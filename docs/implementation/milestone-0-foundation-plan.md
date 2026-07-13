@@ -8,15 +8,7 @@ It does not implement any web or agent product behavior. In particular, it does 
 
 ## Inputs inspected
 
-The audit covered every file present in the checkout: the root instructions and handoff, architecture/current-state/roadmap/threat-model documents, all 12 accepted ADRs, all four specifications, all root/app/package READMEs, root package and workspace configuration, the lockfile and TypeScript base configuration, both Project Options JSON files, and all tooling scripts/tests.
-
-Three requested sources are referenced by `docs/README.md` but absent from this checkout:
-
-- `docs/ai-development-workflow.md` (including the projects model policy);
-- `docs/orchestration/current-task.md` (created by this planning task only as a completion record);
-- `docs/templates/codex-session-handoff.md` (and the other template files listed by `docs/README.md`).
-
-The missing workflow/model policy makes every per-task model recommendation below provisional. The recommendations use policy roles rather than invented model names and must be mapped to the restored policy before implementation begins.
+The initial audit covered the repository scaffold, documentation, specifications, accepted ADRs, package ownership notes, configuration, schemas, and placeholder tooling that existed when this plan was written. M0-F01 subsequently restored the orchestration inputs and closed the representation blockers recorded below. The concrete model and chat recommendations in this revision follow `docs/ai-development-workflow.md`.
 
 ## Current scaffold assessment
 
@@ -29,13 +21,19 @@ The missing workflow/model policy makes every per-task model recommendation belo
 ## Sequencing decisions
 
 1. Establish the real workspace and shared quality tooling before adding domain code. Use pnpm recursive execution and TypeScript project references; do not add a task orchestrator in Milestone 0.
-2. Make each production package build independently, with dependency direction enforced by manifests and lint rules. Keep `packages/testkit` dev-only.
+2. Make each production package build independently, with dependency direction enforced by manifests and lint rules. Create `packages/testkit` only in M0-F04, when the test foundation consumes it.
 3. Close specification gaps immediately before implementing the affected package. Documentation-only closure tasks are deliberate gates, not invitations to replace accepted ADRs.
 4. Use one executable runtime-schema representation as the source for TypeScript inference and committed JSON Schema artifacts. Generated files are drift-checked, never hand-edited.
 5. Implement pure leaf foundations first (`domain` and `security`), then Project Options and contracts, then database schema/migrations.
 6. Treat migration SQL as a committed release artifact. Test the same migration path the web application will eventually invoke; do not give the agent database access.
 7. Replace each placeholder command only when its real successor exists. Keep a narrowly named repository hygiene check if desired, but do not continue presenting scaffold/file-presence checks as lint, build, contracts, schemas, or migrations.
-8. Finish with one clean-clone CI job whose command sequence exactly matches `AGENTS.md`; package-specific jobs may be added only as diagnostics, not as substitutes.
+8. Finish with one Linux clean-clone CI job whose command sequence exactly matches `AGENTS.md`; package-specific jobs may be added only as diagnostics, not as substitutes. Preserve table-driven Windows drive, separator, and UNC hostile-path fixtures in that Linux job.
+
+## Model escalation and grouped-chat strategy
+
+Use Luna XHigh for clearly scoped implementation work. Use Sol Medium for architecture, security, protocol, lifecycle, and database work. If one focused Sol Medium attempt plus a well-targeted correction fails, escalate that task to Sol High or Max. Never recommend Sol Ultra.
+
+Numbered tasks are review boundaries, not a requirement for one fresh chat each. The intended groups are M0-F02 through M0-F04, M0-F05 through M0-F06, M0-F07 through M0-F08, M0-F09 through M0-F10, M0-F11 through M0-F13, and M0-F14 as final integration. Keep a group in one chat while context remains accurate and checks isolate each numbered slice; rotate early if the workflow's stale-context conditions apply.
 
 ## Intended package graph and ownership
 
@@ -46,26 +44,26 @@ apps/agent -> contracts, domain, project-options, security (types/build only in 
 packages/domain          -> no internal production dependency
 packages/security        -> no internal production dependency
 packages/project-options -> security (only shared pure validators)
-packages/contracts       -> domain; project-options only for the versioned configuration schema
+packages/contracts       -> domain; no project-options dependency in Milestone 0
 packages/database        -> domain constants at schema-generation time; no app or agent dependency
 
-packages/testkit         -> dev-only fixture utilities; production packages never import it at runtime
-packages/gateway-caddy   -> manifest/build stub only until the preview milestone
+packages/testkit         -> deferred until M0-F04, then dev-only fixture utilities
+packages/gateway-caddy   -> deferred until the preview milestone; not a Milestone 0 workspace package
 ```
 
 Avoid a `shared`/`utils` package. The schema library and JSON Schema validator may be common external dependencies without creating a new internal common package. `database` owns schema/migrations, not web repositories or application transactions; those belong to `apps/web` when their milestone arrives. `project-options` owns canonical configuration and hashing, but actual runtime-plan compilation remains Milestone 1.
 
 ## Dependency-ordered tasks
 
-### M0-F01 — Restore workflow policy and close foundation-wide representation decisions
+### M0-F01 — Close foundation-wide representation and specification decisions
 
-**Exact goal:** Restore the missing AI development workflow/model policy and record the minimum implementation decisions shared by multiple packages: supported Node/pnpm versions, ESM policy, runtime-schema source of truth, JSON Schema draft/output layout, opaque ID representation, timestamp representation, and canonical JSON/hash algorithm. Amend specifications or add an ADR only where the existing authority order requires it.
+**Exact goal:** Record the minimum implementation decisions shared by multiple packages and close the Project Options, agent protocol, lifecycle, database, and orchestration blockers identified by this plan.
 
-**Affected:** `docs/ai-development-workflow.md`, applicable `docs/specs/*`, possibly a narrowly scoped ADR, `docs/current-state.md`, and `docs/orchestration/current-task.md`.
+**Affected:** ADR 013, the four foundation specifications, this plan, `docs/current-state.md`, and `docs/orchestration/current-task.md`.
 
 **Dependencies:** None.
 
-**Implementation details:** Recover the missing policy from the intended source rather than reconstructing it from this plan. Prefer Node ESM consistently. Select one runtime schema system that can express strict objects/discriminated unions and emit draft 2020-12 JSON Schema without a second handwritten model. Define canonicalization precisely (object-key order, array order, defaults, Unicode/string handling, numbers, UTF-8 encoding, SHA-256 output encoding, and algorithm/version marker). Decide UUID-compatible versus prefixed opaque wire IDs. Decide one UTC timestamp encoding. Record which committed files are generated.
+**Implementation details:** Record Node.js 24 LTS, pnpm 11, ESM, Zod runtime schemas, generated draft 2020-12 artifacts, UUIDv7 IDs, millisecond UTC timestamps, RFC 8785/JCS, versioned SHA-256 hashes, REST-style HTTP over the Unix socket, and per-boot cursor recovery. Separate project metadata from immutable runtime configuration, complete workspace container configuration, define web-owned operations plus the agent's narrow execution journal, and reserve sequence zero for snapshot/cursor boundaries. Complete the owning specifications without changing implementation or generated artifacts.
 
 **Explicit non-goals:** No manifests, dependencies, generated schemas, validators, or product code.
 
@@ -73,21 +71,21 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Required automated checks:** Existing checks that still apply; `git diff --check`; link/path check if available.
 
-**Likely risks or decisions:** Recovering the wrong workflow version; choosing a schema library whose JSON Schema output cannot represent required cross-field checks; changing public representations after fixtures exist.
+**Likely risks or decisions:** Duplicating specification detail in the ADR, treating generated JSON Schema as a second authority, or leaving a cross-package representation implicit.
 
-**Recommended model:** Provisional project-policy architecture/specification reasoning tier.
+**Recommended model:** Sol Medium.
 
-**Next chat:** Fresh chat, because this is an authority/specification decision slice.
+**Next chat:** Completed on 2026-07-14. Start M0-F02 through M0-F04 as the next grouped implementation chat.
 
 ### M0-F02 — Create the real pnpm workspace and package manifests
 
-**Exact goal:** Turn every app/package directory into a real private or publishable workspace importer with explicit names, entry points, dependency direction, and package scripts while preserving zero product behavior.
+**Exact goal:** Turn every Milestone 0 app and production-package directory into a real private or publishable workspace importer with explicit names, entry points, dependency direction, and package scripts while preserving zero product behavior. Defer `packages/testkit` to M0-F04 and `packages/gateway-caddy` to the preview milestone.
 
 **Affected:** Root `package.json`, `pnpm-workspace.yaml`, lockfile, `apps/*`, `packages/*`, package READMEs, `.npmrc`/version pin files if selected, `docs/current-state.md`.
 
 **Dependencies:** M0-F01 for runtime versions and module policy.
 
-**Implementation details:** Pin `packageManager` and the supported Node range; use `workspace:*` for internal dependencies; add manifests and empty typed entry modules where a buildable package needs one; mark apps/private tooling as private; define `exports`, `types`, and `files` deliberately. Remove the ineffective `tooling/*` workspace glob unless real tooling packages are intentionally created. Use pnpm recursive scripts rather than adding Turbo/Nx. Add an import-direction rule or dependency-graph test that prohibits app dependencies from packages and runtime imports from `testkit`.
+**Implementation details:** Pin the exact pnpm 11 `packageManager` value and Node.js 24 LTS range; use `workspace:*` for internal dependencies; add manifests and empty typed entry modules where a buildable package needs one; mark apps/private tooling as private; define `exports`, `types`, and `files` deliberately. Remove the ineffective `tooling/*` workspace glob unless real tooling packages are intentionally created. Use pnpm recursive scripts rather than adding Turbo/Nx. Add an import-direction rule or dependency-graph test that prohibits app dependencies from packages, a `contracts -> project-options` edge, and runtime imports from the later `testkit` package.
 
 **Explicit non-goals:** No server bootstrap, routes, sockets, filesystem access, runtime adapters, UI, or database access.
 
@@ -97,9 +95,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** Accidental circular dependencies; publishing metadata for packages meant to remain private; native dependencies added too early.
 
-**Recommended model:** Provisional project-policy standard coding tier.
+**Recommended model:** Luna XHigh.
 
-**Next chat:** Fresh chat; this is the first implementation task and should begin from a clean dependency decision record.
+**Next chat:** Begin the grouped M0-F02 through M0-F04 implementation chat.
 
 ### M0-F03 — Add shared TypeScript build and lint configuration
 
@@ -119,9 +117,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** NodeNext extension rules; lint/typecheck duplication; generated files entering lint; shared config creating circular workspace dependencies.
 
-**Recommended model:** Provisional project-policy standard coding tier.
+**Recommended model:** Luna XHigh.
 
-**Next chat:** Same chat as M0-F02 if context remains compact; otherwise fresh.
+**Next chat:** Continue the M0-F02 through M0-F04 grouped chat if the M0-F02 slice is accepted and context remains accurate.
 
 ### M0-F04 — Establish the unit-test and fixture harness
 
@@ -131,7 +129,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Dependencies:** M0-F02 and M0-F03.
 
-**Implementation details:** Select the test runner fixed in M0-F01 (Vitest is the default recommendation); give each package colocated unit tests and shared root defaults; make CI mode deterministic and non-watch; define temporary-directory helpers with cleanup and JSON fixture loading in `testkit`. Add coverage collection/reporting but defer hard global thresholds until meaningful code exists. Delete or rename `tooling/tests/scaffold.test.mjs` once equivalent real assertions exist.
+**Implementation details:** Select the test runner within this task (Vitest is the default recommendation); give each package colocated unit tests and shared root defaults; make CI mode deterministic and non-watch; define temporary-directory helpers with cleanup and JSON fixture loading in `testkit`. Add coverage collection/reporting but defer hard global thresholds until meaningful code exists. Delete or rename `tooling/tests/scaffold.test.mjs` once equivalent real assertions exist.
 
 **Explicit non-goals:** No fake agent, temporary Git repositories, Docker fixtures, browser tests, or app integration tests; those belong to later milestones.
 
@@ -141,9 +139,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** ESM/test-runner resolution differences; testkit leaking into production bundles; Windows/Linux temp-path differences.
 
-**Recommended model:** Provisional project-policy standard coding tier.
+**Recommended model:** Luna XHigh.
 
-**Next chat:** Same chat as M0-F03.
+**Next chat:** Complete the M0-F02 through M0-F04 grouped chat, preserving a separate review/check boundary for M0-F04.
 
 ### M0-F05 — Implement pure domain lifecycle state machines
 
@@ -161,11 +159,11 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Required automated checks:** Package unit tests; `pnpm test`; `pnpm typecheck`; `pnpm build`.
 
-**Likely risks or decisions:** The current spec omits service, operation, and runtime-stack desired transition graphs and is ambiguous about some recovery edges; do not invent them in code.
+**Likely risks or decisions:** State tables drifting from the now-complete specification, confusing desired with observed state, or treating `lost` as an implicit synonym for stopped/absent.
 
-**Recommended model:** Provisional project-policy reasoning-capable coding tier.
+**Recommended model:** Sol Medium.
 
-**Next chat:** Fresh chat because exhaustive state review benefits from a focused context.
+**Next chat:** Begin the grouped M0-F05 through M0-F06 domain/security chat.
 
 ### M0-F06 — Implement pure security validation primitives
 
@@ -181,23 +179,23 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Acceptance criteria:** Traversal/absolute/UNC/drive/NUL and malicious hostname-pattern fixtures fail; valid relative Dockerfile/context/instructions/working-directory forms succeed under their distinct policies; APIs clearly state that symlink containment must be revalidated by the future agent.
 
-**Required automated checks:** Package unit tests on Windows and Linux CI where available; `pnpm test`; `pnpm lint`; `pnpm typecheck`.
+**Required automated checks:** Package unit tests in the initial Linux CI, including table-driven Windows drive, separator, and UNC hostile-path fixtures; `pnpm test`; `pnpm lint`; `pnpm typecheck`.
 
 **Likely risks or decisions:** Over-generalizing one path validator across semantically different fields; Unicode IDN policy; accidentally implying TOCTOU safety from a pure helper.
 
-**Recommended model:** Provisional project-policy security/reasoning tier.
+**Recommended model:** Sol Medium.
 
-**Next chat:** Fresh chat for security-focused review.
+**Next chat:** Continue the M0-F05 through M0-F06 grouped chat after the lifecycle slice is accepted.
 
 ### M0-F07 — Reconcile and implement Project Options v1 runtime schema
 
-**Exact goal:** Close the prose/schema mismatch, then make `packages/project-options` the executable strict parser and sole source for Project Options v1 types and generated JSON Schema.
+**Exact goal:** Implement the reconciled Project Options v1 specification as the executable strict parser and sole source for inferred types and generated JSON Schema.
 
 **Affected:** `docs/specs/project-options-v1.md`, `packages/project-options`, `schemas/project-options-v1.schema.json`, root schema scripts, fixtures, `docs/current-state.md`.
 
 **Dependencies:** M0-F01, M0-F03, M0-F04, and M0-F06.
 
-**Implementation details:** First decide every mismatch listed under Questions/blockers. Implement strict nested object validation, discriminated environment/variable binding unions, bounded strings/arrays/numbers, unique stable keys, task/service/preview cross-references, service port matching, secret-ID-only persistence, placeholder allowlists, and forbidden capability rejection. Parse unknown input into a typed v1 value with structured path-aware issues. Generate the committed draft 2020-12 artifact deterministically from the runtime source, and make `schema:check` regenerate to a temp location and byte-compare. Keep version dispatch explicit so v2 can coexist later.
+**Implementation details:** Implement the runtime-revision fields, defaults, strict nested objects, top-level workspace-scoped named volumes, development-environment variables/ports/mounts, structured service startup overrides, discriminated environment-binding unions, collection ordering, bounded scalars, unique stable keys, task/service/preview cross-references, workspace and service declared-port matching, secret-ID-only persistence, placeholder allowlists, and forbidden capability rejection already defined by the specification. Project General metadata remains authoritative on `projects` and is not part of this schema. Parse unknown input into a typed v1 value with structured path-aware issues. Generate the committed draft 2020-12 artifact deterministically from the runtime source, and make `schema:check` regenerate to a temp location and byte-compare. Keep version dispatch explicit so v2 can coexist later.
 
 **Explicit non-goals:** No UI, detection/import, database revision workflow, secret storage, Dockerfile inspection, package installation, runtime plan compilation, container policy validation, or activation.
 
@@ -207,9 +205,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** JSON Schema cannot encode every refinement; applying defaults during parsing can change hashes; schema-library output churn; mistakenly implementing Milestone 1 runtime-plan compilation.
 
-**Recommended model:** Provisional project-policy reasoning-capable coding tier.
+**Recommended model:** Luna XHigh.
 
-**Next chat:** Fresh chat after the schema-gap decisions are accepted.
+**Next chat:** Begin the grouped M0-F07 through M0-F08 Project Options chat.
 
 ### M0-F08 — Add Project Options canonicalization, hashing, and compatibility fixtures
 
@@ -219,7 +217,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Dependencies:** M0-F07 and the canonicalization decision in M0-F01.
 
-**Implementation details:** Apply only documented normalization (for example explicit defaults, normalized approved path forms, and lower-cased fields whose semantics are case-insensitive). Preserve order for semantically ordered arrays such as setup steps; sort only structures declared order-insensitive. Serialize using the selected canonical JSON algorithm, hash exact UTF-8 bytes with SHA-256, and expose both canonical JSON and hash with an algorithm/version marker. Add golden fixtures and tests for key insertion order, equivalent normalized inputs, array-order sensitivity, Unicode, numeric bounds, and changed semantic values.
+**Implementation details:** Apply only the documented normalization: materialize explicit defaults, sort collections declared unordered, and require already-canonical scalar forms without trimming, Unicode normalization, URL rewriting, or path rewriting. Preserve order for semantically ordered arrays such as setup steps and service startup arrays. Serialize with RFC 8785/JCS, hash the specified domain-separated UTF-8 input with SHA-256, and expose the `sha256-jcs-v1:<lowercase hex>` representation. Project metadata and workspace display names are separate compiler inputs and never revision-hash inputs. Add golden fixtures and tests for key insertion order, equivalent defaulted inputs, array-order sensitivity, Unicode, numeric bounds, and changed semantic values.
 
 **Explicit non-goals:** No revision persistence/activation, mutable drafts, runtime-plan hashes, secret material, or import/export UI.
 
@@ -229,19 +227,19 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** Default insertion changing user intent; order semantics for task/service/variable collections; golden churn from implementation-defined serialization.
 
-**Recommended model:** Provisional project-policy reasoning-capable coding tier.
+**Recommended model:** Luna XHigh.
 
 **Next chat:** Same chat as M0-F07 if the schema review remains focused.
 
 ### M0-F09 — Define versioned agent protocol primitives, responses, and errors
 
-**Exact goal:** Establish a transport-neutral v1 contract core for request metadata, success responses, typed errors, IDs, timestamps, resource references, idempotency data, and protocol/version negotiation.
+**Exact goal:** Establish the v1 HTTP-over-Unix-socket wire contract for request metadata, success responses, typed errors, IDs, timestamps, resource references, idempotency data, and protocol/version negotiation.
 
 **Affected:** `docs/specs/agent-api-v1.md`, `packages/contracts`, contract JSON Schema outputs and fixtures, `docs/current-state.md`.
 
-**Dependencies:** M0-F01, M0-F03, M0-F04, and M0-F05; Project Options schema dependency only where configuration messages embed it.
+**Dependencies:** M0-F01, M0-F03, M0-F04, and M0-F05. `packages/contracts` does not depend on `packages/project-options` in Milestone 0.
 
-**Implementation details:** Resolve whether the documented transport is REST-like HTTP over a Unix socket or JSON-RPC; do not combine incompatible envelopes. Define strict request and response schemas per operation, a stable error-code union and per-code details schemas, retryability semantics, request/operation ID rules, and mutation idempotency hash semantics. Forbid unknown executable/runtime locator fields structurally and with negative fixtures. Generate named/versioned JSON Schemas and create a registry mapping operation names/routes to request, response, and documented error validators.
+**Implementation details:** Implement the specified REST-style HTTP/1.1 plus JSON contract under `/v1`; do not introduce JSON-RPC. Define strict request and response schemas per operation, a stable error-code union and per-code details schemas, retryability semantics, web-created operation ID metadata, and mutation idempotency hash semantics. Specify the narrow durable agent execution-journal contract without implementing its storage or giving the agent SQLite access. Represent configuration registration through contract-owned versioned envelope fields and hashes rather than importing the Project Options schema. Forbid unknown executable/runtime locator fields structurally and with negative fixtures. Generate named/versioned JSON Schemas and create a registry mapping operation names/routes to request, response, and documented error validators.
 
 **Explicit non-goals:** No Unix socket server/client, HTTP framework, authentication, handler, idempotency store, browser API, agent operation, or runtime inspection.
 
@@ -249,11 +247,11 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Required automated checks:** Contract unit/fixture tests; initial `pnpm contracts:check`; `pnpm typecheck`; `pnpm build`.
 
-**Likely risks or decisions:** Current endpoint prose lacks response shapes and many request fields; prefixed example IDs conflict with “UUID-compatible” database wording; importing Project Options may over-couple the protocol package.
+**Likely risks or decisions:** Later-milestone endpoint payloads may still require task-local schemas before their implementation, but the shared envelope, primitive, hash, and transport representations are closed. Do not solve missing later payloads by importing Project Options or persistence models.
 
-**Recommended model:** Provisional project-policy architecture/protocol tier.
+**Recommended model:** Sol Medium.
 
-**Next chat:** Fresh chat due to public contract surface area.
+**Next chat:** Begin the grouped M0-F09 through M0-F10 protocol chat.
 
 ### M0-F10 — Define versioned events, cursors, and contract compatibility checks
 
@@ -263,7 +261,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Dependencies:** M0-F09 and M0-F05.
 
-**Implementation details:** Model events as a discriminated union on `type`, with the resource type and payload constrained together. Specify optional versus required `operationId`, per-boot monotonically increasing sequence, cursor grammar, reconnect behavior across agent boots, event ordering guarantees, redacted error/progress payloads, and snapshot/event boundary behavior. Store valid and one-purpose-invalid fixtures for every event. Make `contracts:check` regenerate schemas, validate fixtures, assert registry completeness, and detect removal/change of committed v1 artifacts without an explicit versioning action.
+**Implementation details:** Model events as a discriminated union on `type`, with the resource type and payload constrained together. Specify optional versus required `operationId`, per-boot event sequences beginning at one, cursor grammar that additionally permits the zero boundary, reconnect behavior across agent boots, event ordering guarantees, redacted error/progress payloads, and snapshot/event boundary behavior. Cover a pre-event snapshot cursor and replay from zero while rejecting event sequence zero. Store valid and one-purpose-invalid fixtures for every event. Make `contracts:check` regenerate schemas, validate fixtures, assert registry completeness, and detect removal/change of committed v1 artifacts without an explicit versioning action.
 
 **Explicit non-goals:** No event producer/consumer, stream, persistence, WebSocket frames, terminal bytes, snapshot implementation, or reconciliation.
 
@@ -271,9 +269,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Required automated checks:** `pnpm contracts:check`; `pnpm test`; `pnpm typecheck`; `pnpm build`.
 
-**Likely risks or decisions:** “Ordered per connection” is insufficient for resume after restart; some later-milestone event payloads may need spec decisions before they can be frozen; overly strong backward-compatibility assertions can block additive schema changes.
+**Likely risks or decisions:** Implementing cursors as durable cross-boot offsets, failing to preserve the snapshot `throughCursor` boundary, or freezing later-milestone payload details before their task specifies them.
 
-**Recommended model:** Provisional project-policy architecture/protocol tier.
+**Recommended model:** Sol Medium.
 
 **Next chat:** Same chat as M0-F09.
 
@@ -285,7 +283,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Dependencies:** M0-F01, M0-F03, M0-F04, M0-F05, and Project Options/contract representations where stored values refer to them.
 
-**Implementation details:** Resolve the database questions below first. Define all listed tables, foreign keys, unique and partial indexes, checks for enum/domain values, nullability, defaults, row-version fields, and migration metadata. Enable foreign keys in every test connection. Store canonical JSON/hashes as immutable text with application/runtime validation boundaries documented. Enforce “at most one” active revision and primary workspace with partial indexes where SQLite supports them; enforce “exactly one eventually” through future web transactions, not a false DDL claim. Break circular project/workspace and project/revision references through nullable foreign keys and explicit transaction ordering. Export schema metadata only; do not export CRUD repositories.
+**Implementation details:** Implement the accepted UUIDv7/text, timestamp/text, enum, JSON-validation, row-version, nullable-pointer, and creation-order decisions. Keep project name, slug, repository URL, default branch, and automatic fetch policy authoritative on `projects`; keep workspace display name on `workspaces`; configuration JSON contains runtime configuration only. Define all listed tables, foreign keys, unique and partial indexes, checks, nullability, defaults, and migration metadata. Enable foreign keys in every test connection. Enforce at most one active revision and non-removed primary workspace with partial indexes; leave eventual exactly-one behavior and optimistic General Options updates to the specified future web transactions. Export schema metadata only; do not export CRUD repositories.
 
 **Explicit non-goals:** No web persistence service, database singleton, API handler, activation transaction, reconciliation write, seed data, runtime operation, or agent database access.
 
@@ -295,9 +293,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** Drizzle support for partial indexes/checks; circular references; SQLite’s inability to enforce cross-row “exactly one”; storing sensitive paths/log metadata while preserving web-only writes.
 
-**Recommended model:** Provisional project-policy database/reasoning tier.
+**Recommended model:** Sol Medium.
 
-**Next chat:** Fresh chat for database-focused review.
+**Next chat:** Begin the grouped M0-F11 through M0-F13 database chat.
 
 ### M0-F12 — Generate and commit forward-only migration infrastructure
 
@@ -317,7 +315,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** Native SQLite driver portability; Drizzle snapshot churn; a check command accidentally rewriting committed artifacts; defining the previous-release baseline before one exists.
 
-**Recommended model:** Provisional project-policy database coding tier.
+**Recommended model:** Sol Medium.
 
 **Next chat:** Same chat as M0-F11.
 
@@ -335,11 +333,11 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Acceptance criteria:** Tests use unique temp files and clean them; empty, already-current, forward-prefix upgrade, and newer-version rejection cases are explicit; foreign keys are enabled; failures return nonzero and identify the migration/scenario.
 
-**Required automated checks:** `pnpm db:migrate:test`; database package tests; `pnpm test`; run on Linux and Windows CI if the selected driver supports both.
+**Required automated checks:** `pnpm db:migrate:test`; database package tests; `pnpm test`; run in the initial Linux CI. Cross-platform path behavior remains covered by platform-independent fixtures rather than a Windows CI job.
 
 **Likely risks or decisions:** Native driver installation in frozen clean clones; false confidence from an already-current test before migration 0002; migration journal paths depending on the working directory.
 
-**Recommended model:** Provisional project-policy database coding tier.
+**Recommended model:** Sol Medium.
 
 **Next chat:** Same chat as M0-F12.
 
@@ -351,7 +349,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Dependencies:** M0-F02 through M0-F13.
 
-**Implementation details:** Configure CI from a clean checkout with the pinned Node/pnpm versions and pnpm cache, then run exactly: `pnpm install --frozen-lockfile`, `pnpm lint`, `pnpm test`, `pnpm typecheck`, `pnpm build`, `pnpm contracts:check`, `pnpm schema:check`, and `pnpm db:migrate:test`. Ensure checks are non-interactive and read-only except build/temp outputs. Delete `check-json.mjs`, `check-scaffold.mjs`, and scaffold tests when their real successors cover them; keep `check-text.mjs` only under an honest hygiene name if still useful. Add a generated-artifact cleanliness assertion using `git diff --exit-code` in CI where generation checks cannot compare in memory/temp storage.
+**Implementation details:** Configure one initial Linux CI job from a clean checkout with the pinned Node/pnpm versions and pnpm cache, then run exactly: `pnpm install --frozen-lockfile`, `pnpm lint`, `pnpm test`, `pnpm typecheck`, `pnpm build`, `pnpm contracts:check`, `pnpm schema:check`, and `pnpm db:migrate:test`. Ensure checks are non-interactive and read-only except build/temp outputs. Delete `check-json.mjs`, `check-scaffold.mjs`, and scaffold tests when their real successors cover them; keep `check-text.mjs` only under an honest hygiene name if still useful. Add a generated-artifact cleanliness assertion using `git diff --exit-code` in CI where generation checks cannot compare in memory/temp storage. Keep Windows drive, separator, and UNC hostile-path cases in table-driven fixtures executed on Linux; a Windows CI job is deferred until platform-specific runtime behavior exists.
 
 **Explicit non-goals:** No deployment, container build, service startup, end-to-end browser test, runtime smoke test, Git mutation from product code, auto-merge, or later-milestone implementation.
 
@@ -361,9 +359,9 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Likely risks or decisions:** Local/CI Node drift; generated schemas or migrations changing line endings; root scripts skipping a workspace with no matching script; overloading one CI job without useful diagnostics.
 
-**Recommended model:** Provisional project-policy standard coding tier, followed by the policy’s independent review tier.
+**Recommended model:** Luna XHigh for implementation; Sol Medium for the independent architecture/scope review.
 
-**Next chat:** Fresh chat for final integration and independent scope review.
+**Next chat:** Use one focused M0-F14 integration chat after M0-F11 through M0-F13 are accepted.
 
 ## Placeholder replacement matrix
 
@@ -379,28 +377,33 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 ## Critical review: contradictions, questions, and blockers
 
-### Material blockers requiring an explicit answer
+### M0-F01 blocker closure
 
-1. **Project Options prose and JSON Schema disagree.** The prose requires fields/capabilities absent from the schema: repository URL, primary-workspace display name, command environment, task concurrency/success-code/log-retention policy, rebuild policy, service environment/health/resources/dependencies, preview WebSocket/HMR setting, host-safe and service-connection variables, AI fixed arguments/network warning, and broader resource/cleanup policy. Conversely, the schema makes a particular top-level shape mandatory without documenting default/omission policy. Recommendation: reconcile the versioned specification first, then generate the schema from the accepted runtime representation. Do not silently treat the current hand-authored schema as complete.
-2. **Canonicalization and hashing are unspecified.** No source defines defaults, object/array ordering, Unicode/number treatment, normalization, hash algorithm, or encoding. Recommendation: adopt a named, versioned canonical JSON procedure and SHA-256 before any revision/operation hashes are fixture-frozen.
-3. **The agent transport is ambiguous.** “HTTP-style JSON RPC” conflicts with the listed verb/path REST endpoints, and success responses, status mapping, per-endpoint errors, content types, negotiation, and most payloads are missing. Recommendation: select one HTTP-over-UDS request model (REST-style is closest to the existing endpoint list) and specify it before generating contracts.
-4. **Event resume semantics are incomplete.** Events are ordered per connection, while cursors contain `agentBootId:sequence`; behavior for reconnecting across an agent restart, cursor expiration, snapshot handoff, and events without operations is not defined. Recommendation: define per-boot cursor behavior plus mandatory snapshot/reconciliation fallback before freezing v1 event fixtures.
-5. **Database primitive representations are undecided.** The database spec explicitly leaves timestamp format open; “UUID-compatible” IDs conflict with prefixed examples; several enum-like columns (notably service desired/observed state) lack value sets. Recommendation: decide these in M0-F01 and complete the data specification before Drizzle code.
-6. **Database cardinality wording exceeds SQLite DDL.** “Exactly one non-removed primary workspace per project” cannot be guaranteed during project creation by a partial unique index alone, and the schema has circular nullable pointers between projects/workspaces and projects/active revisions. Recommendation: DDL guarantees at most one; a future web-owned transaction guarantees eventual exactly one. Document creation ordering and whether a registering project may temporarily have none.
-7. **Lifecycle coverage is incomplete relative to the database.** There are no state machines for workspace services or operations and no explicit desired-state transition graph for runtime stacks. Some recovery transitions may also be underspecified. Recommendation: add graphs before implementing those transitions; do not infer operational behavior from enum lists.
-8. **The project model policy is absent.** `docs/README.md` points to the missing `docs/ai-development-workflow.md`, so concrete model-name recommendations cannot honestly claim policy compliance. Recommendation: restore it in M0-F01 and replace the provisional role labels in this plan if the policy requires named models.
+All eight material foundation blockers identified by the initial audit are closed for subsequent Milestone 0 work:
+
+1. Project Options v1 now separates project-row General metadata from immutable runtime revisions and defines the complete runtime field set, workspace-scoped named volumes, development/service container settings, defaults, strictness, collection semantics, refinements, and generated-schema boundary. The existing hand-authored JSON Schema remains unchanged until M0-F07 regenerates it from Zod.
+2. RFC 8785/JCS canonicalization, domain-separated SHA-256 input, and the `sha256-jcs-v1:<lowercase hex>` representation are specified.
+3. Agent transport is REST-style HTTP/1.1 plus JSON over the Unix socket under `/v1`; it is not JSON-RPC.
+4. Per-boot event sequencing, the cursor-only zero boundary, retained same-boot replay, and snapshot-required recovery are specified.
+5. IDs, timestamps, hashes, JSON storage, and every closed state/kind/source/protocol value in the database model are specified.
+6. Partial indexes provide at-most-one guarantees; future web-owned finalization and activation transactions provide eventual exactly-one invariants for ready projects.
+7. Web-owned SQLite operations, the agent's narrow durable execution journal, operation/workspace-service/runtime-stack desired states, and explicit lost/recovery lifecycle graphs are specified.
+8. The project model policy is present and every task now names Luna XHigh or Sol Medium, with Sol High/Max reserved for a failed focused Sol Medium attempt and Sol Ultra prohibited.
+
+The remaining deferrals are intentional milestone boundaries, not representation blockers: runtime-plan compilation waits for Milestone 1; the Caddy package waits for the preview milestone; `testkit` waits for M0-F04; generated schemas, migrations, and executable contracts wait for their implementation tasks.
 
 ### Ownership contradictions or missing ownership decisions
 
 1. `AGENTS.md` assigns `packages/database` “schema and migrations; no runtime operations,” while `packages/database/README.md` also claims repositories. Recommendation: keep repositories/application transactions in `apps/web`; update the package README in the implementation slice. This preserves web-only writes and prevents the agent from acquiring a database-capable package.
 2. `packages/domain` claims IDs, while `packages/contracts` necessarily validates wire IDs and the database stores them. Recommendation: domain owns the semantic ID constructors/brands and contracts owns versioned wire schemas that consume them; database stores their decided text representation without becoming the ID authority.
 3. The source of Project Options truth is unclear between the hand-authored root JSON Schema and the future runtime validator. Recommendation: `packages/project-options` owns one executable schema; `schemas/project-options-v1.schema.json` is a committed generated portability artifact.
-4. `packages/testkit` currently claims a fake agent and temporary Git repositories. Those imply later behavior and should not be built in Milestone 0. Recommendation: restrict it now to JSON fixtures and temporary SQLite/path helpers; add fake agent/Git facilities only with the milestone that consumes them.
+4. `packages/testkit` is not created by M0-F02. M0-F04 may create it for JSON fixtures and temporary SQLite/path helpers only; fake-agent and temporary-Git facilities wait for a milestone that consumes them.
 
 ### Undesirable coupling to avoid
 
 - Do not make contracts depend on database tables or Drizzle types; wire compatibility must not change with persistence layout.
 - Do not make database depend on full contract schemas; persist selected primitives/JSON with explicit boundaries.
+- Do not make contracts depend on Project Options in Milestone 0; each package owns and generates its versioned schemas independently.
 - Do not put Project Options in domain or a generic common package; it owns its versioned model and generated schema.
 - Do not make production packages import `testkit`, test-runner APIs, Drizzle Kit, or schema-generation CLIs at runtime.
 - Do not add a task orchestrator, web framework, browser framework, HTTP framework, Docker client, Git library, PTY library, or Caddy client merely to make the scaffold look executable.
@@ -409,14 +412,14 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 ### Work assigned to the wrong milestone
 
 - Actual runtime-plan compilation belongs to Milestone 1 activation, despite the `project-options` README and architecture describing its future ownership. Milestone 0 should define/validate configuration and, if necessary, the plan contract—not compile executable plans.
-- The Caddy adapter belongs to the preview milestone. In Milestone 0 `packages/gateway-caddy` should be a buildable ownership stub only.
+- The Caddy adapter belongs to the preview milestone. `packages/gateway-caddy` is not made an executable workspace package in Milestone 0.
 - Fake agent, temporary Git repositories, repository inspection, canonical filesystem handle operations, and symlink-safe mutation belong with Milestone 1 agent behavior, not this foundation.
 - Runtime-policy enforcement against Docker, process/terminal framing implementations, preview routing, and AI CLI behavior remain in their documented later milestones. Their wire schemas may exist in v1, but there must be no handlers.
 - Cloudflare integration is deployment/product work and is not required for the Milestone 0 executable TypeScript foundation.
 
-### Missing requested repository sources (non-architectural blocker)
+### Orchestration sources
 
-The absent orchestration/workflow/templates contradict `docs/README.md` and prevent exact use of the documented session handoff and model policy. They do not block this plan’s technical audit, but they must be restored before implementation sessions are orchestrated under the claimed workflow.
+The workflow, current-task record, and handoff templates referenced by `docs/README.md` are present. No missing orchestration source blocks the grouped M0-F02 through M0-F04 implementation chat.
 
 ## Milestone 0 final review checklist
 
@@ -424,7 +427,7 @@ The absent orchestration/workflow/templates contradict `docs/README.md` and prev
 - App packages contain build scaffolding only, with no product behavior.
 - TypeScript, lint, test, build, contract, schema, and migration commands invoke real tools and fail on representative defects.
 - Project Options v1 has one runtime source, strict parser, canonical form/hash, generated JSON Schema, and valid/invalid/golden fixtures.
-- Domain transitions are pure, exhaustive, and tested; unspecified graphs remain documented blockers rather than guessed code.
+- Domain transitions are pure, exhaustive, tested, and demonstrably match every specified graph.
 - Agent v1 requests, responses, errors, and events are strict/versioned/generated/fixture-tested, with no transport implementation.
 - Drizzle definitions and committed forward migrations reflect the accepted database spec; only the future web app is authorized to write.
 - Empty, already-current, prefix-upgrade, and newer-version migration scenarios use temporary SQLite files.
@@ -436,4 +439,4 @@ The absent orchestration/workflow/templates contradict `docs/README.md` and prev
 
 ## Recommended first implementation task
 
-Start with **M0-F01** to recover the project workflow/model policy and close the small set of shared representation decisions. Then execute **M0-F02** as the first code-bearing slice on a `feat/milestone-0-foundation`-appropriate branch (or a smaller `feat/pnpm-workspace-foundation` branch if each slice will receive its own PR). M0-F02 is intentionally limited to manifests, dependency direction, and buildable empty entry points; it must not absorb TypeScript/lint/test setup or product behavior.
+M0-F01 is complete. Execute **M0-F02 through M0-F04 in the next grouped implementation chat**, retaining a separate diff and check boundary for each numbered task. M0-F02 remains limited to manifests, corrected dependency direction, and buildable empty entry points; M0-F03 adds TypeScript/lint foundations; M0-F04 creates the test harness and only then creates `packages/testkit`. None may add product behavior.
