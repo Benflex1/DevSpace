@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "general": {
+    "name": "Chess Web Game",
+    "slug": "chess",
+    "defaultBranch": "master",
+    "autoFetch": true
+  },
+  "environment": {
+    "source": {
+      "kind": "preset",
+      "preset": "node",
+      "version": "22"
+    },
+    "defaultUser": "devspace",
+    "passwordlessSudo": true,
+    "setupSteps": [
+      {
+        "key": "install",
+        "name": "Install dependencies",
+        "command": {
+          "executable": "pnpm",
+          "args": [
+            "install",
+            "--frozen-lockfile"
+          ],
+          "workingDirectory": "."
+        }
+      }
+    ],
+    "cacheVolumes": [
+      {
+        "key": "pnpm-store",
+        "target": "/home/devspace/.local/share/pnpm/store"
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "key": "dev",
+      "name": "Development server",
+      "command": {
+        "executable": "pnpm",
+        "args": [
+          "dev:all"
+        ],
+        "workingDirectory": "."
+      },
+      "interactive": false,
+      "longRunning": true,
+      "timeoutSeconds": null
+    },
+    {
+      "key": "test",
+      "name": "Tests",
+      "command": {
+        "executable": "pnpm",
+        "args": [
+          "test"
+        ],
+        "workingDirectory": "."
+      },
+      "interactive": false,
+      "longRunning": false,
+      "timeoutSeconds": 900
+    }
+  ],
+  "services": [],
+  "previews": [
+    {
+      "key": "web",
+      "name": "Web",
+      "targetService": "workspace",
+      "containerPort": 3000,
+      "protocol": "http",
+      "domainBaseId": "preview-main",
+      "hostnamePattern": "{project}-{workspace}-{preview}-{shortId}",
+      "health": {
+        "path": "/",
+        "expectedStatus": 200,
+        "startupTimeoutSeconds": 120
+      }
+    }
+  ],
+  "variables": [],
+  "ai": {
+    "profiles": [
+      {
+        "key": "codex",
+        "name": "Codex CLI",
+        "provider": "openai-codex-cli",
+        "credentialSecretIds": [
+          "secret_codex_auth"
+        ],
+        "instructionsFile": "AGENTS.md"
+      }
+    ]
+  },
+  "resources": {
+    "memoryMb": 8192,
+    "cpuCores": 4,
+    "pids": 2048,
+    "maxConcurrentWorkspaces": 3
+  },
+  "workspaceDefaults": {
+    "autoStart": false,
+    "stopAfterMinutesIdle": 120,
+    "retainStoppedDays": 30
+  }
+}

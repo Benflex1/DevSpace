@@ -1,0 +1,585 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devspace.local/schemas/project-options-v1.schema.json",
+  "title": "DevSpace Project Options v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "general",
+    "environment",
+    "tasks",
+    "services",
+    "previews",
+    "variables",
+    "ai",
+    "resources",
+    "workspaceDefaults"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "general": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "slug",
+        "defaultBranch"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "maxLength": 50
+        },
+        "defaultBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "autoFetch": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "defaultUser",
+        "passwordlessSudo",
+        "setupSteps",
+        "cacheVolumes"
+      ],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "preset",
+                "version"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "preset"
+                },
+                "preset": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "image"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "image"
+                },
+                "image": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "dockerfilePath",
+                "contextPath"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "dockerfile"
+                },
+                "dockerfilePath": {
+                  "type": "string"
+                },
+                "contextPath": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "defaultUser": {
+          "enum": [
+            "devspace",
+            "root"
+          ]
+        },
+        "passwordlessSudo": {
+          "type": "boolean"
+        },
+        "setupSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedCommand"
+          },
+          "maxItems": 50
+        },
+        "cacheVolumes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedVolume"
+          },
+          "maxItems": 20
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/task"
+      },
+      "maxItems": 100
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/service"
+      },
+      "maxItems": 20
+    },
+    "previews": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/preview"
+      },
+      "maxItems": 20
+    },
+    "variables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/variable"
+      },
+      "maxItems": 200
+    },
+    "ai": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profiles"
+      ],
+      "properties": {
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aiProfile"
+          },
+          "maxItems": 10
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryMb",
+        "cpuCores",
+        "pids",
+        "maxConcurrentWorkspaces"
+      ],
+      "properties": {
+        "memoryMb": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 131072
+        },
+        "cpuCores": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 128
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 100000
+        },
+        "maxConcurrentWorkspaces": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        }
+      }
+    },
+    "workspaceDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "autoStart",
+        "stopAfterMinutesIdle",
+        "retainStoppedDays"
+      ],
+      "properties": {
+        "autoStart": {
+          "type": "boolean"
+        },
+        "stopAfterMinutesIdle": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 5
+        },
+        "retainStoppedDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3650
+        }
+      }
+    }
+  },
+  "$defs": {
+    "key": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,49}$"
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "args",
+        "workingDirectory"
+      ],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 200
+        },
+        "workingDirectory": {
+          "type": "string",
+          "pattern": "^(?:\\.|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)$"
+        }
+      }
+    },
+    "namedCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "name",
+        "command"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "command": {
+          "$ref": "#/$defs/command"
+        }
+      }
+    },
+    "namedVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "target"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^/[^\\0]+$"
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "name",
+        "command",
+        "interactive",
+        "longRunning",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "$ref": "#/$defs/command"
+        },
+        "interactive": {
+          "type": "boolean"
+        },
+        "longRunning": {
+          "type": "boolean"
+        },
+        "timeoutSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "name",
+        "image",
+        "ports",
+        "volumes"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "containerPort"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/key"
+              },
+              "containerPort": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedVolume"
+          }
+        }
+      }
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "name",
+        "targetService",
+        "containerPort",
+        "protocol",
+        "domainBaseId",
+        "hostnamePattern",
+        "health"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targetService": {
+          "type": "string",
+          "minLength": 1
+        },
+        "containerPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocol": {
+          "const": "http"
+        },
+        "domainBaseId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hostnamePattern": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "health": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "expectedStatus",
+            "startupTimeoutSeconds"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^/"
+            },
+            "expectedStatus": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            },
+            "startupTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          }
+        }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "binding"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "binding": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "value"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "literal"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "secretId"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "secret"
+                },
+                "secretId": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "generator"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "generated"
+                },
+                "generator": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "aiProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "name",
+        "provider",
+        "credentialSecretIds"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentialSecretIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "instructionsFile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

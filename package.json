@@ -1,0 +1,13 @@
+{
+  "name": "devspace",
+  "private": true,
+  "scripts": {
+    "lint": "node tooling/check-text.mjs",
+    "test": "node --test tooling/tests/*.test.mjs",
+    "typecheck": "node tooling/check-json.mjs",
+    "build": "node tooling/check-scaffold.mjs",
+    "contracts:check": "node tooling/check-scaffold.mjs",
+    "schema:check": "node tooling/check-json.mjs",
+    "db:migrate:test": "node tooling/check-scaffold.mjs"
+  }
+}

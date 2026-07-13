@@ -1,0 +1,79 @@
+# Dependencies
+node_modules/
+
+# Package-manager and tool caches
+.pnpm-store/
+.turbo/
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# Build output
+dist/
+build/
+out/
+.next/
+coverage/
+
+# Test and browser output
+playwright-report/
+test-results/
+blob-report/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Local certificates and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases and SQLite runtime files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# DevSpace local runtime state
+.devspace-local/
+.runtime/
+.local-state/
+
+# AI tool session state and transcripts
+.codex/
+.ai-sessions/
+transcripts/
+
+# IDE-specific files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
