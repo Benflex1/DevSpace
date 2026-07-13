@@ -5,4 +5,60 @@ settings:
   excludeLinksFromLockfile: false
 
 importers:
+
   .: {}
+
+  apps/agent:
+    dependencies:
+      '@devspace/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@devspace/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@devspace/project-options':
+        specifier: workspace:*
+        version: link:../../packages/project-options
+      '@devspace/security':
+        specifier: workspace:*
+        version: link:../../packages/security
+
+  apps/web:
+    dependencies:
+      '@devspace/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@devspace/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@devspace/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@devspace/project-options':
+        specifier: workspace:*
+        version: link:../../packages/project-options
+      '@devspace/security':
+        specifier: workspace:*
+        version: link:../../packages/security
+
+  packages/contracts:
+    dependencies:
+      '@devspace/domain':
+        specifier: workspace:*
+        version: link:../domain
+
+  packages/database:
+    dependencies:
+      '@devspace/domain':
+        specifier: workspace:*
+        version: link:../domain
+
+  packages/domain: {}
+
+  packages/project-options:
+    dependencies:
+      '@devspace/security':
+        specifier: workspace:*
+        version: link:../security
+
+  packages/security: {}

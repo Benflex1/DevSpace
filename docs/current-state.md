@@ -28,6 +28,7 @@ Milestone 0 — Architecture and contracts.
 ## What exists
 
 - documentation and repository scaffold only;
+- a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - Project Options v1 JSON Schema scaffold, pending regeneration from the future Zod source in M0-F07;
 - closed Project Options, database, lifecycle, and agent transport specifications for Milestone 0 implementation, including complete workspace container configuration and zero-event cursor semantics;
 - accepted foundation-representations ADR 013;
@@ -43,4 +44,4 @@ Milestone 0 — Architecture and contracts.
 
 ## Next task
 
-Run M0-F02 through M0-F04 as one grouped implementation chat: create the pnpm workspace/package boundaries, add TypeScript and lint foundations, then establish the test/fixture harness. Do not implement product behavior or begin Milestone 1.
+M0-F02 is complete in this chat. Continue with M0-F03 in the same chat: add shared strict TypeScript build and semantic lint configuration. M0-F04 remains pending and must not be marked complete until its test and fixture harness is implemented. Do not implement product behavior or begin Milestone 1.

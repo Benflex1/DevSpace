@@ -1,3 +1,3 @@
 # database
 
-SQLite schema, migrations, and repositories. The web application is the only runtime consumer allowed to write.
+SQLite schema definitions, migrations, and narrow migration utilities. The web application owns repositories, application transactions, and runtime SQLite writes.

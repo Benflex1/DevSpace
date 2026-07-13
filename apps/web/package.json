@@ -1,0 +1,13 @@
+{
+  "name": "@devspace/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@devspace/contracts": "workspace:*",
+    "@devspace/database": "workspace:*",
+    "@devspace/domain": "workspace:*",
+    "@devspace/project-options": "workspace:*",
+    "@devspace/security": "workspace:*"
+  }
+}
