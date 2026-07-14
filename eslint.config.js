@@ -1,0 +1,192 @@
+import eslint from "@eslint/js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import globals from "globals";
+import tseslint from "typescript-eslint";
+import { expectedPackages } from "./tooling/workspace-graph.mjs";
+
+const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
+const packageDirectories = new Map(
+  [...expectedPackages].map(([directory, definition]) => [directory, definition.name])
+);
+const internalPackages = new Set(packageDirectories.values());
+const allowedImports = new Map(
+  [...expectedPackages.values()].map((definition) => [definition.name, new Set(definition.dependencies)])
+);
+
+function packageForFile(filename) {
+  if (!path.isAbsolute(filename)) {
+    return null;
+  }
+  const relativeFilename = path.relative(rootDirectory, filename).replaceAll("\\", "/");
+  for (const [directory, packageName] of packageDirectories) {
+    if (relativeFilename === directory || relativeFilename.startsWith(`${directory}/`)) {
+      return packageName;
+    }
+  }
+  return null;
+}
+
+const boundaryPlugin = {
+  rules: {
+    "package-boundaries": {
+      meta: {
+        type: "problem",
+        schema: [],
+        messages: {
+          unknown: "Do not import unknown or deferred internal package '{{name}}'.",
+          deep: "Import '{{name}}' through its public package entry point; deep internal imports are prohibited.",
+          forbidden: "Package '{{from}}' may not import internal package '{{to}}'."
+        }
+      },
+      create(context) {
+        const sourcePackage = packageForFile(context.filename);
+        if (sourcePackage === null) {
+          return {};
+        }
+
+        function checkImport(sourceNode) {
+          const source = sourceNode.value;
+          if (typeof source !== "string") {
+            return;
+          }
+          const match = /^(@devspace\/[^/]+)(\/.*)?$/.exec(source);
+          if (match === null) {
+            return;
+          }
+
+          const targetPackage = match[1];
+          if (!internalPackages.has(targetPackage)) {
+            context.report({ node: sourceNode, messageId: "unknown", data: { name: targetPackage } });
+            return;
+          }
+          if (match[2] !== undefined) {
+            context.report({ node: sourceNode, messageId: "deep", data: { name: source } });
+            return;
+          }
+          if (!allowedImports.get(sourcePackage)?.has(targetPackage)) {
+            context.report({
+              node: sourceNode,
+              messageId: "forbidden",
+              data: { from: sourcePackage, to: targetPackage }
+            });
+          }
+        }
+
+        return {
+          ImportDeclaration(node) {
+            checkImport(node.source);
+          },
+          ImportExpression(node) {
+            checkImport(node.source);
+          },
+          TSImportType(node) {
+            checkImport(node.argument);
+          },
+          ExportAllDeclaration(node) {
+            checkImport(node.source);
+          },
+          ExportNamedDeclaration(node) {
+            if (node.source !== null) {
+              checkImport(node.source);
+            }
+          }
+        };
+      }
+    }
+  }
+};
+
+const sharedRules = {
+  "devspace/package-boundaries": "error",
+  "no-duplicate-imports": "error",
+  "no-restricted-globals": [
+    "error",
+    { name: "require", message: "First-party source must use ESM imports." },
+    { name: "module", message: "First-party source must use ESM exports." },
+    { name: "exports", message: "First-party source must use ESM exports." }
+  ],
+  "no-restricted-syntax": [
+    "error",
+    {
+      selector: "CallExpression[callee.name='require']",
+      message: "First-party source must use ESM imports."
+    },
+    {
+      selector: "MemberExpression[object.name='module'][property.name='exports']",
+      message: "First-party source must use ESM exports."
+    }
+  ],
+  "no-var": "error",
+  "prefer-const": "error",
+  "@typescript-eslint/no-require-imports": "error"
+};
+
+const unusedVariableOptions = {
+  args: "all",
+  argsIgnorePattern: "^_",
+  caughtErrors: "all",
+  caughtErrorsIgnorePattern: "^_",
+  varsIgnorePattern: "^_"
+};
+
+const typeCheckedTypeScriptConfigs = tseslint.configs.recommendedTypeChecked.map((config) => ({
+  ...config,
+  files: ["**/*.ts"]
+}));
+
+export default tseslint.config(
+  {
+    ignores: [
+      "**/.cache/**",
+      "**/.git/**",
+      "**/coverage/**",
+      "**/dist/**",
+      "**/generated/**",
+      "**/node_modules/**",
+      "schemas/**"
+    ]
+  },
+  eslint.configs.recommended,
+  ...typeCheckedTypeScriptConfigs,
+  {
+    files: ["**/*.ts"],
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: rootDirectory
+      },
+      globals: globals.node,
+      sourceType: "module",
+      ecmaVersion: "latest"
+    },
+    plugins: {
+      "@typescript-eslint": tseslint.plugin,
+      devspace: boundaryPlugin
+    },
+    rules: {
+      ...sharedRules,
+      "no-undef": "off",
+      "no-unused-vars": "off",
+      "@typescript-eslint/no-floating-promises": ["error", { ignoreVoid: false }],
+      "@typescript-eslint/no-unused-vars": ["error", unusedVariableOptions]
+    }
+  },
+  {
+    files: ["**/*.js", "**/*.mjs"],
+    languageOptions: {
+      globals: globals.node,
+      sourceType: "module",
+      ecmaVersion: "latest"
+    },
+    plugins: {
+      "@typescript-eslint": tseslint.plugin,
+      devspace: boundaryPlugin
+    },
+    rules: {
+      ...sharedRules,
+      "no-unused-vars": ["error", unusedVariableOptions]
+    }
+  }
+);

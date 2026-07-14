@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.typecheck.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../../.cache/tsbuild/packages-security.typecheck.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

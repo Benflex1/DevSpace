@@ -1,6 +1,13 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  applicationNames,
+  deferredDirectories,
+  deferredPackageNames,
+  expectedNames,
+  expectedPackages
+} from "./workspace-graph.mjs";
 
 const defaultRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const rootArgumentIndex = process.argv.indexOf("--root");
@@ -8,41 +15,6 @@ const root = rootArgumentIndex === -1
   ? defaultRoot
   : resolve(process.argv[rootArgumentIndex + 1] ?? "");
 
-const expectedPackages = new Map([
-  ["apps/web", { name: "@devspace/web", kind: "application", dependencies: [
-    "@devspace/contracts",
-    "@devspace/domain",
-    "@devspace/project-options",
-    "@devspace/database",
-    "@devspace/security"
-  ] }],
-  ["apps/agent", { name: "@devspace/agent", kind: "application", dependencies: [
-    "@devspace/contracts",
-    "@devspace/domain",
-    "@devspace/project-options",
-    "@devspace/security"
-  ] }],
-  ["packages/contracts", { name: "@devspace/contracts", kind: "library", dependencies: [
-    "@devspace/domain"
-  ] }],
-  ["packages/domain", { name: "@devspace/domain", kind: "library", dependencies: [] }],
-  ["packages/database", { name: "@devspace/database", kind: "library", dependencies: [
-    "@devspace/domain"
-  ] }],
-  ["packages/project-options", { name: "@devspace/project-options", kind: "library", dependencies: [
-    "@devspace/security"
-  ] }],
-  ["packages/security", { name: "@devspace/security", kind: "library", dependencies: [] }]
-]);
-
-const deferredDirectories = ["packages/testkit", "packages/gateway-caddy"];
-const deferredPackageNames = new Set(["@devspace/testkit", "@devspace/gateway-caddy"]);
-const expectedNames = new Set([...expectedPackages.values()].map((definition) => definition.name));
-const applicationNames = new Set(
-  [...expectedPackages.values()]
-    .filter((definition) => definition.kind === "application")
-    .map((definition) => definition.name)
-);
 const errors = [];
 const manifests = new Map();
 

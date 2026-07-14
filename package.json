@@ -7,13 +7,21 @@
   },
   "packageManager": "pnpm@11.12.0",
   "scripts": {
-    "lint": "node tooling/check-text.mjs",
+    "lint": "pnpm workspace:check && eslint . --max-warnings 0 && node tooling/check-text.mjs",
     "test": "node --test tooling/tests/*.test.mjs",
-    "typecheck": "node tooling/check-json.mjs",
-    "build": "node tooling/check-scaffold.mjs",
+    "typecheck": "pnpm --filter @devspace/domain run typecheck && pnpm --filter @devspace/security run typecheck && pnpm --filter @devspace/contracts run typecheck && pnpm --filter @devspace/project-options run typecheck && pnpm --filter @devspace/database run typecheck && pnpm --filter @devspace/agent run typecheck && pnpm --filter @devspace/web run typecheck",
+    "build": "pnpm --filter @devspace/domain run build && pnpm --filter @devspace/security run build && pnpm --filter @devspace/contracts run build && pnpm --filter @devspace/project-options run build && pnpm --filter @devspace/database run build && pnpm --filter @devspace/agent run build && pnpm --filter @devspace/web run build",
     "contracts:check": "node tooling/check-scaffold.mjs",
     "schema:check": "node tooling/check-json.mjs",
     "db:migrate:test": "node tooling/check-scaffold.mjs",
     "workspace:check": "node tooling/check-workspace-graph.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.3",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.64.0"
   }
 }
