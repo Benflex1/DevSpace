@@ -9,7 +9,8 @@
       "@devspace/domain": ["packages/domain/src/index.ts"],
       "@devspace/database": ["packages/database/src/index.ts"],
       "@devspace/project-options": ["packages/project-options/src/index.ts"],
-      "@devspace/security": ["packages/security/src/index.ts"]
+      "@devspace/security": ["packages/security/src/index.ts"],
+      "@devspace/testkit": ["packages/testkit/src/index.ts"]
     }
   }
 }

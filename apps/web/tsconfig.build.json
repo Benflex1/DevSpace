@@ -10,6 +10,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/apps-web.build.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"],
   "references": [
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/database/tsconfig.build.json" },

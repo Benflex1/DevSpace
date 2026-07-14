@@ -1,30 +1,62 @@
 import eslint from "@eslint/js";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import globals from "globals";
 import tseslint from "typescript-eslint";
-import { expectedPackages } from "./tooling/workspace-graph.mjs";
+import {
+  expectedPackages,
+  isTestOnlyPath,
+  testkitPackageName
+} from "./tooling/workspace-graph.mjs";
 
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
 const packageDirectories = new Map(
   [...expectedPackages].map(([directory, definition]) => [directory, definition.name])
 );
 const internalPackages = new Set(packageDirectories.values());
+const packageManifests = new Map(
+  [...expectedPackages].map(([directory, definition]) => {
+    const manifestPath = path.resolve(rootDirectory, directory, "package.json");
+    try {
+      return [definition.name, JSON.parse(readFileSync(manifestPath, "utf8"))];
+    } catch {
+      return [definition.name, {}];
+    }
+  })
+);
+const testkitDevDependencyPackages = new Set(
+  [...packageManifests].filter(([, manifest]) => (
+    manifest.devDependencies?.[testkitPackageName] === "workspace:*"
+  )).map(([packageName]) => packageName)
+);
 const allowedImports = new Map(
   [...expectedPackages.values()].map((definition) => [definition.name, new Set(definition.dependencies)])
 );
 
-function packageForFile(filename) {
+function relativePathForFile(filename) {
   if (!path.isAbsolute(filename)) {
     return null;
   }
-  const relativeFilename = path.relative(rootDirectory, filename).replaceAll("\\", "/");
+  return path.relative(rootDirectory, filename).replaceAll("\\", "/");
+}
+
+function packageForFile(filename) {
+  const relativeFilename = relativePathForFile(filename);
+  if (relativeFilename === null) {
+    return null;
+  }
   for (const [directory, packageName] of packageDirectories) {
     if (relativeFilename === directory || relativeFilename.startsWith(`${directory}/`)) {
       return packageName;
     }
   }
   return null;
+}
+
+function isTestOnlyFile(filename) {
+  const relativeFilename = relativePathForFile(filename);
+  return relativeFilename !== null && isTestOnlyPath(relativeFilename);
 }
 
 const boundaryPlugin = {
@@ -36,6 +68,8 @@ const boundaryPlugin = {
         messages: {
           unknown: "Do not import unknown or deferred internal package '{{name}}'.",
           deep: "Import '{{name}}' through its public package entry point; deep internal imports are prohibited.",
+          testkitSource: "Package '{{name}}' may be imported only from test-only files.",
+          testkitDependency: "Package '{{from}}' must declare @devspace/testkit as devDependencies: workspace:* before importing it.",
           forbidden: "Package '{{from}}' may not import internal package '{{to}}'."
         }
       },
@@ -64,6 +98,22 @@ const boundaryPlugin = {
             context.report({ node: sourceNode, messageId: "deep", data: { name: source } });
             return;
           }
+          if (targetPackage === testkitPackageName) {
+            if (!isTestOnlyFile(context.filename)) {
+              context.report({
+                node: sourceNode,
+                messageId: "testkitSource",
+                data: { name: testkitPackageName }
+              });
+            } else if (!testkitDevDependencyPackages.has(sourcePackage)) {
+              context.report({
+                node: sourceNode,
+                messageId: "testkitDependency",
+                data: { from: sourcePackage }
+              });
+            }
+            return;
+          }
           if (!allowedImports.get(sourcePackage)?.has(targetPackage)) {
             context.report({
               node: sourceNode,
@@ -81,7 +131,7 @@ const boundaryPlugin = {
             checkImport(node.source);
           },
           TSImportType(node) {
-            checkImport(node.argument);
+            checkImport(node.source);
           },
           ExportAllDeclaration(node) {
             checkImport(node.source);
@@ -141,6 +191,7 @@ export default tseslint.config(
       "**/.cache/**",
       "**/.git/**",
       "**/coverage/**",
+      "**/.vitest/**",
       "**/dist/**",
       "**/generated/**",
       "**/node_modules/**",

@@ -10,6 +10,7 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/packages-project-options.build.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"],
   "references": [
     { "path": "../../packages/security/tsconfig.build.json" }
   ]

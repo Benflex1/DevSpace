@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.typecheck.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": true,
+    "types": ["node", "vitest"],
+    "tsBuildInfoFile": "../../.cache/tsbuild/packages-security.test.typecheck.tsbuildinfo"
+  },
+  "include": ["src/**/*.test.ts"]
+}

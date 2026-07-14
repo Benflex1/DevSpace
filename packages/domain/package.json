@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --project tsconfig.json --pretty false",
+    "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
     "build": "tsc --build tsconfig.build.json --force --pretty false"
   },
   "exports": {
@@ -16,5 +16,8 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist"
-  ]
+  ],
+  "devDependencies": {
+    "@devspace/testkit": "workspace:*"
+  }
 }

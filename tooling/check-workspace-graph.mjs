@@ -1,12 +1,15 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 import {
   applicationNames,
   deferredDirectories,
   deferredPackageNames,
   expectedNames,
-  expectedPackages
+  expectedPackages,
+  isTestOnlyPath,
+  testkitPackageName
 } from "./workspace-graph.mjs";
 
 const defaultRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -14,6 +17,7 @@ const rootArgumentIndex = process.argv.indexOf("--root");
 const root = rootArgumentIndex === -1
   ? defaultRoot
   : resolve(process.argv[rootArgumentIndex + 1] ?? "");
+const checkTestProjects = process.argv.includes("--test-projects");
 
 const errors = [];
 const manifests = new Map();
@@ -58,6 +62,82 @@ function findPackageManifests(directory) {
   return found;
 }
 
+function findTestFiles(directory) {
+  if (!existsSync(directory)) {
+    return [];
+  }
+
+  const found = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...findTestFiles(entryPath));
+    } else if (entry.isFile() && entry.name.endsWith(".test.ts")) {
+      found.push(entryPath);
+    }
+  }
+  return found;
+}
+
+function findTypeScriptFiles(directory) {
+  if (!existsSync(directory)) {
+    return [];
+  }
+
+  const found = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...findTypeScriptFiles(entryPath));
+    } else if (entry.isFile() && entry.name.endsWith(".ts")) {
+      found.push(entryPath);
+    }
+  }
+  return found;
+}
+
+function sourceImports(filePath) {
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    readFileSync(filePath, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const imports = [];
+
+  function addImport(moduleSpecifier) {
+    if (ts.isStringLiteral(moduleSpecifier)) {
+      imports.push(moduleSpecifier.text);
+    }
+  }
+
+  function visit(node) {
+    if (ts.isImportDeclaration(node)) {
+      addImport(node.moduleSpecifier);
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      addImport(node.moduleSpecifier);
+    } else if (ts.isImportTypeNode(node)
+      && ts.isLiteralTypeNode(node.argument)
+      && ts.isStringLiteral(node.argument.literal)) {
+      addImport(node.argument.literal);
+    } else if (ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.ImportKeyword
+      && node.arguments.length === 1) {
+      addImport(node.arguments[0]);
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return imports;
+}
+
+function isTestkitSpecifier(specifier) {
+  return specifier === testkitPackageName || specifier.startsWith(`${testkitPackageName}/`);
+}
+
 for (const [relativePath, definition] of expectedPackages) {
   const manifest = readManifest(relativePath);
   if (manifest === null) {
@@ -88,6 +168,14 @@ for (const [relativePath, definition] of expectedPackages) {
     }
   } else if ("exports" in manifest || "types" in manifest || "files" in manifest) {
     errors.push(`${relativePath}/package.json is an application boundary and must not expose library entry-point fields`);
+  }
+}
+
+if (checkTestProjects) {
+  for (const [relativePath, definition] of expectedPackages) {
+    if (findTestFiles(join(root, relativePath, "src")).length === 0) {
+      errors.push(`${relativePath} (${definition.name}) has no colocated TypeScript tests`);
+    }
   }
 }
 
@@ -133,6 +221,45 @@ function dependencyObject(packageData, field) {
 }
 
 for (const [packageName, packageData] of manifests) {
+  const devDependencies = dependencyObject(packageData, "devDependencies");
+  const declaresTestkit = Object.hasOwn(devDependencies, testkitPackageName);
+  let hasTestkitTestImport = false;
+
+  for (const filePath of findTypeScriptFiles(join(root, packageData.relativePath, "src"))) {
+    const relativeFilePath = relative(root, filePath).replaceAll("\\", "/");
+    const testOnlyFile = isTestOnlyPath(relativeFilePath);
+
+    for (const specifier of sourceImports(filePath)) {
+      if (!isTestkitSpecifier(specifier)) {
+        continue;
+      }
+
+      if (specifier !== testkitPackageName) {
+        errors.push(`${displayPath(filePath)} must import ${testkitPackageName} through its public package entry point; deep import ${specifier} is prohibited`);
+        continue;
+      }
+      if (packageName === testkitPackageName) {
+        errors.push(`${packageData.relativePath} must not import ${testkitPackageName} from its own source`);
+        continue;
+      }
+      if (!testOnlyFile) {
+        errors.push(`${displayPath(filePath)} may import ${testkitPackageName} only from a test-only file`);
+        continue;
+      }
+
+      hasTestkitTestImport = true;
+      if (devDependencies[testkitPackageName] !== "workspace:*") {
+        errors.push(`${displayPath(filePath)} imports ${testkitPackageName}, but ${packageData.relativePath}/package.json must declare it in devDependencies as workspace:*`);
+      }
+    }
+  }
+
+  if (declaresTestkit && !hasTestkitTestImport) {
+    errors.push(`${packageData.relativePath} declares ${testkitPackageName} but has no public test-only source import of it`);
+  }
+}
+
+for (const [packageName, packageData] of manifests) {
   const dependencies = dependencyObject(packageData, "dependencies");
 
   for (const requiredDependency of packageData.definition.dependencies) {
@@ -145,6 +272,13 @@ for (const [packageName, packageData] of manifests) {
 
   for (const [dependencyName, version] of Object.entries(dependencies)) {
     if (!dependencyName.startsWith("@devspace/")) {
+      continue;
+    }
+    if (dependencyName === testkitPackageName) {
+      if (version !== "workspace:*") {
+        errors.push(`${packageData.relativePath} must use workspace:* for ${testkitPackageName}, found ${String(version)}`);
+      }
+      errors.push(`${packageData.relativePath} must declare ${testkitPackageName} only in devDependencies, not dependencies`);
       continue;
     }
     if (version !== "workspace:*") {
@@ -175,6 +309,21 @@ for (const [packageName, packageData] of manifests) {
     const dependenciesInNonProductionField = dependencyObject(packageData, field);
     for (const dependencyName of Object.keys(dependenciesInNonProductionField)) {
       if (!dependencyName.startsWith("@devspace/")) {
+        continue;
+      }
+      if (dependencyName === testkitPackageName) {
+        if (dependenciesInNonProductionField[dependencyName] !== "workspace:*") {
+          errors.push(`${packageData.relativePath} must use workspace:* for ${testkitPackageName}, found ${String(dependenciesInNonProductionField[dependencyName])}`);
+        }
+        if (field !== "devDependencies") {
+          errors.push(`${packageData.relativePath} must declare ${testkitPackageName} only in devDependencies, not ${field}`);
+        } else if (packageName === testkitPackageName) {
+          errors.push(`${packageData.relativePath} must not depend on itself through devDependencies`);
+        }
+        continue;
+      }
+      if (packageName === testkitPackageName) {
+        errors.push(`${packageData.relativePath} must not depend on ${dependencyName} in ${field}`);
         continue;
       }
       if (deferredPackageNames.has(dependencyName)) {
