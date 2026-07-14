@@ -2,6 +2,24 @@
 
 ## Status
 
+M0-F05 review corrections implemented on 2026-07-14; focused re-review pending.
+
+## Completed task
+
+Implement the complete pure Milestone 0 domain lifecycle state machines without adding orchestration, persistence, runtime operations, or M0-F06 security primitives.
+
+## Deliverables
+
+- Closed state unions and private, deeply frozen exhaustive transition definitions cover project, configuration revision, operation, workspace desired/observed, runtime-stack desired/observed, workspace-service desired/observed/health, process desired/observed, terminal, preview desired/observed, AI session, and task run.
+- Public lifecycle-specific transition functions return immutable discriminated results with stable invalid-edge and contextual-guard error codes.
+- Project readiness, cancellation capability, isolated-workspace dirty handling, lost recovery evidence, runtime absence confirmation, service ownership, health validity, and preview route-presence rules are pure typed guards or invariants.
+- Specification-derived fixtures independently encode all 17 state sets, 245 allowed edges, 445 rejected pairs, exact terminal states, and all 690 ordered pairs; accidental production-edge additions and removals fail naturally.
+- Independent guarded-edge fixtures cover every guarded edge with required positive and negative context, plus invalid-edge precedence for every guard family.
+- Package-root and type-level regression checks prevent production transition-table exports; internal table construction freezes the top-level table and every copied destination collection.
+- Desired and observed state APIs remain separate; no self-transition, shortcut, implicit recovery, persistence, orchestration, runtime access, or executable behavior was introduced.
+
+## Previous completed task
+
 M0-F04 completed on 2026-07-14.
 
 ## Completed task
@@ -11,14 +29,10 @@ Establish the real TypeScript unit-test and fixture harness without adding produ
 ## Deliverables
 
 - Vitest 4 named-project configuration runs all eight active workspaces in deterministic Node mode through non-watch `vitest run`.
-- Test-project validation fails when an expected package has no colocated TypeScript tests, and configuration validation fails when expected project names are omitted or unexpected names are added.
-- Every active workspace has an explicit no-emit `tsconfig.test.json`; package typecheck scripts include test source, while build configurations exclude test files from `dist/`.
-- Vitest and TypeScript resolve public workspace package names to source entrypoints from a clean checkout with no prior build output.
-- Private development-only `@devspace/testkit` provides `withTemporaryDirectory` and `loadJsonFixture`, with success, failure, uniqueness, path, file-URL, and malformed-JSON tests.
-- Workspace graph and ESLint checks enforce exact testkit `workspace:*` devDependencies, test-only public imports, actual source consumption, and rejection of deep or production imports.
-- A focused ESLint regression harness covers TypeScript import-type boundary behavior for deep, undeclared, production-source, and legitimate test-file imports.
-- V8 coverage is available through `test:coverage`, writes to ignored `coverage/`, includes first-party source, and has no thresholds.
-- The old Node scaffold test was removed; contracts, schema, and migration placeholder scripts remain unchanged for later tasks.
+- Every active workspace has explicit no-emit test typechecking; package builds exclude test files from `dist/`.
+- Private development-only `@devspace/testkit` provides tested temporary-directory and JSON-fixture helpers.
+- Workspace graph and ESLint checks enforce testkit dependency and import boundaries.
+- V8 coverage is available through `test:coverage` and writes only to ignored output.
 
 ## Previous completed task
 
@@ -31,12 +45,9 @@ Establish real strict TypeScript compilation, package builds, and semantic linti
 ## Deliverables
 
 - Root and package TypeScript configurations preserve strictness, use NodeNext ESM, and separate no-emit typechecking from emitting composite builds.
-- No-emit typechecking uses public-package-to-source `paths` mappings so cross-package imports work from a clean checkout without prior `dist/` output.
-- All seven active packages have real `typecheck` and `build` scripts; root commands invoke every package explicitly in dependency-safe order.
-- Library and application builds emit ESM JavaScript, declarations, source maps, and declaration maps to ignored `dist/` directories.
-- Flat-config ESLint uses official JavaScript recommendations, type-aware TypeScript rules, Node globals, zero warnings, ESM-only checks, and accepted source-import boundaries.
-- Root lint preserves workspace-graph and text-hygiene checks.
-- Only the requested development tooling dependencies were added; no test framework or runtime dependency was added.
+- No-emit typechecking uses public-package-to-source path mappings so cross-package imports work without prior build output.
+- All active packages have real typecheck and build scripts; production builds emit ESM JavaScript and declarations without test files.
+- Flat-config ESLint uses type-aware TypeScript rules, ESM checks, and accepted source-import boundaries.
 
 ## Previous completed task
 
@@ -70,4 +81,4 @@ Close the material representation and specification blockers in the Milestone 0 
 
 ## Next task in this chat
 
-M0-F05: implement the pure domain lifecycle state machines. Do not begin lifecycle work until its relevant contracts and ADR boundaries are accepted.
+Focused independent re-review of the M0-F05 corrections. Do not begin M0-F06 yet.

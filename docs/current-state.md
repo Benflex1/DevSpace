@@ -27,12 +27,15 @@ Milestone 0 — Architecture and contracts.
 
 ## What exists
 
-- documentation and repository scaffold only;
+- documentation, repository scaffold, and pure domain lifecycle implementation only;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
 - a Vitest-based TypeScript unit-test harness with eight named Node projects, deterministic non-watch execution, test typechecking, optional V8 coverage, and source-resolved public workspace imports;
 - the private development-only `@devspace/testkit` package with temporary-directory and JSON-fixture helpers, including substantive utility tests;
+- all 17 complete Milestone 0 lifecycle graphs represented by closed TypeScript state unions, private runtime-frozen transition definitions, lifecycle-specific pure transition functions, and stable discriminated errors;
+- specification-derived tests independently encode every state, edge, terminal state, and expected count, so an accidental production-edge addition or removal fails parity testing across all 690 ordered pairs;
+- pure contextual lifecycle guards for project readiness, operation cancellation, isolated-workspace dirty protection, positive lost-state recovery evidence, runtime-stack absence confirmation, service/stack ownership, service health, and preview route presence, with every guarded edge and invalid-edge precedence covered;
 - workspace graph and ESLint boundaries require testkit's exact `workspace:*` devDependency, public imports from test-only files, and real source consumption; deep imports and production imports are rejected;
 - ESLint regression coverage exercises deep, undeclared, production-source, and legitimate TypeScript import-type testkit imports;
 - Project Options v1 JSON Schema scaffold, pending regeneration from the future Zod source in M0-F07;
@@ -50,4 +53,4 @@ Milestone 0 — Architecture and contracts.
 
 ## Next task
 
-M0-F04 is complete in this chat. Continue with M0-F05: implement the pure domain lifecycle state machines. Do not begin lifecycle implementation before that task's contracts and ADR boundaries are accepted, and do not begin Milestone 1.
+M0-F05 review corrections are implemented and await focused independent re-review. Do not begin M0-F06 or Milestone 1 until that review is complete.
