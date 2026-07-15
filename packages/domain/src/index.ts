@@ -14,3 +14,4 @@ export * from "./workspace-lifecycles.js";
 export * from "./runtime-lifecycles.js";
 export * from "./execution-lifecycles.js";
 export * from "./experience-lifecycles.js";
+export * from "./git-branch.js";

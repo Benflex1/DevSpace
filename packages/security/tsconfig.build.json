@@ -10,5 +10,8 @@
     "tsBuildInfoFile": "../../.cache/tsbuild/packages-security.build.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"],
+  "references": [
+    { "path": "../../packages/domain/tsconfig.build.json" }
+  ]
 }

@@ -18,6 +18,8 @@
     "dist"
   ],
   "dependencies": {
-    "@devspace/domain": "workspace:*"
+    "@devspace/domain": "workspace:*",
+    "canonicalize": "3.0.0",
+    "zod": "^4.4.3"
   }
 }

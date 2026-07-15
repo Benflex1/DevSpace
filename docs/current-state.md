@@ -33,7 +33,7 @@ Milestone 0 — Architecture and contracts.
 - documentation, repository scaffold, pure domain lifecycle implementation, accepted M0-F06 pure
   security-validation implementation, accepted M0-F07 Project Options schema contract, accepted
   M0-F08 canonicalization and hashing, and the documentation-only Agent API v1 wire-contract gap
-  closure corrected after the first independent review and awaiting focused re-review;
+  closure accepted and implemented as an executable M0-F09 review candidate;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
@@ -63,7 +63,17 @@ Milestone 0 — Architecture and contracts.
   checked-in golden canonical/hash fixture;
 - closed Project Options, database, lifecycle, and agent transport specifications for Milestone 0 implementation, including complete workspace container configuration and zero-event cursor semantics;
 - accepted foundation-representations ADR 013;
-- architecture, threat model, roadmap, and accepted ADR set.
+- architecture, threat model, roadmap, and accepted ADR set;
+- the executable Agent API v1 F09 foundation: strict reusable wire schemas, all 29 declarative
+  endpoint descriptors, 19 mutation-header contracts, 23 strict executable errors with
+  route-specific unions, lifecycle-dependent inspection validation, terminal framing codecs, and
+  a deterministic generated contract artifact;
+- the shared F08/F09 Project Options revision representation limit is exactly 2,097,152 final
+  canonical UTF-8 bytes, enforced by all F08 revision producers and the F09 wire validator without
+  changing F07 structural parsing;
+- one authoritative domain Git branch-shorthand primitive consumed by contracts and delegated to
+  by security without changing the F06 public contract, with the narrow `security -> domain`
+  dependency edge enforced by workspace tooling;
 
 ## What does not exist
 
@@ -72,10 +82,9 @@ Milestone 0 — Architecture and contracts.
 - no Docker integration;
 - no database migrations;
 - no terminals, tasks, previews, worktree mutation, or AI sessions;
-- no F09 runtime contract schemas, generated Agent API schemas, or transport implementation;
+- no Agent API transport, handlers, clients, journal, persistence, or runtime behavior;
 
 ## Next task
 
-Perform a focused independent re-review of the corrected Agent API v1 wire specification. F09
-production implementation has not begun. After the specification is accepted, resume M0-F09 from
-its exact 29-endpoint, operation-ID-only contract without beginning F10.
+Re-review the focused uncommitted M0-F09 correction after the seven independent-review findings.
+Do not begin M0-F10 until F09 is reviewed and accepted.

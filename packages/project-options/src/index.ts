@@ -27,6 +27,8 @@ export function generateProjectOptionsV1JsonSchema(): ProjectOptionsV1JsonSchema
 export const projectOptionsV1JsonSchema = generateProjectOptionsV1JsonSchema();
 
 export {
+  PROJECT_OPTIONS_REVISION_MAX_BYTES,
+  ProjectOptionsRevisionSizeError,
   canonicalizeProjectOptionsV1,
   canonicalizeProjectOptionsV1Bytes,
   hashProjectOptionsV1,

@@ -8,16 +8,25 @@ compilation.
 
 - `projectOptionsV1Schema` is the authoritative Zod 4 schema.
 - `ProjectOptionsV1` and `ProjectOptionsV1Input` are inferred input/output types.
+- `PROJECT_OPTIONS_REVISION_MAX_BYTES` and `ProjectOptionsRevisionSizeError` expose the fixed
+  revision-representation boundary and its stable failure metadata.
 - `parseProjectOptionsV1` throws the schema's path-aware `ZodError` for invalid input.
 - `safeParseProjectOptionsV1` returns the corresponding discriminated success/error result.
 - `projectOptionsV1JsonSchema` and `generateProjectOptionsV1JsonSchema` expose the deterministic
   draft 2020-12 portability representation.
 - `canonicalizeProjectOptionsV1` and `canonicalizeProjectOptionsV1Bytes` validate through the v1
   parser, materialize defaults, apply only the specified unordered-collection sorting, and emit
-  the canonical runtime-revision JSON.
+  the canonical runtime-revision JSON. Both enforce the final canonical UTF-8 revision limit of
+  2,097,152 bytes.
 - `hashProjectOptionsV1` hashes the UTF-8 domain `devspace/project-options-revision/v1`, one zero
   byte, and the canonical Project Options bytes with SHA-256. It returns a branded
-  `ProjectOptionsRevisionHash` in `sha256-jcs-v1:<64 lowercase hex>` form.
+  `ProjectOptionsRevisionHash` in `sha256-jcs-v1:<64 lowercase hex>` form and cannot hash an
+  oversized revision.
+
+The 2,097,152-byte maximum is a revision-level representation constraint measured after parsing,
+default materialization, semantic normalization, JCS canonicalization, and UTF-8 encoding.
+Exactly 2,097,152 bytes is accepted and 2,097,153 is rejected. `parseProjectOptionsV1` remains the
+F07 structural and semantic parser and does not compute canonical byte size.
 
 Defaults are materialized by the parser. Every configuration object is strict; environment maps
 accept only valid environment-variable names. Cross-field checks cover collection uniqueness,

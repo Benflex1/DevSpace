@@ -64,8 +64,9 @@ filesystem and repeat containment validation immediately before acting.
 
 ## Git branch shorthand
 
-`validateGitBranchName` implements only the lexical branch shorthand needed by fields such as
-`defaultBranch`. It rejects empty/control/whitespace values, backslashes, Git-forbidden
+`validateGitBranchName` preserves the F06 security result, brand, error, and field/policy contract
+while delegating the authoritative lexical grammar and reason selection to `@devspace/domain`. It
+rejects empty/control/whitespace values, backslashes, Git-forbidden
 characters and sequences, ambiguous slash/dot components, `.lock` suffixes, a lone `@`, and a
 leading `-`. It does not trim or normalize.
 

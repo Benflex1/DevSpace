@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  canonicalizeJson,
   canonicalizeJsonBytes,
   type JsonValue
 } from "./canonical-json.js";
@@ -9,6 +8,19 @@ import type { ProjectOptionsV1 } from "./schema.js";
 
 const projectOptionsRevisionDomain = "devspace/project-options-revision/v1";
 const projectOptionsRevisionDomainBytes = new TextEncoder().encode(projectOptionsRevisionDomain);
+export const PROJECT_OPTIONS_REVISION_MAX_BYTES = 2_097_152 as const;
+
+export class ProjectOptionsRevisionSizeError extends RangeError {
+  readonly code = "PROJECT_OPTIONS_REVISION_TOO_LARGE" as const;
+
+  constructor(
+    readonly actualBytes: number,
+    readonly maximumBytes: number = PROJECT_OPTIONS_REVISION_MAX_BYTES
+  ) {
+    super(`Canonical Project Options revision is ${actualBytes} bytes; maximum is ${maximumBytes}`);
+    this.name = "ProjectOptionsRevisionSizeError";
+  }
+}
 
 declare const projectOptionsRevisionHashBrand: unique symbol;
 export type ProjectOptionsRevisionHash = string & {
@@ -108,12 +120,20 @@ function normalizedJson(input: unknown): JsonValue {
   return normalizeProjectOptionsV1(parseProjectOptionsV1(input));
 }
 
+function canonicalRevisionBytes(input: unknown): Uint8Array {
+  const bytes = canonicalizeJsonBytes(normalizedJson(input));
+  if (bytes.byteLength > PROJECT_OPTIONS_REVISION_MAX_BYTES) {
+    throw new ProjectOptionsRevisionSizeError(bytes.byteLength);
+  }
+  return bytes;
+}
+
 export function canonicalizeProjectOptionsV1(input: unknown): string {
-  return canonicalizeJson(normalizedJson(input));
+  return new TextDecoder().decode(canonicalRevisionBytes(input));
 }
 
 export function canonicalizeProjectOptionsV1Bytes(input: unknown): Uint8Array {
-  return canonicalizeJsonBytes(normalizedJson(input));
+  return canonicalRevisionBytes(input);
 }
 
 export function hashProjectOptionsV1(input: unknown): ProjectOptionsRevisionHash {

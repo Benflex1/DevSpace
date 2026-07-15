@@ -22,7 +22,9 @@ export const expectedPackages = new Map([
   ["packages/project-options", { name: "@devspace/project-options", kind: "library", dependencies: [
     "@devspace/security"
   ] }],
-  ["packages/security", { name: "@devspace/security", kind: "library", dependencies: [] }],
+  ["packages/security", { name: "@devspace/security", kind: "library", dependencies: [
+    "@devspace/domain"
+  ] }],
   ["packages/testkit", { name: "@devspace/testkit", kind: "library", dependencies: [] }]
 ]);
 

@@ -17,5 +17,8 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist"
-  ]
+  ],
+  "dependencies": {
+    "@devspace/domain": "workspace:*"
+  }
 }

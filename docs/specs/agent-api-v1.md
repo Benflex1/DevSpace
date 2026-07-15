@@ -59,7 +59,7 @@ The names below are normative reusable scalar schemas.
 | `GitBranchName` | A string accepted by the foundation `git-branch-shorthand` policy: non-empty; no NUL, ASCII control, whitespace, backslash, `~`, `^`, `:`, `?`, `*`, or `[`; no `..`, `@{`, lone `@`, leading `-`, leading/trailing `/`, repeated `//`, or trailing `.`; and no slash-delimited component beginning with `.` or ending with `.lock`. This is exactly the accepted F06 behavior, not a second contracts-owned grammar. |
 | `GitBaseRef` | Strict union `{ kind: "branch", branchName: GitBranchName } | { kind: "commit", commit: GitObjectId }`. Tags, revision expressions, reflog syntax, and arbitrary Git ref syntax are not accepted in v1. |
 | `RemoteRepositoryUrl` | Absolute `https:` or `ssh:` URL of 1 through 2048 UTF-8 bytes, with a non-empty host, no fragment, and no control or whitespace character. HTTPS URLs have no user-info. SSH URLs may have a non-empty username but no password. Other schemes are invalid. Approval remains Agent policy. |
-| `CanonicalJsonObjectText` | JSON string whose UTF-8 encoding is 2 through 2,097,152 bytes and is exactly the RFC 8785/JCS serialization of one JSON object. Duplicate keys, non-object roots, and non-canonical spellings are invalid. |
+| `CanonicalJsonObjectText` | JSON string whose UTF-8 encoding is 2 through 2,097,152 bytes and is exactly the RFC 8785/JCS serialization of one JSON object. Duplicate keys, non-object roots, and non-canonical spellings are invalid. The upper bound is the same revision-level final canonical UTF-8 representation limit enforced by F08; exactly 2,097,152 bytes is valid and 2,097,153 is invalid. |
 | `ErrorMessage` | JSON string of 1 through 512 Unicode scalar values with no C0/C1 control characters. It is safe for an operator but is not a stable programmatic discriminator. |
 | `NonNegativeCount` | JSON integer from 0 through 2,147,483,647 inclusive. |
 | `ExitCode` | JSON integer from -2,147,483,648 through 2,147,483,647 inclusive. |
@@ -105,6 +105,12 @@ control authorization or ordering.
 No other `X-DevSpace-*` header is accepted except the operation-ID header on mutation routes.
 Standard HTTP hop-by-hop, content-negotiation, and WebSocket headers are governed by HTTP/1.1 and
 RFC 6455 rather than this object contract.
+
+Contract validation operates on a case-insensitively extracted DevSpace-header projection, not a
+closed representation of the complete HTTP header collection. The extraction boundary ignores
+ordinary transport, forwarding, tracing, proxy, and WebSocket headers; rejects unknown
+`X-DevSpace-*` names; and rejects duplicate or ambiguous known DevSpace values before endpoint
+schema validation.
 
 Every POST request body is the strict envelope `{ "data": <EndpointRequestData> }`. `data` is
 required and non-null. No endpoint in F09 defines body defaults. Omitted fields remain omitted only

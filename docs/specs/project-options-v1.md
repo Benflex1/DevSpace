@@ -183,6 +183,14 @@ Drafts may be stored with unresolved registry references only when their validat
 
 ## Canonicalization and revision hash
 
+The final canonical Project Options v1 revision representation is limited to exactly 2,097,152
+UTF-8 bytes. The limit is measured after F07 parsing and default materialization, accepted semantic
+normalization, JCS canonicalization, and UTF-8 encoding. Exactly 2,097,152 bytes is valid;
+2,097,153 bytes is invalid. This is a revision-representation constraint enforced by
+`canonicalizeProjectOptionsV1`, `canonicalizeProjectOptionsV1Bytes`, and `hashProjectOptionsV1`.
+It is not a base F07 structural-object constraint: `parseProjectOptionsV1` does not compute or
+enforce canonical byte size.
+
 Canonicalization is performed only after successful v1 validation:
 
 1. Strictly parse the input and reject unknown keys and invalid scalar forms.

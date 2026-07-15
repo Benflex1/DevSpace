@@ -2,16 +2,11 @@
 
 ## Status
 
-The focused architecture correction to the documentation-only Agent API v1 wire contract is ready
-for independent re-review. M0-F08 is accepted and committed as `67691aa`. M0-F09 production
-implementation has not begun.
+The accepted Agent API v1 specification at `bafa075` has been implemented as the uncommitted
+M0-F09 executable contract foundation. Seven concrete findings from the first implementation
+review have been corrected and the slice is ready for re-review. It is not accepted or committed.
 
-The first independent contract review required removal of premature runtime-plan, second-key/public
-request-hash, extra Agent-side terminal authorization, keyed AI-profile, reconciliation,
-Web-operation-lifecycle, optional capability, broad Git-ref, and F10-error concepts. Those findings
-are resolved in the specification.
-
-## Corrected deliverables
+## Implementation deliverables
 
 - an exact 29-endpoint F09 inventory: 19 journaled mutations, nine ordinary non-mutating HTTP
   operations, and one terminal WebSocket upgrade;
@@ -23,19 +18,32 @@ are resolved in the specification.
 - singular workspace `aiProfile` selection and `AI_NOT_CONFIGURED` for a null profile;
 - protected-UDS terminal proxy authorization owned by Web, one active attachment, deterministic
   pre-ready rejection, and detach without terminal closure;
-- distinct branch-name and branch/commit base-ref concepts, plus the required future extraction of
-  branch validation authority into `@devspace/domain` while preserving the security API;
+- distinct branch-name and branch/commit base-ref concepts, with branch validation authority
+  extracted into `@devspace/domain` while preserving the security API;
 - a 23-code executable F09 error registry and exhaustive 29-row route mapping;
 - reconciliation deferred beyond both F09 and F10, while F10 snapshot/event/error contracts remain
-  clearly non-executable F09 design input.
+  clearly non-executable F09 design input;
+- strict Zod request, response, primitive, lifecycle, and error schemas exposed from the contracts
+  package root;
+- one declarative 29-endpoint inventory with mechanically inspectable mutation headers, success
+  statuses, and route-specific errors;
+- pure byte-exact terminal frame codecs and protocol metadata, without WebSocket transport;
+- domain-owned branch shorthand validation with security delegation and narrow workspace-graph
+  correction;
+- deterministic generated Agent API v1 JSON Schema artifact and permanent regression tests;
+- DevSpace-only raw-header projection that ignores ordinary transport headers while rejecting
+  unknown or duplicate protocol headers;
+- one exact 2,097,152-byte final canonical Project Options revision boundary across F08 and F09;
+- literal-preserving endpoint lookup types, independent endpoint/error test oracles, documented
+  JSON Schema runtime limitations, and a fixed public error API with no override-capable builder.
 
 ## Scope boundary
 
-This slice changes specification and living/security documentation only. It adds no production
-source, runtime schemas, generated artifacts, Agent/Web/database behavior, transport, journal,
-terminal implementation, reconciliation, or F10 event/cursor implementation.
+This slice adds contract infrastructure only. It adds no Agent/Web/database behavior, HTTP or UDS
+transport, mutation journal, terminal execution/proxy, reconciliation, runtime plan, or F10
+event/cursor implementation.
 
 ## Next task
 
-Perform a focused independent contract re-review. If accepted, resume M0-F09 implementation
-directly from `docs/specs/agent-api-v1.md`; do not begin M0-F10 in the same review slice.
+Perform a focused independent re-review of the corrected M0-F09 diff. If accepted, commit it as a
+separate review boundary before beginning M0-F10.

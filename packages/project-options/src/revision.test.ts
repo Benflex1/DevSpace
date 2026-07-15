@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import {
+  PROJECT_OPTIONS_REVISION_MAX_BYTES,
+  ProjectOptionsRevisionSizeError,
   canonicalizeProjectOptionsV1,
   canonicalizeProjectOptionsV1Bytes,
-  hashProjectOptionsV1
+  hashProjectOptionsV1,
+  parseProjectOptionsV1
 } from "@devspace/project-options";
 
 function minimalOptions(): Record<string, unknown> {
@@ -12,6 +15,27 @@ function minimalOptions(): Record<string, unknown> {
     schemaVersion: 1,
     developmentEnvironment: {
       source: { kind: "image", imageReference: "node:24" }
+    }
+  };
+}
+
+function optionsWithCanonicalSize(targetBytes: number): Record<string, unknown> {
+  const base = {
+    ...minimalOptions(),
+    developmentEnvironment: {
+      source: { kind: "image", imageReference: "node:24" },
+      environment: { PADDING: { kind: "literal", value: "" } }
+    }
+  };
+  const baseBytes = canonicalizeProjectOptionsV1Bytes(base).byteLength;
+  if (targetBytes < baseBytes) throw new RangeError("Target is smaller than the canonical base fixture");
+  const requiredValueBytes = targetBytes - baseBytes;
+  const value = `${"é".repeat(Math.floor(requiredValueBytes / 2))}${requiredValueBytes % 2 === 0 ? "" : "a"}`;
+  return {
+    ...base,
+    developmentEnvironment: {
+      ...(base.developmentEnvironment as Record<string, unknown>),
+      environment: { PADDING: { kind: "literal", value } }
     }
   };
 }
@@ -168,6 +192,29 @@ test("has a fixed canonical minimal document and fixed domain-separated SHA-256 
     new TextEncoder().encode(goldenFixture.canonicalText)
   );
   expect(hashProjectOptionsV1(goldenFixture.input)).toBe(goldenFixture.revisionHash);
+});
+
+test("enforces the canonical revision byte limit consistently across every F08 producer", () => {
+  const exact = optionsWithCanonicalSize(PROJECT_OPTIONS_REVISION_MAX_BYTES);
+  const oversized = optionsWithCanonicalSize(PROJECT_OPTIONS_REVISION_MAX_BYTES + 1);
+
+  expect(Buffer.byteLength(canonicalizeProjectOptionsV1(exact), "utf8")).toBe(2_097_152);
+  expect(canonicalizeProjectOptionsV1Bytes(exact)).toHaveLength(2_097_152);
+  expect(hashProjectOptionsV1(exact)).toMatch(/^sha256-jcs-v1:[0-9a-f]{64}$/u);
+
+  expect(parseProjectOptionsV1(oversized)).toBeDefined();
+  for (const produce of [
+    canonicalizeProjectOptionsV1,
+    canonicalizeProjectOptionsV1Bytes,
+    hashProjectOptionsV1
+  ]) {
+    expect(() => produce(oversized)).toThrowError(expect.objectContaining({
+      name: "ProjectOptionsRevisionSizeError",
+      code: "PROJECT_OPTIONS_REVISION_TOO_LARGE",
+      actualBytes: 2_097_153,
+      maximumBytes: 2_097_152
+    } satisfies Partial<ProjectOptionsRevisionSizeError>));
+  }
 });
 
 test("normalizes source property order, omitted defaults, and explicit defaults identically", () => {
