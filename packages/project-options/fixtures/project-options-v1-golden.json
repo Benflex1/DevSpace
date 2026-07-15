@@ -1,0 +1,13 @@
+{
+  "input": {
+    "schemaVersion": 1,
+    "developmentEnvironment": {
+      "source": {
+        "kind": "image",
+        "imageReference": "node:24"
+      }
+    }
+  },
+  "canonicalText": "{\"aiProfile\":null,\"developmentEnvironment\":{\"containerUser\":null,\"environment\":{},\"passwordlessSudo\":false,\"ports\":[],\"rebuildPolicy\":\"manual\",\"setupSteps\":[],\"source\":{\"imageReference\":\"node:24\",\"kind\":\"image\"},\"volumes\":[],\"workingDirectory\":\"/workspace\"},\"namedVolumes\":[],\"previews\":[],\"resources\":{\"automaticStopMinutes\":null,\"cpuMillicores\":null,\"logRetentionDays\":null,\"maxConcurrentWorkspaces\":null,\"maxNamedVolumeBytes\":null,\"memoryBytes\":null,\"pidLimit\":null,\"stoppedWorkspaceRetentionDays\":null},\"schemaVersion\":1,\"services\":[],\"tasks\":[]}",
+  "revisionHash": "sha256-jcs-v1:480ee237bf3e08069745894686f1f05810b8e15c7bb9cba49c1bb50da4ce3e44"
+}

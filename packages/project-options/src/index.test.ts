@@ -689,6 +689,13 @@ test("loads all validation behavior through the package-root import without requ
   expect(safeParseProjectOptionsV1(minimalOptions()).success).toBe(true);
 });
 
-test("keeps the package-root API focused on parsing, schema, and inferred types", () => {
+test("keeps the package-root API focused on Project Options contracts", () => {
   expect("projectOptionsValidationIssueCodes" in packageEntry).toBe(false);
+  expect(typeof packageEntry.canonicalizeProjectOptionsV1).toBe("function");
+  expect(typeof packageEntry.canonicalizeProjectOptionsV1Bytes).toBe("function");
+  expect(typeof packageEntry.hashProjectOptionsV1).toBe("function");
+  expect("canonicalizeJson" in packageEntry).toBe(false);
+  expect("canonicalizeJsonBytes" in packageEntry).toBe(false);
+  expect("JsonPrimitive" in packageEntry).toBe(false);
+  expect("JsonValue" in packageEntry).toBe(false);
 });

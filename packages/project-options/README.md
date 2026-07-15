@@ -1,8 +1,8 @@
 # project-options
 
 `@devspace/project-options` owns the strict Project Options v1 runtime revision. It does not
-contain project General metadata, workspace display names, persistence, canonicalization, hashing,
-or runtime-plan compilation.
+contain project General metadata, workspace display names, persistence, or runtime-plan
+compilation.
 
 ## Public contract
 
@@ -12,6 +12,12 @@ or runtime-plan compilation.
 - `safeParseProjectOptionsV1` returns the corresponding discriminated success/error result.
 - `projectOptionsV1JsonSchema` and `generateProjectOptionsV1JsonSchema` expose the deterministic
   draft 2020-12 portability representation.
+- `canonicalizeProjectOptionsV1` and `canonicalizeProjectOptionsV1Bytes` validate through the v1
+  parser, materialize defaults, apply only the specified unordered-collection sorting, and emit
+  the canonical runtime-revision JSON.
+- `hashProjectOptionsV1` hashes the UTF-8 domain `devspace/project-options-revision/v1`, one zero
+  byte, and the canonical Project Options bytes with SHA-256. It returns a branded
+  `ProjectOptionsRevisionHash` in `sha256-jcs-v1:<64 lowercase hex>` form.
 
 Defaults are materialized by the parser. Every configuration object is strict; environment maps
 accept only valid environment-variable names. Cross-field checks cover collection uniqueness,
@@ -34,4 +40,7 @@ semantics remain runtime-only because JSON Schema cannot faithfully express thos
 duplicating the security package's private validation logic. References, uniqueness by object key,
 dependency cycles, preview-port ownership, and other cross-field rules are runtime-only as well.
 
-Canonicalization and revision hashing begin in F08. Runtime-plan compilation begins in Milestone 1.
+Canonicalization uses an internal standards-focused `canonicalize` implementation and is not a
+general package-level utility. Revision hashing excludes all project General metadata, workspace
+display names, and database revision metadata because the strict runtime-revision parser rejects
+those fields. Runtime-plan compilation begins in Milestone 1.

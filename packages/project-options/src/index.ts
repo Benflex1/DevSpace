@@ -1,8 +1,5 @@
 import * as z from "zod";
-import {
-  projectOptionsV1Schema,
-  type ProjectOptionsV1
-} from "./schema.js";
+import { projectOptionsV1Schema } from "./schema.js";
 
 export {
   projectOptionsV1Schema,
@@ -10,15 +7,7 @@ export {
   type ProjectOptionsV1Input
 } from "./schema.js";
 
-export function parseProjectOptionsV1(input: unknown): ProjectOptionsV1 {
-  return projectOptionsV1Schema.parse(input);
-}
-
-export function safeParseProjectOptionsV1(
-  input: unknown
-): z.ZodSafeParseResult<ProjectOptionsV1> {
-  return projectOptionsV1Schema.safeParse(input);
-}
+export { parseProjectOptionsV1, safeParseProjectOptionsV1 } from "./parser.js";
 
 export type ProjectOptionsV1JsonSchema = Record<string, unknown>;
 
@@ -36,3 +25,10 @@ export function generateProjectOptionsV1JsonSchema(): ProjectOptionsV1JsonSchema
 }
 
 export const projectOptionsV1JsonSchema = generateProjectOptionsV1JsonSchema();
+
+export {
+  canonicalizeProjectOptionsV1,
+  canonicalizeProjectOptionsV1Bytes,
+  hashProjectOptionsV1,
+  type ProjectOptionsRevisionHash
+} from "./revision.js";

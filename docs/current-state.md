@@ -28,7 +28,8 @@ Milestone 0 — Architecture and contracts.
 ## What exists
 
 - documentation, repository scaffold, pure domain lifecycle implementation, accepted M0-F06 pure
-  security-validation implementation, and the in-progress M0-F07 Project Options schema slice;
+  security-validation implementation, accepted M0-F07 Project Options schema contract, and the
+  in-progress M0-F08 canonicalization and hashing slice;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
@@ -53,6 +54,9 @@ Milestone 0 — Architecture and contracts.
 - strict Project Options v1 Zod source and inferred types covering runtime configuration only;
 - Project Options v1 parser defaults, nested strictness, security-policy adapters, local
   cross-reference validation, and generated draft 2020-12 JSON Schema with byte-level drift check;
+- package-owned RFC 8785/JCS text and UTF-8 canonicalization with an explicit JSON-value boundary,
+  Project Options collection normalization, domain-separated SHA-256 revision hashing, and a
+  checked-in golden canonical/hash fixture;
 - closed Project Options, database, lifecycle, and agent transport specifications for Milestone 0 implementation, including complete workspace container configuration and zero-event cursor semantics;
 - accepted foundation-representations ADR 013;
 - architecture, threat model, roadmap, and accepted ADR set.
@@ -67,7 +71,6 @@ Milestone 0 — Architecture and contracts.
 
 ## Next task
 
-Complete the M0-F07 correction review and acceptance. F07 is not accepted or committed. Project
-Options v1 intentionally imposes no task flag/timeout/concurrency combination rule; the parser
-validates those fields independently, including the scalar bounds for non-null timeouts. F08
-canonicalization/hashing and all later-milestone runtime work remain out of scope.
+Complete the M0-F08 canonicalization and hashing review. F07 is accepted and committed as
+`66c3f2d`. F08 is implemented but is not accepted or committed. F09 agent contracts and all
+later-milestone runtime work remain out of scope.
