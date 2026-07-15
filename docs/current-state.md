@@ -27,7 +27,8 @@ Milestone 0 — Architecture and contracts.
 
 ## What exists
 
-- documentation, repository scaffold, and pure domain lifecycle implementation only;
+- documentation, repository scaffold, pure domain lifecycle implementation, and the M0-F06 pure
+  security-validation implementation pending independent review;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
@@ -36,6 +37,17 @@ Milestone 0 — Architecture and contracts.
 - all 17 complete Milestone 0 lifecycle graphs represented by closed TypeScript state unions, private runtime-frozen transition definitions, lifecycle-specific pure transition functions, and stable discriminated errors;
 - specification-derived tests independently encode every state, edge, terminal state, and expected count, so an accidental production-edge addition or removal fails parity testing across all 690 ordered pairs;
 - pure contextual lifecycle guards for project readiness, operation cancellation, isolated-workspace dirty protection, positive lost-state recovery evidence, runtime-stack absence confirmation, service/stack ownership, service health, and preview route presence, with every guarded edge and invalid-edge precedence covered;
+- side-effect-free typed security validators for distinct worktree-relative path policies,
+  claimed canonical absolute POSIX path relations, Git branch shorthand, lower-case ASCII DNS
+  labels and approved bases, and one-label preview-pattern composition;
+- constructor-created approved preview bases bind IDs to domains with private runtime/type
+  identity; composition resolves exact IDs only through an opaque snapshotted package-owned
+  registry, rejects duplicates and structural forgeries, and defensively revalidates the selected
+  domain;
+- fully reflected copied-symbol approved-base forgeries are covered by a permanent regression;
+- branded security values remain serializable strings, expected failures return immutable
+  discriminated results with stable structured error codes, and package tests cover hostile POSIX
+  and Windows path spellings on Linux without filesystem or Git access;
 - workspace graph and ESLint boundaries require testkit's exact `workspace:*` devDependency, public imports from test-only files, and real source consumption; deep imports and production imports are rejected;
 - ESLint regression coverage exercises deep, undeclared, production-source, and legitimate TypeScript import-type testkit imports;
 - Project Options v1 JSON Schema scaffold, pending regeneration from the future Zod source in M0-F07;
@@ -53,4 +65,6 @@ Milestone 0 — Architecture and contracts.
 
 ## Next task
 
-M0-F05 review corrections are implemented and await focused independent re-review. Do not begin M0-F06 or Milestone 1 until that review is complete.
+The blocking M0-F06 approved-preview-base binding correction is implemented but is not accepted or
+committed. L-02's fully reflected copied-symbol regression is covered and awaits focused independent
+confirmation. Do not begin M0-F07 or Milestone 1.

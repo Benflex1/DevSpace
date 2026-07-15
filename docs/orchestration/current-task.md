@@ -2,21 +2,50 @@
 
 ## Status
 
-M0-F05 review corrections implemented on 2026-07-14; focused re-review pending.
+The blocking M0-F06 approved-preview-base binding correction was implemented on 2026-07-15;
+focused independent security re-review is pending. The slice is not accepted or committed. Do not
+begin M0-F07.
 
 ## Completed task
 
-Implement the complete pure Milestone 0 domain lifecycle state machines without adding orchestration, persistence, runtime operations, or M0-F06 security primitives.
+Implement pure Milestone 0 security validation primitives without filesystem, Git, DNS, gateway,
+runtime, Project Options schema, or other M0-F07 behavior.
 
 ## Deliverables
 
-- Closed state unions and private, deeply frozen exhaustive transition definitions cover project, configuration revision, operation, workspace desired/observed, runtime-stack desired/observed, workspace-service desired/observed/health, process desired/observed, terminal, preview desired/observed, AI session, and task run.
-- Public lifecycle-specific transition functions return immutable discriminated results with stable invalid-edge and contextual-guard error codes.
-- Project readiness, cancellation capability, isolated-workspace dirty handling, lost recovery evidence, runtime absence confirmation, service ownership, health validity, and preview route-presence rules are pure typed guards or invariants.
-- Specification-derived fixtures independently encode all 17 state sets, 245 allowed edges, 445 rejected pairs, exact terminal states, and all 690 ordered pairs; accidental production-edge additions and removals fail naturally.
-- Independent guarded-edge fixtures cover every guarded edge with required positive and negative context, plus invalid-edge precedence for every guard family.
-- Package-root and type-level regression checks prevent production transition-table exports; internal table construction freezes the top-level table and every copied destination collection.
-- Desired and observed state APIs remain separate; no self-transition, shortcut, implicit recovery, persistence, orchestration, runtime access, or executable behavior was introduced.
+- Four distinct worktree-relative path brands and validators share a private platform-independent
+  lexical parser while preserving field-specific root/file rules.
+- Claimed already-canonical absolute POSIX paths use a separate brand and a segment-aware
+  `equal`/`descendant`/`outside` relation without authorization or symlink-safety claims.
+- Git branch shorthand validation implements strict lexical boundaries without Git invocation or
+  existence/ref-resolution claims.
+- Lower-case ASCII DNS labels, trusted approved preview bases, non-repeating allowlisted one-label
+  patterns, validated placeholder inputs, and final hostname composition enforce label and FQDN
+  limits without DNS or gateway activity.
+- Approved preview bases are immutable constructor-created opaque ID/domain pairs; an opaque
+  package-owned registry snapshots associations, rejects duplicate IDs and structural forgeries,
+  and prevents callers from replacing the domain selected by an exact requested ID.
+- L-02 covers a forged approved base created by copying every own string and symbol key and
+  descriptor from a genuine base before changing its visible association.
+- Composition defensively revalidates the internally selected domain, and the independently
+  encoded accepted error inventory contains exactly 62 reachable stable codes.
+- Expected failures use immutable discriminated results with a frozen closed error-code set,
+  category, original input, field, policy, and structured details.
+- Table-driven Linux tests include POSIX traversal and Windows drive, rooted, UNC, device, and
+  backslash-hostile fixtures; compile-time tests enforce brand separation and public export scope.
+- Package documentation records lexical-only, symlink, TOCTOU, Git, DNS, and runtime non-goals.
+
+## Previous completed task
+
+M0-F05 review corrections were implemented on 2026-07-14.
+
+## M0-F05 deliverables
+
+- Closed state unions and private, deeply frozen exhaustive transition definitions cover all 17
+  specified lifecycles.
+- Lifecycle-specific pure transitions and contextual guards return stable discriminated errors.
+- Specification-derived fixtures cover all 690 ordered state pairs plus every guarded edge and
+  invalid-edge precedence case.
 
 ## Previous completed task
 
@@ -81,4 +110,5 @@ Close the material representation and specification blockers in the Milestone 0 
 
 ## Next task in this chat
 
-Focused independent re-review of the M0-F05 corrections. Do not begin M0-F06 yet.
+Focused independent security re-review of the M0-F06 approved-base binding correction and L-02
+regression. Do not begin M0-F07 yet.
