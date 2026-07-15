@@ -68,3 +68,43 @@ test("ESLint permits a public testkit import type from a valid test file", async
 
   assert.deepEqual(messages.filter((message) => message.ruleId === "devspace/package-boundaries"), []);
 });
+
+test("ESLint permits a package-root self-import only from a test file", async () => {
+  const messages = await lintTemporarySource(
+    "packages/project-options",
+    true,
+    'export type Probe = typeof import("@devspace/project-options").parseProjectOptionsV1;\n'
+  );
+
+  assert.deepEqual(messages.filter((message) => message.ruleId === "devspace/package-boundaries"), []);
+});
+
+test("ESLint rejects a package-root self-import from production source", async () => {
+  const messages = await lintTemporarySource(
+    "packages/project-options",
+    false,
+    'export type Probe = typeof import("@devspace/project-options").parseProjectOptionsV1;\n'
+  );
+
+  assert.equal(hasBoundaryMessage(messages, "may not import internal package '@devspace/project-options'"), true);
+});
+
+test("ESLint keeps deep package-root self-imports forbidden", async () => {
+  const messages = await lintTemporarySource(
+    "packages/project-options",
+    true,
+    'export type Probe = typeof import("@devspace/project-options/src/index.js").parseProjectOptionsV1;\n'
+  );
+
+  assert.equal(hasBoundaryMessage(messages, "deep internal imports are prohibited"), true);
+});
+
+test("ESLint keeps normal production dependency boundaries stronger than the test exception", async () => {
+  const messages = await lintTemporarySource(
+    "packages/security",
+    false,
+    'export type Probe = typeof import("@devspace/project-options").parseProjectOptionsV1;\n'
+  );
+
+  assert.equal(hasBoundaryMessage(messages, "may not import internal package '@devspace/project-options'"), true);
+});

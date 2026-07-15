@@ -172,7 +172,10 @@ Runtime refinements enforce all of the following:
 - every service-targeted preview port exists on its referenced service;
 - every service-connection environment binding names an existing service and supported connection value;
 - every referenced secret, domain base, host variable, generated value, provider, and executable profile exists and is authorized for the project;
-- task flags and timeout/concurrency choices form a supported combination;
+- `interactive`, `longRunning`, `timeoutSeconds`, and `concurrencyPolicy` are independent task
+  fields: every structurally valid combination is supported in v1, with no additional cross-field
+  relationship imposed. `timeoutSeconds`, when non-null, still obeys its positive-integer bounds;
+  task execution semantics belong to a later runtime milestone;
 - administrator resource limits are not exceeded;
 - AI network disclosure is acknowledged before activation.
 
@@ -199,7 +202,7 @@ The hash identifies the complete default-materialized runtime-configuration revi
 
 Generated JSON Schema represents strict object shapes, required fields, defaults as annotations, scalar bounds and patterns, discriminated binding/source/health-check variants, service startup override shapes, constants, and locally checkable array uniqueness where JSON Schema can express it.
 
-Runtime Zod refinements remain authoritative for uniqueness by stable key or port name, sorting/canonicalization, graph acyclicity, named-volume mount references, references across collections or administrator registries, preview target and declared-port matching, task flag combinations, resource-policy comparisons, activation-only rules, and revision hashing. Fixtures must cover both portable constraints and runtime-only refinements. Defaults are applied by the runtime parser; JSON Schema `default` annotations do not mutate input.
+Runtime Zod refinements remain authoritative for uniqueness by stable key or port name, sorting/canonicalization, graph acyclicity, named-volume mount references, references across collections or administrator registries, preview target and declared-port matching, resource-policy comparisons, activation-only rules, and revision hashing. There is no task flag/timeout/concurrency combination refinement in v1; those four task fields are validated independently. Fixtures must cover both portable constraints and runtime-only refinements. Defaults are applied by the runtime parser; JSON Schema `default` annotations do not mutate input.
 
 ## Revision lifecycle and portability
 

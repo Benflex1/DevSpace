@@ -1,3 +1,37 @@
 # project-options
 
-Project Options validation, canonicalization, and revision hashing. Runtime-plan compilation is deferred to Milestone 1.
+`@devspace/project-options` owns the strict Project Options v1 runtime revision. It does not
+contain project General metadata, workspace display names, persistence, canonicalization, hashing,
+or runtime-plan compilation.
+
+## Public contract
+
+- `projectOptionsV1Schema` is the authoritative Zod 4 schema.
+- `ProjectOptionsV1` and `ProjectOptionsV1Input` are inferred input/output types.
+- `parseProjectOptionsV1` throws the schema's path-aware `ZodError` for invalid input.
+- `safeParseProjectOptionsV1` returns the corresponding discriminated success/error result.
+- `projectOptionsV1JsonSchema` and `generateProjectOptionsV1JsonSchema` expose the deterministic
+  draft 2020-12 portability representation.
+
+Defaults are materialized by the parser. Every configuration object is strict; environment maps
+accept only valid environment-variable names. Cross-field checks cover collection uniqueness,
+named-volume mounts, service dependencies and cycles, health-check ports, service bindings, and
+workspace/service preview declared-port matching. Registry references remain identifiers for
+later authorization/runtime refinement; secret material is never part of this model.
+Task `interactive`, `longRunning`, `timeoutSeconds`, and `concurrencyPolicy` fields are independent
+in v1; all structurally valid combinations are accepted, and no additional task-combination rule
+is imposed beyond each field's own scalar validation.
+
+The JSON Schema is generated from the Zod source with `z.toJSONSchema(..., { target:
+"draft-2020-12", io: "input" })`. `pnpm schema:check` builds the source package, regenerates
+into a temporary file, and byte-compares it with `schemas/project-options-v1.schema.json`.
+
+The generated representation includes Zod's strict object shapes, defaults, enums, identifier and
+environment-name patterns, UUIDv7 pattern, port/status/resource bounds, health-path shape, the
+portable hostname-pattern token alphabet, and canonical container-mount spelling with dot-segment
+rejection. Repository-relative path validation and the security validator's full hostname-pattern
+semantics remain runtime-only because JSON Schema cannot faithfully express those policies without
+duplicating the security package's private validation logic. References, uniqueness by object key,
+dependency cycles, preview-port ownership, and other cross-field rules are runtime-only as well.
+
+Canonicalization and revision hashing begin in F08. Runtime-plan compilation begins in Milestone 1.

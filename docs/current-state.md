@@ -27,8 +27,8 @@ Milestone 0 — Architecture and contracts.
 
 ## What exists
 
-- documentation, repository scaffold, pure domain lifecycle implementation, and the M0-F06 pure
-  security-validation implementation pending independent review;
+- documentation, repository scaffold, pure domain lifecycle implementation, accepted M0-F06 pure
+  security-validation implementation, and the in-progress M0-F07 Project Options schema slice;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
@@ -50,7 +50,9 @@ Milestone 0 — Architecture and contracts.
   and Windows path spellings on Linux without filesystem or Git access;
 - workspace graph and ESLint boundaries require testkit's exact `workspace:*` devDependency, public imports from test-only files, and real source consumption; deep imports and production imports are rejected;
 - ESLint regression coverage exercises deep, undeclared, production-source, and legitimate TypeScript import-type testkit imports;
-- Project Options v1 JSON Schema scaffold, pending regeneration from the future Zod source in M0-F07;
+- strict Project Options v1 Zod source and inferred types covering runtime configuration only;
+- Project Options v1 parser defaults, nested strictness, security-policy adapters, local
+  cross-reference validation, and generated draft 2020-12 JSON Schema with byte-level drift check;
 - closed Project Options, database, lifecycle, and agent transport specifications for Milestone 0 implementation, including complete workspace container configuration and zero-event cursor semantics;
 - accepted foundation-representations ADR 013;
 - architecture, threat model, roadmap, and accepted ADR set.
@@ -65,6 +67,7 @@ Milestone 0 — Architecture and contracts.
 
 ## Next task
 
-The blocking M0-F06 approved-preview-base binding correction is implemented but is not accepted or
-committed. L-02's fully reflected copied-symbol regression is covered and awaits focused independent
-confirmation. Do not begin M0-F07 or Milestone 1.
+Complete the M0-F07 correction review and acceptance. F07 is not accepted or committed. Project
+Options v1 intentionally imposes no task flag/timeout/concurrency combination rule; the parser
+validates those fields independently, including the scalar bounds for non-null timeouts. F08
+canonicalization/hashing and all later-milestone runtime work remain out of scope.

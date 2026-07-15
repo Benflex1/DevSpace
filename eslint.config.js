@@ -114,6 +114,16 @@ const boundaryPlugin = {
             }
             return;
           }
+          if (targetPackage === sourcePackage) {
+            if (!isTestOnlyFile(context.filename)) {
+              context.report({
+                node: sourceNode,
+                messageId: "forbidden",
+                data: { from: sourcePackage, to: targetPackage }
+              });
+            }
+            return;
+          }
           if (!allowedImports.get(sourcePackage)?.has(targetPackage)) {
             context.report({
               node: sourceNode,

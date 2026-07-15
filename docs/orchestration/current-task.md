@@ -2,9 +2,21 @@
 
 ## Status
 
-The blocking M0-F06 approved-preview-base binding correction was implemented on 2026-07-15;
-focused independent security re-review is pending. The slice is not accepted or committed. Do not
-begin M0-F07.
+M0-F07 correction work is in progress on the existing branch. M0-F06 is accepted and committed as
+`317aa90`. F07 is not accepted or committed. The task-combination clarification is now explicit:
+the four task execution fields are independent, all structurally valid combinations are supported,
+and no additional combination matrix is validated.
+
+## In-progress F07 deliverables
+
+- Strict Zod v4 runtime-revision schema with materialized defaults and package-root parser APIs;
+- security-policy reuse for repository-relative paths and preview hostname patterns;
+- local uniqueness, mount, service-graph, binding, health-check, and declared-preview-port checks;
+- deterministic generated draft 2020-12 JSON Schema and schema drift check;
+- focused valid/invalid contract tests, including the checked-in example.
+- exhaustive public-parser coverage for all 24 structurally valid task-field combinations.
+
+The ESLint self-import predicate correction and package-root boundary regressions are also included.
 
 ## Completed task
 
@@ -110,5 +122,5 @@ Close the material representation and specification blockers in the Milestone 0 
 
 ## Next task in this chat
 
-Focused independent security re-review of the M0-F06 approved-base binding correction and L-02
-regression. Do not begin M0-F07 yet.
+Review the complete F07 diff and verification results. Do not begin F08 canonicalization/hashing or
+any later-milestone runtime work.

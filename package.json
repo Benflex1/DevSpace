@@ -13,7 +13,7 @@
     "typecheck": "pnpm --filter @devspace/domain run typecheck && pnpm --filter @devspace/security run typecheck && pnpm --filter @devspace/testkit run typecheck && pnpm --filter @devspace/contracts run typecheck && pnpm --filter @devspace/project-options run typecheck && pnpm --filter @devspace/database run typecheck && pnpm --filter @devspace/agent run typecheck && pnpm --filter @devspace/web run typecheck",
     "build": "pnpm --filter @devspace/domain run build && pnpm --filter @devspace/security run build && pnpm --filter @devspace/testkit run build && pnpm --filter @devspace/contracts run build && pnpm --filter @devspace/project-options run build && pnpm --filter @devspace/database run build && pnpm --filter @devspace/agent run build && pnpm --filter @devspace/web run build",
     "contracts:check": "node tooling/check-scaffold.mjs",
-    "schema:check": "node tooling/check-json.mjs",
+    "schema:check": "pnpm --filter @devspace/project-options run build && node tooling/check-project-options-schema.mjs",
     "db:migrate:test": "node tooling/check-scaffold.mjs",
     "workspace:check": "node tooling/check-workspace-graph.mjs"
   },
