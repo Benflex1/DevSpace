@@ -21,6 +21,9 @@ Milestone 0 — Architecture and contracts.
 - web/agent Unix socket;
 - web is sole SQLite writer;
 - web-owned operation records plus a narrow agent runtime execution/idempotency journal outside SQLite;
+- a corrected Agent API v1 F09 wire specification with 29 routes, 19 caller-ID-only mutations,
+  closed endpoint payloads, strict route-specific errors, and terminal binary framing separated
+  from deferred reconciliation and the two F10-owned snapshot/event routes;
 - Caddy preview gateway;
 - terminal-first AI sessions;
 - trusted owner-controlled repository threat model.
@@ -28,8 +31,9 @@ Milestone 0 — Architecture and contracts.
 ## What exists
 
 - documentation, repository scaffold, pure domain lifecycle implementation, accepted M0-F06 pure
-  security-validation implementation, accepted M0-F07 Project Options schema contract, and the
-  in-progress M0-F08 canonicalization and hashing slice;
+  security-validation implementation, accepted M0-F07 Project Options schema contract, accepted
+  M0-F08 canonicalization and hashing, and the documentation-only Agent API v1 wire-contract gap
+  closure corrected after the first independent review and awaiting focused re-review;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
@@ -67,10 +71,11 @@ Milestone 0 — Architecture and contracts.
 - no agent implementation;
 - no Docker integration;
 - no database migrations;
-- no terminals, tasks, previews, worktree mutation, or AI sessions.
+- no terminals, tasks, previews, worktree mutation, or AI sessions;
+- no F09 runtime contract schemas, generated Agent API schemas, or transport implementation;
 
 ## Next task
 
-Complete the M0-F08 canonicalization and hashing review. F07 is accepted and committed as
-`66c3f2d`. F08 is implemented but is not accepted or committed. F09 agent contracts and all
-later-milestone runtime work remain out of scope.
+Perform a focused independent re-review of the corrected Agent API v1 wire specification. F09
+production implementation has not begun. After the specification is accepted, resume M0-F09 from
+its exact 29-endpoint, operation-ID-only contract without beginning F10.

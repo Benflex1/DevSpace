@@ -42,7 +42,8 @@ apps/web   -> contracts, domain, project-options, database, security (types/buil
 apps/agent -> contracts, domain, project-options, security (types/build only in M0)
 
 packages/domain          -> no internal production dependency
-packages/security        -> no internal production dependency
+packages/security        -> domain (only the extracted branch-shorthand primitive in M0-F09;
+                            its existing public security API remains authoritative to callers)
 packages/project-options -> security (only shared pure validators)
 packages/contracts       -> domain; no project-options dependency in Milestone 0
 packages/database        -> domain constants at schema-generation time; no app or agent dependency
@@ -235,23 +236,24 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Exact goal:** Establish the v1 HTTP-over-Unix-socket wire contract for request metadata, success responses, typed errors, IDs, timestamps, resource references, idempotency data, and protocol/version negotiation.
 
-**Affected:** `docs/specs/agent-api-v1.md`, `packages/contracts`, contract JSON Schema outputs and fixtures, `docs/current-state.md`.
+**Affected:** `docs/specs/agent-api-v1.md`, `packages/contracts`, the narrow branch-validator ownership extraction in `packages/domain` and delegation in `packages/security`, contract JSON Schema outputs and fixtures, `docs/current-state.md`.
 
-**Dependencies:** M0-F01, M0-F03, M0-F04, and M0-F05. `packages/contracts` does not depend on `packages/project-options` in Milestone 0.
+**Dependencies:** M0-F01, M0-F03, M0-F04, M0-F05, and M0-F06. `packages/contracts` does not depend on `packages/project-options` or `packages/security` in Milestone 0.
 
-**Implementation details:** Implement the specified REST-style HTTP/1.1 plus JSON contract under `/v1`; do not introduce JSON-RPC. Define strict request and response schemas per operation, a stable error-code union and per-code details schemas, retryability semantics, web-created operation ID metadata, and mutation idempotency hash semantics. Specify the narrow durable agent execution-journal contract without implementing its storage or giving the agent SQLite access. Represent configuration registration through contract-owned versioned envelope fields and hashes rather than importing the Project Options schema. Forbid unknown executable/runtime locator fields structurally and with negative fixtures. Generate named/versioned JSON Schemas and create a registry mapping operation names/routes to request, response, and documented error validators.
+**Implementation details:** Implement the corrected `agent-api-v1.md` F09 surface: exactly 29 unique REST-style HTTP/1.1/WebSocket-upgrade routes under `/v1`, comprising 19 mutations, nine ordinary non-mutating HTTP operations, and one non-mutating terminal upgrade. Do not introduce JSON-RPC. Define the specification's strict request and response schemas per operation, 23-code executable error union with per-code closed details/literal retryability, exhaustive route-specific error unions/statuses, the sole Web-created operation-ID header, private-journal replay/mismatch boundary, fixed capability metadata, and terminal binary framing contract. Mutation success is only `{ operationId }` and never duplicates Web-owned operation lifecycle. Configuration validation/registration transports only the versioned canonical Project Options document and revision hash; do not define or transport a runtime plan. Extract the existing branch-shorthand grammar/reasons into `@devspace/domain`; consume it from contracts and make `@devspace/security` delegate while preserving every F06 public result, brand, error code, and detail. Add security's exact `workspace:*` domain dependency and narrowly update graph enforcement for that one accepted edge; do not permit contracts to depend on security. Forbid unknown executable/runtime locator fields structurally and with negative fixtures. Generate named/versioned JSON Schemas and create one registry mapping the stable operation names/routes to request, response, and documented error validators. Exclude reconciliation, the two F10-owned snapshot/event endpoints, F10 errors, and every event/cursor schema.
 
 **Explicit non-goals:** No Unix socket server/client, HTTP framework, authentication, handler, idempotency store, browser API, agent operation, or runtime inspection.
 
-**Acceptance criteria:** Every declared v1 operation has named request/success/error types or is explicitly deferred with rationale; malformed metadata and prohibited fields fail; protocol-version mismatch has a fixture; generated artifacts are deterministic and drift-checked.
+**Acceptance criteria:** All 29 F09 operations have their specified named request/success/error types, exact method/path/status metadata, and exhaustive route-specific error unions; exactly 19 mutations require only a caller-supplied operation ID; runtime-plan, public request-hash, second idempotency-key, extra terminal authorization-token, keyed AI-profile, reconciliation, and F10 error concepts remain absent; mandatory endpoint support is not capability-negotiated; domain/security/contracts branch validation has one behavior-preserving authority; malformed metadata and prohibited fields fail; protocol-version mismatch and terminal-frame/concurrency boundaries have fixtures; generated artifacts are deterministic and drift-checked.
 
 **Required automated checks:** Contract unit/fixture tests; initial `pnpm contracts:check`; `pnpm typecheck`; `pnpm build`.
 
-**Likely risks or decisions:** Later-milestone endpoint payloads may still require task-local schemas before their implementation, but the shared envelope, primitive, hash, and transport representations are closed. Do not solve missing later payloads by importing Project Options or persistence models.
+**Likely risks or decisions:** Drifting from the exact endpoint/error registries, treating durable acceptance as resource completion, duplicating Web operation lifecycle, copying rather than extracting branch validation, weakening closed nested objects, duplicating Project Options parsing/hashing, reintroducing undefined runtime-plan fields, or leaking deferred reconciliation/F10 fields into F09.
 
 **Recommended model:** Sol Medium.
 
-**Next chat:** Begin the grouped M0-F09 through M0-F10 protocol chat.
+**Next chat:** After independent acceptance of the completed wire specification, implement M0-F09
+without beginning M0-F10; retain a clean review boundary before event/cursor work.
 
 ### M0-F10 — Define versioned events, cursors, and contract compatibility checks
 
