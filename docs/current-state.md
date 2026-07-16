@@ -12,6 +12,9 @@ Milestone 0 — foundation closure.
 - Agent API F09/F10 executable contracts and generated contract checks.
 - Database contract ready for implementation, including the 13-table inventory, explicit
   timestamp/FK behavior, and operation identity rules.
+- Complete executable database foundation: 13-table Drizzle schema, committed initial SQLite
+  migration, read-only drift verification, narrow newer-version-aware migrator, and real
+  temporary-file migration/constraint tests.
 - Durable architecture, security model, roadmap, specifications, and accepted ADRs.
 
 ## Not implemented yet
@@ -24,7 +27,6 @@ Milestone 0 — foundation closure.
 
 ## Remaining M0 work
 
-- Database schema, migrations, and migration verification.
 - Final CI/clean-clone integration.
 - M0 documentation and status cleanup.
 

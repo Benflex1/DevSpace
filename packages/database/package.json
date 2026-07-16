@@ -4,8 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "db:generate": "pnpm --dir ../.. --filter @devspace/domain run build && node scripts/generate-migration.mjs",
+    "db:check": "pnpm --dir ../.. --filter @devspace/domain run build && node scripts/check-migrations.mjs",
+    "db:migrate:test": "pnpm --dir ../.. exec vitest run --project @devspace/database",
     "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
-    "build": "tsc --build tsconfig.build.json --force --pretty false"
+    "build": "tsc --build tsconfig.build.json --force --pretty false && node scripts/copy-migrations.mjs"
   },
   "exports": {
     ".": {
@@ -18,6 +21,13 @@
     "dist"
   ],
   "dependencies": {
-    "@devspace/domain": "workspace:*"
+    "@devspace/domain": "workspace:*",
+    "better-sqlite3": "12.4.1",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "@devspace/testkit": "workspace:*",
+    "@types/better-sqlite3": "7.6.13",
+    "drizzle-kit": "0.31.10"
   }
 }

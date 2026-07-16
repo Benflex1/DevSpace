@@ -311,6 +311,8 @@ accepted.
 
 **Next chat:** Begin the grouped M0-F11 through M0-F13 database chat.
 
+**Status:** Completed together with M0-F12 and M0-F13 on 2026-07-16.
+
 ### M0-F12 — Generate and commit forward-only migration infrastructure
 
 **Exact goal:** Create the initial reproducible SQL migration set and migration metadata/configuration from the reviewed Drizzle schema.
@@ -333,6 +335,8 @@ accepted.
 
 **Next chat:** Same chat as M0-F11.
 
+**Status:** Completed together with M0-F11 and M0-F13 on 2026-07-16.
+
 ### M0-F13 — Add empty and upgrade-path temporary database migration tests
 
 **Exact goal:** Make `pnpm db:migrate:test` prove both clean creation and forward upgrade behavior using isolated temporary SQLite databases.
@@ -354,6 +358,8 @@ accepted.
 **Recommended model:** Sol Medium.
 
 **Next chat:** Same chat as M0-F12.
+
+**Status:** Completed together with M0-F11 and M0-F12 on 2026-07-16.
 
 ### M0-F14 — Wire the clean-clone CI contract and retire placeholders
 
