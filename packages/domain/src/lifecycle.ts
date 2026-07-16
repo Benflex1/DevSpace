@@ -119,6 +119,14 @@ export function evaluateTransition<State extends string>(
   return { ok: true, state: to };
 }
 
+export function isStructuralLifecycleEdge<State extends string>(
+  transitions: TransitionDefinition<State>,
+  from: State,
+  to: State
+): boolean {
+  return transitions[from].includes(to);
+}
+
 export function requiresRecoveryEvidence(
   lifecycle: LifecycleName,
   from: string,

@@ -49,6 +49,16 @@ export {
   type ExecutableAgentErrorCode
 } from "./errors.js";
 export {
+  completeAgentApiV1ErrorCodes,
+  completeAgentApiV1ErrorRegistry,
+  completeAgentApiV1ErrorSchema,
+  f10ExecutableAgentErrorCodes,
+  f10ExecutableAgentErrorRegistry,
+  f10ExecutableAgentErrorSchema,
+  type CompleteAgentApiV1ErrorCode,
+  type F10ExecutableAgentErrorCode
+} from "./errors.js";
+export {
   agentApiV1EndpointByOperation,
   agentApiV1Endpoints,
   type AgentApiV1Endpoint,
@@ -57,5 +67,18 @@ export {
   type AgentEndpointClass,
   type AgentHttpMethod
 } from "./endpoints.js";
+export * from "./cursor.js";
+export * from "./execution-failures.js";
+export * from "./recovery.js";
+export * from "./events.js";
+export {
+  completeAgentApiV1EndpointByOperation,
+  completeAgentApiV1Endpoints,
+  f10AgentApiV1EndpointByOperation,
+  f10AgentApiV1Endpoints,
+  type CompleteAgentApiV1Endpoint,
+  type F10AgentApiV1Endpoint,
+  type F10AgentApiV1Operation
+} from "./f10-endpoints.js";
 export * from "./terminal.js";
 export { generateAgentApiV1JsonSchema, type AgentApiV1JsonSchema } from "./json-schema.js";

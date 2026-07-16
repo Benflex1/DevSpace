@@ -24,7 +24,7 @@ Milestone 0 — Architecture and contracts.
 - a corrected Agent API v1 F09 wire specification with 29 routes, 19 caller-ID-only mutations,
   closed endpoint payloads, strict route-specific errors, and terminal binary framing separated
   from deferred reconciliation and the two F10-owned snapshot/event routes;
-- a corrected F10 Agent API v1 wire-specification candidate with two non-mutating routes, JSON-safe
+- an accepted F10 Agent API v1 wire specification with two non-mutating routes, JSON-safe
   boot-scoped cursors, an eight-resource recovery snapshot, 12 closed event payloads, race-aware
   asynchronous execution failures, two F10-only errors, and exact LF-delimited ordinary-JSON
   framing;
@@ -72,6 +72,11 @@ Milestone 0 — Architecture and contracts.
   endpoint descriptors, 19 mutation-header contracts, 23 strict executable errors with
   route-specific unions, lifecycle-dependent inspection validation, terminal framing codecs, and
   a deterministic generated contract artifact;
+- the executable Agent API v1 F10 recovery foundation: exact safe-integer/textual cursors, an
+  eight-resource snapshot with operation observations, an 18-code asynchronous failure union and
+  exact 19-mutation applicability, 12 strict events, two F10 endpoints/errors, complete-v1
+  inventory composition, domain-owned structural lifecycle-edge predicates, NDJSON metadata, and
+  generated schema coverage without runtime production/storage/streaming behavior;
 - the shared F08/F09 Project Options revision representation limit is exactly 2,097,152 final
   canonical UTF-8 bytes, enforced by all F08 revision producers and the F09 wire validator without
   changing F07 structural parsing;
@@ -94,10 +99,10 @@ Milestone 0 — Architecture and contracts.
 - no database migrations;
 - no terminals, tasks, previews, worktree mutation, or AI sessions;
 - no Agent API transport, handlers, clients, journal, persistence, or runtime behavior;
-- no executable F10 snapshot, cursor, event, error, fixture, or generated-schema implementation;
+- no Agent runtime event production, snapshot collection, replay/retention storage, or HTTP
+  streaming implementation;
 
 ## Next task
 
-Perform a focused independent re-review of the corrected uncommitted documentation-only M0-F10
-specification. Do not implement F10 production contracts until this correction is accepted, and
-do not begin M0-F11.
+Review the uncommitted M0-F10 executable contract implementation against the accepted
+specification. Do not begin M0-F11.

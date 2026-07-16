@@ -127,17 +127,36 @@ describe("Agent API v1 executable endpoint inventory", () => {
     }
   });
 
-  test("generates named request, success, and route-error JSON Schema definitions", () => {
+  test("generates complete v1 named request, success, route-error, and F10 definitions", () => {
     const generated = generateAgentApiV1JsonSchema();
     expect(generated.description).toContain("Structural JSON Schema projection");
     expect(generated.$comment).toContain("Authoritative runtime Zod validation");
     expect(generated.$comment).toContain("semantic refinements");
-    expect(generated["x-devspace-endpoint-count"]).toBe(29);
+    expect(generated["x-devspace-endpoint-count"]).toBe(31);
     const definitions = generated.$defs as Record<string, unknown>;
     expect(definitions["operation.workspace.create.requestBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.successBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.errors"]).toBeDefined();
     expect(definitions["operation.terminal.stream.requestBody"]).toBeUndefined();
-    expect(Object.keys(definitions).join(" ")).not.toMatch(/EVENT_|snapshot|cursor|runtime.?plan|reconciliation/ui);
+    expect(definitions.EventCursor).toBeDefined();
+    expect(definitions.EventSequence).toBeDefined();
+    expect(definitions.AgentSnapshotData).toBeDefined();
+    expect(definitions.AgentSnapshotResource).toBeDefined();
+    expect(definitions.AgentExecutionFailure).toBeDefined();
+    expect(definitions.AgentEvent).toBeDefined();
+    const eventCursor = definitions.EventCursor as Record<string, unknown>;
+    expect(eventCursor.description).toContain("9007199254740991");
+    expect(eventCursor.$comment).toContain("does not encode the exact maximum");
+    expect(definitions["operation.snapshot.get.successBody"]).toBeDefined();
+    expect(definitions["operation.event.stream.successBody"]).toBeUndefined();
+    expect(Object.keys(definitions).join(" ")).not.toMatch(
+      /operation\.cancelled|process\.output|process\.started|process\.exited|reconciliation/ui
+    );
+    expect(generated.$comment).toContain("stream continuity");
+    expect(generated.$comment).toContain("snapshot atomicity");
+    expect(generated.$comment).toContain("retention");
+    expect(generated.$comment).toContain("parseEventCursor");
+    expect(generated.$comment).toContain("validatePreviewObservationChange");
+    expect(generated.$comment).toContain("standalone agentEventSchema cannot prove");
   });
 });

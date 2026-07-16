@@ -2,17 +2,12 @@
 
 ## Status
 
-M0-F09 is accepted and committed at `fb9687d`. The first M0-F10 implementation attempt correctly
-stopped before changing production code because the deferred event/snapshot specification did not
-define deterministic payload, snapshot, error-applicability, numeric-bound, or NDJSON contracts.
-The first documentation-only completion then failed adversarial independent review with 11
-concrete ownership, identity, lifecycle, asynchronous-failure, recovery, and framing findings. The
-next focused re-review found five remaining operation-recovery, post-acceptance-race,
-lifecycle-ownership, preview-recovery, and process-observation problems. The current uncommitted
-task remains documentation-only M0-F10 specification correction. No F10 production implementation
-has begun.
+M0-F09 remains accepted and committed. The corrected M0-F10 specification was accepted and
+committed at `54fb68136e8aeeff9ecb62fdc92b899b654bf3b7`. The current uncommitted slice implements only
+the M0-F10 executable recovery contract foundation in contracts plus the accepted narrow domain
+structural-edge API extraction.
 
-## Specification-closure deliverables
+## Implementation deliverables
 
 - an exact two-route F10 inventory and 31-route complete-v1 count without reconciliation;
 - safe-integer event/cursor bounds, exact serialized cursor grammar, and cursor-invalid reason
@@ -40,11 +35,11 @@ has begun.
 
 ## Scope boundary
 
-This slice changes specification and living documentation only. It adds no package source,
-generated schema, fixture, dependency, Agent/Web/database behavior, snapshot collection, event
-production/storage, replay, HTTP/NDJSON transport, reconciliation, runtime plan, or F11 work.
+This slice adds schemas, types, pure validators, endpoint/error inventory composition, generated
+schema coverage, fixtures/tests, and pure structural lifecycle-edge predicates. It adds no
+dependency edge, Agent/Web/database behavior, snapshot collection, event production/storage,
+retention/replay, HTTP/NDJSON transport, reconciliation, runtime plan, or F11 work.
 
 ## Next task
 
-Perform a focused independent re-review of the corrected M0-F10 specification. If accepted, retain
-it as the documentation boundary for a fresh M0-F10 implementation agent. Do not begin M0-F11.
+Review the uncommitted M0-F10 implementation and verification results. Do not begin M0-F11.

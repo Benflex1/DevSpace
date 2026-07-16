@@ -2,6 +2,7 @@ import {
   createTransitionTable,
   evaluateTransition,
   guardRejected,
+  isStructuralLifecycleEdge,
   requiresRecoveryEvidence,
   type LifecycleState,
   type RecoveryEvidence,
@@ -20,6 +21,12 @@ const previewDesiredTransitions: TransitionDefinition<
   inactive: ["active"],
   active: ["inactive"]
 });
+export function isPreviewDesiredStructuralEdge(
+  from: PreviewDesiredState,
+  to: PreviewDesiredState
+): boolean {
+  return isStructuralLifecycleEdge(previewDesiredTransitions, from, to);
+}
 export function transitionPreviewDesired(
   from: PreviewDesiredState,
   to: PreviewDesiredState
@@ -45,6 +52,13 @@ const previewObservedTransitions: TransitionDefinition<
   failed: ["starting", "inactive"],
   lost: ["starting", "inactive"]
 });
+
+export function isPreviewObservedStructuralEdge(
+  from: PreviewObservedState,
+  to: PreviewObservedState
+): boolean {
+  return isStructuralLifecycleEdge(previewObservedTransitions, from, to);
+}
 
 export interface PreviewObservedTransitionContext {
   readonly recoveryEvidence?: RecoveryEvidence;
@@ -95,6 +109,9 @@ const aiSessionTransitions: TransitionDefinition<(typeof aiSessionStates)[number
   failed: [],
   lost: []
 });
+export function isAiSessionStructuralEdge(from: AiSessionState, to: AiSessionState): boolean {
+  return isStructuralLifecycleEdge(aiSessionTransitions, from, to);
+}
 export function transitionAiSession(
   from: AiSessionState,
   to: AiSessionState

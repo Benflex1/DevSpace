@@ -1,6 +1,7 @@
 import {
   createTransitionTable,
   evaluateTransition,
+  isStructuralLifecycleEdge,
   requiresRecoveryEvidence,
   type LifecycleState,
   type RecoveryEvidence,
@@ -19,6 +20,13 @@ const processDesiredTransitions: TransitionDefinition<
   running: ["stopped"],
   stopped: ["running"]
 });
+
+export function isProcessDesiredStructuralEdge(
+  from: ProcessDesiredState,
+  to: ProcessDesiredState
+): boolean {
+  return isStructuralLifecycleEdge(processDesiredTransitions, from, to);
+}
 
 export function transitionProcessDesired(
   from: ProcessDesiredState,
@@ -47,6 +55,13 @@ const processObservedTransitions: TransitionDefinition<
   lost: ["exited", "killed", "failed"]
 });
 
+export function isProcessObservedStructuralEdge(
+  from: ProcessObservedState,
+  to: ProcessObservedState
+): boolean {
+  return isStructuralLifecycleEdge(processObservedTransitions, from, to);
+}
+
 export interface ProcessObservedTransitionContext {
   readonly recoveryEvidence?: RecoveryEvidence;
 }
@@ -74,6 +89,10 @@ const terminalTransitions: TransitionDefinition<(typeof terminalStates)[number]>
   failed: [],
   lost: []
 });
+
+export function isTerminalStructuralEdge(from: TerminalState, to: TerminalState): boolean {
+  return isStructuralLifecycleEdge(terminalTransitions, from, to);
+}
 
 export function transitionTerminal(
   from: TerminalState,

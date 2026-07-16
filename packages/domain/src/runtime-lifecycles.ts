@@ -2,6 +2,7 @@ import {
   createTransitionTable,
   evaluateTransition,
   guardRejected,
+  isStructuralLifecycleEdge,
   requiresRecoveryEvidence,
   type LifecycleState,
   type RecoveryEvidence,
@@ -51,6 +52,13 @@ const runtimeStackObservedTransitions: TransitionDefinition<
   removing: ["absent", "failed", "lost"],
   lost: ["absent", "creating", "stopped", "starting", "running", "stopping", "degraded", "failed", "removing"]
 });
+
+export function isRuntimeStackObservedStructuralEdge(
+  from: RuntimeStackObservedState,
+  to: RuntimeStackObservedState
+): boolean {
+  return isStructuralLifecycleEdge(runtimeStackObservedTransitions, from, to);
+}
 
 export interface RuntimeStackObservedTransitionContext {
   readonly recoveryEvidence?: RecoveryEvidence;
@@ -113,6 +121,13 @@ const workspaceServiceObservedTransitions: TransitionDefinition<
   lost: ["absent", "creating", "stopped", "starting", "running", "stopping", "degraded", "failed", "removing"]
 });
 
+export function isWorkspaceServiceObservedStructuralEdge(
+  from: WorkspaceServiceObservedState,
+  to: WorkspaceServiceObservedState
+): boolean {
+  return isStructuralLifecycleEdge(workspaceServiceObservedTransitions, from, to);
+}
+
 export interface WorkspaceServiceObservedTransitionContext {
   readonly recoveryEvidence?: RecoveryEvidence;
   readonly owningStackObservedState?: RuntimeStackObservedState;
@@ -162,6 +177,13 @@ const workspaceServiceHealthTransitions: TransitionDefinition<
   healthy: ["unhealthy", "unknown"],
   unhealthy: ["healthy", "unknown"]
 });
+
+export function isWorkspaceServiceHealthStructuralEdge(
+  from: WorkspaceServiceHealthState,
+  to: WorkspaceServiceHealthState
+): boolean {
+  return isStructuralLifecycleEdge(workspaceServiceHealthTransitions, from, to);
+}
 
 export interface WorkspaceServiceHealthTransitionContext {
   readonly serviceObservedState?: WorkspaceServiceObservedState;

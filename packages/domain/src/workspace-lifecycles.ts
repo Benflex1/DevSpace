@@ -2,6 +2,7 @@ import {
   createTransitionTable,
   evaluateTransition,
   guardRejected,
+  isStructuralLifecycleEdge,
   requiresRecoveryEvidence,
   type LifecycleState,
   type RecoveryEvidence,
@@ -83,6 +84,13 @@ const workspaceObservedTransitions: TransitionDefinition<
   archived: ["provisioning", "stopped", "removed", "lost"],
   removed: []
 });
+
+export function isWorkspaceObservedStructuralEdge(
+  from: WorkspaceObservedState,
+  to: WorkspaceObservedState
+): boolean {
+  return isStructuralLifecycleEdge(workspaceObservedTransitions, from, to);
+}
 
 export interface WorkspaceObservedTransitionContext {
   readonly recoveryEvidence?: RecoveryEvidence;
