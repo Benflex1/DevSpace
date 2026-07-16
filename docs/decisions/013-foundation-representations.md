@@ -10,7 +10,7 @@ Milestone 0 needs one representation for runtime tooling, versioned schemas, ide
 
 ## Decision
 
-- DevSpace targets Node.js 24 LTS and pnpm 11. M0-F02 will pin one exact pnpm 11 release.
+- DevSpace targets Node.js 24 LTS and pnpm 11, with one exact pnpm 11 release pinned.
 - All first-party JavaScript and TypeScript packages use ESM. CommonJS may be consumed as an external dependency but is not a first-party output format.
 - Zod runtime schemas are the executable source of truth for versioned data models. TypeScript types are inferred from them. Committed JSON Schema draft 2020-12 files are deterministic generated artifacts and are never hand-maintained.
 - IDs are canonical lowercase UUIDv7 strings. The resource type is carried in a separate field and is never encoded as an ID prefix.
@@ -22,7 +22,7 @@ Milestone 0 needs one representation for runtime tooling, versioned schemas, ide
 
 ## Consequences
 
-- M0-F02 may scaffold packages without selecting these representations again.
+- Packages can share these representations without selecting them again.
 - Schema checks must detect drift by regenerating artifacts from Zod sources; generated JSON Schema is not an alternate authority.
 - Database, domain, Project Options, and contract fixtures share the same ID, timestamp, canonicalization, and hash formats.
 - Agent restarts intentionally break cursor continuity; clients recover from a snapshot instead of treating cursors as durable global offsets.
@@ -33,4 +33,3 @@ Milestone 0 needs one representation for runtime tooling, versioned schemas, ide
 - [SQLite Data Model v1](../specs/database-v1.md)
 - [Lifecycle State Machines](../specs/lifecycle-states.md)
 - [Web to Workspace Agent Contract v1](../specs/agent-api-v1.md)
-
