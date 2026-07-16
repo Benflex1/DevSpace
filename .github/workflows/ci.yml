@@ -26,6 +26,7 @@ jobs:
         uses: pnpm/action-setup@v6
         with:
           version: "11.12.0"
+          standalone: true
           cache: true
           cache_dependency_path: pnpm-lock.yaml
           run_install: false
