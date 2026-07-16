@@ -4,6 +4,9 @@
 
 Deliver documentation, schemas, ADRs, contract fixtures, repository scaffold, and CI contract checks. No feature implementation.
 
+After Milestone 0, this horizontal milestone sequencing will be replaced by a vertical product
+roadmap. The first post-M0 milestone must produce a genuinely usable primary-workspace path.
+
 ## Milestone 1 — Project onboarding and primary workspace foundation
 
 Small independently testable slices:

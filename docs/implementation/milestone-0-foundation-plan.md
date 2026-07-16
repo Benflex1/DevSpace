@@ -8,7 +8,7 @@ It does not implement any web or agent product behavior. In particular, it does 
 
 ## Inputs inspected
 
-The initial audit covered the repository scaffold, documentation, specifications, accepted ADRs, package ownership notes, configuration, schemas, and placeholder tooling that existed when this plan was written. M0-F01 subsequently restored the orchestration inputs and closed the representation blockers recorded below. The concrete model and chat recommendations in this revision follow `docs/ai-development-workflow.md`.
+The initial audit covered the repository scaffold, documentation, specifications, accepted ADRs, package ownership notes, configuration, schemas, and placeholder tooling that existed when this plan was written. M0-F01 subsequently restored the orchestration inputs and closed the representation blockers recorded below. Current repository-wide model and workflow guidance lives in `AGENTS.md`; this plan retains only milestone-specific execution context.
 
 ## Current scaffold assessment
 
@@ -60,7 +60,7 @@ Avoid a `shared`/`utils` package. The schema library and JSON Schema validator m
 
 **Exact goal:** Record the minimum implementation decisions shared by multiple packages and close the Project Options, agent protocol, lifecycle, database, and orchestration blockers identified by this plan.
 
-**Affected:** ADR 013, the four foundation specifications, this plan, `docs/current-state.md`, and `docs/orchestration/current-task.md`.
+**Affected:** ADR 013, the four foundation specifications, this plan, and `docs/current-state.md`.
 
 **Dependencies:** None.
 
@@ -359,7 +359,7 @@ accepted.
 
 **Exact goal:** Make the documented definition of done the actual local and CI contract, with no placeholder command masquerading as a real check.
 
-**Affected:** Root/package scripts, CI workflow, obsolete `tooling/check-*.mjs` and scaffold tests, generated-artifact checks, READMEs, `docs/current-state.md`, `docs/orchestration/current-task.md`.
+**Affected:** Root/package scripts, CI workflow, obsolete `tooling/check-*.mjs` and scaffold tests, generated-artifact checks, READMEs, and `docs/current-state.md`.
 
 **Dependencies:** M0-F02 through M0-F13.
 
@@ -373,9 +373,16 @@ accepted.
 
 **Likely risks or decisions:** Local/CI Node drift; generated schemas or migrations changing line endings; root scripts skipping a workspace with no matching script; overloading one CI job without useful diagnostics.
 
-**Recommended model:** Luna XHigh for implementation; Sol Medium for the independent architecture/scope review.
+**Recommended model:** Luna XHigh. Use independent review only if the integration exposes a
+listed architecture, security, migration, or other unusually risky boundary.
 
 **Next chat:** Use one focused M0-F14 integration chat after M0-F11 through M0-F13 are accepted.
+
+## M0 closure mode
+
+F11, F12, and F13 may be implemented as one coherent database slice. Review the resulting
+implementation once rather than automatically reviewing every numbered subtask. F14 closes
+CI/integration. After Milestone 0, this plan is historical and may be archived or removed.
 
 ## Placeholder replacement matrix
 
@@ -433,7 +440,8 @@ The remaining deferrals are intentional milestone boundaries, not representation
 
 ### Orchestration sources
 
-The workflow, current-task record, and handoff templates referenced by `docs/README.md` are present. No missing orchestration source blocks the grouped M0-F02 through M0-F04 implementation chat.
+The active task is supplied by the orchestrator prompt. No committed task record, generic prompt
+template, or session handoff document is required for the remaining M0 closure work.
 
 ## Milestone 0 final review checklist
 
@@ -448,7 +456,8 @@ The workflow, current-task record, and handoff templates referenced by `docs/REA
 - Security helpers are pure foundations and do not claim repository discovery, symlink-safe mutation, DNS, or runtime enforcement.
 - No runtime plan compiler, Git/Docker/process/terminal/preview/Caddy/Cloudflare/AI behavior appears in the diff.
 - Placeholder scripts are gone or renamed so no command overstates what it checks.
-- `docs/current-state.md` is updated after every meaningful implementation slice.
+- `docs/current-state.md` is updated at significant checkpoints, milestone boundaries, or when the
+  next developer would otherwise receive materially incorrect information.
 - The exact clean-clone command sequence passes and leaves the checkout clean.
 
 ## Recommended first implementation task
