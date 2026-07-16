@@ -20,7 +20,9 @@ Milestone 0 — Architecture and contracts.
 - Cloudflare Access for control and preview ingress;
 - web/agent Unix socket;
 - web is sole SQLite writer;
-- web-owned operation records plus a narrow agent runtime execution/idempotency journal outside SQLite;
+- Web-owned project operation records keyed by the sole public `operationId`, plus a narrow Agent
+  runtime execution/idempotency journal outside SQLite with only a private implementation
+  fingerprint;
 - a corrected Agent API v1 F09 wire specification with 29 routes, 19 caller-ID-only mutations,
   closed endpoint payloads, strict route-specific errors, and terminal binary framing separated
   from deferred reconciliation and the two F10-owned snapshot/event routes;
@@ -65,7 +67,13 @@ Milestone 0 — Architecture and contracts.
 - package-owned RFC 8785/JCS text and UTF-8 canonicalization with an explicit JSON-value boundary,
   Project Options collection normalization, domain-separated SHA-256 revision hashing, and a
   checked-in golden canonical/hash fixture;
-- closed Project Options, database, lifecycle, and agent transport specifications for Milestone 0 implementation, including complete workspace container configuration and zero-event cursor semantics;
+- closed Project Options, lifecycle, and agent transport specifications for Milestone 0
+  implementation, including complete workspace container configuration and zero-event cursor
+  semantics;
+- an uncommitted database-v1 contract correction that makes every timestamp nullability and all
+  24 foreign-key actions explicit, removes the stale SQLite/public `idempotency_key` and
+  `request_hash`, and preserves the exact 13-table inventory and three at-most-one partial
+  uniqueness invariants without beginning F11 implementation;
 - accepted foundation-representations ADR 013;
 - architecture, threat model, roadmap, and accepted ADR set;
 - the executable Agent API v1 F09 foundation: strict reusable wire schemas, all 29 declarative
@@ -104,5 +112,5 @@ Milestone 0 — Architecture and contracts.
 
 ## Next task
 
-Review the uncommitted M0-F10 executable contract implementation against the accepted
-specification. Do not begin M0-F11.
+Review the uncommitted database-v1 specification correction. Do not begin M0-F11 until the
+corrected database contract is accepted.

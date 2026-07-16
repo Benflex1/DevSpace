@@ -2,44 +2,31 @@
 
 ## Status
 
-M0-F09 remains accepted and committed. The corrected M0-F10 specification was accepted and
-committed at `54fb68136e8aeeff9ecb62fdc92b899b654bf3b7`. The current uncommitted slice implements only
-the M0-F10 executable recovery contract foundation in contracts plus the accepted narrow domain
-structural-edge API extraction.
+M0-F10 recovery contracts are accepted and committed at
+`70fad658e15930e434f57cfcfb6736a0e395693d`. The first M0-F11 implementation attempt correctly
+stopped before production changes because database-v1 left timestamp nullability and foreign-key
+actions implicit and retained stale operation idempotency/request-hash language. The current
+uncommitted slice corrects only those database specification blockers.
 
-## Implementation deliverables
+## Specification-correction deliverables
 
-- an exact two-route F10 inventory and 31-route complete-v1 count without reconciliation;
-- safe-integer event/cursor bounds, exact serialized cursor grammar, and cursor-invalid reason
-  precedence;
-- a strict four-field snapshot boundary with eight exact Agent-observation resource members and
-  retained Agent operation observations that do not replace Web lifecycle ownership;
-- an exact 12-way event union binding each discriminator to one resource/operation association and
-  one closed payload;
-- type-specific resource identities with multi-scope project Git recovery and no manufactured
-  runtime-stack/service UUIDs;
-- an 18-code race-aware `AgentExecutionFailure` union, exhaustive classification of all 23 F09
-  errors, and exact applicability for all 19 mutations;
-- authoritative domain-owned structural lifecycle-edge validation without fabricated context;
-- a coarse three-state Agent operation observation that guarantees nonterminal recovery while
-  preserving accepted F09 terminal compaction;
-- complete F09 process and preview observation events, including exact same-state enrichment rules;
-- F09 inspection/error-shape reuse without changing the accepted 29-endpoint/23-error F09 views;
-- two F10-only errors, exhaustive route applicability, and a 25-error full-v1 view;
-- deterministic snapshot-required replay reasons and exact LF-only ordinary-JSON framing,
-  property-order, trailing-newline, blank-line, and incomplete-line semantics;
-- explicit separation between individual-object validation and runtime continuity/replay
-  guarantees;
-- milestone-plan alignment that assigns snapshot contracts to F10 while leaving snapshot
-  collection, event production, replay, retention, and HTTP streaming outside Milestone 0.
+- explicit `NOT NULL` or nullable status for every persisted timestamp in all 13 accepted tables;
+- one normative 24-row foreign-key matrix with required/nullable status, `ON DELETE`, universal
+  `ON UPDATE NO ACTION`, and ownership/reference rationale;
+- cascades limited to strict project/workspace ownership paths, protected required references
+  using `RESTRICT`, and nullable retained context using `SET NULL`;
+- `operations.operation_id` as the sole public idempotency identity, required project ownership,
+  optional workspace context, and the stable F09 `operation_name`;
+- removal of stale Web SQLite/public `idempotency_key` and `request_hash` fields while preserving
+  the Agent journal's private fingerprint boundary;
+- unchanged 13-table inventory and unchanged three at-most-one partial uniqueness invariants.
 
 ## Scope boundary
 
-This slice adds schemas, types, pure validators, endpoint/error inventory composition, generated
-schema coverage, fixtures/tests, and pure structural lifecycle-edge predicates. It adds no
-dependency edge, Agent/Web/database behavior, snapshot collection, event production/storage,
-retention/replay, HTTP/NDJSON transport, reconciliation, runtime plan, or F11 work.
+This is documentation-only specification correction. It adds no Drizzle schema, source code,
+manifest or lockfile change, migration, test, generated artifact, runtime persistence, Agent
+journal storage, F10 event/snapshot persistence, or F12/F13 work.
 
 ## Next task
 
-Review the uncommitted M0-F10 implementation and verification results. Do not begin M0-F11.
+Review and accept the corrected database-v1 contract before restarting M0-F11 implementation.

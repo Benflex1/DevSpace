@@ -290,6 +290,15 @@ depends on domain. No other production package or dependency-boundary change is 
 
 **Implementation details:** Implement the accepted UUIDv7/text, timestamp/text, enum, JSON-validation, row-version, nullable-pointer, and creation-order decisions. Keep project name, slug, repository URL, default branch, and automatic fetch policy authoritative on `projects`; keep workspace display name on `workspaces`; configuration JSON contains runtime configuration only. Define all listed tables, foreign keys, unique and partial indexes, checks, nullability, defaults, and migration metadata. Enable foreign keys in every test connection. Enforce at most one active revision and non-removed primary workspace with partial indexes; leave eventual exactly-one behavior and optimistic General Options updates to the specified future web transactions. Export schema metadata only; do not export CRUD repositories.
 
+The pre-implementation F11 audit stopped before production changes because timestamp nullability,
+foreign-key actions, and operation identity storage were not fully reconciled. The database-v1
+contract-correction gate now requires explicit nullability for every timestamp, a normative
+foreign-key matrix with `ON UPDATE NO ACTION` throughout, ownership-only cascades, protected
+historical references, `operation_id` as the sole public idempotency identity, and no SQLite/public
+second idempotency key, request hash, Agent private fingerprint, journal table, or F10
+event/snapshot persistence. F11 implementation resumes only after that correction is reviewed and
+accepted.
+
 **Explicit non-goals:** No web persistence service, database singleton, API handler, activation transaction, reconciliation write, seed data, runtime operation, or agent database access.
 
 **Acceptance criteria:** Drizzle definitions cover every decided v1 column/index/foreign key/check; schema tests inspect SQLite metadata and prove critical constraints; no package gives `apps/agent` a database dependency; stored enum values match domain definitions.

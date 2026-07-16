@@ -6,11 +6,19 @@ The web application is the sole SQLite writer. The workspace agent never opens t
 
 - Every primary and foreign-key ID is `TEXT` containing a canonical lowercase UUIDv7 string. Resource type is stored in its own column and is not encoded in an ID prefix.
 - Every timestamp is `TEXT` containing RFC 3339 UTC with exactly millisecond precision, such as `2026-07-14T12:00:00.000Z`.
+- Every timestamp is application-supplied. SQLite timestamp defaults, including
+  `CURRENT_TIMESTAMP`, are not used because they do not provide the accepted canonical
+  millisecond representation.
 - Hash columns contain `sha256-jcs-v1:` followed by exactly 64 lowercase hexadecimal characters unless their owning versioned contract introduces a separately named format.
 - Foreign keys are enabled for every connection.
+- Every foreign key uses `ON UPDATE NO ACTION`; DevSpace identifiers are immutable. The normative
+  `ON DELETE` action and relationship classification for every foreign key are defined in the
+  foreign-key matrix below.
 - Required state, kind, source, and protocol columns use `NOT NULL` plus checks for the closed value sets below.
 
-Registry-backed values such as `actor`, `operation_type`, `event_type`, `resource_type`, task/service/profile keys, provider keys, error codes, and image references are validated by their owning runtime schemas rather than frozen as SQL enums.
+Registry-backed values such as `actor`, `operation_name`, `event_type`, `resource_type`,
+task/service/profile keys, provider keys, error codes, and image references are validated by their
+owning runtime schemas rather than frozen as SQL enums.
 
 ## JSON storage boundary
 
@@ -35,7 +43,9 @@ The project row is the single authoritative storage location for project display
 - `state`: `registering | ready | invalid | archived`
 - `active_config_revision_id` nullable foreign key
 - `primary_workspace_id` nullable foreign key
-- `created_at`, `updated_at`, `archived_at`
+- `created_at` `NOT NULL`
+- `updated_at` `NOT NULL`
+- `archived_at` nullable
 - `row_version`
 
 ## project_config_revisions
@@ -51,7 +61,9 @@ The project row is the single authoritative storage location for project display
 - `source`: `user | detected | imported`
 - `state`: `draft | active | superseded | rejected`
 - `created_by`
-- `created_at`, `activated_at`, `superseded_at`
+- `created_at` `NOT NULL`
+- `activated_at` nullable
+- `superseded_at` nullable
 
 A partial unique index on `project_id WHERE state = 'active'` enforces at most one active revision per project.
 
@@ -70,7 +82,10 @@ A partial unique index on `project_id WHERE state = 'active'` enforces at most o
 - `desired_state`: `stopped | running | archived | removed`
 - `observed_state`: `provisioning | stopped | starting | running | stopping | degraded | failed | lost | archived | removed`
 - `dirty_state`: `unknown | clean | dirty`
-- `created_at`, `updated_at`, `archived_at`, `removed_at`
+- `created_at` `NOT NULL`
+- `updated_at` `NOT NULL`
+- `archived_at` nullable
+- `removed_at` nullable
 - `row_version`
 
 A partial unique index on `project_id WHERE kind = 'primary' AND desired_state <> 'removed'` enforces at most one non-removed primary workspace per project. In this definition, non-removed is based on desired state; an observed row remains the primary while removal is pending unless its desired state has already changed to `removed`.
@@ -84,7 +99,9 @@ A partial unique index on `project_id WHERE kind = 'primary' AND desired_state <
 - `desired_state`: `absent | stopped | running`
 - `observed_state`: `absent | creating | stopped | starting | running | stopping | degraded | failed | lost | removing`
 - `runtime_generation`
-- `created_at`, `updated_at`, `last_observed_at`
+- `created_at` `NOT NULL`
+- `updated_at` `NOT NULL`
+- `last_observed_at` nullable
 - `last_error_code`, `last_error_message`
 
 ## workspace_services
@@ -99,7 +116,9 @@ A partial unique index on `project_id WHERE kind = 'primary' AND desired_state <
 - `desired_state`: `absent | stopped | running`
 - `observed_state`: `absent | creating | stopped | starting | running | stopping | degraded | failed | lost | removing`
 - `health_state`: `unknown | starting | healthy | unhealthy`
-- `started_at`, `stopped_at`, `last_observed_at`
+- `started_at` nullable
+- `stopped_at` nullable
+- `last_observed_at` nullable
 
 Unique: `(runtime_stack_id, service_key)`.
 
@@ -116,7 +135,9 @@ Unique: `(runtime_stack_id, service_key)`.
 - `desired_state`: `running | stopped`
 - `observed_state`: `queued | starting | running | stopping | exited | failed | killed | lost`
 - `exit_code` nullable
-- `started_at`, `finished_at`, `last_observed_at`
+- `started_at` nullable
+- `finished_at` nullable
+- `last_observed_at` nullable
 - `log_path` nullable
 
 A process is never stopped based only on a PID. Container identity and a generated process token must match.
@@ -129,7 +150,9 @@ A process is never stopped based only on a PID. Container identity and a generat
 - `title`
 - `shell_profile_key`
 - `state`: `creating | active | disconnected | closing | closed | failed | lost`
-- `created_at`, `last_activity_at`, `closed_at`
+- `created_at` `NOT NULL`
+- `last_activity_at` nullable
+- `closed_at` nullable
 
 ## previews
 
@@ -144,7 +167,10 @@ A process is never stopped based only on a PID. Container identity and a generat
 - `desired_state`: `inactive | active`
 - `observed_state`: `inactive | starting | healthy | unhealthy | stopping | failed | lost`
 - `route_revision` nullable
-- `created_at`, `updated_at`, `activated_at`, `deactivated_at`
+- `created_at` `NOT NULL`
+- `updated_at` `NOT NULL`
+- `activated_at` nullable
+- `deactivated_at` nullable
 
 Unique: `(workspace_id, preview_key)`.
 
@@ -159,7 +185,10 @@ Port leases are needed only when rootless networking or gateway integration requ
 - `bind_address`, fixed to approved loopback addresses
 - `state`: `reserved | active | released | stale`
 - `lease_token` unique
-- `created_at`, `activated_at`, `released_at`, `expires_at`
+- `created_at` `NOT NULL`
+- `activated_at` nullable
+- `released_at` nullable
+- `expires_at` `NOT NULL`
 
 A partial unique index on `(bind_address, port) WHERE state IN ('reserved', 'active')` enforces at most one live lease for an address and port.
 
@@ -174,7 +203,10 @@ A partial unique index on `(bind_address, port) WHERE state IN ('reserved', 'act
 - `external_session_id` nullable
 - `title`
 - `state`: `creating | active | waiting_for_input | interrupted | stopped | failed | lost`
-- `created_at`, `updated_at`, `last_activity_at`, `stopped_at`
+- `created_at` `NOT NULL`
+- `updated_at` `NOT NULL`
+- `last_activity_at` nullable
+- `stopped_at` nullable
 
 ## task_runs
 
@@ -185,26 +217,43 @@ A partial unique index on `(bind_address, port) WHERE state IN ('reserved', 'act
 - `config_revision_id` foreign key
 - `state`: `queued | starting | running | passed | failed | cancelled | timed_out | lost`
 - `exit_code` nullable
-- `started_at`, `finished_at`
+- `started_at` nullable
+- `finished_at` nullable
 - `summary_json` nullable
 - `log_path`
 
 ## operations
 
-- `id` primary key
-- `idempotency_key` unique UUIDv7
+- `operation_id` primary key; this is the caller-generated UUIDv7 sent to the Agent as
+  `X-DevSpace-Operation-Id`
+- `project_id` required ownership foreign key
+- `workspace_id` nullable workspace-context foreign key
 - `actor`
-- `operation_type`
+- `operation_name`
 - `resource_type`, `resource_id`
-- `request_hash`
 - `state`: `accepted | running | succeeded | failed | cancelled`
 - `progress_json` nullable
 - `error_code`, `error_message` nullable
-- `created_at`, `started_at`, `finished_at`
+- `created_at` `NOT NULL`
+- `started_at` nullable
+- `finished_at` nullable
 
-The web creates the UUIDv7 operation ID and inserts this SQLite row before sending a mutating request to the agent. The operation ID, idempotency key, and request hash are then sent as agent request metadata. The workspace agent never creates or writes this row.
+The web creates `operation_id` and inserts this SQLite row before sending a mutating request to the
+Agent. That same ID is the sole public idempotency identity and is sent only through
+`X-DevSpace-Operation-Id`. There is no second public idempotency key or public request hash.
+`operation_name` is the stable F09 mutation operation name. `project_id` makes the row
+project-owned; `workspace_id` is nullable because some project operations have no workspace and
+because retained project operation history may survive deletion of an individual workspace. The
+workspace Agent never creates or writes this row.
 
-This row is the control-plane and audit source of truth for operation lifecycle, progress, and outcome. The agent's separate narrow durable execution/idempotency journal is not SQLite and is not a second control-plane database; it exists only to make acceptance, execution, and transport retries safe. Reuse or replay semantics are defined by the agent protocol.
+This row is the Web control-plane and audit source of truth for operation lifecycle, progress, and
+outcome. The Agent's separate narrow durable execution/idempotency journal is not SQLite and is
+not a second control-plane database; it exists only to make acceptance, execution, and transport
+retries safe. That journal may bind an operation ID to an operation name, complete validated
+request, and private deterministic fingerprint. The fingerprint is private Agent implementation
+state, is not a protocol value, and is not persisted in this SQLite model. F10 Agent execution
+observations describe recoverable Agent state and do not create another SQLite table. Reuse or
+replay semantics are defined by the Agent protocol.
 
 ## audit_events
 
@@ -215,9 +264,44 @@ This row is the control-plane and audit source of truth for operation lifecycle,
 - `resource_type`, `resource_id`
 - `operation_id` nullable foreign key
 - `metadata_json` redacted
-- `created_at`
+- `created_at` `NOT NULL`
 
 Audit events are append-only through the application layer. Their database sequence is not an agent event cursor and does not reset with agent boots.
+
+## Foreign-key matrix
+
+This matrix is normative. `RESTRICT` is used consistently for required or protected references:
+the referenced row cannot be deleted independently while a surviving child or current pointer
+depends on it. `CASCADE` is reserved for strict ownership. `SET NULL` is used only for optional
+historical or contextual references whose child is intentionally retained without the referenced
+row. Every foreign key uses `ON UPDATE NO ACTION`.
+
+| Child table | Child column | Parent table | Parent column | Nullability | ON DELETE | ON UPDATE | Classification and rationale |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `projects` | `active_config_revision_id` | `project_config_revisions` | `id` | nullable | `RESTRICT` | `NO ACTION` | Protected current-selection pointer. Staged project creation permits null, but a selected immutable revision cannot be deleted independently. |
+| `projects` | `primary_workspace_id` | `workspaces` | `id` | nullable | `RESTRICT` | `NO ACTION` | Protected current-primary pointer. Staged project creation permits null, but the selected primary workspace cannot be deleted independently. |
+| `project_config_revisions` | `project_id` | `projects` | `id` | required | `CASCADE` | `NO ACTION` | Strict project ownership; a revision has no independent meaning after project deletion. |
+| `workspaces` | `project_id` | `projects` | `id` | required | `CASCADE` | `NO ACTION` | Strict project ownership; a workspace has no independent meaning after project deletion. |
+| `workspaces` | `config_revision_id` | `project_config_revisions` | `id` | required | `RESTRICT` | `NO ACTION` | Required immutable-revision reference needed to interpret the workspace. |
+| `runtime_stacks` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace runtime ownership. |
+| `workspace_services` | `runtime_stack_id` | `runtime_stacks` | `id` | required | `CASCADE` | `NO ACTION` | Strict runtime-stack ownership, and therefore transitively strict workspace ownership. |
+| `processes` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace runtime ownership. |
+| `processes` | `service_id` | `workspace_services` | `id` | required | `RESTRICT` | `NO ACTION` | Required execution-context reference; a service cannot be deleted independently while a surviving process refers to it. |
+| `terminal_sessions` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace runtime ownership. |
+| `terminal_sessions` | `process_id` | `processes` | `id` | required | `RESTRICT` | `NO ACTION` | Required one-to-one execution reference needed to interpret the terminal session. |
+| `previews` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace runtime ownership. |
+| `previews` | `service_id` | `workspace_services` | `id` | required | `RESTRICT` | `NO ACTION` | Required preview target reference; workspace-targeted previews use the workspace development service. |
+| `port_leases` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace runtime ownership. |
+| `port_leases` | `preview_id` | `previews` | `id` | nullable | `SET NULL` | `NO ACTION` | Optional preview context; a lease may remain for release or stale-lease cleanup after preview deletion. |
+| `ai_sessions` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace runtime ownership. |
+| `ai_sessions` | `terminal_session_id` | `terminal_sessions` | `id` | nullable | `SET NULL` | `NO ACTION` | Optional historical terminal context; the AI-session record may survive terminal deletion. |
+| `ai_sessions` | `process_id` | `processes` | `id` | nullable | `SET NULL` | `NO ACTION` | Optional historical process context; the AI-session record may survive process deletion. |
+| `task_runs` | `workspace_id` | `workspaces` | `id` | required | `CASCADE` | `NO ACTION` | Strict workspace ownership. |
+| `task_runs` | `process_id` | `processes` | `id` | nullable | `SET NULL` | `NO ACTION` | Optional execution context; retained task-run history may survive process deletion. |
+| `task_runs` | `config_revision_id` | `project_config_revisions` | `id` | required | `RESTRICT` | `NO ACTION` | Required immutable-revision reference needed to interpret the task run. |
+| `operations` | `project_id` | `projects` | `id` | required | `CASCADE` | `NO ACTION` | Strict project ownership of the Web control-plane operation row. |
+| `operations` | `workspace_id` | `workspaces` | `id` | nullable | `SET NULL` | `NO ACTION` | Optional workspace context; project operation history may survive deletion of an individual workspace. |
+| `audit_events` | `operation_id` | `operations` | `operation_id` | nullable | `SET NULL` | `NO ACTION` | Optional originating-operation context; retained audit history survives operation deletion. |
 
 ## At-most-one constraints and eventual exactly-one transactions
 
