@@ -2,48 +2,49 @@
 
 ## Status
 
-The accepted Agent API v1 specification at `bafa075` has been implemented as the uncommitted
-M0-F09 executable contract foundation. Seven concrete findings from the first implementation
-review have been corrected and the slice is ready for re-review. It is not accepted or committed.
+M0-F09 is accepted and committed at `fb9687d`. The first M0-F10 implementation attempt correctly
+stopped before changing production code because the deferred event/snapshot specification did not
+define deterministic payload, snapshot, error-applicability, numeric-bound, or NDJSON contracts.
+The first documentation-only completion then failed adversarial independent review with 11
+concrete ownership, identity, lifecycle, asynchronous-failure, recovery, and framing findings. The
+next focused re-review found five remaining operation-recovery, post-acceptance-race,
+lifecycle-ownership, preview-recovery, and process-observation problems. The current uncommitted
+task remains documentation-only M0-F10 specification correction. No F10 production implementation
+has begun.
 
-## Implementation deliverables
+## Specification-closure deliverables
 
-- an exact 29-endpoint F09 inventory: 19 journaled mutations, nine ordinary non-mutating HTTP
-  operations, and one terminal WebSocket upgrade;
-- the Web-created `X-DevSpace-Operation-Id` as the sole public idempotency identity, with private
-  Agent fingerprinting permitted but not standardized;
-- Project Options revision validation/registration with no runtime-plan document or hash;
-- minimal `{ operationId }` durable-acceptance receipts with no duplicated Web operation state;
-- fixed capability metadata with every executable v1 endpoint mandatory;
-- singular workspace `aiProfile` selection and `AI_NOT_CONFIGURED` for a null profile;
-- protected-UDS terminal proxy authorization owned by Web, one active attachment, deterministic
-  pre-ready rejection, and detach without terminal closure;
-- distinct branch-name and branch/commit base-ref concepts, with branch validation authority
-  extracted into `@devspace/domain` while preserving the security API;
-- a 23-code executable F09 error registry and exhaustive 29-row route mapping;
-- reconciliation deferred beyond both F09 and F10, while F10 snapshot/event/error contracts remain
-  clearly non-executable F09 design input;
-- strict Zod request, response, primitive, lifecycle, and error schemas exposed from the contracts
-  package root;
-- one declarative 29-endpoint inventory with mechanically inspectable mutation headers, success
-  statuses, and route-specific errors;
-- pure byte-exact terminal frame codecs and protocol metadata, without WebSocket transport;
-- domain-owned branch shorthand validation with security delegation and narrow workspace-graph
-  correction;
-- deterministic generated Agent API v1 JSON Schema artifact and permanent regression tests;
-- DevSpace-only raw-header projection that ignores ordinary transport headers while rejecting
-  unknown or duplicate protocol headers;
-- one exact 2,097,152-byte final canonical Project Options revision boundary across F08 and F09;
-- literal-preserving endpoint lookup types, independent endpoint/error test oracles, documented
-  JSON Schema runtime limitations, and a fixed public error API with no override-capable builder.
+- an exact two-route F10 inventory and 31-route complete-v1 count without reconciliation;
+- safe-integer event/cursor bounds, exact serialized cursor grammar, and cursor-invalid reason
+  precedence;
+- a strict four-field snapshot boundary with eight exact Agent-observation resource members and
+  retained Agent operation observations that do not replace Web lifecycle ownership;
+- an exact 12-way event union binding each discriminator to one resource/operation association and
+  one closed payload;
+- type-specific resource identities with multi-scope project Git recovery and no manufactured
+  runtime-stack/service UUIDs;
+- an 18-code race-aware `AgentExecutionFailure` union, exhaustive classification of all 23 F09
+  errors, and exact applicability for all 19 mutations;
+- authoritative domain-owned structural lifecycle-edge validation without fabricated context;
+- a coarse three-state Agent operation observation that guarantees nonterminal recovery while
+  preserving accepted F09 terminal compaction;
+- complete F09 process and preview observation events, including exact same-state enrichment rules;
+- F09 inspection/error-shape reuse without changing the accepted 29-endpoint/23-error F09 views;
+- two F10-only errors, exhaustive route applicability, and a 25-error full-v1 view;
+- deterministic snapshot-required replay reasons and exact LF-only ordinary-JSON framing,
+  property-order, trailing-newline, blank-line, and incomplete-line semantics;
+- explicit separation between individual-object validation and runtime continuity/replay
+  guarantees;
+- milestone-plan alignment that assigns snapshot contracts to F10 while leaving snapshot
+  collection, event production, replay, retention, and HTTP streaming outside Milestone 0.
 
 ## Scope boundary
 
-This slice adds contract infrastructure only. It adds no Agent/Web/database behavior, HTTP or UDS
-transport, mutation journal, terminal execution/proxy, reconciliation, runtime plan, or F10
-event/cursor implementation.
+This slice changes specification and living documentation only. It adds no package source,
+generated schema, fixture, dependency, Agent/Web/database behavior, snapshot collection, event
+production/storage, replay, HTTP/NDJSON transport, reconciliation, runtime plan, or F11 work.
 
 ## Next task
 
-Perform a focused independent re-review of the corrected M0-F09 diff. If accepted, commit it as a
-separate review boundary before beginning M0-F10.
+Perform a focused independent re-review of the corrected M0-F10 specification. If accepted, retain
+it as the documentation boundary for a fresh M0-F10 implementation agent. Do not begin M0-F11.

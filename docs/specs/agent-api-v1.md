@@ -17,9 +17,9 @@ gateway upstream, or a Caddy configuration fragment. That document cannot bypass
 Agent validation or the host boundary.
 
 F09 owns the 29 endpoints in the F09 inventory and their ordinary request, response, error, and
-terminal-stream wire contracts. F10 owns snapshot and event contracts. The F10 material retained
-at the end of this document is normative design input for F10 but is not part of F09's endpoint
-count or implementation surface.
+terminal-stream wire contracts. F10 owns the two snapshot/event endpoints and their cursor,
+snapshot, event, error, and NDJSON wire contracts. The F10 section is normative but remains
+separate from F09's endpoint count and F09-only executable registries.
 
 ## Transport
 
@@ -769,92 +769,705 @@ runtime-plan application, stale-resource repair, and serialization against ordin
 F09 schema, registry entry, fixture, or generated artifact may expose this route or a reconciliation
 request/response shape.
 
-## F10-deferred inventory and retained design
+## F10 snapshot, event, and cursor contract
 
-The exact F10-deferred endpoint count is **2**:
+F10 adds contract infrastructure only. It defines schemas, fixtures, generated artifacts, and
+compatibility checks; it does not collect snapshots, produce or retain events, execute replay,
+open an HTTP stream, buffer NDJSON, or persist Agent state.
 
-| Stable operation name | Method | Exact path/query | F10 responsibility |
+### F10 endpoint inventory
+
+The exact executable F10 endpoint count is **2**. Both are non-mutating HTTP GET operations, forbid
+`X-DevSpace-Operation-Id`, and use the common DevSpace request-header shape. They accept no request
+body.
+
+| Stable operation name | Method | Exact path/query | Success |
 | --- | --- | --- | --- |
-| `snapshot.get` | GET | `/v1/snapshot` with no query | Exact snapshot resource union, boot identity, and through-cursor schema |
-| `event.stream` | GET | `/v1/events?cursor=<cursor>` with exactly one required cursor query parameter | Event union, event sequence, cursor validation, replay, retention conflict, and NDJSON streaming |
+| `snapshot.get` | GET | `/v1/snapshot` with no query | HTTP `200` normal `SuccessEnvelope<AgentSnapshotData>` |
+| `event.stream` | GET | `/v1/events?cursor=<cursor>` with exactly one required cursor query parameter | HTTP `200` NDJSON stream; no success envelope |
 
-F09 does not define or implement their request/success schemas, event envelopes, cursor allocation,
-replay, snapshot recovery, stream transport, or errors. F10 will apply the common request metadata
-and ordinary pre-stream error envelope. Its future error inputs are
-`EVENT_SNAPSHOT_REQUIRED (409, retryable false)` with strict details
-`{ reason: "boot_mismatch" | "cursor_expired" | "history_unavailable", currentAgentBootId:
-UuidV7, snapshotPath: "/v1/snapshot" }`, and `EVENT_CURSOR_INVALID (400, retryable false)` with
-strict empty details. Neither code is an executable F09 error or export.
+No query parameter is accepted by `snapshot.get`. `event.stream` accepts exactly one decoded query
+parameter named `cursor`; an unknown or duplicate query parameter is invalid. The F10 route error
+table below is exhaustive. F09 remains exactly 29 endpoints; complete Agent API v1 is therefore 31
+endpoints: 19 mutations, 11 non-mutating HTTP operations, and one WebSocket upgrade.
 
-The following accepted F10 design is retained as normative input for that task.
+### Event sequence and cursor primitives
 
-On every Agent start, the Agent creates a new `UuidV7` `agentBootId`; emitted event sequences begin
-at `1`, are positive unsigned decimal integers without leading zeroes, and increase by exactly one.
-No event has sequence zero. A cursor has exact ASCII grammar:
+`EventSequence` is a JSON safe integer from **1** through **9007199254740991** inclusive. It is the
+sequence of a real event within one Agent boot. No event has sequence zero. The Agent must not emit
+an event whose sequence would exceed 9007199254740991; rollover runtime behavior is outside F10.
+
+`CursorSequence` is an integer from **0** through **9007199254740991** inclusive as represented in
+the serialized cursor below. Zero is the position before the first event for one specific boot; it
+does not name an event.
+
+`EventCursor` is one ASCII string with exact grammar:
 
 ```text
 v1.<lowercase UUIDv7 agentBootId>.<sequence>
 ```
 
-The cursor sequence component has grammar `0|[1-9][0-9]*`. Zero is a cursor boundary only. A
-snapshot before the first event may return a through-cursor ending in `.0`. An event cursor names
-that event; subscribing from a cursor replays retained events with greater sequence and then waits
-for new events.
+The decimal sequence component matches `0|[1-9][0-9]*`, has no sign, whitespace, leading zeroes
+other than the single value `0`, fraction, or exponent, and must be in the `CursorSequence` range.
+The `agentBootId` component is exactly `UuidV7`. Cursor parsing does not coerce or normalize input.
 
-Replay succeeds only when the cursor boot ID is current and all later sequences remain retained.
-A boot mismatch, expired cursor, or unavailable required history returns
-`EVENT_SNAPSHOT_REQUIRED`. Web then obtains `/v1/snapshot`, replaces its Agent-observed view, and
-subscribes from the snapshot's `throughCursor`. Cursors are Agent-observation cursors, not SQLite
-audit sequences, and never cross boot streams.
+An event cursor names the event at its positive sequence. Subscribing from a cursor replays
+retained events with greater sequence and then waits for new events. A `.0` cursor requests replay
+from the start of that boot's retained event history. Cursors are Agent-observation positions, not
+SQLite audit sequences, and never cross boot streams.
 
-F10 will define `GET /v1/events` success as HTTP `200` with
-`Content-Type: application/x-ndjson; charset=utf-8`; each complete line is one strict event. Errors
-before streaming use the ordinary JSON error envelope. Failure after streaming begins closes the
-connection, and Web reconnects with its last fully processed cursor.
+### F10 resource references
 
-The accepted event-envelope design to be completed in F10 is:
+`AgentResourceReference` is the following strict union. It uses only identities already supplied by
+accepted F09 requests or the accepted service configuration key. Runtime stacks and services have
+no invented UUID identity. Every displayed field is required and every object is closed.
 
 ```text
-{
-  protocolVersion: 1,
-  eventId: UuidV7,
-  agentBootId: UuidV7,
-  sequence: positive integer,
-  cursor: same-boot cursor naming this event,
-  occurredAt: UtcTimestampMs,
-  operationId: UuidV7 | null,
-  resource: <F10-defined resource reference or null>,
-  type: F10 event-type discriminator,
-  payload: F10 event-specific closed payload
+AgentResourceReference =
+  | { type: "project", projectId: UuidV7 }
+  | { type: "workspace", projectId: UuidV7, workspaceId: UuidV7 }
+  | { type: "runtime-stack", projectId: UuidV7, workspaceId: UuidV7 }
+  | { type: "service", projectId: UuidV7, workspaceId: UuidV7,
+      serviceKey: ConfigurationKey }
+  | { type: "process", projectId: UuidV7, workspaceId: UuidV7, processId: UuidV7 }
+  | { type: "terminal", projectId: UuidV7, workspaceId: UuidV7, terminalId: UuidV7 }
+  | { type: "preview", projectId: UuidV7, workspaceId: UuidV7, previewId: UuidV7 }
+  | { type: "ai-session", projectId: UuidV7, workspaceId: UuidV7, aiSessionId: UuidV7 }
+```
+
+This F10 union is distinct from the narrower F09 error `ResourceReference`: F10 adds
+`runtime-stack` and `service`, uses type-specific field names, and carries the accepted parent
+identities needed to place observations. It does not change the F09 error primitive.
+
+### Project Git inspection scopes
+
+`project.source.inspect` has no accepted project identity. Its `SourceInspectionData` is therefore
+not an F10 snapshot observation and never emits `project.inspected`; it remains only the ordinary
+F09 request/response operation.
+
+`ProjectGitInspectionScope` is this strict discriminated union:
+
+```text
+ProjectGitInspectionScope =
+  | { kind: "managed-store" }
+  | { kind: "workspace", workspaceId: UuidV7 }
+
+ProjectGitInspectionObservation = {
+  scope: ProjectGitInspectionScope,
+  inspection: GitInspectionData
 }
 ```
 
-F10 must constrain `resource.type`, nullability, and payload together for every event discriminator.
-`operationId` is nullable because observation, health, and process-output-availability events can
-occur outside an operation. `resource` is nullable only for event types
-that F10 explicitly classifies as Agent-wide. Absence of an operation never weakens resource
-authorization or event ordering.
+`GitInspectionData` is reused exactly, including all F09 refinements. In every containing project
+snapshot/event, `inspection.projectId` must equal the containing `projectId`. A `managed-store`
+scope requires `inspection.workspaceId: null`; a `workspace` scope requires
+`inspection.workspaceId` to equal `scope.workspaceId`. These equalities are strict runtime-schema
+refinements where JSON Schema cannot express them.
 
-F10 must define strict payloads for these event types:
+### Snapshot success data
 
-- `operation.progressed`
-- `operation.succeeded`
-- `operation.failed`
-- `operation.cancelled`
-- `project.inspected`
-- `workspace.observed-state.changed`
-- `runtime-stack.observed-state.changed`
-- `service.observed-state.changed`
-- `service.health.changed`
-- `process.started`
-- `process.output.available`
-- `process.exited`
-- `terminal.state.changed`
-- `preview.state.changed`
-- `ai-session.state.changed`
+`GET /v1/snapshot` returns the normal strict F09 `SuccessEnvelope` convention with this exact data:
 
-Terminal and interactive AI bytes remain exclusively in terminal binary streams. F10 JSON events
-may announce state or output availability but never carry terminal bytes.
+```text
+AgentSnapshotData = {
+  agentBootId: UuidV7,
+  throughCursor: EventCursor,
+  resources: AgentSnapshotResource[],
+  operationObservations: AgentOperationObservation[]
+}
+```
+
+`throughCursor` must contain the same `agentBootId` as the snapshot. Its cursor sequence may be
+zero and identifies the event boundary through which all snapshot observations are
+self-consistent. After replacing its Agent-observed view with this snapshot, Web reconnects using
+`GET /v1/events?cursor=<throughCursor>`.
+
+The snapshot is a recovery observation of Agent-owned state. It is not a SQLite dump, a Project
+Options document/copy, a runtime plan, an event history, or an ownership transfer of Web state.
+Desired-state and revision-identity fields appear only where they are members of an exact accepted
+F09 Agent inspection shape; they report the Agent's retained observation and do not become
+authoritative Web desired state or configuration storage.
+
+#### Snapshot resource union
+
+The following lifecycle names mean the exact authoritative values from `lifecycle-states.md` and
+the public domain package:
+
+```text
+WorkspaceServiceDesiredState = "absent" | "stopped" | "running"
+WorkspaceServiceObservedState = RuntimeStackObservedState
+WorkspaceServiceHealthState = "unknown" | "starting" | "healthy" | "unhealthy"
+TerminalState = "creating" | "active" | "disconnected" | "closing" |
+  "closed" | "failed" | "lost"
+AiSessionState = "creating" | "active" | "waiting_for_input" | "interrupted" |
+  "stopped" | "failed" | "lost"
+
+WorkspaceServiceObservation = {
+  desiredState: WorkspaceServiceDesiredState,
+  observedState: WorkspaceServiceObservedState,
+  health: WorkspaceServiceHealthState
+}
+```
+
+`AgentSnapshotResource` is this strict discriminated union. Fields shown in each member are exact;
+none is optional and no unknown field is accepted.
+
+```text
+AgentSnapshotResource =
+  | {
+      type: "project",
+      projectId: UuidV7,
+      gitInspections: ProjectGitInspectionObservation[]
+    }
+  | {
+      type: "workspace",
+      observation: WorkspaceInspectionData
+    }
+  | {
+      type: "runtime-stack",
+      projectId: UuidV7,
+      workspaceId: UuidV7,
+      observation: WorkspaceInspectionData["runtimeStack"]
+    }
+  | {
+      type: "service",
+      projectId: UuidV7,
+      workspaceId: UuidV7,
+      serviceKey: ConfigurationKey,
+      observation: WorkspaceServiceObservation
+    }
+  | {
+      type: "process",
+      observation: ProcessInspectionData
+    }
+  | {
+      type: "terminal",
+      identity: TerminalIdentityData,
+      state: TerminalState
+    }
+  | {
+      type: "preview",
+      observation: PreviewInspectionData
+    }
+  | {
+      type: "ai-session",
+      identity: AiSessionIdentityData,
+      state: AiSessionState
+    }
+```
+
+`WorkspaceInspectionData`, `ProcessInspectionData`, `PreviewInspectionData`,
+`TerminalIdentityData`, and `AiSessionIdentityData` are embedded exactly as accepted by F09, with
+all nested strictness and refinements unchanged. `WorkspaceInspectionData["runtimeStack"]` means
+the exact strict nested runtime-stack observation already defined by that F09 shape; F10 extracts
+and reuses it rather than duplicating its fields. A workspace has at most one runtime stack, so
+`workspaceId` is its identity and no stack UUID exists.
+
+F09 has no standalone service inspection response. `WorkspaceServiceObservation` is the exact F10
+composition of the accepted domain service desired-state, observed-state, and health vocabularies.
+Its health must be `unknown` whenever `observedState` is not `running`; `starting`, `healthy`, or
+`unhealthy` health is valid only while the service is observed `running`.
+
+The observation authority for each snapshot category is therefore exact:
+
+| Snapshot category | Exact identity key | Authoritative observation shape |
+| --- | --- | --- |
+| `project` | `projectId` | `gitInspections`, whose items embed exact F09 `GitInspectionData`; no source inspection |
+| `workspace` | `observation.workspaceId` | exact F09 `WorkspaceInspectionData` |
+| `runtime-stack` | `workspaceId` | exact extracted `WorkspaceInspectionData["runtimeStack"]` |
+| `service` | (`workspaceId`, `serviceKey`) | F10 `WorkspaceServiceObservation` from authoritative domain values |
+| `process` | `observation.processId` | exact F09 `ProcessInspectionData` |
+| `terminal` | `identity.terminalId` | exact F09 `TerminalIdentityData` plus domain `TerminalState` |
+| `preview` | `observation.previewId` | exact F09 `PreviewInspectionData` |
+| `ai-session` | `identity.aiSessionId` | exact F09 `AiSessionIdentityData` plus domain `AiSessionState` |
+
+`resources` may contain zero or more items and is the complete Agent-observed resource set visible
+to Web at the boundary. No two items of one type may share that type's exact identity key from the
+table. Different resource types do not conflict merely because UUID text happens to match. Array
+order has no semantic meaning and no canonical sort is required. Type-specific uniqueness is a
+runtime-schema refinement because JSON Schema cannot express it faithfully.
+
+Every workspace snapshot member has exactly one corresponding runtime-stack member with the same
+`projectId`/`workspaceId`, and the runtime-stack member's `observation` must equal
+`workspace.observation.runtimeStack`. This preserves the exact embedded F09 workspace inspection
+while giving runtime-stack events one independently addressable snapshot category; the two
+representations cannot diverge.
+
+Within one project resource, `gitInspections` may be empty and has insignificant order. It rejects
+duplicate scopes: at most one `managed-store` item and at most one `workspace` item for each
+`workspaceId`. A `project.inspected` event replaces or inserts the one array item with the same
+scope; all other scopes remain unchanged.
+
+#### Agent operation observations
+
+`AgentExecutionFailure` is a dedicated post-acceptance failure value. It contains only conditions
+that can arise after a mutation has already been durably accepted and returned HTTP `202`. It is
+not the F09 route-error union and has no response `meta` wrapper.
+
+Every variant is the strict object `{ code, message: ErrorMessage, retryable, details }`.
+`code` discriminates the exact 18-member union below. Retryability and details reuse the existing
+F09 contracts exactly:
+
+| Allowed code | Retryable | Exact strict details |
+| --- | --- | --- |
+| `CONFIGURATION_NOT_REGISTERED` | false | `{ revisionId: UuidV7, revisionHash: ProjectOptionsRevisionHash }` |
+| `RUNTIME_POLICY_VIOLATION` | false | `{ policy: one of ("source-not-approved", "workspace-action-rejected", "task-action-rejected", "terminal-action-rejected", "preview-action-rejected", "ai-profile-rejected") }` |
+| `PROJECT_NOT_FOUND` | false | `{ projectId: UuidV7 }` |
+| `RESOURCE_NOT_FOUND` | false | `{ resource: ResourceReference }` |
+| `SOURCE_NOT_FOUND` | false | `{ sourceId: UuidV7 }` |
+| `SOURCE_INVALID` | false | `{ reason: one of ("not-a-git-repository", "unsupported-repository-format") }` |
+| `SOURCE_UNAVAILABLE` | true | `{}` |
+| `WORKSPACE_STATE_CONFLICT` | false | `{ workspaceId: UuidV7, desiredState: WorkspaceDesiredState, observedState: WorkspaceObservedState, action: one of ("create", "start", "stop", "rebuild", "archive", "remove", "run-task", "create-terminal", "activate-preview", "start-ai-session") }` |
+| `RESOURCE_STATE_CONFLICT` | false | `{ resource: ResourceReference, action: one of ("create", "start", "stop", "close", "attach", "activate", "deactivate", "interrupt", "resume") }` |
+| `DIRTY_WORKSPACE_REQUIRES_ACTION` | false | `{ workspaceId: UuidV7, requestedAction: one of ("archive", "remove") }` |
+| `TASK_NOT_DEFINED` | false | `{ revisionId: UuidV7, taskKey: ConfigurationKey }` |
+| `PROCESS_IDENTITY_MISMATCH` | false | `{ processId: UuidV7 }` |
+| `PREVIEW_NOT_DEFINED` | false | `{ revisionId: UuidV7, previewKey: ConfigurationKey }` |
+| `AI_NOT_CONFIGURED` | false | `{ workspaceId: UuidV7, revisionId: UuidV7 }` |
+| `PREVIEW_DOMAIN_NOT_APPROVED` | false | `{ previewId: UuidV7 }` |
+| `GATEWAY_UPDATE_FAILED` | true | `{ previewId: UuidV7 }` |
+| `ROOTLESS_RUNTIME_UNAVAILABLE` | true | `{ component: "docker" }` |
+| `AGENT_INTERNAL_ERROR` | true | `{ incidentId: UuidV7 }` |
+
+Unknown fields, arbitrary details, F10 cursor errors, and the five pre-acceptance-only F09 errors
+are rejected. For an execution failure, `retryable: true` means a caller may submit a new operation
+with a new operation ID after the transient condition changes or is addressed. It never causes
+replay of the same operation ID to execute again; same-ID replay remains governed by F09 durable
+idempotency and returns the retained outcome without retrying execution.
+
+The classification of all 23 F09 executable codes is exhaustive:
+
+| F09 code | Classification for asynchronous execution | Accepted semantic reason |
+| --- | --- | --- |
+| `PROTOCOL_VERSION_UNSUPPORTED` | strictly pre-acceptance only | protocol negotiation rejects the request before durable acceptance |
+| `REQUEST_INVALID` | strictly pre-acceptance only | malformed request data is rejected before durable acceptance |
+| `OPERATION_CONFLICT` | strictly pre-acceptance only | journal identity mismatch prevents acceptance |
+| `OPERATION_JOURNAL_UNAVAILABLE` | strictly pre-acceptance only | the Agent cannot durably accept the mutation |
+| `CONFIGURATION_INVALID` | strictly pre-acceptance only | configuration validation precedes registration acceptance |
+| `CONFIGURATION_NOT_REGISTERED` | potentially post-acceptance | the required registered revision may become unavailable before execution uses it |
+| `RUNTIME_POLICY_VIOLATION` | potentially post-acceptance | applicable Agent policy may change or be re-evaluated against changed runtime state |
+| `PROJECT_NOT_FOUND` | potentially post-acceptance | a project retained at validation may be absent when execution begins |
+| `RESOURCE_NOT_FOUND` | potentially post-acceptance | a referenced resource may be removed or lose its accepted ownership relation |
+| `SOURCE_NOT_FOUND` | potentially post-acceptance | a registered-local source may be removed after validation |
+| `SOURCE_INVALID` | potentially post-acceptance | managed-store execution may discover that fetched/read source content is not an accepted Git repository |
+| `SOURCE_UNAVAILABLE` | potentially post-acceptance | accepted source creation/fetch work may lose access to its source |
+| `WORKSPACE_STATE_CONFLICT` | potentially post-acceptance | workspace desired/observed state may change before execution acts |
+| `RESOURCE_STATE_CONFLICT` | potentially post-acceptance | resource state or caller-supplied identity binding may race after validation |
+| `DIRTY_WORKSPACE_REQUIRES_ACTION` | potentially post-acceptance | an isolated worktree may become dirty before archive/removal executes |
+| `TASK_NOT_DEFINED` | potentially post-acceptance | the workspace's effective registered revision may change before task resolution/execution |
+| `PROCESS_IDENTITY_MISMATCH` | potentially post-acceptance | the required live identity check may fail immediately before signalling |
+| `PREVIEW_NOT_DEFINED` | potentially post-acceptance | the workspace's effective revision may no longer define the preview |
+| `AI_NOT_CONFIGURED` | potentially post-acceptance | the workspace's effective revision may change to one with no AI profile |
+| `PREVIEW_DOMAIN_NOT_APPROVED` | potentially post-acceptance | approved-domain policy may change before gateway application |
+| `GATEWAY_UPDATE_FAILED` | potentially post-acceptance | accepted preview execution may fail while applying the gateway update |
+| `ROOTLESS_RUNTIME_UNAVAILABLE` | potentially post-acceptance | the runtime may become unavailable while accepted work executes |
+| `AGENT_INTERNAL_ERROR` | potentially post-acceptance | an unexpected redacted Agent failure may occur during accepted execution |
+
+The Agent journal already binds each `operationId` to one stable F09 mutation operation. The
+runtime must validate a stored/emitted failure against that binding using this exact table; the
+wire failure does not duplicate the operation name.
+
+| F09 mutation operation | Allowed asynchronous `AgentExecutionFailure.code` values |
+| --- | --- |
+| `configuration-revision.register` | `AGENT_INTERNAL_ERROR` |
+| `project.managed-store.create` | `RESOURCE_STATE_CONFLICT`; `SOURCE_NOT_FOUND`; `SOURCE_INVALID`; `SOURCE_UNAVAILABLE`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
+| `project.fetch` | `PROJECT_NOT_FOUND`; `SOURCE_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `workspace.create` | `PROJECT_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `workspace.start` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `workspace.stop` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `workspace.rebuild` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `workspace.archive` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_STATE_CONFLICT`; `DIRTY_WORKSPACE_REQUIRES_ACTION`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `workspace.remove` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_STATE_CONFLICT`; `DIRTY_WORKSPACE_REQUIRES_ACTION`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `task.start` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RESOURCE_STATE_CONFLICT`; `TASK_NOT_DEFINED`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `process.stop` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `RESOURCE_STATE_CONFLICT`; `PROCESS_IDENTITY_MISMATCH`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `terminal.create` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RESOURCE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `terminal.close` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `RESOURCE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `preview.activate` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RESOURCE_STATE_CONFLICT`; `PREVIEW_NOT_DEFINED`; `RUNTIME_POLICY_VIOLATION`; `PREVIEW_DOMAIN_NOT_APPROVED`; `GATEWAY_UPDATE_FAILED`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `preview.deactivate` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `RESOURCE_STATE_CONFLICT`; `GATEWAY_UPDATE_FAILED`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `ai-session.start` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RESOURCE_STATE_CONFLICT`; `AI_NOT_CONFIGURED`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `ai-session.interrupt` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `RESOURCE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `ai-session.stop` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `RESOURCE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `ai-session.resume` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `RESOURCE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+
+Each operation row reuses the exact F09 route-specific details narrowing for resource types,
+actions, policy values, and echoed request identities. No validation-to-execution reservation,
+global mutation serialization, or resource-scoped serialization is assumed. A failure listed in a
+row may be emitted when the condition was absent at acceptance but becomes true before or during
+execution.
+
+`AgentOperationObservation` is the following strict discriminated union:
+
+```text
+AgentOperationObservation =
+  | { operationId: UuidV7, state: "accepted" | "succeeded",
+      updatedAt: UtcTimestampMs, failure: null }
+  | { operationId: UuidV7, state: "failed", updatedAt: UtcTimestampMs,
+      failure: AgentExecutionFailure }
+```
+
+These three states are coarse F10 Agent execution observations, not a reuse or replacement of
+Web's SQLite operation lifecycle. `accepted` means the Agent durably accepted the operation and no
+terminal execution outcome is currently recorded. It intentionally covers every internal
+nonterminal phase, including waiting, internal queueing, and active execution. F10 exposes no
+separate public scheduling or running state.
+
+The exact application rules are:
+
+- first durable HTTP `202` acceptance creates `{ state: "accepted", failure: null,
+  updatedAt: <durable acceptance time> }` when no observation exists; an exact same-ID F09 replay
+  leaves an existing recoverable observation unchanged and does not recreate a compacted terminal
+  observation; the timestamp is journal metadata rather than a `MutationReceipt` field;
+- `operation.progressed` requires an existing recoverable `accepted` observation, leaves
+  `state: "accepted"` and `failure: null`, and sets `updatedAt` to the event `occurredAt`; its
+  message remains transient;
+- `operation.succeeded` requires an existing `accepted` observation and replaces it with
+  `{ state: "succeeded", failure: null, updatedAt: event.occurredAt }`;
+- `operation.failed` requires an existing `accepted` observation and replaces it with
+  `{ state: "failed", failure: event.payload.error, updatedAt: event.occurredAt }`.
+
+Progress against a terminal observation is invalid. No operation event may move a terminal
+observation back to `accepted` or to another terminal state. Normal cursor processing prevents
+duplicate replay application; F10 does not define a separate idempotent snapshot-mutation API.
+
+`operationObservations` is the complete set of currently recoverable Agent execution observations
+retained by the Agent. It must contain every durably accepted operation for which no terminal
+outcome is recorded. It may contain retained `succeeded` and `failed` observations, may be empty
+only when no recoverable observation exists, rejects duplicate `operationId` values, and has no
+semantic ordering.
+
+F10 does not strengthen F09 journal compaction. The Agent may compact terminal observation details
+under the accepted F09 compaction policy provided operation-ID reuse safety remains preserved.
+Current nonterminal `accepted` observations may not be compacted.
+
+Absence has exactly one meaning: no recoverable Agent execution observation for that operation ID
+is available in this snapshot. It does not prove that the operation was never accepted, succeeded,
+or failed, and Web must not infer a terminal outcome. A nonterminal Web operation row without a
+matching Agent observation is an unresolved recovery inconsistency for its later owning lifecycle
+policy, not a new F10 wire error. F10 guarantees recovery of current nonterminal Agent execution
+observations, not permanent historical operation-outcome storage.
+
+### Event envelope and exact event union
+
+Every event is one strict object with exactly these fields:
+
+```text
+AgentEvent = {
+  protocolVersion: 1,
+  agentBootId: UuidV7,
+  sequence: EventSequence,
+  cursor: EventCursor,
+  occurredAt: UtcTimestampMs,
+  operationId: <event-specific UuidV7 or null>,
+  resource: <event-specific AgentResourceReference or null>,
+  type: <one exact event discriminator>,
+  payload: <one exact closed payload>
+}
+```
+
+For every event, `cursor` must contain the same boot ID as `agentBootId` and the same positive
+sequence as `sequence`. Event sequence zero is invalid even though cursor sequence zero is valid
+at snapshot/replay boundaries. The cursor equality is a runtime-schema refinement when generated
+JSON Schema cannot express it. The stable event identity is exactly the pair
+`(agentBootId, sequence)` and its cursor serialization; the envelope has no second event identity.
+
+`AgentProgressMessage` is an F10 semantic primitive with exactly the same wire validation policy as
+F09 `ErrorMessage`: 1 through 512 Unicode scalar values and no C0/C1 controls. It is a distinct
+public name because ordinary progress text is not an error.
+
+The schema is a discriminated union on `type`; each discriminator selects the resource shape,
+operation-ID rule, and payload in the table below. `ProjectRef`, `WorkspaceRef`, and the other
+`*Ref` names mean the corresponding exact `AgentResourceReference` member. In this table,
+`nullable T` means exactly `T` or JSON `null`; it never means omitted.
+
+| Event `type` | `operationId` | `resource` | Exact `payload` |
+| --- | --- | --- | --- |
+| `operation.progressed` | required `UuidV7` | any `AgentResourceReference` or `null` | `{ message: AgentProgressMessage }` |
+| `operation.succeeded` | required `UuidV7` | any `AgentResourceReference` or `null` | `{}` |
+| `operation.failed` | required `UuidV7` | any `AgentResourceReference` or `null` | `{ error: AgentExecutionFailure }` |
+| `project.inspected` | exactly `null` | required `ProjectRef` | `ProjectGitInspectionObservation` |
+| `workspace.observed-state.changed` | `UuidV7` or `null` | required `WorkspaceRef` | `{ previous: nullable WorkspaceObservedState, current: WorkspaceObservedState }` |
+| `runtime-stack.observed-state.changed` | `UuidV7` or `null` | required `RuntimeStackRef` | `{ previous: nullable RuntimeStackObservedState, current: RuntimeStackObservedState }` |
+| `service.observed-state.changed` | `UuidV7` or `null` | required `ServiceRef` | `{ previous: nullable WorkspaceServiceObservedState, current: WorkspaceServiceObservedState }` |
+| `service.health.changed` | `UuidV7` or `null` | required `ServiceRef` | `{ previous: nullable WorkspaceServiceHealthState, current: WorkspaceServiceHealthState }` |
+| `process.observation.changed` | `UuidV7` or `null` | required `ProcessRef` | `{ previous: nullable ProcessInspectionData, current: ProcessInspectionData }` |
+| `terminal.state.changed` | `UuidV7` or `null` | required `TerminalRef` | `{ previous: nullable TerminalState, current: TerminalState }` |
+| `preview.state.changed` | `UuidV7` or `null` | required `PreviewRef` | `{ previousState: nullable PreviewObservedState, observation: PreviewInspectionData }` |
+| `ai-session.state.changed` | `UuidV7` or `null` | required `AiSessionRef` | `{ previous: nullable AiSessionState, current: AiSessionState }` |
+
+There are exactly **12** executable F10 event discriminators. Generic operation-cancellation,
+process-output-availability, and special process-start/process-exit events are not executable F10
+events. Process observation changes use the one complete observation event above. No
+reconciliation event exists.
+
+Every payload and nested failure/details value is closed. Progress has no percentages, stage maps,
+metadata, or extension object. `operation.failed.error` cannot override fixed code details or
+retryability. Raw process output, output offsets/counts, terminal bytes, and interactive AI bytes
+never enter F10 events or snapshots.
+
+For `project.inspected`, `resource.projectId`, `payload.inspection.projectId`, and the containing
+project identity must match. The scope/inspection workspace-nullability equality defined above also
+applies. Web applies the event by replacing or inserting the matching `gitInspections` scope in its
+project snapshot view.
+
+#### Process observation events
+
+`process.observation.changed` carries the exact accepted F09 `ProcessInspectionData` as both its
+nullable prior observation and required current observation. The event resource's `projectId`,
+`workspaceId`, and `processId` must equal `current`; when `previous` is non-null, its identity and
+`kind` must equal `current`. Both values independently satisfy every F09 process
+state/timestamp/exit-code refinement, and `previous`/`current` must not be deeply equal.
+
+When `previous.observedState` differs from `current.observedState`, the pair must be one structural
+edge in the domain process-observed graph. When `desiredState` differs, it must be one structural
+edge in the domain process-desired graph. Across every event:
+
+- a previously non-null `startedAt`, `finishedAt`, or `exitCode` must remain equal;
+- `startedAt` may enrich only from null to non-null when the current F09 observation permits it;
+- `finishedAt` may become non-null only as part of a transition to an F09 terminal observation;
+- `exitCode` may enrich only from null to a signed 32-bit value in an F09 terminal observation.
+
+When observed state is unchanged, every identity/ownership/`kind`/`finishedAt` field remains equal,
+and the changed-field set must be a non-empty subset of:
+
+- `desiredState`, provided it follows one structural process-desired edge;
+- `startedAt`, only from null to non-null;
+- `exitCode`, only from null to a signed 32-bit value while the unchanged state is `exited`,
+  `failed`, or `killed`.
+
+This permits the accepted same-`starting` enrichment from `startedAt: null` to a non-null timestamp,
+as well as later recovery of a nullable terminal start time/exit code and replay-relevant desired
+state changes. It rejects arbitrary same-state mutation. Applying the event replaces the matching
+process snapshot `observation` with `current`; no output/log state is introduced.
+
+#### Preview observation events
+
+`preview.state.changed` carries `previousState` plus the complete exact F09
+`PreviewInspectionData` current `observation`. The event resource's `projectId`, `workspaceId`, and
+`previewId` must equal the observation identities.
+
+`previousState: null` is allowed only when no prior Agent preview observation exists. Otherwise the
+Agent validates against its retained prior `PreviewInspectionData`, whose identities and
+`previewKey` must equal the current observation and whose `observedState` must equal
+`previousState`. If the observed state changes, the pair must be one structural edge in the domain
+preview-observed graph.
+
+The accepted F09 preview shape has replay-relevant fields that may change while observed state is
+unchanged. A same-state event is valid only when the retained prior/current observations are not
+deeply equal, identities and `previewKey` remain equal, and the changed-field set is a non-empty
+subset of:
+
+- `desiredState`, provided it follows one structural preview-desired edge;
+- the jointly validated `routePresent`/`hostname` observation fields.
+
+Both retained prior and current observations must satisfy the complete F09 preview refinements.
+Applying the event replaces the matching preview snapshot `observation` with the payload
+observation. Web does not derive or clear hostname/route fields independently.
+
+#### Lifecycle transition validation
+
+For the five generic state-change event types, `previous: null` is allowed only when the Agent has no prior
+observation for that exact resource identity, including first discovery after recovery. The
+accepted lifecycle specification defines no narrower initial-observation subset, so `current` may
+be any valid state in that resource's authoritative state vocabulary.
+
+When `previous` is non-null, `previous -> current` must be one genuine edge in the authoritative
+domain lifecycle graph. Equal states, reverse edges, and every absent edge are invalid.
+
+Lifecycle graph ownership remains exclusively in `@devspace/domain`. The F10 implementation may
+perform one narrow domain API extraction: expose the smallest pure structural edge predicates
+needed by contracts when they are not already public. Exact predicate names are implementation
+detail. The edge tables remain defined once in domain, and existing contextual transition
+validators continue consuming that same authority without behavior changes. Contracts consume
+only the structural predicates; they do not copy edge tables or construct recovery, dirty,
+route-presence, owning-stack, runtime-absence, or other fabricated context.
+
+The exact graph mapping is:
+
+| Event | Domain-owned structural edge relation |
+| --- | --- |
+| `workspace.observed-state.changed` | workspace-observed graph |
+| `runtime-stack.observed-state.changed` | runtime-stack-observed graph |
+| `service.observed-state.changed` | workspace-service-observed graph |
+| `terminal.state.changed` | terminal graph |
+| `ai-session.state.changed` | AI-session graph |
+
+The full-observation events consume the same domain authority: process-observed and
+process-desired structural predicates for `process.observation.changed`, and preview-observed and
+preview-desired structural predicates for `preview.state.changed`.
+
+`service.health.changed` follows the authoritative workspace-service-health graph: `unknown` may
+transition to `starting`, `healthy`, or `unhealthy`; `starting` may transition to `healthy`,
+`unhealthy`, or `unknown`; `healthy` may transition to `unhealthy` or `unknown`; and `unhealthy`
+may transition to `healthy` or `unknown`. `previous: null` permits any valid health state as a first
+observation. Equal health states and every absent edge are invalid. F10 consumes a pure
+domain-owned structural health-edge predicate. The separate service-state/health invariant still
+requires non-`unknown` health only while the service is actually observed `running`.
+
+Other event resource parent fields are mandatory even when `operationId` is null. Absence of an
+operation association never relaxes resource identity.
+
+#### Snapshot/event recovery completeness
+
+| Event category | Current state recovered from snapshot |
+| --- | --- |
+| `operation.progressed` | retained `accepted` observation with updated `updatedAt`; progress text is transient |
+| `operation.succeeded` | retained `succeeded` observation when still recoverable |
+| `operation.failed` | retained `failed` observation and `AgentExecutionFailure` when still recoverable |
+| `project.inspected` | matching project `gitInspections` scope |
+| `workspace.observed-state.changed` | `WorkspaceInspectionData.observedState` |
+| `runtime-stack.observed-state.changed` | extracted `WorkspaceInspectionData["runtimeStack"].observedState` and matching runtime-stack member |
+| `service.observed-state.changed` | `WorkspaceServiceObservation.observedState` |
+| `service.health.changed` | `WorkspaceServiceObservation.health` |
+| `process.observation.changed` | complete current `ProcessInspectionData` |
+| `terminal.state.changed` | terminal snapshot member `state` |
+| `preview.state.changed` | complete current `PreviewInspectionData`, including hostname and route presence |
+| `ai-session.state.changed` | AI-session snapshot member `state` |
+
+When applying a runtime-stack state event, Web updates both the matching runtime-stack member and
+the equal nested `WorkspaceInspectionData.runtimeStack.observedState` in its Agent-observed view so
+the required snapshot equality remains true. The event carries one observation, not two divergent
+states. When a service-state event moves the service away from `running`, Web also sets its
+snapshot health to `unknown`.
+
+`operation.progressed` messages are transient informational events and are not reconstructed by a
+snapshot. Snapshots guarantee current Agent-observed resource state and every currently
+nonterminal `accepted` operation observation. Retained terminal operation observations provide
+best-available recovery only and remain subject to accepted F09 compaction. F10 does not claim
+permanent historical operation-outcome recovery. No remaining F10 event changes durable current
+Agent-observed resource state that the snapshot cannot represent.
+
+### F10 errors and exhaustive route applicability
+
+F10 adds exactly two error codes. Both use the ordinary strict `ErrorEnvelope` and are separate
+from the unchanged 23-code F09 executable registry:
+
+| Code | Status | Retryable | Exact strict details |
+| --- | --- | --- | --- |
+| `EVENT_CURSOR_INVALID` | `400` | false | `{ reason: one of ("missing", "malformed", "unsupported_version", "invalid_agent_boot_id", "invalid_sequence", "sequence_out_of_range") }` |
+| `EVENT_SNAPSHOT_REQUIRED` | `409` | false | `{ reason: one of ("boot_mismatch", "cursor_expired", "history_unavailable"), currentAgentBootId: UuidV7, snapshotPath: "/v1/snapshot" }` |
+
+The useful executable registry views are: unchanged F09-only (23), F10-only (2), and complete
+Agent API v1 (25). Existing F09-only public exports retain their meaning and exclude both F10
+codes. `AgentExecutionFailure` is a separate 18-code post-acceptance value union and does not
+change these route-error code counts.
+
+Cursor-invalid reason selection is deterministic and uses this precedence after query-collection
+validation:
+
+1. No `cursor` parameter: `missing`.
+2. A first component matching `v` followed by one or more ASCII decimal digits, but not exactly
+   `v1`: `unsupported_version`.
+3. Otherwise, failure to split into exactly `v1`, one boot-ID component, and one sequence
+   component, or any forbidden whitespace/additional component: `malformed`.
+4. An exact `v1` structure whose boot component is not `UuidV7`: `invalid_agent_boot_id`.
+5. A valid boot component whose sequence does not match `0|[1-9][0-9]*`:
+   `invalid_sequence`.
+6. A grammatically valid decimal sequence greater than 9007199254740991:
+   `sequence_out_of_range`.
+
+An empty cursor value is `malformed`. Duplicate `cursor` parameters are request-shape failures,
+not cursor-value failures.
+
+For a syntactically valid cursor, `EVENT_SNAPSHOT_REQUIRED.reason` follows this exact decision
+model. Let `H` be the current boot's greatest emitted event sequence, or `0` before any event. Let
+the earliest replayable cursor boundary `B` be:
+
+- `N - 1` when `N` is the earliest normally retained real event;
+- `H` when `H > 0` and normal retention has discarded every real event;
+- `0` when `H = 0`.
+
+Thus replay from cursor sequence `B` begins with the earliest retained event when one exists. A
+cursor at `B` is not expired merely because no earlier event remains.
+
+| Precedence | Condition | Result |
+| --- | --- | --- |
+| 1 | `cursor.agentBootId` differs from the current Agent boot ID | `boot_mismatch` |
+| 2 | boot matches and `cursor.sequence < B` | `cursor_expired` |
+| 3 | boot matches, cursor is not expired, and `cursor.sequence > H` | `history_unavailable` |
+| 4 | boot matches, cursor is not expired, but the Agent cannot provide every event in the contiguous range `cursor.sequence + 1` through `H` because required retained history is missing, corrupt, or unreadable | `history_unavailable` |
+| 5 | none of the above | replay is valid |
+
+Sequence zero is replayable exactly while `B = 0`. If the earliest retained event is `1`, cursor
+zero remains the valid boundary immediately before it. Once normal retention advances `B` above
+zero, cursor zero is expired. `history_unavailable` is never used as another name for ordinary
+retention expiry.
+
+The following route table is exhaustive:
+
+| Operation | Exact executable errors |
+| --- | --- |
+| `snapshot.get` | reused F09 `PROTOCOL_VERSION_UNSUPPORTED (400/426)`; reused F09 `REQUEST_INVALID (400)`; reused F09 `AGENT_INTERNAL_ERROR (500)` |
+| `event.stream` | reused F09 `PROTOCOL_VERSION_UNSUPPORTED (400/426)`; F10-only `EVENT_CURSOR_INVALID (400)`; reused F09 `REQUEST_INVALID (400)`; F10-only `EVENT_SNAPSHOT_REQUIRED (409)`; reused F09 `AGENT_INTERNAL_ERROR (500)` |
+
+Both routes reuse the common DevSpace protocol-version header behavior and exact existing
+`PROTOCOL_VERSION_UNSUPPORTED` retryability/details schema. `REQUEST_INVALID` is limited to other
+non-cursor request-shape failures: forbidden DevSpace headers, forbidden body, unknown/duplicate
+query parameters, or any query input on `snapshot.get`. Missing or invalid `event.stream` cursor
+values always use `EVENT_CURSOR_INVALID`, never `REQUEST_INVALID`. These responsibilities do not
+overlap.
+
+When more than one defect is present, validation precedence is: protocol-version metadata first;
+then other header/body/query-collection shape; then cursor value syntax/representation; then
+runtime replay availability. This selects, respectively, `PROTOCOL_VERSION_UNSUPPORTED`,
+`REQUEST_INVALID`, `EVENT_CURSOR_INVALID`, or `EVENT_SNAPSHOT_REQUIRED`.
+
+All errors occur before the successful response begins. After `event.stream` sends HTTP `200`, no
+JSON error envelope may be appended; a later failure closes the transport.
+
+### NDJSON event-stream framing
+
+Successful `event.stream` response metadata is exactly:
+
+```text
+HTTP status: 200
+Content-Type: application/x-ndjson; charset=utf-8
+```
+
+Each emitted line is one complete valid ordinary JSON serialization of one strict `AgentEvent`,
+encoded as UTF-8 and followed by one LF byte (`0x0A`). Raw CR (`0x0D`) and LF bytes are forbidden
+inside the line; logical newlines inside JSON strings use normal JSON escape sequences and do not
+break framing. Insignificant single-line JSON whitespace is permitted, while producers should emit
+compact JSON. Object property order is semantically insignificant. RFC 8785/JCS and canonical
+property ordering are not required, and consumers must not depend on byte-for-byte
+canonicalization or property order.
+
+Blank lines are forbidden. CRLF is not an alternative delimiter. Pretty-printed/multiline JSON is
+invalid because it contains raw line breaks. Every complete event, including the final complete
+event before a normal close, is terminated by LF.
+
+If a connection ends with a final line that lacks its terminating LF, that line is uncommitted and
+Web discards it even when its bytes happen to parse as complete JSON. Web advances its cursor only
+after a fully processed LF-terminated event and reconnects from the last such cursor. Terminal
+bytes, raw process output bytes, and raw interactive AI bytes are never NDJSON event content.
+
+F10 requires the exact content-type constant, event schemas, and framing fixtures. The F10 package
+root does not expose an NDJSON codec API. Fixture tests may use a test-local pure one-event line
+helper, but fixtures compare parsed semantic event values or an explicitly fixed serializer vector;
+they must not imply that every producer uses one property order. The helper is not a versioned
+public contract. No stream reader, buffering state machine, backpressure, transport, or writer
+implementation belongs to F10.
+
+### Runtime-only ordering, replay, and snapshot semantics
+
+Individual runtime schemas can validate sequence ranges, cursor grammar/range, cursor/event
+boot-and-sequence equality for one event, and snapshot boot/through-cursor equality. Snapshot
+schemas also enforce their cross-field and uniqueness refinements described above.
+
+The following are runtime history/transport guarantees and must be documented in generated schema
+comments rather than falsely claimed as standalone JSON Schema validation:
+
+- on every Agent start, a new `agentBootId` is created and the first real event sequence is `1`;
+- within one boot, emitted event sequences increase by exactly one;
+- replay returns retained events in sequence order with sequence greater than the supplied cursor;
+- a snapshot is self-consistent through its `throughCursor`;
+- reconnect after snapshot recovery begins after that cursor;
+- retained replay has no intentional gap.
+
+Replay succeeds only while the cursor boot ID is current and every required later event remains
+retained. A wrong boot, expired cursor, or unavailable required history produces
+`EVENT_SNAPSHOT_REQUIRED`. Web then fetches `/v1/snapshot`, replaces its Agent-observed view, and
+resubscribes from `throughCursor`. No F10 schema calculates retention, stores history, performs
+replay, or implements snapshot collection.
 
 ## Implementation-readiness invariants
 
@@ -884,3 +1497,52 @@ document without another protocol decision:
     PIDs, mounts, host ports, gateway targets, Caddy fragments, secret values, or open metadata.
 12. F09 exports no event, cursor, sequence, snapshot, replay, NDJSON success, F10 error, runtime
     plan, or reconciliation schema.
+
+### F10 implementation-readiness invariants
+
+An F10 implementation and its independent fixtures must establish all of the following without a
+new protocol decision:
+
+1. The F10 inventory contains exactly the two named GET routes, and the complete v1 inventory is
+   exactly 31 routes without reconciliation.
+2. `EventSequence` accepts exactly safe integers 1..9007199254740991; zero is rejected.
+3. `EventCursor` accepts exactly the specified ASCII grammar and range, including `.0`.
+4. Snapshot `agentBootId` equals the boot component of `throughCursor`.
+5. Snapshot data contains exactly the four named fields and both arrays may be empty.
+6. The snapshot resource union contains exactly eight members, uses the exact type-specific
+   identity keys, supports all project Git scopes, and contains no source inspection.
+7. Snapshot resources, project Git scopes, and operation observations enforce their exact
+   uniqueness rules without imposing array order.
+8. Agent operation observations use exactly `accepted`, `succeeded`, and `failed`, expose no
+   running phase, enforce exact event application, retain every nonterminal accepted operation,
+   and leave terminal retention subject to F09 compaction.
+9. `AgentExecutionFailure` contains exactly the 18 enumerated post-acceptance-capable codes, all 23
+   F09 codes have one explicit classification, all 19 mutations have exact applicability, and
+   retryability never re-executes the same operation ID.
+10. The event union contains exactly the 12 table discriminators, each with one exact resource,
+    operation-ID, and payload contract; no second UUID event identity, cancellation event,
+    process-output event, or special process start/exit event exists.
+11. An event cursor equals that event's boot ID and sequence; a cursor ending in `.0` cannot appear
+    in an event envelope.
+12. Nested objects, empty payloads, failure values, and every union member reject unknown fields.
+13. Project Git scope/inspection identities and every embedded F09 observation refinement are
+    enforced.
+14. Structural edge predicates remain domain-owned, contracts fabricate no contextual evidence,
+    non-null generic state pairs are genuine edges, and full process/preview observations follow
+    their exact structural and same-state change rules.
+15. `boot_mismatch`, `cursor_expired`, and `history_unavailable` follow the exact replay-boundary
+    decision table, including sequence zero.
+16. The F10-only error registry contains exactly two codes, the F09 view remains exactly 23, and
+    the complete view is exactly 25.
+17. Both F10 routes reuse `PROTOCOL_VERSION_UNSUPPORTED`; cursor-value and other request-shape
+    errors follow the non-overlapping route table.
+18. NDJSON fixtures prove ordinary non-JCS JSON semantics, one LF-terminated event per line, no
+    blanks, no CRLF, property-order independence, and rejection of an incomplete final line for
+    cursor advancement.
+19. The recovery matrix accounts for every current-state effect of the 12 events, treats progress
+    messages as transient, guarantees all current nonterminal accepted observations, and marks
+    terminal operation recovery as best-available.
+20. Generated schema comments distinguish object-level refinements from stream/history guarantees.
+21. No fixture, export, schema, or inventory entry introduces source-inspection ownership,
+    reconciliation, a public streaming codec, terminal/output bytes, output retention, persistence,
+    replay execution, or F11+ behavior.

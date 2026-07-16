@@ -24,6 +24,10 @@ Milestone 0 — Architecture and contracts.
 - a corrected Agent API v1 F09 wire specification with 29 routes, 19 caller-ID-only mutations,
   closed endpoint payloads, strict route-specific errors, and terminal binary framing separated
   from deferred reconciliation and the two F10-owned snapshot/event routes;
+- a corrected F10 Agent API v1 wire-specification candidate with two non-mutating routes, JSON-safe
+  boot-scoped cursors, an eight-resource recovery snapshot, 12 closed event payloads, race-aware
+  asynchronous execution failures, two F10-only errors, and exact LF-delimited ordinary-JSON
+  framing;
 - Caddy preview gateway;
 - terminal-first AI sessions;
 - trusted owner-controlled repository threat model.
@@ -32,8 +36,8 @@ Milestone 0 — Architecture and contracts.
 
 - documentation, repository scaffold, pure domain lifecycle implementation, accepted M0-F06 pure
   security-validation implementation, accepted M0-F07 Project Options schema contract, accepted
-  M0-F08 canonicalization and hashing, and the documentation-only Agent API v1 wire-contract gap
-  closure accepted and implemented as an executable M0-F09 review candidate;
+  M0-F08 canonicalization and hashing, and accepted/committed M0-F09 Agent API v1 executable
+  contracts;
 - a pnpm workspace with the seven Milestone 0 app/package boundaries, empty ESM source roots, and a dependency-graph invariant check;
 - strict TypeScript typecheck/build configurations and semantic flat-config ESLint for all eight active workspaces, with generated output kept ignored;
 - clean-clone cross-package typechecking resolves public workspace imports to source entry points through a shared no-emit TypeScript topology; production builds remain project-reference based;
@@ -74,6 +78,13 @@ Milestone 0 — Architecture and contracts.
 - one authoritative domain Git branch-shorthand primitive consumed by contracts and delegated to
   by security without changing the F06 public contract, with the narrow `security -> domain`
   dependency edge enforced by workspace tooling;
+- the first M0-F10 implementation attempt correctly stopped before changes when the retained
+  snapshot/event design proved underspecified; the documentation-only specification-closure slice
+  then failed adversarial independent review with 11 concrete ownership, identity, lifecycle,
+  failure, recovery, and framing findings; the current documentation-only correction addresses
+  those findings, and a focused re-review found five remaining operation-recovery, race,
+  lifecycle-ownership, preview-recovery, and process-observation problems now corrected without
+  beginning production implementation;
 
 ## What does not exist
 
@@ -83,8 +94,10 @@ Milestone 0 — Architecture and contracts.
 - no database migrations;
 - no terminals, tasks, previews, worktree mutation, or AI sessions;
 - no Agent API transport, handlers, clients, journal, persistence, or runtime behavior;
+- no executable F10 snapshot, cursor, event, error, fixture, or generated-schema implementation;
 
 ## Next task
 
-Re-review the focused uncommitted M0-F09 correction after the seven independent-review findings.
-Do not begin M0-F10 until F09 is reviewed and accepted.
+Perform a focused independent re-review of the corrected uncommitted documentation-only M0-F10
+specification. Do not implement F10 production contracts until this correction is accepted, and
+do not begin M0-F11.
