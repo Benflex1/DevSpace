@@ -707,7 +707,7 @@ The route-specific error validators further narrow discriminators as follows:
 ## Terminal attachment and streaming contract
 
 Terminal streaming belongs to F09 because `/v1/terminals/{terminalId}/stream` is an explicit v1
-endpoint and M0-F10 explicitly excludes terminal frames. This section defines framing only; it does
+endpoint and the F10 contract explicitly excludes terminal frames. This section defines framing only; it does
 not implement WebSocket or PTY behavior.
 
 ### Upgrade request and response

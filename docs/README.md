@@ -13,11 +13,6 @@
 `current-state.md` is the concise factual status of the repository. It is not an authority for
 architecture or contracts.
 
-## Historical and execution documents
-
-`implementation/milestone-0-foundation-plan.md` is retained as historical execution context after
-Milestone 0. It is not an active implementation authority or a permanent architecture source.
-
 ## Authority and conflict order
 
 When documents disagree, use this order:
@@ -27,7 +22,7 @@ When documents disagree, use this order:
 3. versioned specifications;
 4. architecture and security documents;
 5. roadmap;
-6. status and implementation plans;
+6. current status;
 7. package READMEs and code comments.
 
 Agents should read `AGENTS.md`, directly relevant code, and directly relevant durable
