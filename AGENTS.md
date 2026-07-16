@@ -1,35 +1,49 @@
 # DevSpace Agent Instructions
 
-## Current milestone
+## Development rules
 
-Milestone 0 only: architecture, contracts, schemas, documentation, test fixtures, and repository scaffolding.
+- Respect accepted durable architecture and security boundaries.
+- Consult the directly relevant specification when one exists. Do not require a new
+  specification or ADR for ordinary reversible implementation work; update durable contracts
+  only when behavior or architecture genuinely changes.
+- Prefer vertical product slices after Milestone 0. A product slice should end in observable
+  user value whenever product work is involved.
+- Make reasonable reversible local decisions during implementation.
+- Stop only for a genuine architectural, security, or destructive-operation blocker.
+- The active task lives in the current prompt, not in a committed task-tracking document.
+- Update `docs/current-state.md` at significant checkpoints, milestone boundaries, or when the
+  next developer would otherwise receive materially incorrect information.
+- For documentation conflicts, use the single authority order in `docs/README.md`.
 
-Do not implement project discovery, Docker control, terminals, task execution, previews, Git mutation, or AI sessions until the relevant contracts and ADRs are accepted.
-
-## Architecture invariants
+## Architecture boundaries
 
 - The browser talks only to the web application.
-- The web application is the sole SQLite writer.
-- The web application never invokes Git, shell commands, Docker, or Caddy.
-- The workspace agent is the only component allowed to manage the dedicated rootless Docker runtime.
-- The host/Coolify Docker socket is prohibited.
-- Project containers receive only their worktree and declared named volumes.
-- Privileged containers, host networking, host PID mode, arbitrary host mounts, and production-directory access are prohibited.
-- Every project has a primary workspace; additional workspaces are optional.
-- Every workspace has an independent Git worktree and container stack.
-- Project Options are UI-managed, stored as immutable database revisions, and never require YAML editing.
-- Browser actions reference task, preview, service, or AI-profile IDs. They never provide executable commands or host paths.
+- The web application is the sole SQLite writer and never invokes Git, shell commands, Docker,
+  or Caddy.
+- The workspace agent is the only component allowed to manage the dedicated rootless Docker
+  runtime. The host/Coolify Docker socket is prohibited.
+- Project containers receive only their worktree and declared named volumes. Privileged
+  containers, host networking, host PID mode, arbitrary host mounts, and production-directory
+  access are prohibited.
+- Every project has a primary workspace; additional workspaces are optional. Every workspace
+  has an independent Git worktree and container stack.
+- Project Options are UI-managed, stored as immutable database revisions, and never require YAML
+  editing.
+- Browser actions reference task, preview, service, or AI-profile IDs. They never provide
+  executable commands or host paths.
 - AI integrations begin as PTY-based CLIs inside the workspace container.
 - Preview routing is delegated to Caddy through a narrow adapter.
 - Never auto-merge or deploy production changes.
 
 ## Security model
 
-Registered repositories are trusted owner-controlled code, not hostile code. Nevertheless, enforce the host boundary, project/workspace separation, request validation, secret redaction, and least-privilege runtime design.
+Registered repositories are trusted owner-controlled code, not hostile code. Enforce the host
+boundary, project/workspace separation, request validation, secret redaction, canonical paths and
+hostnames, and least-privilege runtime design.
 
 ## Code organization
 
-- `apps/web`: UI, browser API, authentication, orchestration, database ownership.
+- `apps/web`: UI, browser API, authentication, orchestration, and database ownership.
 - `apps/agent`: filesystem, Git, rootless Docker, PTY, process, and gateway operations.
 - `packages/contracts`: versioned web/agent request, response, and event schemas.
 - `packages/domain`: state machines and domain invariants.
@@ -40,23 +54,46 @@ Registered repositories are trusted owner-controlled code, not hostile code. Nev
 
 Avoid generic `shared` or `utils` packages. Put logic with the domain that owns it.
 
-## Required checks
+## Review policy
 
-A future implementation must keep these commands passing from a clean clone:
+- Codex self-review and tests are always required.
+- Independent review is selective. Require it primarily for authentication/authorization,
+  container/host isolation, destructive or complex migrations, security boundaries, major
+  architecture changes, and unusually risky cross-system behavior.
+- Normal features and straightforward schema/code work do not automatically require an
+  implement-review-correction-re-review cycle.
 
-```bash
-pnpm install --frozen-lockfile
-pnpm lint
-pnpm test
-pnpm typecheck
-pnpm build
-pnpm contracts:check
-pnpm schema:check
-pnpm db:migrate:test
-```
+## Model policy
 
-## Branches and changes
+- Commits, renames, and tiny changes: Luna Medium/High.
+- Normal scoped implementation: Luna XHigh.
+- Unclear repository exploration: Terra Medium.
+- Architecture, security, migrations, and complex boundaries: Sol Medium.
+- A failed focused Terra/Sol attempt: Sol High/Max.
+- Sol Ultra: never.
 
-Use branch names that match the eventual scope, such as `feat/...`, `fix/...`, or `refactor/...`. Do not use a documentation-only branch prefix if implementation will be added later.
+## Chat rotation
 
-Keep changes small and independently testable. Update `docs/current-state.md` after every meaningful slice.
+- Use the same Codex chat for one implementation and its immediate fixes.
+- Use a fresh chat for a genuinely new subsystem, stale context, or independent review.
+- Do not rotate merely because a fixed prompt count was reached.
+
+## Git and checks
+
+- Use branch names matching the eventual scope, such as `feat/...`, `fix/...`, or `refactor/...`.
+- Make intentional commits. Never merge automatically, deploy production automatically, or use
+  destructive Git operations without explicit user intent.
+- A clean clone must keep this verification contract passing:
+
+  ```bash
+  pnpm install --frozen-lockfile
+  pnpm workspace:check
+  pnpm lint
+  pnpm test
+  pnpm typecheck
+  pnpm build
+  pnpm contracts:check
+  pnpm schema:check
+  pnpm db:migrate:test
+  pnpm db:check
+  ```

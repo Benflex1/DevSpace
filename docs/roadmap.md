@@ -1,119 +1,94 @@
 # Roadmap
 
-## Milestone 0 — Architecture and contracts
+The roadmap switches to vertical product delivery after the completed foundation. A slice may
+touch Web, DB, Agent, runtime, and UI together when that is required to produce visible value.
 
-Deliver documentation, schemas, ADRs, contract fixtures, repository scaffold, and CI contract checks. No feature implementation.
+## Milestone 0 — Foundation
 
-## Milestone 1 — Project onboarding and primary workspace foundation
+Status: complete.
 
-Small independently testable slices:
+Contains:
 
-1. **Global settings model**
-   - managed project/worktree roots;
-   - import roots;
-   - approved preview-domain bases;
-   - rootless runtime availability metadata.
+- architecture and security boundaries;
+- executable contracts;
+- Project Options foundation;
+- lifecycle and security primitives;
+- database schema and migrations;
+- clean-clone CI contract.
 
-2. **Project Options revision storage**
-   - create draft;
-   - strict validation;
-   - activate and supersede transactionally;
-   - retrieve active revision;
-   - no Docker side effects.
+## Milestone 1 — Usable Primary Workspace
 
-3. **Agent health over Unix socket**
-   - protocol negotiation;
-   - capability report;
-   - rootless runtime and managed-root checks;
-   - no mutation.
+### Definition of done
 
-4. **Repository source inspection**
-   - inspect approved local import source or remote metadata;
-   - detect Git repository/default branch;
-   - collect package/runtime hints;
-   - reject source paths outside configured import roots.
+A user can open DevSpace in the browser, register or import a trusted repository, create its
+primary managed workspace, start a real isolated development container, use a browser terminal,
+run at least one configured task, and open a working preview URL.
 
-5. **Project registration**
-   - persist project;
-   - create draft detected options;
-   - dashboard shows `configuration required`;
-   - no managed clone yet.
+This milestone is implemented as vertical slices:
 
-6. **Activate Project Options**
-   - compile canonical runtime plan;
-   - agent policy validation;
-   - store hashes and activate revision;
-   - reject privileged/mount/socket policy violations.
+### 1. Project onboarding path
 
-7. **Managed repository store**
-   - clone/import to agent-derived bare repository store;
-   - verify ownership and remote;
-   - idempotent retry and cleanup on failure.
+Crosses the Web UI/API, SQLite, Agent Unix-socket health and inspection, and repository
+registration.
 
-8. **Primary worktree creation**
-   - create default-branch worktree at agent-derived path;
-   - persist primary workspace pinned to active revision;
-   - verify branch, HEAD, and clean status.
+Visible result: a project can be added and appears in DevSpace with real persisted status.
 
-9. **Stopped runtime-stack record**
-   - create runtime stack desired/observed as absent or stopped;
-   - no container creation yet;
-   - show planned image/services/previews from the pinned revision.
+### 2. Managed primary workspace
 
-10. **Project dashboard vertical slice**
-    - project name/source/default branch;
-    - active revision;
-    - primary workspace branch and dirty state;
-    - runtime not started state;
-    - refresh through semantic agent inspection.
+Crosses Web orchestration, the Agent, the managed repository store, the primary Git worktree, and
+persisted workspace/runtime state.
 
-11. **Security and integration tests**
-    - path/import-root escapes;
-    - symlink source escape;
-    - invalid refs;
-    - duplicate primary workspace;
-    - revision activation race;
-    - idempotent managed-store/worktree operations;
-    - browser cannot provide destination paths.
+Visible result: a real repository has a managed primary workspace.
 
-### Milestone 1 definition of done
+### 3. Real workspace runtime
 
-- A trusted repository can be registered.
-- Detected Project Options are reviewed and activated through the UI.
-- DevSpace creates a managed repository store and primary Git worktree.
-- The project dashboard shows correct Git and configuration state.
-- No project command or container has run.
-- Invalid paths and runtime-policy violations are rejected.
-- Clean-clone lint, test, typecheck, build, schema, contract, and migration checks pass.
+Crosses Project Options runtime-plan compilation, Agent policy validation, dedicated rootless
+Docker, start/stop lifecycle, and persisted desired/observed state.
 
-## Milestone 2 — Workspace runtime lifecycle
+Visible result: the user can start and stop the real isolated development environment.
 
-Implement the dedicated rootless Docker adapter, workspace stack creation, image pull/build, supporting services, start/stop/rebuild, resource limits, and reconciliation.
+### 4. Terminal and task path
 
-## Milestone 3 — Tasks and logs
+Crosses the WebSocket/browser terminal, Agent PTY, workspace container, and process/task tracking.
 
-Implement predefined structured commands, process supervision, stop/restart, exit status, rotated logs, and check summaries.
+Visible result: the user can interact with the running workspace and execute useful project
+commands.
 
-## Milestone 4 — Terminals
+### 5. Preview path
 
-Implement xterm.js, container PTYs, resize, reconnect while the agent remains alive, multiple tabs, and explicit auditing.
+Crosses a configured preview target, the Agent, the Caddy gateway, a wildcard domain, and Web
+status.
 
-## Milestone 5 — Previews
+Visible result: the user can open the running project through its DevSpace preview URL.
 
-Implement Caddy routes, approved wildcard domains, health checks, HMR/WebSockets, route cleanup, and Cloudflare Access deployment validation.
+### 6. Dogfood and hardening
 
-## Milestone 6 — Optional isolated workspaces
+Use DevSpace to work on at least one real project and fix only concrete blockers exposed by real
+use. The Milestone 1 definition of done remains the complete usable path above.
 
-Implement additional branch/worktree creation, independent stacks, dirty-state handling, archive/remove, and parallel previews.
+These are not mandatory isolated subsystem phases. Each slice ends in observable user value.
 
-## Milestone 7 — AI PTY sessions
+## Milestone 2 — Better Daily Development
 
-Implement approved AI CLI profiles, credential injection, start/resume/interrupt/stop, and workspace-scoped session metadata.
+Likely goals include better Project Options editing and detection, supporting services, logs and
+process UX, rebuild/restart flows, stronger recovery and reconciliation, and better Git status.
 
-## Milestone 8 — Git review and publishing
+## Milestone 3 — Parallel Workspaces
 
-Implement diffs, staging, checks, explicit commits, pushes, and optional draft pull requests. Never auto-merge.
+Add optional isolated workspaces, branches and worktrees, independent stacks and previews, and
+archive/remove lifecycle.
 
-## Milestone 9 — Reliability and polish
+## Milestone 4 — AI Development Sessions
 
-Implement deeper reconciliation, stale cleanup, resource reporting, notification, metadata backup, and restore validation.
+Add approved AI CLI profiles, start/resume/interrupt/stop controls, terminal-backed AI sessions,
+workspace-scoped credentials, and session metadata and UX.
+
+## Milestone 5 — Git Review and Publishing
+
+Add diff/status UI, staging, checks, commits, push, and optional draft pull request creation.
+Never auto-merge.
+
+## Milestone 6 — Reliability and Polish
+
+Add deeper reconciliation, stale cleanup, resource reporting, backup/restore validation,
+notifications, and UX polish.

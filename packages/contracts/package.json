@@ -1,0 +1,25 @@
+{
+  "name": "@devspace/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
+    "build": "tsc --build tsconfig.build.json --force --pretty false"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@devspace/domain": "workspace:*",
+    "canonicalize": "3.0.0",
+    "zod": "^4.4.3"
+  }
+}

@@ -110,7 +110,11 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 ### Controls
 
 - Cloudflare Access plus application session and strict Origin checks;
-- short-lived one-session attachment tokens bound to user, workspace, and terminal IDs;
+- Web authenticates the browser and authorizes the exact workspace and terminal before proxying a
+  stream;
+- the Agent trusts only the protected local Web-to-Agent Unix-socket peer, is not a browser
+  authentication boundary, and is not directly reachable by untrusted browser clients;
+- exactly one active Agent stream attachment is permitted per terminal resource;
 - browser never chooses container or exec identifiers;
 - output is streamed, bounded, and not indexed globally;
 - secret values are redacted where feasible, but terminal output is treated as sensitive;

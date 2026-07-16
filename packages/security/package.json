@@ -1,0 +1,24 @@
+{
+  "name": "@devspace/security",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "pnpm --dir ../.. exec vitest run --project @devspace/security",
+    "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
+    "build": "tsc --build tsconfig.build.json --force --pretty false"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@devspace/domain": "workspace:*"
+  }
+}

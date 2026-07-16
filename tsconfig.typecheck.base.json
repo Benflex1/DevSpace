@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@devspace/web": ["apps/web/src/index.ts"],
+      "@devspace/agent": ["apps/agent/src/index.ts"],
+      "@devspace/contracts": ["packages/contracts/src/index.ts"],
+      "@devspace/domain": ["packages/domain/src/index.ts"],
+      "@devspace/database": ["packages/database/src/index.ts"],
+      "@devspace/project-options": ["packages/project-options/src/index.ts"],
+      "@devspace/security": ["packages/security/src/index.ts"],
+      "@devspace/testkit": ["packages/testkit/src/index.ts"]
+    }
+  }
+}

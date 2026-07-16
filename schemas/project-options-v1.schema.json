@@ -1,585 +1,1480 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://devspace.local/schemas/project-options-v1.schema.json",
-  "title": "DevSpace Project Options v1",
   "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schemaVersion",
-    "general",
-    "environment",
-    "tasks",
-    "services",
-    "previews",
-    "variables",
-    "ai",
-    "resources",
-    "workspaceDefaults"
-  ],
   "properties": {
     "schemaVersion": {
+      "type": "number",
       "const": 1
     },
-    "general": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "name",
-        "slug",
-        "defaultBranch"
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 120
+    "namedVolumes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "cache",
+              "data"
+            ]
+          }
         },
-        "slug": {
-          "type": "string",
-          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
-          "maxLength": 50
-        },
-        "defaultBranch": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "autoFetch": {
-          "type": "boolean",
-          "default": true
-        }
+        "required": [
+          "key",
+          "kind"
+        ],
+        "additionalProperties": false
       }
     },
-    "environment": {
+    "developmentEnvironment": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "source",
-        "defaultUser",
-        "passwordlessSudo",
-        "setupSteps",
-        "cacheVolumes"
-      ],
       "properties": {
         "source": {
           "oneOf": [
             {
               "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "preset",
-                "version"
-              ],
               "properties": {
                 "kind": {
+                  "type": "string",
                   "const": "preset"
                 },
-                "preset": {
-                  "type": "string"
+                "presetKey": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$"
                 },
-                "version": {
-                  "type": "string"
-                }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "image"
-              ],
-              "properties": {
-                "kind": {
-                  "const": "image"
-                },
-                "image": {
+                "runtimeVersion": {
                   "type": "string",
                   "minLength": 1
                 }
-              }
+              },
+              "required": [
+                "kind",
+                "presetKey",
+                "runtimeVersion"
+              ],
+              "additionalProperties": false
             },
             {
               "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "dockerfilePath",
-                "contextPath"
-              ],
               "properties": {
                 "kind": {
+                  "type": "string",
+                  "const": "image"
+                },
+                "imageReference": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "imageReference"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
                   "const": "dockerfile"
                 },
                 "dockerfilePath": {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 },
                 "contextPath": {
-                  "type": "string"
+                  "default": ".",
+                  "type": "string",
+                  "minLength": 1
                 }
-              }
+              },
+              "required": [
+                "kind",
+                "dockerfilePath"
+              ],
+              "additionalProperties": false
             }
           ]
         },
-        "defaultUser": {
-          "enum": [
-            "devspace",
-            "root"
+        "containerUser": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "passwordlessSudo": {
+          "default": false,
           "type": "boolean"
-        },
-        "setupSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/namedCommand"
-          },
-          "maxItems": 50
-        },
-        "cacheVolumes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/namedVolume"
-          },
-          "maxItems": 20
-        }
-      }
-    },
-    "tasks": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/task"
-      },
-      "maxItems": 100
-    },
-    "services": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/service"
-      },
-      "maxItems": 20
-    },
-    "previews": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/preview"
-      },
-      "maxItems": 20
-    },
-    "variables": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/variable"
-      },
-      "maxItems": 200
-    },
-    "ai": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "profiles"
-      ],
-      "properties": {
-        "profiles": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/aiProfile"
-          },
-          "maxItems": 10
-        }
-      }
-    },
-    "resources": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "memoryMb",
-        "cpuCores",
-        "pids",
-        "maxConcurrentWorkspaces"
-      ],
-      "properties": {
-        "memoryMb": {
-          "type": "integer",
-          "minimum": 256,
-          "maximum": 131072
-        },
-        "cpuCores": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "maximum": 128
-        },
-        "pids": {
-          "type": "integer",
-          "minimum": 64,
-          "maximum": 100000
-        },
-        "maxConcurrentWorkspaces": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 32
-        }
-      }
-    },
-    "workspaceDefaults": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "autoStart",
-        "stopAfterMinutesIdle",
-        "retainStoppedDays"
-      ],
-      "properties": {
-        "autoStart": {
-          "type": "boolean"
-        },
-        "stopAfterMinutesIdle": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 5
-        },
-        "retainStoppedDays": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 3650
-        }
-      }
-    }
-  },
-  "$defs": {
-    "key": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]{0,49}$"
-    },
-    "command": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "executable",
-        "args",
-        "workingDirectory"
-      ],
-      "properties": {
-        "executable": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 255
-        },
-        "args": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "maxLength": 4096
-          },
-          "maxItems": 200
         },
         "workingDirectory": {
+          "default": "/workspace",
           "type": "string",
-          "pattern": "^(?:\\.|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)$"
-        }
-      }
-    },
-    "namedCommand": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "name",
-        "command"
-      ],
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/key"
+          "const": "/workspace"
         },
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "command": {
-          "$ref": "#/$defs/command"
-        }
-      }
-    },
-    "namedVolume": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "target"
-      ],
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/key"
-        },
-        "target": {
-          "type": "string",
-          "pattern": "^/[^\\0]+$"
-        }
-      }
-    },
-    "task": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "name",
-        "command",
-        "interactive",
-        "longRunning",
-        "timeoutSeconds"
-      ],
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/key"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "command": {
-          "$ref": "#/$defs/command"
-        },
-        "interactive": {
-          "type": "boolean"
-        },
-        "longRunning": {
-          "type": "boolean"
-        },
-        "timeoutSeconds": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 1
-        }
-      }
-    },
-    "service": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "name",
-        "image",
-        "ports",
-        "volumes"
-      ],
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/key"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "image": {
-          "type": "string",
-          "minLength": 1
+        "environment": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Z_][A-Z0-9_]*$"
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "literal"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "host"
+                  },
+                  "variable": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "variable"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "secret"
+                  },
+                  "secretId": {
+                    "type": "string",
+                    "minLength": 36,
+                    "maxLength": 36,
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "secretId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "generated"
+                  },
+                  "valueKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z][a-z0-9-]*$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "valueKey"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "service"
+                  },
+                  "serviceKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z][a-z0-9-]*$"
+                  },
+                  "valueKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z][a-z0-9-]*$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "serviceKey",
+                  "valueKey"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
         },
         "ports": {
+          "default": [],
           "type": "array",
           "items": {
             "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "name",
-              "containerPort"
-            ],
             "properties": {
               "name": {
-                "$ref": "#/$defs/key"
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9-]*$"
               },
               "containerPort": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 65535
+              },
+              "protocol": {
+                "default": "tcp",
+                "type": "string",
+                "const": "tcp"
               }
-            }
+            },
+            "required": [
+              "name",
+              "containerPort"
+            ],
+            "additionalProperties": false
           }
         },
         "volumes": {
+          "default": [],
           "type": "array",
           "items": {
-            "$ref": "#/$defs/namedVolume"
+            "type": "object",
+            "properties": {
+              "volumeKey": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "mountPath": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))\\/(?:[^/\\\\\\0]+(?:\\/[^/\\\\\\0]+)*)?$"
+              }
+            },
+            "required": [
+              "volumeKey",
+              "mountPath"
+            ],
+            "additionalProperties": false
           }
+        },
+        "setupSteps": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "executable": {
+                "type": "string",
+                "minLength": 1
+              },
+              "args": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "workingDirectory": {
+                "default": ".",
+                "type": "string",
+                "minLength": 1
+              },
+              "environment": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Z_][A-Z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "literal"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "host"
+                        },
+                        "variable": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[A-Z_][A-Z0-9_]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "variable"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "secret"
+                        },
+                        "secretId": {
+                          "type": "string",
+                          "minLength": 36,
+                          "maxLength": 36,
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "secretId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "generated"
+                        },
+                        "valueKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "valueKey"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "service"
+                        },
+                        "serviceKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9-]*$"
+                        },
+                        "valueKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "serviceKey",
+                        "valueKey"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "executable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "rebuildPolicy": {
+          "default": "manual",
+          "type": "string",
+          "enum": [
+            "manual",
+            "on-revision-change"
+          ]
         }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "tasks": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "object",
+            "properties": {
+              "executable": {
+                "type": "string",
+                "minLength": 1
+              },
+              "args": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "workingDirectory": {
+                "default": ".",
+                "type": "string",
+                "minLength": 1
+              },
+              "environment": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Z_][A-Z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "literal"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "host"
+                        },
+                        "variable": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[A-Z_][A-Z0-9_]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "variable"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "secret"
+                        },
+                        "secretId": {
+                          "type": "string",
+                          "minLength": 36,
+                          "maxLength": 36,
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "secretId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "generated"
+                        },
+                        "valueKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "valueKey"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "service"
+                        },
+                        "serviceKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9-]*$"
+                        },
+                        "valueKey": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9-]*$"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "serviceKey",
+                        "valueKey"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "executable"
+            ],
+            "additionalProperties": false
+          },
+          "interactive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "longRunning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "timeoutSeconds": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "concurrencyPolicy": {
+            "default": "reject",
+            "type": "string",
+            "enum": [
+              "reject",
+              "allow",
+              "replace"
+            ]
+          },
+          "successExitCodes": {
+            "default": [
+              0
+            ],
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "uniqueItems": true
+          },
+          "logRetentionDays": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "displayName",
+          "command"
+        ],
+        "additionalProperties": false
       }
     },
-    "preview": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "name",
-        "targetService",
-        "containerPort",
-        "protocol",
-        "domainBaseId",
-        "hostnamePattern",
-        "health"
-      ],
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/key"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "targetService": {
-          "type": "string",
-          "minLength": 1
-        },
-        "containerPort": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        },
-        "protocol": {
-          "const": "http"
-        },
-        "domainBaseId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "hostnamePattern": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 120
-        },
-        "health": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "path",
-            "expectedStatus",
-            "startupTimeoutSeconds"
-          ],
-          "properties": {
-            "path": {
+    "services": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "imageReference": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "default": {},
+            "type": "object",
+            "propertyNames": {
               "type": "string",
-              "pattern": "^/"
+              "minLength": 1,
+              "pattern": "^[A-Z_][A-Z0-9_]*$"
             },
-            "expectedStatus": {
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "literal"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "host"
+                    },
+                    "variable": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[A-Z_][A-Z0-9_]*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "variable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "secret"
+                    },
+                    "secretId": {
+                      "type": "string",
+                      "minLength": 36,
+                      "maxLength": 36,
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "secretId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "generated"
+                    },
+                    "valueKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[a-z][a-z0-9-]*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "valueKey"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "service"
+                    },
+                    "serviceKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[a-z][a-z0-9-]*$"
+                    },
+                    "valueKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[a-z][a-z0-9-]*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "serviceKey",
+                    "valueKey"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "volumes": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "volumeKey": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "mountPath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))\\/(?:[^/\\\\\\0]+(?:\\/[^/\\\\\\0]+)*)?$"
+                }
+              },
+              "required": [
+                "volumeKey",
+                "mountPath"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "ports": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "containerPort": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "protocol": {
+                  "default": "tcp",
+                  "type": "string",
+                  "const": "tcp"
+                }
+              },
+              "required": [
+                "name",
+                "containerPort"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "entrypoint": {
+            "default": null,
+            "anyOf": [
+              {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "command": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workingDirectory": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "healthCheck": {
+            "default": null,
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "http"
+                      },
+                      "portName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z][a-z0-9-]*$"
+                      },
+                      "path": {
+                        "default": "/",
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^\\/"
+                      },
+                      "expectedStatuses": {
+                        "default": [
+                          200
+                        ],
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 599
+                        },
+                        "uniqueItems": true
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "portName"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "tcp"
+                      },
+                      "portName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z][a-z0-9-]*$"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "portName"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "command"
+                      },
+                      "command": {
+                        "type": "object",
+                        "properties": {
+                          "executable": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "args": {
+                            "default": [],
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "workingDirectory": {
+                            "default": ".",
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "environment": {
+                            "default": {},
+                            "type": "object",
+                            "propertyNames": {
+                              "type": "string",
+                              "minLength": 1,
+                              "pattern": "^[A-Z_][A-Z0-9_]*$"
+                            },
+                            "additionalProperties": {
+                              "oneOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "literal"
+                                    },
+                                    "value": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "host"
+                                    },
+                                    "variable": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "pattern": "^[A-Z_][A-Z0-9_]*$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "variable"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "secret"
+                                    },
+                                    "secretId": {
+                                      "type": "string",
+                                      "minLength": 36,
+                                      "maxLength": 36,
+                                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "secretId"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "generated"
+                                    },
+                                    "valueKey": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "pattern": "^[a-z][a-z0-9-]*$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "valueKey"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "service"
+                                    },
+                                    "serviceKey": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "pattern": "^[a-z][a-z0-9-]*$"
+                                    },
+                                    "valueKey": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "pattern": "^[a-z][a-z0-9-]*$"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "serviceKey",
+                                    "valueKey"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "executable"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "command"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dependsOn": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "serviceKey": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "condition": {
+                  "type": "string",
+                  "enum": [
+                    "started",
+                    "healthy"
+                  ]
+                }
+              },
+              "required": [
+                "serviceKey",
+                "condition"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "resources": {
+            "default": {
+              "cpuMillicores": null,
+              "memoryBytes": null
+            },
+            "type": "object",
+            "properties": {
+              "cpuMillicores": {
+                "default": null,
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "memoryBytes": {
+                "default": null,
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "key",
+          "imageReference"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "previews": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workspace"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "service"
+                  },
+                  "serviceKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z][a-z0-9-]*$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "serviceKey"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "containerPort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "domainBaseId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "hostnamePattern": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?:[a-z0-9-]|\\{(?:project|workspace|preview|shortId)\\})+$"
+          },
+          "protocol": {
+            "default": "http",
+            "type": "string",
+            "const": "http"
+          },
+          "healthPath": {
+            "default": "/",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\/"
+          },
+          "healthStatuses": {
+            "default": [
+              200
+            ],
+            "type": "array",
+            "items": {
               "type": "integer",
               "minimum": 100,
               "maximum": 599
             },
-            "startupTimeoutSeconds": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 3600
-            }
+            "uniqueItems": true
+          },
+          "startupTimeoutSeconds": {
+            "default": 60,
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "webSocketForwarding": {
+            "default": true,
+            "type": "boolean"
           }
-        }
-      }
-    },
-    "variable": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "name",
-        "binding"
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[A-Z_][A-Z0-9_]*$"
         },
-        "binding": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "value"
-              ],
-              "properties": {
-                "kind": {
-                  "const": "literal"
-                },
-                "value": {
-                  "type": "string"
-                }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "secretId"
-              ],
-              "properties": {
-                "kind": {
-                  "const": "secret"
-                },
-                "secretId": {
-                  "type": "string"
-                }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "generator"
-              ],
-              "properties": {
-                "kind": {
-                  "const": "generated"
-                },
-                "generator": {
-                  "type": "string"
-                }
-              }
-            }
-          ]
-        }
+        "required": [
+          "key",
+          "displayName",
+          "target",
+          "containerPort",
+          "domainBaseId",
+          "hostnamePattern"
+        ],
+        "additionalProperties": false
       }
     },
     "aiProfile": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "name",
-        "provider",
-        "credentialSecretIds"
-      ],
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/key"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "provider": {
-          "type": "string",
-          "minLength": 1
-        },
-        "credentialSecretIds": {
-          "type": "array",
-          "items": {
-            "type": "string"
+      "default": null,
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "providerKey": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "executableProfileKey": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "fixedArgs": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "credentialSecretIds": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 36,
+                "maxLength": 36,
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "uniqueItems": true
+            },
+            "instructionsFilePath": {
+              "default": null,
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "networkDisclosureAcknowledged": {
+              "default": false,
+              "type": "boolean"
+            }
           },
-          "maxItems": 20
+          "required": [
+            "providerKey",
+            "executableProfileKey"
+          ],
+          "additionalProperties": false
         },
-        "instructionsFile": {
-          "type": [
-            "string",
-            "null"
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resources": {
+      "default": {
+        "cpuMillicores": null,
+        "memoryBytes": null,
+        "pidLimit": null,
+        "maxNamedVolumeBytes": null,
+        "logRetentionDays": null,
+        "stoppedWorkspaceRetentionDays": null,
+        "automaticStopMinutes": null,
+        "maxConcurrentWorkspaces": null
+      },
+      "type": "object",
+      "properties": {
+        "cpuMillicores": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBytes": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pidLimit": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxNamedVolumeBytes": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logRetentionDays": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stoppedWorkspaceRetentionDays": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "automaticStopMinutes": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxConcurrentWorkspaces": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
           ]
         }
-      }
+      },
+      "additionalProperties": false
     }
-  }
+  },
+  "required": [
+    "schemaVersion",
+    "developmentEnvironment"
+  ],
+  "additionalProperties": false,
+  "$id": "https://devspace.local/schemas/project-options-v1.schema.json",
+  "title": "DevSpace Project Options v1"
 }

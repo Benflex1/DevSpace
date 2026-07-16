@@ -14,6 +14,7 @@ build/
 out/
 .next/
 coverage/
+.vitest/
 
 # Test and browser output
 playwright-report/

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Clean-clone verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.18.0"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: "11.13.0"
+          cache: true
+          cache_dependency_path: pnpm-lock.yaml
+          run_install: false
+
+      - name: Verify tool versions
+        run: |
+          test "$(node --version)" = "v24.18.0"
+          test "$(pnpm --version)" = "11.13.0"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify workspace graph
+        run: pnpm workspace:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify agent contracts
+        run: pnpm contracts:check
+
+      - name: Verify Project Options schema
+        run: pnpm schema:check
+
+      - name: Verify SQLite migrations
+        run: pnpm db:migrate:test
+
+      - name: Verify migration drift
+        run: pnpm db:check
+
+      - name: Assert checkout remains clean
+        run: |
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain)"

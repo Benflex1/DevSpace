@@ -1,0 +1,17 @@
+{
+  "name": "@devspace/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
+    "build": "tsc --build tsconfig.build.json --force --pretty false"
+  },
+  "dependencies": {
+    "@devspace/contracts": "workspace:*",
+    "@devspace/database": "workspace:*",
+    "@devspace/domain": "workspace:*",
+    "@devspace/project-options": "workspace:*",
+    "@devspace/security": "workspace:*"
+  }
+}

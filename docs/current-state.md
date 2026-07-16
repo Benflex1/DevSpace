@@ -2,36 +2,34 @@
 
 ## Current milestone
 
-Milestone 0 — Architecture and contracts.
+Milestone 0 — complete.
 
-## What is settled
+## Completed foundation
 
-- container-first architecture;
-- dedicated rootless Docker daemon under a dedicated Unix account;
-- one primary workspace per project plus optional isolated workspaces;
-- every workspace uses a Git worktree and independent container stack;
-- UI-managed, database-versioned Project Options; no required YAML;
-- Cloudflare Access for control and preview ingress;
-- web/agent Unix socket;
-- web is sole SQLite writer;
-- Caddy preview gateway;
-- terminal-first AI sessions;
-- trusted owner-controlled repository threat model.
+- pnpm/TypeScript workspace and package boundaries.
+- Real lint, test, typecheck, and build tooling.
+- Domain lifecycle foundation and security validation primitives.
+- Project Options v1 schema, canonicalization, and revision hashing.
+- Agent API v1 F09/F10 executable contracts.
+- SQLite/Drizzle schema and migrations.
+- Real migration tests and migration drift verification.
+- Clean-clone CI contract.
 
-## What exists
+## Product state
 
-- documentation and repository scaffold only;
-- Project Options v1 schema;
-- architecture, threat model, database, API, lifecycle, roadmap, and ADR drafts.
+DevSpace is not yet a usable product.
 
-## What does not exist
+Still absent:
 
-- no web application implementation;
-- no agent implementation;
-- no Docker integration;
-- no database migrations;
-- no terminals, tasks, previews, worktree mutation, or AI sessions.
+- usable Web UI;
+- Agent transport/runtime;
+- managed Git repository/worktree behavior;
+- rootless Docker workspace lifecycle;
+- tasks/process execution;
+- browser terminal;
+- previews;
+- AI sessions.
 
-## Next task
+## Next objective
 
-Create the actual pnpm workspace tooling and contract-test harness without implementing product behavior. Then implement Milestone 1 slice 1: global settings model.
+The next objective is the first usable vertical DevSpace path.

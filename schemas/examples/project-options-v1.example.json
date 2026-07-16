@@ -1,110 +1,178 @@
 {
   "schemaVersion": 1,
-  "general": {
-    "name": "Chess Web Game",
-    "slug": "chess",
-    "defaultBranch": "master",
-    "autoFetch": true
-  },
-  "environment": {
-    "source": {
-      "kind": "preset",
-      "preset": "node",
-      "version": "22"
+  "namedVolumes": [
+    {
+      "key": "pnpm-store",
+      "kind": "cache"
     },
-    "defaultUser": "devspace",
+    {
+      "key": "postgres-data",
+      "kind": "data"
+    }
+  ],
+  "developmentEnvironment": {
+    "source": {
+      "kind": "dockerfile",
+      "dockerfilePath": "Dockerfile",
+      "contextPath": "."
+    },
+    "containerUser": "devspace",
     "passwordlessSudo": true,
-    "setupSteps": [
+    "workingDirectory": "/workspace",
+    "environment": {
+      "NODE_ENV": {
+        "kind": "literal",
+        "value": "development"
+      },
+      "CI_TOKEN": {
+        "kind": "host",
+        "variable": "CI_TOKEN"
+      },
+      "API_KEY": {
+        "kind": "secret",
+        "secretId": "018f0f00-0000-7000-8000-000000000001"
+      }
+    },
+    "ports": [
       {
-        "key": "install",
-        "name": "Install dependencies",
-        "command": {
-          "executable": "pnpm",
-          "args": [
-            "install",
-            "--frozen-lockfile"
-          ],
-          "workingDirectory": "."
-        }
+        "name": "web",
+        "containerPort": 3000,
+        "protocol": "tcp"
       }
     ],
-    "cacheVolumes": [
+    "volumes": [
       {
-        "key": "pnpm-store",
-        "target": "/home/devspace/.local/share/pnpm/store"
+        "volumeKey": "pnpm-store",
+        "mountPath": "/home/devspace/.local/share/pnpm/store"
       }
-    ]
+    ],
+    "setupSteps": [
+      {
+        "executable": "pnpm",
+        "args": [
+          "install",
+          "--frozen-lockfile"
+        ],
+        "workingDirectory": ".",
+        "environment": {}
+      }
+    ],
+    "rebuildPolicy": "on-revision-change"
   },
   "tasks": [
     {
-      "key": "dev",
-      "name": "Development server",
-      "command": {
-        "executable": "pnpm",
-        "args": [
-          "dev:all"
-        ],
-        "workingDirectory": "."
-      },
-      "interactive": false,
-      "longRunning": true,
-      "timeoutSeconds": null
-    },
-    {
       "key": "test",
-      "name": "Tests",
+      "displayName": "Run tests",
       "command": {
         "executable": "pnpm",
         "args": [
           "test"
         ],
-        "workingDirectory": "."
+        "workingDirectory": ".",
+        "environment": {}
       },
       "interactive": false,
       "longRunning": false,
-      "timeoutSeconds": 900
+      "timeoutSeconds": 900,
+      "concurrencyPolicy": "reject",
+      "successExitCodes": [
+        0
+      ],
+      "logRetentionDays": null
     }
   ],
-  "services": [],
+  "services": [
+    {
+      "key": "postgres",
+      "imageReference": "postgres:16",
+      "environment": {},
+      "volumes": [
+        {
+          "volumeKey": "postgres-data",
+          "mountPath": "/var/lib/postgresql/data"
+        }
+      ],
+      "ports": [
+        {
+          "name": "postgres",
+          "containerPort": 5432,
+          "protocol": "tcp"
+        }
+      ],
+      "entrypoint": null,
+      "command": [
+        "postgres"
+      ],
+      "workingDirectory": null,
+      "healthCheck": {
+        "kind": "tcp",
+        "portName": "postgres"
+      },
+      "dependsOn": [],
+      "resources": {
+        "cpuMillicores": 500,
+        "memoryBytes": 536870912
+      }
+    }
+  ],
   "previews": [
     {
       "key": "web",
-      "name": "Web",
-      "targetService": "workspace",
+      "displayName": "Web preview",
+      "target": {
+        "kind": "workspace"
+      },
       "containerPort": 3000,
-      "protocol": "http",
       "domainBaseId": "preview-main",
       "hostnamePattern": "{project}-{workspace}-{preview}-{shortId}",
-      "health": {
-        "path": "/",
-        "expectedStatus": 200,
-        "startupTimeoutSeconds": 120
-      }
+      "protocol": "http",
+      "healthPath": "/",
+      "healthStatuses": [
+        200
+      ],
+      "startupTimeoutSeconds": 60,
+      "webSocketForwarding": true
+    },
+    {
+      "key": "database",
+      "displayName": "Database preview",
+      "target": {
+        "kind": "service",
+        "serviceKey": "postgres"
+      },
+      "containerPort": 5432,
+      "domainBaseId": "preview-main",
+      "hostnamePattern": "{project}-{preview}",
+      "protocol": "http",
+      "healthPath": "/health",
+      "healthStatuses": [
+        200
+      ],
+      "startupTimeoutSeconds": 90,
+      "webSocketForwarding": false
     }
   ],
-  "variables": [],
-  "ai": {
-    "profiles": [
-      {
-        "key": "codex",
-        "name": "Codex CLI",
-        "provider": "openai-codex-cli",
-        "credentialSecretIds": [
-          "secret_codex_auth"
-        ],
-        "instructionsFile": "AGENTS.md"
-      }
-    ]
+  "aiProfile": {
+    "providerKey": "openai",
+    "executableProfileKey": "codex-cli",
+    "fixedArgs": [
+      "--project-dir",
+      "."
+    ],
+    "credentialSecretIds": [
+      "018f0f00-0000-7000-8000-000000000001"
+    ],
+    "instructionsFilePath": "AGENTS.md",
+    "networkDisclosureAcknowledged": true
   },
   "resources": {
-    "memoryMb": 8192,
-    "cpuCores": 4,
-    "pids": 2048,
+    "cpuMillicores": 4000,
+    "memoryBytes": 8589934592,
+    "pidLimit": 2048,
+    "maxNamedVolumeBytes": 10737418240,
+    "logRetentionDays": 30,
+    "stoppedWorkspaceRetentionDays": 14,
+    "automaticStopMinutes": 120,
     "maxConcurrentWorkspaces": 3
-  },
-  "workspaceDefaults": {
-    "autoStart": false,
-    "stopAfterMinutesIdle": 120,
-    "retainStoppedDays": 30
   }
 }

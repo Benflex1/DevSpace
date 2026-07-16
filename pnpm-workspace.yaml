@@ -1,4 +1,6 @@
 packages:
   - apps/*
   - packages/*
-  - tooling/*
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
