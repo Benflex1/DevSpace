@@ -1,5 +1,8 @@
 # Milestone 0 executable foundation implementation plan
 
+> Status: Milestone 0 completed. This document is retained as historical execution context, not
+> as an active implementation authority. Current direction is [`docs/roadmap.md`](../roadmap.md).
+
 ## Purpose
 
 This plan turns the current documentation-only scaffold into a real, executable, testable pnpm/TypeScript foundation. It is limited to Milestone 0: package boundaries, contracts, schemas, immutable data definitions, migrations, pure domain rules, pure security helpers, fixtures, and CI checks.
@@ -465,7 +468,3 @@ template, or session handoff document is required for the remaining M0 closure w
 - `docs/current-state.md` is updated at significant checkpoints, milestone boundaries, or when the
   next developer would otherwise receive materially incorrect information.
 - The exact clean-clone command sequence passes and leaves the checkout clean.
-
-## Recommended first implementation task
-
-M0-F01 is complete. Execute **M0-F02 through M0-F04 in the next grouped implementation chat**, retaining a separate diff and check boundary for each numbered task. M0-F02 remains limited to manifests, corrected dependency direction, and buildable empty entry points; M0-F03 adds TypeScript/lint foundations; M0-F04 creates the test harness and only then creates `packages/testkit`. None may add product behavior.

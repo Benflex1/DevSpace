@@ -1,27 +1,16 @@
 # DevSpace
 
-DevSpace is a self-hosted, single-user, AI-first development control plane.
+DevSpace is a self-hosted, single-user, AI-first development control plane. Each project is
+intended to have a managed primary workspace in an isolated development environment.
 
-Every project receives a managed **primary workspace**. Each workspace runs inside its own rootless, containerized development stack. Optional isolated workspaces use Git worktrees and separate stacks for parallel or experimental work.
+Milestone 0 — the executable architecture, contracts, validation primitives, database foundation,
+and clean-clone verification contract — is complete. The product runtime is not implemented yet.
 
-This repository is currently at **Milestone 0: architecture and contracts**. It intentionally contains no feature implementation.
+Development now proceeds through vertical slices toward a usable primary workspace: browser
+onboarding, a managed worktree, an isolated runtime, terminal/tasks, and previews. See
+[`docs/roadmap.md`](docs/roadmap.md) for the current delivery direction.
 
-## Milestone 0 source of truth
-
-- `DEVSPACE_HANDOFF_V2.md`
-- `docs/architecture.md`
-- `docs/security/threat-model.md`
-- `docs/specs/project-options-v1.md`
-- `docs/specs/database-v1.md`
-- `docs/specs/agent-api-v1.md`
-- `docs/specs/lifecycle-states.md`
-- `docs/roadmap.md`
-- `docs/decisions/`
-
-## Product boundary
-
-DevSpace is not a browser IDE, general Docker manager, deployment platform, Coolify replacement, multi-user SaaS, or hostile-code sandbox.
-
-## Current status
-
-Architecture decisions are recorded. The next implementation milestone is a narrow foundation slice: configuration revisions, project registration, managed repository storage, a primary worktree, and a stopped workspace runtime record. No task execution, terminals, previews, or AI sessions belong in that first slice.
+The accepted boundaries remain: the browser talks only to the web application; the web application
+owns SQLite writes; the agent owns filesystem, Git, PTY, and dedicated rootless-Docker operations;
+project containers receive only declared workspace inputs; and DevSpace never auto-merges or deploys
+production changes.

@@ -2,36 +2,34 @@
 
 ## Current milestone
 
-Milestone 0 — foundation closure.
+Milestone 0 — complete.
 
-## Completed
+## Completed foundation
 
-- Real pnpm/TypeScript workspace and quality tooling.
-- Domain lifecycle foundation and security validation foundation.
-- Project Options v1 validation, canonicalization, and revision hashing.
-- Agent API F09/F10 executable contracts and generated contract checks.
-- Database contract ready for implementation, including the 13-table inventory, explicit
-  timestamp/FK behavior, and operation identity rules.
-- Complete executable database foundation: 13-table Drizzle schema, committed initial SQLite
-  migration, read-only drift verification, narrow newer-version-aware migrator, and real
-  temporary-file migration/constraint tests.
-- Durable architecture, security model, roadmap, specifications, and accepted ADRs.
+- pnpm/TypeScript workspace and package boundaries.
+- Real lint, test, typecheck, and build tooling.
+- Domain lifecycle foundation and security validation primitives.
+- Project Options v1 schema, canonicalization, and revision hashing.
+- Agent API v1 F09/F10 executable contracts.
+- SQLite/Drizzle schema and migrations.
+- Real migration tests and migration drift verification.
+- Clean-clone CI contract.
 
-## Not implemented yet
+## Product state
 
-- No usable web UI.
-- No Agent transport or runtime.
-- No Git/worktree runtime.
-- No Docker workspace runtime.
-- No terminals, tasks, previews, or AI product behavior.
+DevSpace is not yet a usable product.
 
-## Remaining M0 work
+Still absent:
 
-- Final CI/clean-clone integration.
-- M0 documentation and status cleanup.
+- usable Web UI;
+- Agent transport/runtime;
+- managed Git repository/worktree behavior;
+- rootless Docker workspace lifecycle;
+- tasks/process execution;
+- browser terminal;
+- previews;
+- AI sessions.
 
-## Next product objective
+## Next objective
 
-After M0, development switches to vertical product slices. The first objective is a usable
-primary-workspace flow crossing Web, DB, Agent, Git, container runtime, terminal/task execution,
-and preview functionality rather than completing each subsystem horizontally.
+The next objective is the first usable vertical DevSpace path.

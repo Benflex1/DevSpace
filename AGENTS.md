@@ -83,10 +83,11 @@ Avoid generic `shared` or `utils` packages. Put logic with the domain that owns 
 - Use branch names matching the eventual scope, such as `feat/...`, `fix/...`, or `refactor/...`.
 - Make intentional commits. Never merge automatically, deploy production automatically, or use
   destructive Git operations without explicit user intent.
-- A clean clone must keep these checks passing:
+- A clean clone must keep this verification contract passing:
 
   ```bash
   pnpm install --frozen-lockfile
+  pnpm workspace:check
   pnpm lint
   pnpm test
   pnpm typecheck
@@ -94,4 +95,5 @@ Avoid generic `shared` or `utils` packages. Put logic with the domain that owns 
   pnpm contracts:check
   pnpm schema:check
   pnpm db:migrate:test
+  pnpm db:check
   ```

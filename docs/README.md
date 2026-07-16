@@ -15,8 +15,8 @@ architecture or contracts.
 
 ## Historical and execution documents
 
-`implementation/milestone-0-foundation-plan.md` remains useful until Milestone 0 closes. It is an
-execution plan, not a permanent architecture authority; after M0 it may be archived or removed.
+`implementation/milestone-0-foundation-plan.md` is retained as historical execution context after
+Milestone 0. It is not an active implementation authority or a permanent architecture source.
 
 ## Authority and conflict order
 
