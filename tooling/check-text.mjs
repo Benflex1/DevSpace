@@ -2,12 +2,16 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 
 const checkedExtensions = new Set(['.md', '.json', '.yaml', '.yml', '.mjs']);
+const ignoredDirectories = new Set([
+  '.git', '.next', 'blob-report', 'coverage', 'dist', 'node_modules', 'playwright-report',
+  'test-results'
+]);
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
-    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    if (ignoredDirectories.has(entry.name)) continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory()) files.push(...await walk(path));
     else files.push(path);
