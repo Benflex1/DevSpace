@@ -6,5 +6,5 @@
     "types": ["node", "vitest"],
     "tsBuildInfoFile": "../../.cache/tsbuild/apps-agent.test.typecheck.tsbuildinfo"
   },
-  "include": ["src/**/*.test.ts"]
+  "include": ["src/**/*.test.ts", "test/**/*.ts"]
 }

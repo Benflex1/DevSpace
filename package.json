@@ -7,7 +7,12 @@
   },
   "packageManager": "pnpm@11.13.0",
   "scripts": {
-    "lint": "pnpm workspace:check && eslint . --max-warnings 0 && node tooling/check-architecture-boundaries.mjs && node tooling/check-text.mjs",
+    "dev": "mkdir -p .devspace-local && DEVSPACE_AUTH_MODE=development DEVSPACE_APP_ORIGIN=http://localhost:3000 DEVSPACE_DATABASE_PATH=$PWD/.devspace-local/devspace.sqlite DEVSPACE_AGENT_SOCKET_PATH=$PWD/.devspace-local/agent.sock pnpm --parallel --filter @devspace/agent --filter @devspace/web run dev",
+    "dev:web": "mkdir -p .devspace-local && DEVSPACE_AUTH_MODE=development DEVSPACE_APP_ORIGIN=http://localhost:3000 DEVSPACE_DATABASE_PATH=$PWD/.devspace-local/devspace.sqlite DEVSPACE_AGENT_SOCKET_PATH=$PWD/.devspace-local/agent.sock pnpm --filter @devspace/web run dev",
+    "dev:agent": "mkdir -p .devspace-local && DEVSPACE_AGENT_SOCKET_PATH=$PWD/.devspace-local/agent.sock pnpm --filter @devspace/agent run dev",
+    "start:web": "pnpm --filter @devspace/web run start",
+    "test:e2e": "pnpm --filter @devspace/web run prepare:deps && playwright test",
+    "lint": "pnpm workspace:check && pnpm --filter @devspace/web run prepare:deps && eslint . --max-warnings 0 && node tooling/check-architecture-boundaries.mjs && node tooling/check-text.mjs",
     "test": "node tooling/check-workspace-graph.mjs --test-projects && node --test tooling/tests/*.test.mjs && vitest run",
     "test:coverage": "node tooling/check-workspace-graph.mjs --test-projects && vitest run --coverage",
     "typecheck": "pnpm --filter @devspace/domain run typecheck && pnpm --filter @devspace/security run typecheck && pnpm --filter @devspace/testkit run typecheck && pnpm --filter @devspace/contracts run typecheck && pnpm --filter @devspace/project-options run typecheck && pnpm --filter @devspace/database run typecheck && pnpm --filter @devspace/agent run typecheck && pnpm --filter @devspace/web run typecheck",
@@ -21,10 +26,12 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.61.0",
     "@types/node": "^24.13.3",
+    "@vitest/coverage-v8": "^4.1.6",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
-    "@vitest/coverage-v8": "^4.1.6",
+    "tsx": "4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "8.63.0",
     "vitest": "^4.1.6"

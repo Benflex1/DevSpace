@@ -4,14 +4,32 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
-    "build": "tsc --build tsconfig.build.json --force --pretty false"
+    "prepare:deps": "pnpm --dir ../.. --filter @devspace/domain build && pnpm --dir ../.. --filter @devspace/security build && pnpm --dir ../.. --filter @devspace/contracts build && pnpm --dir ../.. --filter @devspace/database build",
+    "predev": "pnpm run prepare:deps",
+    "prebuild": "pnpm run prepare:deps",
+    "dev": "next dev --webpack",
+    "start": "next start",
+    "test": "pnpm --dir ../.. exec vitest run --project @devspace/web",
+    "typecheck": "pnpm run prepare:deps && tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
+    "build": "next build --webpack"
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",
     "@devspace/database": "workspace:*",
     "@devspace/domain": "workspace:*",
     "@devspace/project-options": "workspace:*",
-    "@devspace/security": "workspace:*"
+    "@devspace/security": "workspace:*",
+    "better-sqlite3": "12.4.1",
+    "drizzle-orm": "0.45.2",
+    "jose": "6.1.3",
+    "next": "16.2.9",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "uuid": "14.0.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3"
   }
 }

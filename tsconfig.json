@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.typecheck.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": true,
+    "types": ["node", "@playwright/test"],
+    "tsBuildInfoFile": ".cache/tsbuild/root.typecheck.tsbuildinfo"
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}

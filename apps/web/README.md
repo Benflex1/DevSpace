@@ -1,18 +1,16 @@
 # Web application
 
-Future ownership:
+The Next.js App Router application owns browser APIs, Cloudflare Access authentication, CSRF
+validation, SQLite runtime access, project persistence, audit events, and Agent orchestration.
+It never runs Git or accesses Agent-managed workspace paths.
 
-- Cloudflare Access integration and browser sessions;
-- Project Options UI;
-- browser-facing REST/WebSocket APIs;
-- orchestration, SQLite writes, application transactions, and audit events;
-- terminal rendering and event-stream relaying.
+From the repository root, `pnpm dev` starts Web and Agent together with explicit local-development
+authentication and state under `.devspace-local/`. `pnpm dev:web` starts Web alone against the same
+local paths. Production uses `pnpm build` followed by `pnpm start:web` and must provide the settings
+documented in `.env.example`, including `DEVSPACE_AUTH_MODE=cloudflare-access` and real Access
+issuer/audience values.
 
-The `@devspace/database` package owns SQLite schema definitions, migrations, and narrow migration utilities. The web application owns runtime database writes and repositories.
+The browser workflow is covered by `pnpm test:e2e`.
 
-Prohibited:
-
-- Git commands;
-- shell commands;
-- Docker or Caddy administration;
-- direct workspace filesystem reads.
+Onboarding currently accepts HTTPS Git repository URLs without query parameters. SSH identity and
+credential management are intentionally outside this slice.

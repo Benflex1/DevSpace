@@ -192,7 +192,7 @@ const unusedVariableOptions = {
 
 const typeCheckedTypeScriptConfigs = tseslint.configs.recommendedTypeChecked.map((config) => ({
   ...config,
-  files: ["**/*.ts"]
+  files: ["**/*.{ts,tsx}"]
 }));
 
 export default tseslint.config(
@@ -203,6 +203,7 @@ export default tseslint.config(
       "**/coverage/**",
       "**/.vitest/**",
       "**/dist/**",
+      "**/.next/**",
       "**/generated/**",
       "**/node_modules/**",
       "schemas/**"
@@ -211,7 +212,7 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...typeCheckedTypeScriptConfigs,
   {
-    files: ["**/*.ts"],
+    files: ["**/*.{ts,tsx}"],
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: {
