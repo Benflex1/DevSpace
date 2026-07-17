@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { AddProjectForm } from "./project-form.js";
+import { WorkspaceSetupForm } from "./workspace-setup-form.js";
 import { createAgentClient } from "../server/agent-client.js";
 import { authenticateHeaders } from "../server/auth.js";
 import { readWebRuntimeConfig } from "../server/config.js";
@@ -11,11 +12,21 @@ export default async function HomePage() {
   const config = readWebRuntimeConfig();
   const actor = await authenticateHeaders(await headers(), config.auth);
   const database = getProjectDatabase(config.databasePath);
-  const projects = database.listProjects();
-  const agentStatus = await createAgentClient(config.agentSocketPath).health()
+  const projects = database.listManagedProjects();
+  const agent = createAgentClient(config.agentSocketPath);
+  const agentStatus = await agent.health()
     .then((health) => health.status === "ok" ? "connected" as const : "degraded" as const)
     .catch(() => "unavailable" as const);
   const agentReachable = agentStatus !== "unavailable";
+  const liveStates = new Map((await Promise.all(projects.filter((project) => project.state === "ready" && project.primaryWorkspace !== null).map(async (project) => {
+    try {
+      const workspaceId = project.primaryWorkspace!.id;
+      const [storeGit, workspaceGit, workspace] = await Promise.all([
+        agent.inspectGit(project.id, null), agent.inspectGit(project.id, workspaceId), agent.inspectWorkspace(project.id, workspaceId)
+      ]);
+      return [project.id, { storeGit, workspaceGit, workspace }] as const;
+    } catch { return [project.id, null] as const; }
+  }))));
 
   return <main>
     <header>
@@ -27,7 +38,7 @@ export default async function HomePage() {
 
     <section aria-labelledby="projects-heading">
       <div className="section-heading"><div><h2 id="projects-heading">Projects</h2><p>Persisted trusted repositories.</p></div></div>
-      <ProjectList initialProjects={projects} />
+      <ProjectList initialProjects={projects} liveStates={liveStates} agentReachable={agentReachable} />
     </section>
 
     <section className="form-card" aria-labelledby="add-heading">
@@ -39,18 +50,39 @@ export default async function HomePage() {
   </main>;
 }
 
-function ProjectList({ initialProjects }: { initialProjects: import("../server/database.js").ProjectView[] }) {
+function ProjectList({ initialProjects, liveStates, agentReachable }: {
+  initialProjects: import("../server/database.js").ManagedProjectView[];
+  liveStates: Map<string, null | {
+    storeGit: import("@devspace/contracts").GitInspectionData;
+    workspaceGit: import("@devspace/contracts").GitInspectionData;
+    workspace: import("@devspace/contracts").WorkspaceInspectionData;
+  }>;
+  agentReachable: boolean;
+}) {
   return <div id="project-list" className="project-list">
-    {initialProjects.length === 0 ? <p className="empty">No projects registered yet.</p> : initialProjects.map((project) => <article className="project-card" key={project.id}>
+    {initialProjects.length === 0 ? <p className="empty">No projects registered yet.</p> : initialProjects.map((project) => {
+      const live = liveStates.get(project.id);
+      return <article className="project-card" key={project.id}>
       <div><h3>{project.name}</h3><code>{project.slug}</code></div>
       <dl>
         <div><dt>Repository</dt><dd>{project.repositoryUrl}</dd></div>
         <div><dt>Default branch</dt><dd>{project.defaultBranch}</dd></div>
         <div><dt>Status</dt><dd className="pending">{projectStateLabel(project.state)}</dd></div>
+        {project.activeRevision !== null && <div><dt>Project Options</dt><dd>Active revision v{project.activeRevision.number}</dd></div>}
+        {project.primaryWorkspace !== null && <>
+          <div><dt>Managed repository</dt><dd>{live === undefined || live === null ? "Inspection unavailable" : `Present · ${shortCommit(live.storeGit.headCommit)}`}</dd></div>
+          <div><dt>Primary workspace</dt><dd>{project.primaryWorkspace.name} · {project.primaryWorkspace.branchName}</dd></div>
+          <div><dt>Workspace state</dt><dd>{live === undefined || live === null ? `${project.primaryWorkspace.observedState} (persisted)` : `${live.workspace.observedState} · ${live.workspaceGit.dirty ? "dirty" : "clean"}`}</dd></div>
+          <div><dt>Development runtime</dt><dd>{live === undefined || live === null ? "No container created" : live.workspace.runtimeStack.observedState === "absent" ? "No container created" : live.workspace.runtimeStack.observedState}</dd></div>
+        </>}
       </dl>
-    </article>)}
+      {project.state === "registering" && <WorkspaceSetupForm projectId={project.id} agentReachable={agentReachable} />}
+    </article>;
+    })}
   </div>;
 }
+
+function shortCommit(commit: string | null): string { return commit === null ? "unborn repository" : commit.slice(0, 12); }
 
 function projectStateLabel(state: import("../server/database.js").ProjectView["state"]): string {
   return {

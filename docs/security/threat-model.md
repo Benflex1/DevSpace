@@ -46,8 +46,14 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 ### Controls
 
 - all repository stores and worktrees are agent-derived paths under fixed managed roots;
+- configured project, workspace, private-state, and journal roots are real directories provisioned
+  by the administrator before Agent startup; the Agent never creates these top-level roots;
+- the parent directories of configured roots are not writable by workspace containers or project
+  processes; only Agent-owned internal children are created after the configured roots are
+  canonicalized and device/inode-pinned;
 - browser requests contain opaque IDs, never paths;
-- open paths using canonical parent handles where practical and revalidate immediately before mutation;
+- reject symlinked managed resources and revalidate canonical paths plus pinned device/inode
+  identities immediately before mutation;
 - do not permit project-configured host bind mounts;
 - mount only the workspace worktree and declared named volumes;
 - keep state, secrets, Docker data, and production directories outside container mounts;
@@ -201,5 +207,7 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - rootless resource-limit support depends on host configuration;
 - terminal users can intentionally run destructive commands inside their workspace;
 - an AI provider receives content sent by its CLI.
+- a privileged or same-deployment-identity hostile host process that can concurrently replace
+  administrator-controlled root directories is outside the single-user trusted-host boundary.
 
 These risks are accepted for the single-user trusted-repository product boundary and must be documented in the UI and deployment guide.

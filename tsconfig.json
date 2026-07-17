@@ -6,5 +6,5 @@
     "types": ["node", "@playwright/test"],
     "tsBuildInfoFile": ".cache/tsbuild/root.typecheck.tsbuildinfo"
   },
-  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+  "include": ["e2e/**/*.ts", "playwright.config.ts", "tooling/seed-e2e-project.ts"]
 }
