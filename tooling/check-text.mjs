@@ -3,7 +3,7 @@ import { extname, join } from 'node:path';
 
 const checkedExtensions = new Set(['.md', '.json', '.yaml', '.yml', '.mjs']);
 const ignoredDirectories = new Set([
-  '.git', '.next', 'blob-report', 'coverage', 'dist', 'node_modules', 'playwright-report',
+  '.devspace-local', '.git', '.next', 'blob-report', 'coverage', 'dist', 'node_modules', 'playwright-report',
   'test-results'
 ]);
 

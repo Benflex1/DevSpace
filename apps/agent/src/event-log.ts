@@ -59,6 +59,37 @@ export class AgentEventLog {
       this.append({ operationId, resource: { type: "runtime-stack", projectId, workspaceId }, type: "runtime-stack.observed-state.changed", payload: { previous: null, current: "absent" } })
     ];
   }
+  workspaceRuntimeConverged(operationId: string, projectId: string, workspaceId: string,
+    previous: "absent" | "stopped" | "running", current: "stopped" | "running"): AgentEvent[] {
+    const emitted: AgentEvent[] = [];
+    const workspace = { type: "workspace" as const, projectId, workspaceId };
+    const runtime = { type: "runtime-stack" as const, projectId, workspaceId };
+    const service = { type: "service" as const, projectId, workspaceId, serviceKey: "development" };
+    if (current === "running") {
+      if (previous === "absent") {
+        emitted.push(this.append({ operationId, resource: runtime, type: "runtime-stack.observed-state.changed", payload: { previous: "absent", current: "creating" } }));
+        emitted.push(this.append({ operationId, resource: runtime, type: "runtime-stack.observed-state.changed", payload: { previous: "creating", current: "stopped" } }));
+        emitted.push(this.append({ operationId, resource: service, type: "service.observed-state.changed", payload: { previous: "absent", current: "creating" } }));
+        emitted.push(this.append({ operationId, resource: service, type: "service.observed-state.changed", payload: { previous: "creating", current: "stopped" } }));
+      }
+      if (previous !== "running") {
+        emitted.push(this.append({ operationId, resource: workspace, type: "workspace.observed-state.changed", payload: { previous: "stopped", current: "starting" } }));
+        emitted.push(this.append({ operationId, resource: runtime, type: "runtime-stack.observed-state.changed", payload: { previous: "stopped", current: "starting" } }));
+        emitted.push(this.append({ operationId, resource: service, type: "service.observed-state.changed", payload: { previous: "stopped", current: "starting" } }));
+        emitted.push(this.append({ operationId, resource: runtime, type: "runtime-stack.observed-state.changed", payload: { previous: "starting", current: "running" } }));
+        emitted.push(this.append({ operationId, resource: service, type: "service.observed-state.changed", payload: { previous: "starting", current: "running" } }));
+        emitted.push(this.append({ operationId, resource: workspace, type: "workspace.observed-state.changed", payload: { previous: "starting", current: "running" } }));
+      }
+    } else if (previous === "running") {
+      emitted.push(this.append({ operationId, resource: workspace, type: "workspace.observed-state.changed", payload: { previous: "running", current: "stopping" } }));
+      emitted.push(this.append({ operationId, resource: runtime, type: "runtime-stack.observed-state.changed", payload: { previous: "running", current: "stopping" } }));
+      emitted.push(this.append({ operationId, resource: service, type: "service.observed-state.changed", payload: { previous: "running", current: "stopping" } }));
+      emitted.push(this.append({ operationId, resource: runtime, type: "runtime-stack.observed-state.changed", payload: { previous: "stopping", current: "stopped" } }));
+      emitted.push(this.append({ operationId, resource: service, type: "service.observed-state.changed", payload: { previous: "stopping", current: "stopped" } }));
+      emitted.push(this.append({ operationId, resource: workspace, type: "workspace.observed-state.changed", payload: { previous: "stopping", current: "stopped" } }));
+    }
+    return emitted;
+  }
 
   replay(cursor: string): { ok: true; events: AgentEvent[] } | { ok: false; reason: ReplayFailure } {
     const parsed = parseEventCursor(cursor);

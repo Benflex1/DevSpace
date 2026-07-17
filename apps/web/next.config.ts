@@ -5,7 +5,18 @@ interface WebpackConfiguration {
   readonly resolve: { extensionAlias?: Record<string, string[]> };
 }
 
+function developmentOrigins(): string[] {
+  if (process.env.NODE_ENV === "production") return [];
+  const configured = process.env.DEVSPACE_ALLOWED_DEV_ORIGINS?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
+  const appOrigin = process.env.DEVSPACE_APP_ORIGIN;
+  if (appOrigin !== undefined) {
+    try { configured.push(new URL(appOrigin).hostname); } catch { /* Web runtime config reports the invalid origin. */ }
+  }
+  return [...new Set(configured)];
+}
+
 const nextConfig: NextConfig = {
+  allowedDevOrigins: developmentOrigins(),
   serverExternalPackages: ["better-sqlite3", "@devspace/database"],
   webpack(config: WebpackConfiguration) {
     config.externals.push({ "@devspace/database": "commonjs @devspace/database" });

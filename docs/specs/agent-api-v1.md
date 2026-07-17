@@ -16,7 +16,7 @@ arbitrary process arguments, a PID, a Docker identifier, a host path, a bind mou
 gateway upstream, or a Caddy configuration fragment. That document cannot bypass independent
 Agent validation or the host boundary.
 
-F09 owns the 29 endpoints in the F09 inventory and their ordinary request, response, error, and
+F09 owns the 30 endpoints in the F09 inventory and their ordinary request, response, error, and
 terminal-stream wire contracts. F10 owns the two snapshot/event endpoints and their cursor,
 snapshot, event, error, and NDJSON wire contracts. The F10 section is normative but remains
 separate from F09's endpoint count and F09-only executable registries.
@@ -201,7 +201,7 @@ in both `message` and `details`.
 
 ## F09 endpoint inventory
 
-The exact F09 count is **29**: 19 journaled mutations, nine ordinary non-mutating HTTP operations,
+The exact F09 count is **30**: 20 journaled mutations, nine ordinary non-mutating HTTP operations,
 and one non-mutating WebSocket upgrade. `none` in the Query column means no query parameters are
 accepted. `none` in the Body column means no HTTP request body is permitted. `mutation` means the
 operation-ID header is required; `non-mutating` means it is forbidden.
@@ -213,6 +213,7 @@ operation-ID header is required; `non-mutating` means it is forbidden.
 | `agent.runtime-status.get` | GET | `/v1/runtime/status` | none | none | non-mutating | `200 RuntimeStatusData` |
 | `configuration-revision.validate` | POST | `/v1/configuration-revisions/validate` | none | `ConfigurationRevisionData` | non-mutating | `200 ConfigurationValidationData` |
 | `configuration-revision.register` | POST | `/v1/configuration-revisions/register` | none | `ConfigurationRevisionData` | mutation | `202 MutationReceipt` |
+| `configuration-runtime-plan.register` | POST | `/v1/configuration-revisions/register-runtime-plan` | none | `ConfigurationRuntimePlanData` | mutation | `202 MutationReceipt` |
 | `project.source.inspect` | POST | `/v1/projects/inspect-source` | none | `InspectSourceData` | non-mutating | `200 SourceInspectionData` |
 | `project.managed-store.create` | POST | `/v1/projects/create-managed-store` | none | `CreateManagedStoreData` | mutation | `202 MutationReceipt` |
 | `project.fetch` | POST | `/v1/projects/fetch` | none | `ProjectIdentityData` | mutation | `202 MutationReceipt` |
@@ -260,14 +261,27 @@ ConfigurationRevisionData = {
   revisionId: UuidV7,
   configuration: ConfigurationDocument
 }
+
+RuntimePlanDocument = {
+  format: "devspace.runtime-plan/v1",
+  hash: ProjectOptionsRevisionHash,
+  canonicalJson: CanonicalJsonObjectText
+}
+
+ConfigurationRuntimePlanData = {
+  projectId: UuidV7,
+  revisionId: UuidV7,
+  revisionHash: ProjectOptionsRevisionHash,
+  runtimePlan: RuntimePlanDocument
+}
 ```
 
 The configuration hash identifies the complete default-materialized Project Options revision. The
 contract checks the representation and the Agent checks that it matches `canonicalJson`; neither
-action imports Project Options parsing or hashing into `@devspace/contracts`. F09 defines no
-runtime-plan schema, canonical representation, compiler contract, format string, or hash. Milestone
-1 may extend or version the configuration/runtime-plan relationship only after those runtime-plan
-contracts are accepted.
+action imports Project Options parsing or hashing into `@devspace/contracts`. The runtime-plan
+registration is deliberately separate so existing immutable configuration registration journal
+entries remain valid. The Agent requires the revision first, then independently parses and compiles
+the retained canonical Project Options and requires exact canonical-plan and hash equality.
 
 ### Source and project shapes
 
@@ -651,6 +665,7 @@ except the already-exact `G` protocol-version mapping.
 | `agent.runtime-status.get` | `G` |
 | `configuration-revision.validate` | `G`; `CONFIGURATION_INVALID (422)` |
 | `configuration-revision.register` | `G`; `M`; `CONFIGURATION_INVALID (422)` |
+| `configuration-runtime-plan.register` | `G`; `M`; `CONFIGURATION_NOT_REGISTERED (422)`; `CONFIGURATION_INVALID (422)`; `RUNTIME_POLICY_VIOLATION (422; policy runtime-plan-mismatch)` |
 | `project.source.inspect` | `G`; `SOURCE_NOT_FOUND (404)`; `SOURCE_UNAVAILABLE (503)`; `RUNTIME_POLICY_VIOLATION (422)` |
 | `project.managed-store.create` | `G`; `M`; `RESOURCE_STATE_CONFLICT` (409; type `project`); `SOURCE_NOT_FOUND (404)`; `SOURCE_INVALID (422)`; `SOURCE_UNAVAILABLE (503)`; `RUNTIME_POLICY_VIOLATION (422)` |
 | `project.fetch` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `SOURCE_UNAVAILABLE (503)` |
@@ -788,8 +803,8 @@ body.
 
 No query parameter is accepted by `snapshot.get`. `event.stream` accepts exactly one decoded query
 parameter named `cursor`; an unknown or duplicate query parameter is invalid. The F10 route error
-table below is exhaustive. F09 remains exactly 29 endpoints; complete Agent API v1 is therefore 31
-endpoints: 19 mutations, 11 non-mutating HTTP operations, and one WebSocket upgrade.
+table below is exhaustive. F09 is exactly 30 endpoints; complete Agent API v1 is therefore 32
+endpoints: 20 mutations, 11 non-mutating HTTP operations, and one WebSocket upgrade.
 
 ### Event sequence and cursor primitives
 
@@ -1070,6 +1085,7 @@ wire failure does not duplicate the operation name.
 | F09 mutation operation | Allowed asynchronous `AgentExecutionFailure.code` values |
 | --- | --- |
 | `configuration-revision.register` | `AGENT_INTERNAL_ERROR` |
+| `configuration-runtime-plan.register` | `CONFIGURATION_NOT_REGISTERED`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
 | `project.managed-store.create` | `RESOURCE_STATE_CONFLICT`; `SOURCE_NOT_FOUND`; `SOURCE_INVALID`; `SOURCE_UNAVAILABLE`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
 | `project.fetch` | `PROJECT_NOT_FOUND`; `SOURCE_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.create` | `PROJECT_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
@@ -1474,11 +1490,11 @@ replay, or implements snapshot collection.
 An F09 implementation and its invariant tests must establish all of the following from this
 document without another protocol decision:
 
-1. The endpoint registry contains exactly 29 unique stable operation names and 29 unique
+1. The endpoint registry contains exactly 30 unique stable operation names and 30 unique
    method/path pairs; the terminal upgrade's transport method is HTTP GET.
 2. Every F09 path begins with `/v1`; only terminal stream has a path parameter; no F09 endpoint has
    query parameters.
-3. Exactly the 19 mutation rows require only the caller-supplied operation-ID header. No parser
+3. Exactly the 20 mutation rows require only the caller-supplied operation-ID header. No parser
    generates an operation ID, and no public idempotency-key or request-hash field exists.
 4. Every POST body is the strict `{ data }` envelope and every GET/upgrade has no body.
 5. Every ordinary endpoint has one exact success status and closed success data schema.
@@ -1517,7 +1533,7 @@ new protocol decision:
    running phase, enforce exact event application, retain every nonterminal accepted operation,
    and leave terminal retention subject to F09 compaction.
 9. `AgentExecutionFailure` contains exactly the 18 enumerated post-acceptance-capable codes, all 23
-   F09 codes have one explicit classification, all 19 mutations have exact applicability, and
+   F09 codes have one explicit classification, all 20 mutations have exact applicability, and
    retryability never re-executes the same operation ID.
 10. The event union contains exactly the 12 table discriminators, each with one exact resource,
     operation-ID, and payload contract; no second UUID event identity, cancellation event,

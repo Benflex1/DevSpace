@@ -14,7 +14,28 @@ A repository detector may populate a draft, but only an authenticated user can a
 
 Every object is strict: an unknown key at any nesting level is invalid. A field described as required must be present in submitted input. An optional field may be omitted and is materialized to the stated default before canonicalization. `null` is accepted only where it is named as the default.
 
-All documented sections below belong to v1. Runtime-plan compilation does not; it begins in Milestone 1. The compiler will receive authoritative project metadata separately from the activated runtime-configuration revision; it must not recover or duplicate that metadata in configuration JSON.
+All documented sections below belong to Project Options v1. Runtime-plan compilation is a separate,
+derived contract and does not alter the revision identity or configuration hash.
+
+## Runtime-plan v1
+
+`packages/project-options` owns the executable `devspace.runtime-plan/v1` schema and deterministic
+compile, parse, canonicalize, and hash helpers. Canonical JSON uses the same RFC 8785/JCS machinery
+as Project Options. Its SHA-256 input is domain-separated with `devspace/runtime-plan/v1`, so a
+Project Options revision hash cannot be substituted for a runtime-plan hash.
+
+The currently executable compiler accepts an image source, optional container user, `/workspace`,
+literal environment values, declared TCP ports as metadata, and optional CPU/memory/PID requests.
+It emits empty services, named volumes, and setup steps and requires `passwordlessSudo: false`.
+Preset and Dockerfile sources, supporting services, named volumes or mounts, setup steps,
+non-literal environment bindings, and passwordless sudo remain valid Project Options but produce a
+typed unsupported-compilation error rather than a partial plan.
+
+Web stores the canonical plan and hash as a validated pair in `project_config_revisions`. Existing
+revisions with a null pair are compiled lazily on first start without changing configuration JSON,
+configuration hash, revision number, or revision ID. The Agent retains the canonical Project
+Options revision, recompiles independently during runtime-plan registration, and rejects any
+canonical bytes, plan hash, revision ID, or revision hash mismatch.
 
 ### Root object
 

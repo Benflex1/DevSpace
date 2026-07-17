@@ -34,3 +34,15 @@ export {
   hashProjectOptionsV1,
   type ProjectOptionsRevisionHash
 } from "./revision.js";
+
+export {
+  RuntimePlanCompilationError,
+  canonicalizeRuntimePlanV1,
+  compileRuntimePlanV1,
+  hashRuntimePlanV1,
+  parseRuntimePlanV1,
+  runtimePlanV1Schema,
+  type RuntimePlanHash,
+  type RuntimePlanUnsupportedReason,
+  type RuntimePlanV1
+} from "./runtime-plan.js";

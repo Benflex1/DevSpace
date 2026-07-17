@@ -20,6 +20,7 @@ import { OperationConflictError, OperationJournal } from "./operation-journal.js
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
 const healthEndpoint = agentApiV1EndpointByOperation["agent.health.get"];
+const runtimeStatusEndpoint = agentApiV1EndpointByOperation["agent.runtime-status.get"];
 const inspectEndpoint = agentApiV1EndpointByOperation["project.source.inspect"];
 const snapshotEndpoint = f10AgentApiV1EndpointByOperation["snapshot.get"];
 const eventEndpoint = f10AgentApiV1EndpointByOperation["event.stream"];
@@ -193,13 +194,17 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     const fallbackRequestId = createId();
     const url = new URL(request.url ?? "/", "http://agent.local");
     const selectedEndpoint = request.method === "GET" && url.pathname === healthEndpoint.path ? healthEndpoint
+      : request.method === "GET" && url.pathname === runtimeStatusEndpoint.path ? runtimeStatusEndpoint
       : request.method === "POST" && url.pathname === inspectEndpoint.path ? inspectEndpoint
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["configuration-revision.register"].path ? agentApiV1EndpointByOperation["configuration-revision.register"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["configuration-runtime-plan.register"].path ? agentApiV1EndpointByOperation["configuration-runtime-plan.register"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.managed-store.create"].path ? agentApiV1EndpointByOperation["project.managed-store.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.fetch"].path ? agentApiV1EndpointByOperation["project.fetch"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.inspect"].path ? agentApiV1EndpointByOperation["project.git.inspect"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.create"].path ? agentApiV1EndpointByOperation["workspace.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.inspect"].path ? agentApiV1EndpointByOperation["workspace.inspect"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.start"].path ? agentApiV1EndpointByOperation["workspace.start"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.stop"].path ? agentApiV1EndpointByOperation["workspace.stop"]
       : request.method === "GET" && url.pathname === snapshotEndpoint.path ? snapshotEndpoint
       : request.method === "GET" && url.pathname === eventEndpoint.path ? eventEndpoint
       : undefined;
@@ -245,6 +250,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }));
     }
 
+    if (request.method === "GET" && url.pathname === runtimeStatusEndpoint.path) {
+      if ((request.headers["content-length"] ?? "0") !== "0" || request.headers["transfer-encoding"] !== undefined) {
+        return requestError(response, requestId, now, { location: "body", field: null, reason: "inconsistent" });
+      }
+      return sendJson(response, 200, runtimeStatusEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data: {
+        rootlessRuntime: await managed.runtimeStatus(),
+        operationJournal: journal.isHealthy ? "available" : "corrupt", checkedAt: now().toISOString()
+      } }));
+    }
+
     if (request.method === "GET" && url.pathname === eventEndpoint.path) {
       if ((request.headers["content-length"] ?? "0") !== "0" || request.headers["transfer-encoding"] !== undefined) {
         return requestError(response, requestId, now, { location: "body", field: null, reason: "inconsistent" });
@@ -288,7 +303,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
     }
 
-    const mutationRoutes = ["configuration-revision.register", "project.managed-store.create", "project.fetch", "workspace.create"] as const;
+    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "workspace.create", "workspace.start", "workspace.stop"] as const;
     for (const operation of mutationRoutes) {
       const endpoint = agentApiV1EndpointByOperation[operation];
       if (request.method !== endpoint.method || url.pathname !== endpoint.path) continue;

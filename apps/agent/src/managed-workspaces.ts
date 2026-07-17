@@ -2,6 +2,7 @@ import { readFile, readdir, realpath, rename, rm, unlink } from "node:fs/promise
 import path from "node:path";
 import {
   configurationRevisionDataSchema,
+  configurationRuntimePlanDataSchema,
   createManagedStoreDataSchema,
   createWorkspaceDataSchema,
   gitInspectionDataSchema,
@@ -12,12 +13,16 @@ import {
   type AgentExecutionFailure,
   type AgentSnapshotResource,
   type ConfigurationRevisionData,
+  type ConfigurationRuntimePlanData,
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
-import { canonicalizeProjectOptionsV1, hashProjectOptionsV1, parseProjectOptionsV1 } from "@devspace/project-options";
+import {
+  canonicalizeProjectOptionsV1, hashProjectOptionsV1, parseProjectOptionsV1,
+  canonicalizeRuntimePlanV1, hashRuntimePlanV1, parseRuntimePlanV1
+} from "@devspace/project-options";
 import * as z from "zod";
 import { runBoundedProcess } from "./git-inspector.js";
 import { ExternalExecutionFence, type ExternalExecutionRole } from "./external-execution.js";
@@ -34,6 +39,8 @@ import {
   type AtomicJsonWriter,
   type FileIdentity
 } from "./private-state.js";
+import { WorkspaceRuntimeError, WorkspaceRuntimeManager, verifyRuntimePlanAgainstOptions } from "./workspace-runtime.js";
+import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy } from "./docker-runtime.js";
 
 const GIT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -41,7 +48,8 @@ const objectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
 const absolutePathSchema = z.string().refine((value) => path.isAbsolute(value), "Expected absolute path");
 
 const revisionRecordSchema = z.strictObject({
-  version: z.literal(1), data: configurationRevisionDataSchema
+  version: z.literal(1), data: configurationRevisionDataSchema,
+  runtimePlan: configurationRuntimePlanDataSchema.shape.runtimePlan.nullable().default(null)
 });
 const storeOwnershipSchema = z.strictObject({
   version: z.literal(1), projectId: uuidV7Schema, repositoryPath: absolutePathSchema,
@@ -151,12 +159,18 @@ export class ManagedWorkspaces {
   private workspaceRoot = "";
   private stateRoot = "";
   private executionFence: ExternalExecutionFence | null = null;
+  private readonly runtime: WorkspaceRuntimeManager;
 
   constructor(
     private readonly roots: ManagedWorkspaceRoots,
     private readonly git: GitRunner = runGit,
-    private readonly writer: AtomicJsonWriter = durableJsonWriter
-  ) {}
+    private readonly writer: AtomicJsonWriter = durableJsonWriter,
+    runtime?: WorkspaceRuntimeManager
+  ) {
+    this.runtime = runtime ?? new WorkspaceRuntimeManager(roots.state,
+      new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
+      readRuntimePolicy(), writer);
+  }
 
   get isHealthy(): boolean { return this.corruption === null && (this.executionFence?.isHealthy ?? true); }
   get corruptionReason(): string | null { return this.corruption?.message ?? null; }
@@ -182,8 +196,8 @@ export class ManagedWorkspaces {
     }
     const internalDirectories = [
       path.join(this.stateRoot, "revisions"), path.join(this.stateRoot, "ownership", "projects"),
-      path.join(this.stateRoot, "ownership", "workspaces"), path.join(this.stateRoot, "creations"),
-      path.join(this.stateRoot, "executions"), path.join(this.projectRoot, ".staging"),
+      path.join(this.stateRoot, "ownership", "workspaces"), path.join(this.stateRoot, "ownership", "runtimes"), path.join(this.stateRoot, "creations"),
+      path.join(this.stateRoot, "runtime-creations"), path.join(this.stateRoot, "executions"), path.join(this.projectRoot, ".staging"),
       path.join(this.projectRoot, ".cleanup"), path.join(this.workspaceRoot, ".cleanup")
     ];
     this.guardedDirectories.set(this.projectRoot, configuredRoots[0].identity);
@@ -212,6 +226,8 @@ export class ManagedWorkspaces {
     await this.validateStateTree(path.join(this.stateRoot, "ownership", "projects"), "project");
     await this.validateStateTree(path.join(this.stateRoot, "ownership", "workspaces"), "workspace");
     await this.validateStateTree(path.join(this.stateRoot, "creations"), "creation");
+    try { await this.runtime.validateStateTree(); }
+    catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "ownership", "runtimes"), error instanceof Error ? error.message : "runtime ownership state validation failed"); }
   }
 
   private async validateStateTree(root: string, kind: "revision" | "project" | "workspace" | "creation"): Promise<void> {
@@ -425,7 +441,42 @@ export class ManagedWorkspaces {
       if (JSON.stringify(current.data) !== JSON.stringify(data)) throw new Error("configuration-revision-conflict");
       return;
     }
-    await this.writer.write(file, revisionRecordSchema.parse({ version: 1, data }));
+    await this.writer.write(file, revisionRecordSchema.parse({ version: 1, data, runtimePlan: null }));
+  }
+
+  async registerRuntimePlan(input: ConfigurationRuntimePlanData): Promise<void> {
+    await this.assertManagedDirectories();
+    const data = configurationRuntimePlanDataSchema.parse(input);
+    const file = this.revisionPath(data.projectId, data.revisionId);
+    let record: z.infer<typeof revisionRecordSchema>;
+    try { record = await this.readPrivate(file, revisionRecordSchema); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The configuration revision is not registered.", {
+          revisionId: data.revisionId, revisionHash: data.revisionHash
+        }));
+      }
+      throw error;
+    }
+    if (record.data.configuration.hash !== data.revisionHash) {
+      throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The configuration revision hash does not match.", {
+        revisionId: data.revisionId, revisionHash: data.revisionHash
+      }));
+    }
+    try {
+      const parsedPlan = parseRuntimePlanV1(JSON.parse(data.runtimePlan.canonicalJson));
+      if (canonicalizeRuntimePlanV1(parsedPlan) !== data.runtimePlan.canonicalJson
+        || hashRuntimePlanV1(parsedPlan) !== data.runtimePlan.hash) throw new Error("runtime-plan-document-mismatch");
+      verifyRuntimePlanAgainstOptions(JSON.parse(record.data.configuration.canonicalJson), data.runtimePlan.canonicalJson, data.runtimePlan.hash);
+    } catch {
+      throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "The runtime plan does not match the registered configuration revision.", {
+        policy: "runtime-plan-mismatch"
+      }));
+    }
+    if (record.runtimePlan !== null && JSON.stringify(record.runtimePlan) !== JSON.stringify(data.runtimePlan)) {
+      throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "A different runtime plan is already registered.", { policy: "runtime-plan-mismatch" }));
+    }
+    if (record.runtimePlan === null) await this.writer.write(file, revisionRecordSchema.parse({ ...record, runtimePlan: data.runtimePlan }));
   }
 
   private async loadStoreOwnership(projectId: string): Promise<StoreOwnership> {
@@ -592,6 +643,10 @@ export class ManagedWorkspaces {
   }
 
   private async loadRevision(projectId: string, revisionId: string): Promise<ConfigurationRevisionData> {
+    return (await this.loadRevisionRecord(projectId, revisionId)).data;
+  }
+
+  private async loadRevisionRecord(projectId: string, revisionId: string): Promise<z.infer<typeof revisionRecordSchema>> {
     let record;
     try { record = await this.readPrivate(this.revisionPath(projectId, revisionId), revisionRecordSchema); }
     catch (error) {
@@ -599,7 +654,7 @@ export class ManagedWorkspaces {
       throw error;
     }
     if (record.data.projectId !== projectId || record.data.revisionId !== revisionId) throw new PrivateStateCorruptionError(this.revisionPath(projectId, revisionId), "revision identity mismatch");
-    return record.data;
+    return record;
   }
 
   private async loadWorkspaceOwnership(projectId: string, workspaceId: string): Promise<WorkspaceOwnership> {
@@ -843,11 +898,62 @@ export class ManagedWorkspaces {
 
   async inspectWorkspace(projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> {
     const record = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, record.revision.revisionId);
+    const runtime = revision.runtimePlan === null
+      ? { observedState: "absent" as const, serviceState: "absent" as const, errorCode: null, containerIdentity: null }
+      : await this.runtime.inspect({ projectId, workspaceId, revisionId: record.revision.revisionId,
+          revisionHash: record.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 });
+    const workspaceObserved = runtime.observedState === "running" ? "running"
+      : runtime.observedState === "stopped" || runtime.observedState === "absent" ? "stopped"
+      : runtime.observedState === "lost" ? "lost" : "failed";
+    const desiredState = workspaceObserved === "running" ? "running" : "stopped";
+    const runtimeDesired = runtime.observedState === "absent" ? "absent" : desiredState;
     return workspaceInspectionDataSchema.parse({
       projectId, workspaceId, kind: record.kind, revisionId: record.revision.revisionId, revisionHash: record.revision.revisionHash,
-      desiredState: "stopped", observedState: "stopped", dirty: (await this.inspectGit(projectId, workspaceId)).dirty,
-      runtimeStack: { desiredState: "absent", observedState: "absent" }
+      desiredState, observedState: workspaceObserved, dirty: (await this.inspectGit(projectId, workspaceId)).dirty,
+      runtimeStack: { desiredState: runtimeDesired, observedState: runtime.observedState }
     });
+  }
+
+  async runtimeStatus(): Promise<"available" | "unavailable"> { return await this.runtime.status(); }
+
+  private runtimeFailure(error: unknown, workspaceId: string, action: "start" | "stop"): AgentExecutionError {
+    if (error instanceof WorkspaceRuntimeError) {
+      if (error.code === "ROOTLESS_RUNTIME_UNAVAILABLE") {
+        return new AgentExecutionError(executionFailure(error.code, error.message, { component: "docker" }));
+      }
+      if (error.code === "RUNTIME_POLICY_VIOLATION") {
+        return new AgentExecutionError(executionFailure(error.code, error.message, { policy: "workspace-action-rejected" }));
+      }
+      return new AgentExecutionError(executionFailure(error.code, error.message, {
+        workspaceId, desiredState: action === "start" ? "running" : "stopped",
+        observedState: "lost", action
+      }));
+    }
+    return new AgentExecutionError(executionFailure("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable.", { component: "docker" }));
+  }
+
+  async startWorkspace(projectId: string, workspaceId: string, operationId: string): Promise<void> {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
+    if (revision.runtimePlan === null) {
+      throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
+    }
+    try {
+      await this.runtime.start({ projectId, workspaceId, revisionId: workspace.revision.revisionId,
+        revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 },
+      JSON.parse(revision.runtimePlan.canonicalJson), workspace.worktreePath, operationId);
+    } catch (error) { throw this.runtimeFailure(error, workspaceId, "start"); }
+  }
+
+  async stopWorkspace(projectId: string, workspaceId: string): Promise<void> {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
+    if (revision.runtimePlan === null) throw workspaceConflict(workspaceId, "stopped");
+    try {
+      await this.runtime.stop({ projectId, workspaceId, revisionId: workspace.revision.revisionId,
+        revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 });
+    } catch (error) { throw this.runtimeFailure(error, workspaceId, "stop"); }
   }
 
   async snapshotResources(): Promise<AgentSnapshotResource[]> {
@@ -870,6 +976,8 @@ export class ManagedWorkspaces {
       const observation = await this.inspectWorkspace(record.projectId, record.workspaceId);
       resources.push({ type: "workspace", observation });
       resources.push({ type: "runtime-stack", projectId: record.projectId, workspaceId: record.workspaceId, observation: observation.runtimeStack });
+      resources.push({ type: "service", projectId: record.projectId, workspaceId: record.workspaceId, serviceKey: "development",
+        observation: { desiredState: observation.runtimeStack.desiredState, observedState: observation.runtimeStack.observedState, health: "unknown" } });
     }
     return resources;
   }
@@ -891,6 +999,11 @@ export class ManagedWorkspaces {
         || JSON.stringify(operation.request) !== JSON.stringify(expectedRequest)) {
         this.corruption ??= this.creationCorruption(record, "creation record is not bound to its durable journal operation");
       }
+    }
+    try { await this.runtime.validateCreationJournalBindings(findOperation); }
+    catch (error) {
+      this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "runtime-creations"),
+        error instanceof Error ? error.message : "runtime creation journal binding validation failed");
     }
     this.assertHealthy();
   }

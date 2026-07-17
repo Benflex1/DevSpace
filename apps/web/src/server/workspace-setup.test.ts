@@ -3,9 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { gitInspectionDataSchema, workspaceInspectionDataSchema, type AgentOperationObservation } from "@devspace/contracts";
-import type { WorkspaceAgentClient } from "./agent-client.js";
 import { openProjectDatabase } from "./database.js";
-import { setupPrimaryWorkspace } from "./workspace-setup.js";
+import { setupPrimaryWorkspace, type WorkspaceSetupAgent } from "./workspace-setup.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -28,6 +27,7 @@ test("persists a ready primary workspace and recovers it without repeating Agent
     health: () => Promise.resolve({ status: "ok" as const }),
     inspectSource: () => Promise.reject(new Error("unused")),
     registerRevision: (operationId, data) => { mutations("register"); revisionId = data.revisionId; revisionHash = data.configuration.hash; succeeded(operationId); return Promise.resolve(); },
+    registerRuntimePlan: (operationId) => { mutations("runtime-plan"); succeeded(operationId); return Promise.resolve(); },
     createManagedStore: (operationId) => { mutations("store"); succeeded(operationId); return Promise.resolve(); },
     fetchProject: (operationId) => { mutations("fetch"); succeeded(operationId); return Promise.resolve(); },
     createWorkspace: (operationId, data) => { mutations("workspace"); workspaceId = data.workspaceId; succeeded(operationId); return Promise.resolve(); },
@@ -45,19 +45,19 @@ test("persists a ready primary workspace and recovers it without repeating Agent
       desiredState: "stopped", observedState: "stopped", dirty: false,
       runtimeStack: { desiredState: "absent", observedState: "absent" }
     }))
-  } satisfies WorkspaceAgentClient;
+  } satisfies WorkspaceSetupAgent;
 
   const result = await setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "developer@example.com", { database, agent });
   expect(result.project).toMatchObject({ state: "ready", activeRevision: { number: 1 }, primaryWorkspace: { id: workspaceId, observedState: "stopped" } });
   expect(result.workspace.runtimeStack).toEqual({ desiredState: "absent", observedState: "absent" });
-  expect(mutations.mock.calls.map(([name]) => name)).toEqual(["register", "store", "fetch", "workspace"]);
+  expect(mutations.mock.calls.map(([name]) => name)).toEqual(["register", "runtime-plan", "store", "fetch", "workspace"]);
   database.close();
 
   database = openProjectDatabase(databasePath);
   const recovered = await setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "developer@example.com", { database, agent });
   expect(recovered.project.primaryWorkspace?.id).toBe(workspaceId);
   expect(database.listManagedProjects()[0]).toMatchObject({ state: "ready", primaryWorkspace: { desiredState: "stopped" } });
-  expect(mutations).toHaveBeenCalledTimes(4);
+  expect(mutations).toHaveBeenCalledTimes(5);
   database.close();
 });
 
@@ -72,6 +72,7 @@ test("keeps the project registering when an accepted Agent mutation fails", asyn
   const agent = {
     health: () => Promise.resolve({ status: "ok" as const }), inspectSource: () => Promise.reject(new Error("unused")),
     registerRevision: (operationId: string) => { failedOperationId = operationId; return Promise.resolve(); },
+    registerRuntimePlan: () => Promise.reject(new Error("must not continue")),
     createManagedStore: () => Promise.reject(new Error("must not continue")),
     fetchProject: () => Promise.reject(new Error("must not continue")),
     createWorkspace: () => Promise.reject(new Error("must not continue")),
@@ -86,7 +87,7 @@ test("keeps the project registering when an accepted Agent mutation fails", asyn
     }),
     inspectGit: () => Promise.reject(new Error("must not inspect")),
     inspectWorkspace: () => Promise.reject(new Error("must not inspect"))
-  } satisfies WorkspaceAgentClient;
+  } satisfies WorkspaceSetupAgent;
   await expect(setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "developer@example.com", { database, agent }))
     .rejects.toMatchObject({ code: "AGENT_INTERNAL_ERROR" });
   expect(database.listManagedProjects()).toEqual([expect.objectContaining({
@@ -110,6 +111,7 @@ test("a bounded polling timeout remains recoverable and retry converges on retai
   const agent = {
     health: () => Promise.resolve({ status: "ok" as const }), inspectSource: () => Promise.reject(new Error("unused")),
     registerRevision: (operationId, data) => { revisionId = data.revisionId; revisionHash = data.configuration.hash; return mutation(operationId); },
+    registerRuntimePlan: (operationId) => mutation(operationId),
     createManagedStore: (operationId) => mutation(operationId), fetchProject: (operationId) => mutation(operationId),
     createWorkspace: (operationId, data) => { workspaceId = data.workspaceId; return mutation(operationId); },
     snapshot: () => Promise.resolve({ agentBootId: "018f0f00-0000-7000-8000-000000000099", throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1" as const,
@@ -119,7 +121,7 @@ test("a bounded polling timeout remains recoverable and retry converges on retai
     inspectWorkspace: (requestedProjectId, requestedWorkspaceId) => Promise.resolve(workspaceInspectionDataSchema.parse({ projectId: requestedProjectId,
       workspaceId: requestedWorkspaceId, kind: "primary", revisionId, revisionHash, desiredState: "stopped", observedState: "stopped", dirty: false,
       runtimeStack: { desiredState: "absent", observedState: "absent" } }))
-  } satisfies WorkspaceAgentClient;
+  } satisfies WorkspaceSetupAgent;
   const timing = { orchestrationTimeoutMs: 100, nowMonotonic: () => clock, sleep: (milliseconds: number) => { clock += milliseconds; return Promise.resolve(); } };
   await expect(setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "actor", { database, agent, ...timing }))
     .rejects.toMatchObject({ code: "SETUP_IN_PROGRESS" });
@@ -151,6 +153,7 @@ test("two same-project setup requests converge on one revision, workspace, and o
   const agent = {
     health: () => Promise.resolve({ status: "ok" as const }), inspectSource: () => Promise.reject(new Error("unused")),
     registerRevision: async (operationId, data) => { revisionId = data.revisionId; revisionHash = data.configuration.hash; await succeed(operationId); },
+    registerRuntimePlan: succeed,
     createManagedStore: succeed, fetchProject: async (operationId) => await succeed(operationId),
     createWorkspace: async (operationId, data) => { workspaceId ||= data.workspaceId; expect(data.workspaceId).toBe(workspaceId); await succeed(operationId); },
     snapshot: () => Promise.resolve({ agentBootId: "018f0f00-0000-7000-8000-000000000099", throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.8" as const,
@@ -160,7 +163,7 @@ test("two same-project setup requests converge on one revision, workspace, and o
     inspectWorkspace: (requestedProjectId, requestedWorkspaceId) => Promise.resolve(workspaceInspectionDataSchema.parse({ projectId: requestedProjectId,
       workspaceId: requestedWorkspaceId, kind: "primary", revisionId, revisionHash, desiredState: "stopped", observedState: "stopped", dirty: false,
       runtimeStack: { desiredState: "absent", observedState: "absent" } }))
-  } satisfies WorkspaceAgentClient;
+  } satisfies WorkspaceSetupAgent;
   const [left, right] = await Promise.all([
     setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "actor", { database, agent }),
     setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "actor", { database, agent })
@@ -169,7 +172,7 @@ test("two same-project setup requests converge on one revision, workspace, and o
   expect(database.listConfigRevisions()).toHaveLength(1);
   expect(database.listConfigRevisions()[0]).toMatchObject({ revisionNumber: 1, state: "active" });
   expect(database.listWorkspaces()).toHaveLength(1);
-  expect(database.listOperations()).toHaveLength(4);
-  expect(new Set(database.listOperations().map((operation) => operation.operationName)).size).toBe(4);
+  expect(database.listOperations()).toHaveLength(5);
+  expect(new Set(database.listOperations().map((operation) => operation.operationName)).size).toBe(5);
   database.close();
 });

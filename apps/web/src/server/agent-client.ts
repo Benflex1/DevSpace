@@ -5,10 +5,12 @@ import {
   f10AgentApiV1EndpointByOperation,
   type AgentSnapshotData,
   type ConfigurationRevisionData,
+  type ConfigurationRuntimePlanData,
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
   type HealthData,
+  type RuntimeStatusData,
   type SourceInspectionData,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
@@ -20,7 +22,7 @@ export class AgentUnavailableError extends Error {
 }
 export class AgentResponseError extends Error {
   readonly code: string;
-  constructor(code: string) { super("The Agent could not complete the requested operation."); this.name = "AgentResponseError"; this.code = code; }
+  constructor(code: string, message = "The Agent could not complete the requested operation.") { super(message); this.name = "AgentResponseError"; this.code = code; }
 }
 
 export function createAgentClient(socketPath: string, options: {
@@ -33,9 +35,9 @@ export function createAgentClient(socketPath: string, options: {
   const createId = options.createId ?? uuidv7;
   const now = options.now ?? (() => new Date());
 
-  type SupportedOperation = "agent.health.get" | "project.source.inspect" | "configuration-revision.register"
+  type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
-    | "workspace.inspect" | "snapshot.get";
+    | "workspace.inspect" | "workspace.start" | "workspace.stop" | "snapshot.get";
 
   async function call(operation: SupportedOperation, data?: unknown, operationId?: string): Promise<unknown> {
     const endpoint = operation === "snapshot.get"
@@ -74,8 +76,8 @@ export function createAgentClient(socketPath: string, options: {
             if (response.statusCode === endpoint.successStatus) {
               return resolve(endpoint.successBodySchema.parse(parsed).data);
             }
-            const error = endpoint.errorSchema.parse(parsed) as { error: { code: string } };
-            return reject(new AgentResponseError(error.error.code));
+            const error = endpoint.errorSchema.parse(parsed) as { error: { code: string; message: string } };
+            return reject(new AgentResponseError(error.error.code, error.error.message));
           } catch {
             return reject(new AgentUnavailableError());
           }
@@ -90,11 +92,15 @@ export function createAgentClient(socketPath: string, options: {
 
   return {
     health: async (): Promise<HealthData> => await call("agent.health.get") as HealthData,
+    runtimeStatus: async (): Promise<RuntimeStatusData> => await call("agent.runtime-status.get") as RuntimeStatusData,
     inspectSource: async (url: string): Promise<SourceInspectionData> => await call(
       "project.source.inspect", { source: { kind: "remote", url } }
     ) as SourceInspectionData,
     registerRevision: async (operationId: string, data: ConfigurationRevisionData): Promise<void> => {
       await call("configuration-revision.register", data, operationId);
+    },
+    registerRuntimePlan: async (operationId: string, data: ConfigurationRuntimePlanData): Promise<void> => {
+      await call("configuration-runtime-plan.register", data, operationId);
     },
     createManagedStore: async (operationId: string, data: CreateManagedStoreData): Promise<void> => {
       await call("project.managed-store.create", data, operationId);
@@ -109,6 +115,12 @@ export function createAgentClient(socketPath: string, options: {
       await call("project.git.inspect", { projectId, workspaceId }) as GitInspectionData,
     inspectWorkspace: async (projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> =>
       await call("workspace.inspect", { projectId, workspaceId }) as WorkspaceInspectionData,
+    startWorkspace: async (operationId: string, projectId: string, workspaceId: string): Promise<void> => {
+      await call("workspace.start", { projectId, workspaceId }, operationId);
+    },
+    stopWorkspace: async (operationId: string, projectId: string, workspaceId: string): Promise<void> => {
+      await call("workspace.stop", { projectId, workspaceId }, operationId);
+    },
     snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
   };
 }
