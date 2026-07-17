@@ -1,4 +1,5 @@
 import { spawn, type SpawnOptions } from "node:child_process";
+import path from "node:path";
 import process from "node:process";
 import { remoteRepositoryUrlSchema, sourceInspectionDataSchema, type SourceInspectionData } from "@devspace/contracts";
 
@@ -157,9 +158,13 @@ export function createProductionGitInspector(options: {
   return {
     async inspect(rawUrl) {
       const url = validateInspectionUrl(rawUrl);
+      const caFile = process.env.DEVSPACE_GIT_CA_FILE;
       const result = await processRunner("/usr/bin/git", [
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "submodule.recurse=false",
         "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always",
+        ...(caFile === undefined ? [] : ["-c", `http.sslCAInfo=${path.resolve(caFile)}`]),
         "ls-remote", "--symref", url, "HEAD"
       ], {
         timeoutMs,

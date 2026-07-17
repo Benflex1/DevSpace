@@ -13,6 +13,7 @@ dist/
 build/
 out/
 .next/
+apps/web/next-env.d.ts
 coverage/
 .vitest/
 

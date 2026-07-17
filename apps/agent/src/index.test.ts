@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -24,6 +24,11 @@ async function request(socketPath: string, options: { method: string; path: stri
     call.end();
   });
 }
+async function provisionDefaultRoots(socketPath: string): Promise<void> {
+  const root = path.join(path.dirname(socketPath), ".devspace-managed");
+  await Promise.all(["projects", "workspaces", "state/operations"]
+    .map(async (relative) => await mkdir(path.join(root, relative), { recursive: true })));
+}
 const headers = {
   "X-DevSpace-Protocol-Version": "1",
   "X-DevSpace-Request-Id": id,
@@ -34,6 +39,7 @@ const headers = {
 test("serves health and source inspection through the executable Agent contracts", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-test-")); temporaryDirectories.push(directory);
   const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
   const server = createAgentServer({ socketPath, now: () => now, createId: () => id, gitInspector: {
     inspect: () => Promise.resolve(sourceInspectionDataSchema.parse({ sourceKind: "remote", isGitRepository: true, defaultBranch: "main", headCommit: "0123456789abcdef0123456789abcdef01234567" }))
   } });
@@ -54,6 +60,7 @@ test("serves health and source inspection through the executable Agent contracts
 test("rejects missing protocol headers and malformed source envelopes", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-test-")); temporaryDirectories.push(directory);
   const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
   const server = createAgentServer({ socketPath, now: () => now, createId: () => id, gitInspector: { inspect: () => Promise.reject(new Error("must not run")) } });
   await server.start();
   try {

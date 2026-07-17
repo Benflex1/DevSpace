@@ -1,7 +1,16 @@
 import { createAgentServer } from "./server.js";
 
 const configuredSocketPath = process.env.DEVSPACE_AGENT_SOCKET_PATH;
-const server = createAgentServer(configuredSocketPath === undefined ? {} : { socketPath: configuredSocketPath });
+const localRoot = process.env.DEVSPACE_MANAGED_ROOT;
+const server = createAgentServer({
+  ...(configuredSocketPath === undefined ? {} : { socketPath: configuredSocketPath }),
+  ...(localRoot === undefined ? {} : {
+    managedRoots: {
+      projects: `${localRoot}/projects`, workspaces: `${localRoot}/workspaces`, state: `${localRoot}/state`
+    },
+    operationJournalPath: `${localRoot}/state/operations`
+  })
+});
 await server.start();
 console.log(`DevSpace Agent listening on ${server.socketPath}`);
 

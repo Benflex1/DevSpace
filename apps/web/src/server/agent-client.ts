@@ -2,8 +2,15 @@ import http from "node:http";
 import {
   AGENT_API_VERSION,
   agentApiV1EndpointByOperation,
+  f10AgentApiV1EndpointByOperation,
+  type AgentSnapshotData,
+  type ConfigurationRevisionData,
+  type CreateManagedStoreData,
+  type CreateWorkspaceData,
+  type GitInspectionData,
   type HealthData,
-  type SourceInspectionData
+  type SourceInspectionData,
+  type WorkspaceInspectionData
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 
@@ -13,17 +20,29 @@ export class AgentUnavailableError extends Error {
 }
 export class AgentResponseError extends Error {
   readonly code: string;
-  constructor(code: string) { super("The Agent could not inspect this repository."); this.name = "AgentResponseError"; this.code = code; }
+  constructor(code: string) { super("The Agent could not complete the requested operation."); this.name = "AgentResponseError"; this.code = code; }
 }
 
-export function createAgentClient(socketPath: string, options: { timeoutMs?: number; createId?: () => string; now?: () => Date } = {}) {
-  const timeoutMs = options.timeoutMs ?? 5_000;
+export function createAgentClient(socketPath: string, options: {
+  timeoutMs?: number; mutationReceiptTimeoutMs?: number; observationTimeoutMs?: number;
+  createId?: () => string; now?: () => Date;
+} = {}) {
+  const defaultTimeoutMs = options.timeoutMs ?? 5_000;
+  const mutationReceiptTimeoutMs = options.mutationReceiptTimeoutMs ?? defaultTimeoutMs;
+  const observationTimeoutMs = options.observationTimeoutMs ?? defaultTimeoutMs;
   const createId = options.createId ?? uuidv7;
   const now = options.now ?? (() => new Date());
 
-  async function call(operation: "agent.health.get" | "project.source.inspect", data?: unknown): Promise<unknown> {
-    const endpoint = agentApiV1EndpointByOperation[operation];
+  type SupportedOperation = "agent.health.get" | "project.source.inspect" | "configuration-revision.register"
+    | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
+    | "workspace.inspect" | "snapshot.get";
+
+  async function call(operation: SupportedOperation, data?: unknown, operationId?: string): Promise<unknown> {
+    const endpoint = operation === "snapshot.get"
+      ? f10AgentApiV1EndpointByOperation["snapshot.get"]
+      : agentApiV1EndpointByOperation[operation];
     const requestId = createId();
+    const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs : observationTimeoutMs;
     const body = data === undefined ? undefined : JSON.stringify(endpoint.requestBodySchema.parse({ data }));
     return await new Promise((resolve, reject) => {
       const request = http.request({
@@ -34,6 +53,7 @@ export function createAgentClient(socketPath: string, options: { timeoutMs?: num
           "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION),
           "X-DevSpace-Request-Id": requestId,
           "X-DevSpace-Sent-At": now().toISOString(),
+          ...(operationId === undefined ? {} : { "X-DevSpace-Operation-Id": operationId }),
           Accept: "application/json",
           ...(body === undefined ? {} : {
             "Content-Type": "application/json; charset=utf-8",
@@ -72,8 +92,26 @@ export function createAgentClient(socketPath: string, options: { timeoutMs?: num
     health: async (): Promise<HealthData> => await call("agent.health.get") as HealthData,
     inspectSource: async (url: string): Promise<SourceInspectionData> => await call(
       "project.source.inspect", { source: { kind: "remote", url } }
-    ) as SourceInspectionData
+    ) as SourceInspectionData,
+    registerRevision: async (operationId: string, data: ConfigurationRevisionData): Promise<void> => {
+      await call("configuration-revision.register", data, operationId);
+    },
+    createManagedStore: async (operationId: string, data: CreateManagedStoreData): Promise<void> => {
+      await call("project.managed-store.create", data, operationId);
+    },
+    fetchProject: async (operationId: string, projectId: string): Promise<void> => {
+      await call("project.fetch", { projectId }, operationId);
+    },
+    createWorkspace: async (operationId: string, data: CreateWorkspaceData): Promise<void> => {
+      await call("workspace.create", data, operationId);
+    },
+    inspectGit: async (projectId: string, workspaceId: string | null): Promise<GitInspectionData> =>
+      await call("project.git.inspect", { projectId, workspaceId }) as GitInspectionData,
+    inspectWorkspace: async (projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> =>
+      await call("workspace.inspect", { projectId, workspaceId }) as WorkspaceInspectionData,
+    snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
   };
 }
 
-export type AgentClient = ReturnType<typeof createAgentClient>;
+export type WorkspaceAgentClient = ReturnType<typeof createAgentClient>;
+export type AgentClient = Pick<WorkspaceAgentClient, "health" | "inspectSource">;
