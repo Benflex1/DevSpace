@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "prepare:deps": "pnpm --dir ../.. --filter @devspace/domain build && pnpm --dir ../.. --filter @devspace/security build && pnpm --dir ../.. --filter @devspace/contracts build && pnpm --dir ../.. --filter @devspace/database build",
-    "predev": "pnpm run prepare:deps",
+    "predev": "if [ \"$DEVSPACE_DEPS_PREPARED\" != \"1\" ]; then pnpm run prepare:deps; fi",
     "prebuild": "pnpm run prepare:deps",
     "dev": "next dev --webpack",
     "start": "next start",

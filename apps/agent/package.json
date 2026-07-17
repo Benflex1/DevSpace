@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --dir ../.. exec tsx src/cli.ts",
+    "dev": "pnpm --dir ../.. exec tsx apps/agent/src/cli.ts",
     "start": "node dist/cli.js",
     "test": "pnpm --dir ../.. exec vitest run --project @devspace/agent",
     "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
