@@ -7,7 +7,7 @@ import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string };
   if (typeof request.projectId !== "string") return null;
-  if (record.operationName === "workspace.create" && typeof request.workspaceId === "string") {
+  if (["workspace.create", "workspace.start", "workspace.stop"].includes(record.operationName) && typeof request.workspaceId === "string") {
     return { type: "workspace", projectId: request.projectId, workspaceId: request.workspaceId };
   }
   return { type: "project", projectId: request.projectId };
@@ -59,9 +59,20 @@ export class OperationExecutor {
       await this.managed.awaitProjectExecutionFence(projectId);
       record = await this.journal.markRunning(operationId);
       this.events.progressed(operationId, resource, "Operation execution started.");
+      let previousRuntime: "absent" | "stopped" | "running" = "absent";
+      if ((record.operationName === "workspace.start" || record.operationName === "workspace.stop")
+        && typeof (record.request as { workspaceId?: string }).workspaceId === "string") {
+        const request = record.request as { projectId: string; workspaceId: string };
+        const before = await this.managed.inspectWorkspace(request.projectId, request.workspaceId);
+        previousRuntime = before.runtimeStack.observedState === "running" ? "running"
+          : before.runtimeStack.observedState === "stopped" ? "stopped" : "absent";
+      }
       switch (record.operationName) {
         case "configuration-revision.register":
           await this.managed.registerRevision(record.request as Parameters<ManagedWorkspaces["registerRevision"]>[0]);
+          break;
+        case "configuration-runtime-plan.register":
+          await this.managed.registerRuntimePlan(record.request as Parameters<ManagedWorkspaces["registerRuntimePlan"]>[0]);
           break;
         case "project.managed-store.create":
           await this.managed.createManagedStore(record.request as Parameters<ManagedWorkspaces["createManagedStore"]>[0], operationId);
@@ -74,8 +85,20 @@ export class OperationExecutor {
           await this.managed.createWorkspace(request, operationId);
           break;
         }
+        case "workspace.start": {
+          const request = record.request as { projectId: string; workspaceId: string };
+          await this.managed.startWorkspace(request.projectId, request.workspaceId, operationId);
+          this.events.workspaceRuntimeConverged(operationId, request.projectId, request.workspaceId, previousRuntime, "running");
+          break;
+        }
+        case "workspace.stop": {
+          const request = record.request as { projectId: string; workspaceId: string };
+          await this.managed.stopWorkspace(request.projectId, request.workspaceId);
+          this.events.workspaceRuntimeConverged(operationId, request.projectId, request.workspaceId, previousRuntime, "stopped");
+          break;
+        }
       }
-      if (record.operationName !== "configuration-revision.register") {
+      if (record.operationName !== "configuration-revision.register" && record.operationName !== "configuration-runtime-plan.register") {
         try { this.resources = await this.managed.snapshotResources(); }
         catch (error) { this.observationHealthy = false; throw error; }
         const request = record.request as { projectId: string; workspaceId?: string };
@@ -86,7 +109,7 @@ export class OperationExecutor {
             item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
           if (inspection === undefined) throw new Error("workspace-observation-missing");
           this.events.projectInspected(request.projectId, request.workspaceId, inspection);
-        } else {
+        } else if (record.operationName !== "workspace.start" && record.operationName !== "workspace.stop") {
           const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
           const inspection = project?.type === "project" ? project.gitInspections.find((item) => item.scope.kind === "managed-store")?.inspection : undefined;
           if (inspection === undefined) throw new Error("project-observation-missing");

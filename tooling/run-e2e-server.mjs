@@ -6,6 +6,7 @@ import https from "node:https";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createDockerEngineFixture } from "./docker-engine-fixture.mjs";
 
 const temporaryRoot = tmpdir();
 for (const entry of await readdir(temporaryRoot, { withFileTypes: true })) {
@@ -64,8 +65,10 @@ await Promise.all(["projects", "workspaces", "state/operations"]
 const environment = {
   ...process.env, DEVSPACE_AUTH_MODE: "development", DEVSPACE_APP_ORIGIN: "http://127.0.0.1:3100",
   DEVSPACE_DATABASE_PATH: databasePath, DEVSPACE_AGENT_SOCKET_PATH: path.join(runtimeDirectory, "agent.sock"),
-  DEVSPACE_MANAGED_ROOT: managedRoot, DEVSPACE_GIT_CA_FILE: certificate
+  DEVSPACE_MANAGED_ROOT: managedRoot, DEVSPACE_GIT_CA_FILE: certificate,
+  DEVSPACE_DOCKER_SOCKET_PATH: path.join(runtimeDirectory, "docker-engine.sock")
 };
+const dockerFixture = await createDockerEngineFixture(environment.DEVSPACE_DOCKER_SOCKET_PATH, path.join(managedRoot, "workspaces"));
 await writeFile(coordinationPath, `${JSON.stringify({ runtimeDirectory, databasePath, managedRoot, projectId, repositoryUrl, expectedHead, controlToken })}\n`, { mode: 0o600 });
 
 let children = []; let stopping = false; let restarting = false;
@@ -106,6 +109,7 @@ async function stop(code = 0) {
   await stopChildren();
   await new Promise((resolve) => control.close(resolve));
   await new Promise((resolve) => origin.close(resolve));
+  await dockerFixture.close();
   await rm(coordinationPath, { force: true });
   await rm(runtimeDirectory, { recursive: true, force: true });
   process.exit(code);

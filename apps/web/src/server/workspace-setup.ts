@@ -1,6 +1,9 @@
 import {
   canonicalizeProjectOptionsV1,
+  canonicalizeRuntimePlanV1,
+  compileRuntimePlanV1,
   hashProjectOptionsV1,
+  hashRuntimePlanV1,
   parseProjectOptionsV1
 } from "@devspace/project-options";
 import { gitBranchNameSchema } from "@devspace/contracts";
@@ -15,6 +18,9 @@ export class WorkspaceSetupExecutionError extends Error {
 }
 
 export interface WorkspaceSetupInput { readonly imageReference: string }
+export type WorkspaceSetupAgent = Pick<WorkspaceAgentClient,
+  "health" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" | "fetchProject" |
+  "createWorkspace" | "snapshot" | "inspectGit" | "inspectWorkspace">;
 
 export function parseWorkspaceSetupInput(value: unknown): WorkspaceSetupInput {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -44,7 +50,7 @@ function initialProjectOptions(input: WorkspaceSetupInput) {
 
 async function completeMutation(
   database: ProjectDatabase,
-  agent: WorkspaceAgentClient,
+  agent: Pick<WorkspaceAgentClient, "snapshot">,
   operation: ReturnType<ProjectDatabase["getOrCreateOperation"]>,
   execute: () => Promise<void>,
   polling: { deadline: number; now: () => number; sleep: (milliseconds: number) => Promise<void> }
@@ -76,7 +82,7 @@ async function completeMutation(
 }
 
 export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectId: string, actor: string, dependencies: {
-  readonly database: ProjectDatabase; readonly agent: WorkspaceAgentClient;
+  readonly database: ProjectDatabase; readonly agent: WorkspaceSetupAgent;
   readonly orchestrationTimeoutMs?: number; readonly nowMonotonic?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }): Promise<{
@@ -88,7 +94,11 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
   const options = initialProjectOptions(input);
   const configurationJson = canonicalizeProjectOptionsV1(options);
   const configurationHash = hashProjectOptionsV1(options);
-  const setup = dependencies.database.preparePrimaryWorkspace({ projectId, configurationJson, configurationHash, actor });
+  const runtimePlan = compileRuntimePlanV1(options);
+  const compiledRuntimePlanJson = canonicalizeRuntimePlanV1(runtimePlan);
+  const runtimePlanHash = hashRuntimePlanV1(runtimePlan);
+  const setup = dependencies.database.preparePrimaryWorkspace({ projectId, configurationJson, configurationHash,
+    compiledRuntimePlanJson, runtimePlanHash, actor });
   const nowMonotonic = dependencies.nowMonotonic ?? (() => Date.now());
   const polling = {
     deadline: nowMonotonic() + (dependencies.orchestrationTimeoutMs ?? 120_000), now: nowMonotonic,
@@ -105,6 +115,16 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
     });
     await completeMutation(dependencies.database, dependencies.agent, register, async () => {
       await dependencies.agent.registerRevision(register.operationId, revisionData);
+    }, polling);
+
+    const registerRuntimePlan = dependencies.database.getOrCreateOperation({
+      projectId, actor, operationName: "configuration-runtime-plan.register", resourceType: "configuration-revision", resourceId: setup.revision.id
+    });
+    await completeMutation(dependencies.database, dependencies.agent, registerRuntimePlan, async () => {
+      await dependencies.agent.registerRuntimePlan(registerRuntimePlan.operationId, {
+        projectId, revisionId: setup.revision.id, revisionHash: configurationHash,
+        runtimePlan: { format: "devspace.runtime-plan/v1", hash: runtimePlanHash, canonicalJson: compiledRuntimePlanJson }
+      });
     }, polling);
 
     const createStore = dependencies.database.getOrCreateOperation({

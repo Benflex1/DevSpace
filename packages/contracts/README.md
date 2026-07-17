@@ -3,10 +3,10 @@
 `@devspace/contracts` owns the executable Agent API v1 F09/F10 wire foundation. Its package-root API
 provides strict Zod schemas and inferred types for shared wire primitives, request/success
 envelopes, configuration revision documents, endpoint data, lifecycle-dependent inspections, the
-unchanged F09-only 23-code executable error registry, the declarative 29-endpoint F09 inventory,
+unchanged F09-only 23-code executable error registry, the declarative 30-endpoint F09 inventory,
 mutation headers, and the pure terminal binary-frame codec. F10 adds the textual boot-scoped
 cursor, recovery snapshot and eight-resource union, three-state Agent operation observations,
-18-code asynchronous execution failures with exact 19-mutation applicability, the strict 12-event
+18-code asynchronous execution failures with exact 20-mutation applicability, the strict 12-event
 union, two F10-only errors, two F10 endpoint descriptors, complete-v1 inventory/error views, and
 the NDJSON content-type/framing metadata.
 

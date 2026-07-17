@@ -25,9 +25,12 @@ import {
 
 export const supportedMutationNames = [
   "configuration-revision.register",
+  "configuration-runtime-plan.register",
   "project.managed-store.create",
   "project.fetch",
-  "workspace.create"
+  "workspace.create",
+  "workspace.start",
+  "workspace.stop"
 ] as const;
 export type SupportedMutationName = (typeof supportedMutationNames)[number];
 

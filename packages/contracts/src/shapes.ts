@@ -34,6 +34,17 @@ export const configurationRevisionDataSchema = z.strictObject({
   revisionId: uuidV7Schema,
   configuration: configurationDocumentSchema
 });
+export const runtimePlanDocumentSchema = z.strictObject({
+  format: z.literal("devspace.runtime-plan/v1"),
+  hash: projectOptionsRevisionHashSchema,
+  canonicalJson: canonicalJsonObjectTextSchema
+});
+export const configurationRuntimePlanDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  revisionId: uuidV7Schema,
+  revisionHash: projectOptionsRevisionHashSchema,
+  runtimePlan: runtimePlanDocumentSchema
+});
 export const revisionIdentitySchema = z.strictObject({
   revisionId: uuidV7Schema,
   revisionHash: projectOptionsRevisionHashSchema
@@ -242,6 +253,8 @@ export const previewInspectionDataSchema = z.strictObject({
 
 export type ConfigurationDocument = z.infer<typeof configurationDocumentSchema>;
 export type ConfigurationRevisionData = z.infer<typeof configurationRevisionDataSchema>;
+export type RuntimePlanDocument = z.infer<typeof runtimePlanDocumentSchema>;
+export type ConfigurationRuntimePlanData = z.infer<typeof configurationRuntimePlanDataSchema>;
 export type RevisionIdentity = z.infer<typeof revisionIdentitySchema>;
 export type SourceLocator = z.infer<typeof sourceLocatorSchema>;
 export type InspectSourceData = z.infer<typeof inspectSourceDataSchema>;

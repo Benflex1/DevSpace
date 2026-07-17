@@ -204,6 +204,7 @@ export default tseslint.config(
       "**/.vitest/**",
       "**/dist/**",
       "**/.next/**",
+      "**/.devspace-local/**",
       "**/generated/**",
       "**/node_modules/**",
       "schemas/**"

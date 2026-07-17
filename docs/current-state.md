@@ -32,16 +32,33 @@ Milestone 1 — in progress.
 - The Agent creates the managed bare Git store, fetches the remote with hooks and submodules
   disabled, creates the primary Git worktree at the fetched branch head, and revalidates both
   resources before mutation or authoritative inspection.
-- Ready workspaces are persisted and displayed as stopped with an absent runtime stack; this slice
-  intentionally creates no development container.
+- Runtime-plan v1 deterministically compiles the executable simple image configuration, uses a
+  domain-separated JCS hash, is persisted beside the immutable Project Options revision, and is
+  independently recompiled and verified by the Agent through a separate journaled registration.
+- Ready primary workspaces show the real dedicated rootless Docker availability and can be started
+  and stopped from the browser. Web persists desired state and an operation before each Agent
+  mutation, then stores authoritative workspace, runtime-stack, and development-service
+  observations in SQLite.
+- The Agent talks directly to a configured rootless Docker Engine Unix socket, creates one isolated
+  workspace network and one development container, applies administrator-bounded CPU, memory, and
+  PID limits, and publishes no host ports or Docker socket. Before the first Docker side effect, an
+  operation-bound Agent-private creation record is durably reserved; exact network and container
+  IDs advance through explicit phases before authoritative ownership is committed. Retries and
+  Agent restart recover only exact IDs or operation-labeled partial resources and never adopt by
+  name alone. Agent-private ownership binds exact Docker IDs, opaque derived names, labels,
+  revision, plan hash, generation, effective resource policy, and worktree mount.
+- Ordinary stop retains the container, network, worktree, and generation. Agent restart reinspects
+  exact retained Docker IDs, attached networks, limits, namespaces, capabilities, security options,
+  mounts, devices, and port settings. Missing, replaced, colliding, drifted, or mismatched resources
+  fail closed. Start succeeds only after bounded repeated exact inspection proves the container has
+  remained continuously running for the configured stabilization window.
 - Permanent Playwright coverage drives the browser, Web orchestration, SQLite, Agent journal,
-  loopback HTTPS Git fetch, real store/worktree creation, and Web+Agent restart without public
-  internet access.
+  loopback HTTPS Git fetch, real store/worktree creation, the production Docker Engine API adapter
+  against a stateful Unix-socket fixture, start/stop, and Web+Agent restart without public internet.
 
 ## Still absent
 
-- Docker/runtime stacks;
 - tasks, processes, terminals, previews, and AI sessions.
 
-The managed primary workspace slice ends with the workspace stopped and ready for a later runtime
-slice; no container, task, terminal, preview, or AI-session behavior is implied yet.
+Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secrets,
+rebuild, tasks, terminals, previews, and AI sessions remain intentionally unimplemented.

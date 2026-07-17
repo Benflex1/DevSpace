@@ -44,6 +44,7 @@ export const agentExecutionFailureSchema: z.ZodType<AgentExecutionFailure> =
 
 const applicabilityCodes = {
   "configuration-revision.register": ["AGENT_INTERNAL_ERROR"],
+  "configuration-runtime-plan.register": ["CONFIGURATION_NOT_REGISTERED", "RUNTIME_POLICY_VIOLATION", "AGENT_INTERNAL_ERROR"],
   "project.managed-store.create": ["RESOURCE_STATE_CONFLICT", "SOURCE_NOT_FOUND", "SOURCE_INVALID", "SOURCE_UNAVAILABLE", "RUNTIME_POLICY_VIOLATION", "AGENT_INTERNAL_ERROR"],
   "project.fetch": ["PROJECT_NOT_FOUND", "SOURCE_UNAVAILABLE", "AGENT_INTERNAL_ERROR"],
   "workspace.create": ["PROJECT_NOT_FOUND", "CONFIGURATION_NOT_REGISTERED", "WORKSPACE_STATE_CONFLICT", "RUNTIME_POLICY_VIOLATION", "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR"],

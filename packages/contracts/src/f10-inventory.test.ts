@@ -31,8 +31,8 @@ const acceptedErrors = {
 
 describe("F09, F10, and complete Agent API v1 inventory composition", () => {
   test("preserves the exact F09 classification counts", () => {
-    expect(agentApiV1Endpoints).toHaveLength(29);
-    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(19);
+    expect(agentApiV1Endpoints).toHaveLength(30);
+    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(20);
     expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(9);
     expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
   });
@@ -56,11 +56,11 @@ describe("F09, F10, and complete Agent API v1 inventory composition", () => {
   });
 
   test("composes the exact complete v1 counts", () => {
-    expect(completeAgentApiV1Endpoints).toHaveLength(31);
-    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(19);
+    expect(completeAgentApiV1Endpoints).toHaveLength(32);
+    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(20);
     expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(11);
     expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
-    expect(new Set(completeAgentApiV1Endpoints.map((endpoint) => endpoint.operation)).size).toBe(31);
+    expect(new Set(completeAgentApiV1Endpoints.map((endpoint) => endpoint.operation)).size).toBe(32);
   });
 
   test("keeps error registry views exactly separated", () => {

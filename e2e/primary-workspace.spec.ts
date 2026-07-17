@@ -16,6 +16,8 @@ interface ProjectRow { state: string; active_config_revision_id: string | null; 
 interface RevisionRow { state: string }
 interface OperationRow { operation_id: string; operation_name: string; resource_id: string; state: string }
 interface WorkspaceRow { id: string }
+interface RuntimeRow { runtime_generation: number; desired_state: string; observed_state: string }
+interface ServiceRow { desired_state: string; observed_state: string }
 function parseFixture(value: unknown): Fixture {
   if (value === null || typeof value !== "object") throw new Error("E2E fixture metadata is invalid");
   const record = value as Record<string, unknown>;
@@ -26,6 +28,7 @@ function parseFixture(value: unknown): Fixture {
 }
 
 test("sets up and recovers the real managed primary workspace", async ({ page }) => {
+  test.setTimeout(240_000);
   const fixtureJson: unknown = JSON.parse(await readFile(coordinationPath, "utf8"));
   const fixture = parseFixture(fixtureJson);
   await page.goto("/");
@@ -38,6 +41,8 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(project.getByText(/Present · [0-9a-f]{12}/u)).toBeVisible();
   await expect(project.getByText("stopped · clean")).toBeVisible();
   await expect(project.getByText("No container created")).toBeVisible();
+  await expect(project.getByText("Available", { exact: true })).toBeVisible();
+  await expect(project.getByRole("button", { name: "Start environment" })).toBeVisible();
 
   const database = new BetterSqlite3(fixture.databasePath, { readonly: true });
   const projectRow = database.prepare<ProjectRow>("select state, active_config_revision_id, primary_workspace_id from projects where id = ?").get(fixture.projectId);
@@ -50,7 +55,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   expect(projectRow.state).toBe("ready"); expect(revisions).toHaveLength(1); expect(revisions[0].state).toBe("active");
   expect(workspaces).toHaveLength(1); expect(projectRow.primary_workspace_id).toBe(workspaces[0].id);
   expect(operations.map((operation) => operation.operation_name).sort()).toEqual([
-    "configuration-revision.register", "project.fetch", "project.managed-store.create", "workspace.create"
+    "configuration-revision.register", "configuration-runtime-plan.register", "project.fetch", "project.managed-store.create", "workspace.create"
   ]);
   expect(operations.every((operation) => operation.state === "succeeded")).toBe(true);
 
@@ -67,7 +72,10 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
     expect(journal).toMatchObject({ operationId: operation.operation_id, operationName: operation.operation_name, state: "succeeded" });
   }
 
-  await page.reload(); await expect(project.getByText("Ready", { exact: true })).toBeVisible();
+  await project.getByRole("button", { name: "Start environment" }).click();
+  await expect(project.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
+  await expect(project.getByRole("button", { name: "Stop environment" })).toBeVisible();
+  await page.reload(); await expect(project.getByText("Running", { exact: true })).toBeVisible();
   const restart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(restart.status).toBe(204);
   await expect.poll(async () => await fetch("http://127.0.0.1:3100/").then((response) => response.status).catch(() => 0), {
@@ -79,6 +87,23 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await recoveredPage.goto("/");
   const recovered = recoveredPage.locator("article", { has: recoveredPage.getByRole("heading", { name: "Managed Fixture" }) });
   await expect(recovered.getByText("Ready", { exact: true })).toBeVisible();
+  await expect(recovered.getByText("running · clean")).toBeVisible();
+  await expect(recovered.getByText("Running", { exact: true })).toBeVisible();
+  await recovered.getByRole("button", { name: "Stop environment" }).click();
+  await expect(recovered.getByText("Stopped", { exact: true })).toBeVisible({ timeout: 120_000 });
+  const stoppedRestart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
+  expect(stoppedRestart.status).toBe(204);
+  await expect.poll(async () => await fetch("http://127.0.0.1:3100/").then((response) => response.status).catch(() => 0), { timeout: 30_000 }).toBe(200);
+  await recoveredPage.reload();
   await expect(recovered.getByText("stopped · clean")).toBeVisible();
-  await expect(recovered.getByText("No container created")).toBeVisible();
+  await expect(recovered.getByText("Stopped", { exact: true })).toBeVisible();
+  await recovered.getByRole("button", { name: "Start environment" }).click();
+  await expect(recovered.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
+
+  const runtimeDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
+  const runtimeRows = runtimeDatabase.prepare<RuntimeRow>("select runtime_generation, desired_state, observed_state from runtime_stacks").all();
+  const serviceRows = runtimeDatabase.prepare<ServiceRow>("select desired_state, observed_state from workspace_services where kind = 'development'").all();
+  runtimeDatabase.close();
+  expect(runtimeRows).toEqual([{ runtime_generation: 1, desired_state: "running", observed_state: "running" }]);
+  expect(serviceRows).toEqual([{ desired_state: "running", observed_state: "running" }]);
 });

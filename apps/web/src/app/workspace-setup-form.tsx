@@ -36,7 +36,7 @@ export function WorkspaceSetupForm({ projectId, agentReachable }: { projectId: s
 
   return <form className="setup-form" onSubmit={(event) => { submit(event).catch(() => setSubmitting(false)); }}>
     <label>Development container image
-      <small>Saved in immutable Project Options v1; no container is created in this milestone.</small>
+      <small>Saved in immutable Project Options v1 and used when the environment starts.</small>
       <input required maxLength={512} value={imageReference} onChange={(event) => setImageReference(event.target.value)} />
     </label>
     <button type="submit" disabled={submitting || !agentReachable}>{submitting ? "Setting up…" : "Set up primary workspace"}</button>
