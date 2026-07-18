@@ -1642,6 +1642,33 @@
             },
             "state": {
               "type": "string",
+              "const": "running"
+            },
+            "updatedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            "failure": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "operationId",
+            "state",
+            "updatedAt",
+            "failure"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "state": {
+              "type": "string",
               "const": "succeeded"
             },
             "updatedAt": {
@@ -3855,6 +3882,33 @@
                   "state": {
                     "type": "string",
                     "const": "accepted"
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  },
+                  "failure": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "operationId",
+                  "state",
+                  "updatedAt",
+                  "failure"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "state": {
+                    "type": "string",
+                    "const": "running"
                   },
                   "updatedAt": {
                     "type": "string",
@@ -33022,6 +33076,33 @@
                       "state": {
                         "type": "string",
                         "const": "accepted"
+                      },
+                      "updatedAt": {
+                        "type": "string",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                      },
+                      "failure": {
+                        "type": "null"
+                      }
+                    },
+                    "required": [
+                      "operationId",
+                      "state",
+                      "updatedAt",
+                      "failure"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operationId": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                      },
+                      "state": {
+                        "type": "string",
+                        "const": "running"
                       },
                       "updatedAt": {
                         "type": "string",

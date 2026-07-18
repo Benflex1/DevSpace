@@ -41,7 +41,8 @@ test("lazily compiles an old null-plan revision and persists desired state befor
   raw.prepare("update project_config_revisions set compiled_runtime_plan_json = null, runtime_plan_hash = null").run();
   raw.prepare("delete from operations where operation_name = 'configuration-runtime-plan.register'").run(); raw.close();
   database = openProjectDatabase(databasePath);
-  observations.clear(); let runtimeState: "stopped" | "running" = "stopped"; let planRegistrations = 0; const persistedBeforeAgent: boolean[] = [];
+  observations.clear(); let runtimeState: "stopped" | "running" = "stopped"; let planRegistrations = 0;
+  let startAttempts = 0; const persistedBeforeAgent: boolean[] = []; const activeActions: Array<string | null> = [];
   const runtimeAgent = {
     ...setupAgent,
     runtimeStatus: () => Promise.resolve({ rootlessRuntime: "available" as const, operationJournal: "available" as const, checkedAt: "2026-07-17T12:00:00.000Z" }),
@@ -49,6 +50,20 @@ test("lazily compiles an old null-plan revision and persists desired state befor
     startWorkspace: (operationId) => {
       persistedBeforeAgent.push(database.listOperations().some((item) => item.operationId === operationId && item.operationName === "workspace.start" && item.state === "accepted")
         && database.listRuntimeStacks().some((item) => item.desiredState === "running"));
+      activeActions.push(database.listRuntimeOperations(project.id, database.getRuntimeContext(project.id).workspace.id)
+        .find((item) => item.state === "accepted" || item.state === "running")?.operationName ?? null);
+      startAttempts += 1;
+      if (startAttempts === 1) {
+        const context = database.getRuntimeContext(project.id);
+        const concurrent = database.prepareRuntimeMutation({ projectId: project.id, workspaceId: context.workspace.id, actor: "actor",
+          action: "start", runtimePlanHash: context.revision.runtimePlanHash!, imageReference: "node:24-bookworm" });
+        expect(concurrent.operationId).toBe(operationId);
+        expect(database.listOperations().filter((item) => item.operationName === "workspace.start")).toHaveLength(1);
+        observations.set(operationId, { operationId, state: "failed", updatedAt: "2026-07-17T12:00:00.000Z",
+          failure: { code: "AGENT_INTERNAL_ERROR", message: "Container creation failed safely.", retryable: true,
+            details: { incidentId: "018f0f00-0000-7000-8000-000000000098" } } });
+        return Promise.resolve();
+      }
       runtimeState = "running"; succeed(operationId); return Promise.resolve();
     },
     stopWorkspace: (operationId) => {
@@ -60,15 +75,21 @@ test("lazily compiles an old null-plan revision and persists desired state befor
       kind: "primary", revisionId, revisionHash, desiredState: runtimeState, observedState: runtimeState, dirty: false,
       runtimeStack: { desiredState: runtimeState, observedState: runtimeState } }))
   } satisfies WorkspaceAgentClient;
+  await expect(mutatePrimaryWorkspaceRuntime("start", project.id, "actor", { database, agent: runtimeAgent }))
+    .rejects.toMatchObject({ code: "AGENT_INTERNAL_ERROR" });
+  expect(database.listManagedProjects()[0]).toMatchObject({ runtime: {
+    errorMessage: "Container creation failed safely."
+  } });
   await mutatePrimaryWorkspaceRuntime("start", project.id, "actor", { database, agent: runtimeAgent });
   await mutatePrimaryWorkspaceRuntime("stop", project.id, "actor", { database, agent: runtimeAgent });
   await mutatePrimaryWorkspaceRuntime("start", project.id, "actor", { database, agent: runtimeAgent });
   expect(planRegistrations).toBe(1);
-  expect(persistedBeforeAgent).toEqual([true, true, true]);
+  expect(persistedBeforeAgent).toEqual([true, true, true, true]);
+  expect(activeActions).toEqual(["workspace.start", "workspace.start", "workspace.start"]);
   expect(typeof database.listConfigRevisions()[0]?.compiledRuntimePlanJson).toBe("string");
   expect(typeof database.listConfigRevisions()[0]?.runtimePlanHash).toBe("string");
   expect(database.listRuntimeStacks()).toEqual([expect.objectContaining({ runtimeGeneration: 1, desiredState: "running", observedState: "running" })]);
   expect(database.listWorkspaceServices()).toEqual([expect.objectContaining({ desiredState: "running", observedState: "running" })]);
-  expect(database.listOperations().filter((operation) => operation.operationName === "workspace.start")).toHaveLength(2);
+  expect(database.listOperations().filter((operation) => operation.operationName === "workspace.start")).toHaveLength(3);
   database.close();
 });

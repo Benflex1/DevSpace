@@ -1,11 +1,12 @@
 import BetterSqlite3 from "better-sqlite3";
+import type { WorkspaceInspectionData } from "@devspace/contracts";
 import { mkdirSync } from "node:fs";
 import pathModule from "node:path";
 import {
   auditEvents, migrateDatabase, operations, projectConfigRevisions, projects, runtimeStacks, workspaceServices, workspaces,
   type Operation, type Project, type ProjectConfigRevision
 } from "@devspace/database";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
 
@@ -214,7 +215,9 @@ export function openProjectDatabase(path: string, options: {
         state: outcome.state, finishedAt: timestamp,
         errorCode: outcome.state === "failed" ? outcome.code : null,
         errorMessage: outcome.state === "failed" ? outcome.message : null
-      }).where(and(eq(operations.operationId, operationId), eq(operations.state, "accepted"))).run();
+      }).where(and(eq(operations.operationId, operationId), or(
+        eq(operations.state, "accepted"), eq(operations.state, "running")
+      ))).run();
     },
     getRuntimeContext(projectId: string) {
       const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
@@ -255,6 +258,14 @@ export function openProjectDatabase(path: string, options: {
         if (context.workspace.id !== input.workspaceId || context.workspace.observedState === "provisioning") {
           throw new ProjectSetupConflictError("The primary workspace is not ready for a runtime action.");
         }
+        const active = db.select().from(operations).where(and(eq(operations.projectId, input.projectId),
+          eq(operations.workspaceId, input.workspaceId))).orderBy(desc(operations.createdAt), desc(operations.operationId)).all()
+          .find((candidate) => (candidate.operationName === "workspace.start" || candidate.operationName === "workspace.stop")
+            && (candidate.state === "accepted" || candidate.state === "running"));
+        if (active !== undefined) {
+          if (active.operationName === `workspace.${input.action}`) return active;
+          throw new ProjectSetupConflictError("Another runtime action is still in progress.");
+        }
         let stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
         const target = input.action === "start" ? "running" as const : "stopped" as const;
         if (stack === undefined && input.action === "stop") throw new ProjectSetupConflictError("No development runtime exists to stop.");
@@ -277,9 +288,6 @@ export function openProjectDatabase(path: string, options: {
         }
         db.update(workspaces).set({ desiredState: target, updatedAt: timestamp, rowVersion: context.workspace.rowVersion + 1 })
           .where(eq(workspaces.id, input.workspaceId)).run();
-        const latest = db.select().from(operations).where(and(eq(operations.projectId, input.projectId),
-          eq(operations.operationName, `workspace.${input.action}`))).orderBy(desc(operations.createdAt), desc(operations.operationId)).get();
-        if (latest !== undefined && (latest.state === "accepted" || latest.state === "running")) return latest;
         const operation: Operation = { operationId: createId(), projectId: input.projectId, workspaceId: input.workspaceId,
           actor: input.actor, operationName: `workspace.${input.action}`, resourceType: "workspace", resourceId: input.workspaceId,
           state: "accepted", progressJson: null, errorCode: null, errorMessage: null,
@@ -289,19 +297,21 @@ export function openProjectDatabase(path: string, options: {
       }).immediate();
     },
     finishRuntimeMutation(input: { operationId: string; projectId: string; workspaceId: string;
-      outcome: { state: "succeeded"; observed: "running" | "stopped" } | { state: "failed"; code: string; message: string } }): void {
+      outcome: { state: "succeeded"; workspaceObserved: WorkspaceInspectionData["observedState"];
+        runtimeObserved: WorkspaceInspectionData["runtimeStack"]["observedState"] }
+        | { state: "failed"; code: string; message: string } }): void {
       client.transaction(() => {
         const timestamp = now().toISOString();
         const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
         if (stack === undefined) throw new ProjectSetupConflictError("The runtime stack no longer exists.");
         if (input.outcome.state === "succeeded") {
-          db.update(runtimeStacks).set({ observedState: input.outcome.observed, lastObservedAt: timestamp,
+          db.update(runtimeStacks).set({ observedState: input.outcome.runtimeObserved, lastObservedAt: timestamp,
             updatedAt: timestamp, lastErrorCode: null, lastErrorMessage: null }).where(eq(runtimeStacks.id, stack.id)).run();
-          db.update(workspaces).set({ observedState: input.outcome.observed, updatedAt: timestamp })
+          db.update(workspaces).set({ observedState: input.outcome.workspaceObserved, updatedAt: timestamp })
             .where(eq(workspaces.id, input.workspaceId)).run();
-          db.update(workspaceServices).set({ observedState: input.outcome.observed, healthState: "unknown", lastObservedAt: timestamp,
-            startedAt: input.outcome.observed === "running" ? timestamp : null,
-            stoppedAt: input.outcome.observed === "stopped" ? timestamp : null }).where(eq(workspaceServices.runtimeStackId, stack.id)).run();
+          db.update(workspaceServices).set({ observedState: input.outcome.runtimeObserved, healthState: "unknown", lastObservedAt: timestamp,
+            startedAt: input.outcome.runtimeObserved === "running" ? timestamp : null,
+            stoppedAt: input.outcome.runtimeObserved === "stopped" ? timestamp : null }).where(eq(workspaceServices.runtimeStackId, stack.id)).run();
         } else {
           db.update(runtimeStacks).set({ updatedAt: timestamp, lastObservedAt: timestamp, lastErrorCode: input.outcome.code,
             lastErrorMessage: input.outcome.message.slice(0, 512) }).where(eq(runtimeStacks.id, stack.id)).run();
@@ -351,6 +361,10 @@ export function openProjectDatabase(path: string, options: {
       return result;
     },
     listOperations: () => db.select().from(operations).orderBy(operations.createdAt, operations.operationId).all(),
+    listRuntimeOperations: (projectId: string, workspaceId: string) => db.select().from(operations).where(and(
+      eq(operations.projectId, projectId), eq(operations.workspaceId, workspaceId)
+    )).orderBy(desc(operations.createdAt), desc(operations.operationId)).all().filter((operation) =>
+      operation.operationName === "workspace.start" || operation.operationName === "workspace.stop"),
     listConfigRevisions: () => db.select().from(projectConfigRevisions).orderBy(projectConfigRevisions.revisionNumber).all(),
     listWorkspaces: () => db.select().from(workspaces).orderBy(workspaces.createdAt, workspaces.id).all(),
     listRuntimeStacks: () => db.select().from(runtimeStacks).all(),

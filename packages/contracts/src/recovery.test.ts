@@ -187,6 +187,7 @@ describe("F10 Agent snapshot contract", () => {
 describe("F10 Agent operation observations", () => {
   test.each([
     { operationId, state: "accepted", updatedAt: timestamp, failure: null },
+    { operationId, state: "running", updatedAt: timestamp, failure: null },
     { operationId, state: "succeeded", updatedAt: timestamp, failure: null },
     {
       operationId, state: "failed", updatedAt: timestamp,
@@ -199,16 +200,13 @@ describe("F10 Agent operation observations", () => {
     expect(agentOperationObservationSchema.safeParse(observation).success).toBe(true);
   });
 
-  test("rejects failure/state mismatch and a public running state", () => {
+  test("rejects failure/state mismatch", () => {
     expect(agentOperationObservationSchema.safeParse({
       operationId, state: "accepted", updatedAt: timestamp,
       failure: { code: "SOURCE_UNAVAILABLE", message: "redacted", retryable: true, details: {} }
     }).success).toBe(false);
     expect(agentOperationObservationSchema.safeParse({
       operationId, state: "failed", updatedAt: timestamp, failure: null
-    }).success).toBe(false);
-    expect(agentOperationObservationSchema.safeParse({
-      operationId, state: "running", updatedAt: timestamp, failure: null
     }).success).toBe(false);
   });
 });

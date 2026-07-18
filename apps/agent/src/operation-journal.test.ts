@@ -24,6 +24,7 @@ test("first acceptance, exact replay, conflicts, terminal reload, and restart re
   await expect(journal.accept(operationId, "workspace.create", request)).rejects.toMatchObject({ reason: "operation-name-mismatch" });
   await expect(journal.accept(operationId, "project.fetch", { projectId: otherOperationId })).rejects.toMatchObject({ reason: "request-mismatch" });
   await journal.markRunning(operationId);
+  expect(journal.observations()).toEqual([{ operationId, state: "running", updatedAt: timestamp, failure: null }]);
   const restartedRunning = new OperationJournal(directory, () => new Date(timestamp)); await restartedRunning.initialize();
   expect(restartedRunning.resumable()).toEqual([expect.objectContaining({ operationId, state: "running" })]);
   await restartedRunning.succeed(operationId);

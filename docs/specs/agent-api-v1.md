@@ -1115,17 +1115,16 @@ execution.
 
 ```text
 AgentOperationObservation =
-  | { operationId: UuidV7, state: "accepted" | "succeeded",
+  | { operationId: UuidV7, state: "accepted" | "running" | "succeeded",
       updatedAt: UtcTimestampMs, failure: null }
   | { operationId: UuidV7, state: "failed", updatedAt: UtcTimestampMs,
       failure: AgentExecutionFailure }
 ```
 
-These three states are coarse F10 Agent execution observations, not a reuse or replacement of
+These four states are coarse F10 Agent execution observations, not a reuse or replacement of
 Web's SQLite operation lifecycle. `accepted` means the Agent durably accepted the operation and no
-terminal execution outcome is currently recorded. It intentionally covers every internal
-nonterminal phase, including waiting, internal queueing, and active execution. F10 exposes no
-separate public scheduling or running state.
+terminal execution outcome is currently recorded. `running` means durable execution has begun.
+Both are nonterminal and active.
 
 The exact application rules are:
 
@@ -1133,16 +1132,16 @@ The exact application rules are:
   updatedAt: <durable acceptance time> }` when no observation exists; an exact same-ID F09 replay
   leaves an existing recoverable observation unchanged and does not recreate a compacted terminal
   observation; the timestamp is journal metadata rather than a `MutationReceipt` field;
-- `operation.progressed` requires an existing recoverable `accepted` observation, leaves
-  `state: "accepted"` and `failure: null`, and sets `updatedAt` to the event `occurredAt`; its
+- `operation.progressed` requires an existing recoverable `accepted` or `running` observation,
+  sets `state: "running"` and `failure: null`, and sets `updatedAt` to the event `occurredAt`; its
   message remains transient;
-- `operation.succeeded` requires an existing `accepted` observation and replaces it with
+- `operation.succeeded` requires an existing `accepted` or `running` observation and replaces it with
   `{ state: "succeeded", failure: null, updatedAt: event.occurredAt }`;
-- `operation.failed` requires an existing `accepted` observation and replaces it with
+- `operation.failed` requires an existing `accepted` or `running` observation and replaces it with
   `{ state: "failed", failure: event.payload.error, updatedAt: event.occurredAt }`.
 
 Progress against a terminal observation is invalid. No operation event may move a terminal
-observation back to `accepted` or to another terminal state. Normal cursor processing prevents
+observation back to a nonterminal state or to another terminal state. Normal cursor processing prevents
 duplicate replay application; F10 does not define a separate idempotent snapshot-mutation API.
 
 `operationObservations` is the complete set of currently recoverable Agent execution observations
@@ -1347,7 +1346,7 @@ snapshot health to `unknown`.
 
 `operation.progressed` messages are transient informational events and are not reconstructed by a
 snapshot. Snapshots guarantee current Agent-observed resource state and every currently
-nonterminal `accepted` operation observation. Retained terminal operation observations provide
+nonterminal `accepted` or `running` operation observation. Retained terminal operation observations provide
 best-available recovery only and remain subject to accepted F09 compaction. F10 does not claim
 permanent historical operation-outcome recovery. No remaining F10 event changes durable current
 Agent-observed resource state that the snapshot cannot represent.
@@ -1529,8 +1528,8 @@ new protocol decision:
    identity keys, supports all project Git scopes, and contains no source inspection.
 7. Snapshot resources, project Git scopes, and operation observations enforce their exact
    uniqueness rules without imposing array order.
-8. Agent operation observations use exactly `accepted`, `succeeded`, and `failed`, expose no
-   running phase, enforce exact event application, retain every nonterminal accepted operation,
+8. Agent operation observations use exactly `accepted`, `running`, `succeeded`, and `failed`, expose
+   both nonterminal phases, enforce exact event application, retain every nonterminal operation,
    and leave terminal retention subject to F09 compaction.
 9. `AgentExecutionFailure` contains exactly the 18 enumerated post-acceptance-capable codes, all 23
    F09 codes have one explicit classification, all 20 mutations have exact applicability, and
@@ -1556,7 +1555,7 @@ new protocol decision:
     blanks, no CRLF, property-order independence, and rejection of an incomplete final line for
     cursor advancement.
 19. The recovery matrix accounts for every current-state effect of the 12 events, treats progress
-    messages as transient, guarantees all current nonterminal accepted observations, and marks
+    messages as transient, guarantees all current nonterminal observations, and marks
     terminal operation recovery as best-available.
 20. Generated schema comments distinguish object-level refinements from stream/history guarantees.
 21. No fixture, export, schema, or inventory entry introduces source-inspection ownership,

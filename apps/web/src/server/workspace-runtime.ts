@@ -4,6 +4,7 @@ import {
 } from "@devspace/project-options";
 import { AgentResponseError, type WorkspaceAgentClient } from "./agent-client.js";
 import type { ProjectDatabase } from "./database.js";
+import { reconcilePrimaryWorkspaceRuntimeOperation } from "./runtime-operation-reconciliation.js";
 
 export class WorkspaceRuntimeExecutionError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "WorkspaceRuntimeExecutionError"; }
@@ -77,6 +78,29 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
       throw failure;
     }
   }
+  const reconciliation = await reconcilePrimaryWorkspaceRuntimeOperation(projectId, {
+    database: dependencies.database, agent: dependencies.agent
+  });
+  if (reconciliation.activeAction !== null) {
+    throw new WorkspaceRuntimeExecutionError("RUNTIME_ACTION_IN_PROGRESS", "The runtime action is still running safely.");
+  }
+  if (reconciliation.reconciledTerminal?.state === "succeeded"
+    && reconciliation.reconciledTerminal.action === action && reconciliation.inspection !== null) {
+    return reconciliation.inspection;
+  }
+  const authorized = action === "start" ? reconciliation.canStart : reconciliation.canStop;
+  if (!authorized) {
+    const message = reconciliation.blockingReason === "failed-start-unproven"
+      ? "Retry start requires the exact failed Agent operation and a recoverable stopped runtime inspection."
+      : reconciliation.blockingReason === "agent-snapshot-unavailable"
+        ? "The Agent operation snapshot is unavailable, so the runtime action cannot be authorized safely."
+        : reconciliation.blockingReason === "runtime-unavailable"
+          ? "The Agent operation journal or dedicated rootless runtime is unavailable."
+          : reconciliation.blockingReason === "inspection-unavailable"
+            ? "The live workspace runtime inspection is unavailable."
+            : "The requested runtime action is not valid for the authoritative current state.";
+    throw new WorkspaceRuntimeExecutionError("RUNTIME_ACTION_NOT_AUTHORIZED", message);
+  }
   const operation = dependencies.database.prepareRuntimeMutation({ projectId, workspaceId: context.workspace.id, actor, action,
     runtimePlanHash: planHash, imageReference: plan.developmentContainer.source.imageReference });
   if (operation.state === "succeeded") return await dependencies.agent.inspectWorkspace(projectId, context.workspace.id);
@@ -92,14 +116,23 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
       throw new WorkspaceRuntimeExecutionError("WORKSPACE_STATE_CONFLICT", "The Agent did not observe the requested runtime state.");
     }
     dependencies.database.finishRuntimeMutation({ operationId: operation.operationId, projectId, workspaceId: context.workspace.id,
-      outcome: { state: "succeeded", observed: expected } });
+      outcome: { state: "succeeded", workspaceObserved: observed.observedState,
+        runtimeObserved: observed.runtimeStack.observedState } });
     return observed;
   } catch (error) {
+    const deliveryOutcomeUnknown = !(error instanceof WorkspaceRuntimeExecutionError)
+      && !(error instanceof AgentResponseError);
     const failure = error instanceof WorkspaceRuntimeExecutionError ? error
       : error instanceof AgentResponseError ? new WorkspaceRuntimeExecutionError(error.code, error.message)
       : new WorkspaceRuntimeExecutionError("AGENT_UNAVAILABLE", "The DevSpace Agent is unavailable.");
-    dependencies.database.finishRuntimeMutation({ operationId: operation.operationId, projectId, workspaceId: context.workspace.id,
-      outcome: { state: "failed", code: failure.code, message: failure.message } });
+    if (failure.code !== "RUNTIME_ACTION_IN_PROGRESS" && !deliveryOutcomeUnknown) {
+      dependencies.database.finishRuntimeMutation({ operationId: operation.operationId, projectId, workspaceId: context.workspace.id,
+        outcome: { state: "failed", code: failure.code, message: failure.message } });
+    }
+    if (deliveryOutcomeUnknown) {
+      throw new WorkspaceRuntimeExecutionError("RUNTIME_ACTION_IN_PROGRESS",
+        "The runtime action outcome is not yet confirmed. Reconciliation will continue safely.");
+    }
     throw failure;
   }
 }

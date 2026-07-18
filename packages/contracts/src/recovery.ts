@@ -152,6 +152,9 @@ export const agentOperationObservationSchema = z.discriminatedUnion("state", [
     operationId: uuidV7Schema, state: z.literal("accepted"), updatedAt: utcTimestampMsSchema, failure: z.null()
   }),
   z.strictObject({
+    operationId: uuidV7Schema, state: z.literal("running"), updatedAt: utcTimestampMsSchema, failure: z.null()
+  }),
+  z.strictObject({
     operationId: uuidV7Schema, state: z.literal("succeeded"), updatedAt: utcTimestampMsSchema, failure: z.null()
   }),
   z.strictObject({

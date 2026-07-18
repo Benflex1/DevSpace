@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -53,6 +54,7 @@ const origin = https.createServer({ key: await readFile(privateKey), cert: await
 await new Promise((resolve, reject) => { origin.once("error", reject); origin.listen(3443, "127.0.0.1", resolve); });
 
 const databasePath = path.join(runtimeDirectory, "devspace.sqlite");
+const sqliteModule = createRequire(path.resolve("apps/web/package.json"))("better-sqlite3");
 const seedPath = path.join(runtimeDirectory, "seed.json");
 const repositoryUrl = "https://127.0.0.1:3443/repository.git";
 const seed = spawnSync("pnpm", ["exec", "tsx", "tooling/seed-e2e-project.ts", databasePath, repositoryUrl, seedPath], { encoding: "utf8" });
@@ -94,9 +96,25 @@ async function waitForWeb() {
 startChildren();
 
 const control = http.createServer(async (request, response) => {
-  if (request.method !== "POST" || request.url !== "/restart" || request.headers.authorization !== `Bearer ${controlToken}`) {
+  if (request.headers.authorization !== `Bearer ${controlToken}`) {
     response.writeHead(404).end(); return;
   }
+  if (request.method === "POST" && request.url === "/fail-next-container-create") {
+    dockerFixture.failNextContainerCreates(); response.writeHead(204).end(); return;
+  }
+  if (request.method === "POST" && request.url === "/simulate-stale-web-runtime-operation") {
+    const database = new sqliteModule(databasePath);
+    try {
+      database.prepare("update operations set state = 'accepted', finished_at = null, error_code = null, error_message = null where operation_id = (select operation_id from operations where operation_name = 'workspace.start' order by created_at desc, operation_id desc limit 1)").run();
+    } finally { database.close(); }
+    response.writeHead(204).end(); return;
+  }
+  if (request.method === "GET" && request.url === "/docker-snapshot") {
+    const snapshot = dockerFixture.snapshot();
+    const body = JSON.stringify({ networks: snapshot.networks.length, containers: snapshot.containers.length });
+    response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body); return;
+  }
+  if (request.method !== "POST" || request.url !== "/restart") { response.writeHead(404).end(); return; }
   restarting = true;
   try { await stopChildren(); startChildren(); await waitForWeb(); response.writeHead(204).end(); }
   catch { response.writeHead(500).end(); }

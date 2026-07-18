@@ -100,6 +100,10 @@ export class WorkspaceRuntimeError extends Error {
 export class WorkspaceRuntimeManager {
   private readonly ownershipRoot: string;
   private readonly creationRoot: string;
+  private creationOperation: ((operationId: string) => {
+    readonly operationName: string; readonly request: unknown;
+    readonly state?: "accepted" | "running" | "succeeded" | "failed";
+  } | undefined) | null = null;
   constructor(
     stateRoot: string,
     private readonly engine: DockerEngineClient,
@@ -134,7 +138,8 @@ export class WorkspaceRuntimeManager {
   }
 
   async validateCreationJournalBindings(findOperation: (operationId: string) => {
-    readonly operationName: string; readonly request: unknown
+    readonly operationName: string; readonly request: unknown;
+    readonly state?: "accepted" | "running" | "succeeded" | "failed";
   } | undefined): Promise<void> {
     for (const name of await readdir(this.creationRoot)) {
       const record = await readStrictJson(path.join(this.creationRoot, name), runtimeCreationSchema);
@@ -144,6 +149,7 @@ export class WorkspaceRuntimeManager {
         throw new Error("runtime-creation-record-is-not-bound-to-its-durable-operation");
       }
     }
+    this.creationOperation = findOperation;
   }
 
   async status(): Promise<"available" | "unavailable"> {
@@ -173,7 +179,8 @@ export class WorkspaceRuntimeManager {
     }
   }
 
-  private validateContainer(container: Awaited<ReturnType<DockerEngineClient["inspectContainer"]>>, record: RuntimeOwnership): void {
+  private validateContainer(container: Awaited<ReturnType<DockerEngineClient["inspectContainer"]>>, record: RuntimeOwnership,
+    networkIdentity: "materialized" | "operation-owned-pre-activation" = "materialized"): void {
     const devices = container.HostConfig.Devices ?? [];
     const portBindings = container.HostConfig.PortBindings ?? {};
     const capAdd = [...(container.HostConfig.CapAdd ?? [])].sort();
@@ -183,6 +190,9 @@ export class WorkspaceRuntimeManager {
     const networks = container.NetworkSettings.Networks ?? {};
     const networkNames = Object.keys(networks);
     const attached = networks[record.network.name];
+    const networkIdentityMatches = attached?.NetworkID === record.network.id
+      || (networkIdentity === "operation-owned-pre-activation" && attached?.NetworkID === ""
+        && container.State.Running === false && container.State.Status === "created");
     if (container.Id !== record.developmentContainer.id
       || container.Name.replace(/^\//u, "") !== record.developmentContainer.name
       || !equalLabels(container.Config.Labels ?? {}, record.developmentContainer.labels)
@@ -194,7 +204,7 @@ export class WorkspaceRuntimeManager {
       || container.HostConfig.AutoRemove !== false || container.HostConfig.ReadonlyRootfs !== false
       || container.HostConfig.RestartPolicy.Name !== "no" || container.HostConfig.RestartPolicy.MaximumRetryCount !== 0
       || container.HostConfig.NetworkMode !== record.network.name
-      || networkNames.length !== 1 || networkNames[0] !== record.network.name || attached?.NetworkID !== record.network.id
+      || networkNames.length !== 1 || networkNames[0] !== record.network.name || !networkIdentityMatches
       || Object.keys(portBindings).length !== 0 || devices.length !== 0
       || container.HostConfig.NanoCpus !== record.resources.cpuMillicores * 1_000_000
       || container.HostConfig.Memory !== record.resources.memoryBytes
@@ -211,12 +221,21 @@ export class WorkspaceRuntimeManager {
   }
 
   private async inspectOwned(record: RuntimeOwnership): Promise<{ running: boolean }> {
+    return await this.inspectExact(record, "materialized");
+  }
+
+  private async inspectCreationOwned(creation: RuntimeCreation): Promise<{ running: boolean }> {
+    return await this.inspectExact(this.ownershipFromCreation(creation), "operation-owned-pre-activation");
+  }
+
+  private async inspectExact(record: RuntimeOwnership,
+    networkIdentity: "materialized" | "operation-owned-pre-activation"): Promise<{ running: boolean }> {
     try {
       const [network, container] = await Promise.all([
         this.engine.inspectNetwork(record.network.id), this.engine.inspectContainer(record.developmentContainer.id)
       ]);
       this.validateNetwork(network, record.network);
-      this.validateContainer(container, record);
+      this.validateContainer(container, record, networkIdentity);
       return { running: container.State.Running };
     } catch (error) {
       if (error instanceof WorkspaceRuntimeError) throw error;
@@ -288,14 +307,13 @@ export class WorkspaceRuntimeManager {
         if (!equalLabels(container.Config.Labels ?? {}, containerLabels)) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The derived development container name is occupied by an unrelated resource.");
         }
-        this.validateContainer(container, provisional);
+        this.validateContainer(container, provisional, "operation-owned-pre-activation");
         creation = runtimeCreationSchema.parse({ ...creation, containerId: container.Id, phase: "container-created" });
         await this.saveCreation(creation);
       }
     }
     if (creation.phase === "container-created" || creation.phase === "ownership-committed") {
-      const owned = this.ownershipFromCreation(creation);
-      await this.inspectOwned(owned);
+      await this.inspectCreationOwned(creation);
     }
     return creation;
   }
@@ -332,6 +350,13 @@ export class WorkspaceRuntimeManager {
       try {
         await this.engine.assertRootlessAvailable();
         const recovered = await this.recoverCreationEvidence(creation);
+        const operationState = this.creationOperation?.(recovered.operationId)?.state;
+        if (operationState === "failed") {
+          return { observedState: "stopped", serviceState: "stopped", errorCode: null, containerIdentity: recovered.containerId };
+        }
+        if (operationState === "succeeded") {
+          return { observedState: "lost", serviceState: "lost", errorCode: "WORKSPACE_STATE_CONFLICT", containerIdentity: null };
+        }
         return { observedState: "starting", serviceState: "starting", errorCode: null, containerIdentity: recovered.containerId };
       } catch (error) {
         if (error instanceof WorkspaceRuntimeError) return { observedState: "lost", serviceState: "lost", errorCode: error.code, containerIdentity: null };
@@ -344,12 +369,14 @@ export class WorkspaceRuntimeManager {
     try {
       await this.engine.assertRootlessAvailable();
       const creation = await this.loadCreation(association.workspaceId);
+      let recoveredCreation: RuntimeCreation | null = null;
       if (creation !== null) {
         const names = resourceNames(association.workspaceId, association.generation);
         if (!this.creationMatches(creation, association, record.worktreePath, record.resources, names)) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "Runtime creation evidence conflicts with authoritative ownership.");
         }
         const recovered = await this.recoverCreationEvidence(creation);
+        recoveredCreation = recovered;
         if (recovered.networkId !== record.network.id || recovered.containerId !== record.developmentContainer.id) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "Runtime creation Docker IDs conflict with authoritative ownership.");
         }
@@ -357,7 +384,7 @@ export class WorkspaceRuntimeManager {
           await this.saveCreation(runtimeCreationSchema.parse({ ...recovered, phase: "ownership-committed" }));
         }
       }
-      const inspected = await this.inspectOwned(record);
+      const inspected = recoveredCreation === null ? await this.inspectOwned(record) : await this.inspectCreationOwned(recoveredCreation);
       return { observedState: inspected.running ? "running" : "stopped", serviceState: inspected.running ? "running" : "stopped",
         errorCode: null, containerIdentity: record.developmentContainer.id };
     } catch (error) {
@@ -386,11 +413,13 @@ export class WorkspaceRuntimeManager {
         throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime belongs to another revision, plan, policy, worktree, or generation.");
       }
       const creation = await this.loadCreation(association.workspaceId);
+      let recoveredCreation: RuntimeCreation | null = null;
       if (creation !== null) {
         if (!this.creationMatches(creation, association, resolvedWorktree, resources, names)) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime creation record does not match authoritative ownership.");
         }
         const recovered = await this.recoverCreationEvidence(creation);
+        recoveredCreation = recovered;
         if (recovered.networkId !== record.network.id || recovered.containerId !== record.developmentContainer.id) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "Runtime creation evidence conflicts with authoritative ownership.");
         }
@@ -398,7 +427,8 @@ export class WorkspaceRuntimeManager {
           await this.saveCreation(runtimeCreationSchema.parse({ ...recovered, phase: "ownership-committed" }));
         }
       }
-      await this.inspectOwned(record);
+      if (recoveredCreation === null) await this.inspectOwned(record);
+      else await this.inspectCreationOwned(recoveredCreation);
       await this.engine.startContainer(record.developmentContainer.id);
       await this.stabilize(record);
       return { observedState: "running", serviceState: "running", errorCode: null, containerIdentity: record.developmentContainer.id };
@@ -451,11 +481,11 @@ export class WorkspaceRuntimeManager {
     }
     creation = await this.recoverCreationEvidence(creation);
     record = this.ownershipFromCreation(creation);
-    await this.inspectOwned(record);
+    await this.inspectCreationOwned(creation);
     await this.writer.write(this.ownershipPath(association.workspaceId), record);
     creation = runtimeCreationSchema.parse({ ...creation, phase: "ownership-committed" });
     await this.saveCreation(creation);
-    await this.inspectOwned(record);
+    await this.inspectCreationOwned(creation);
     await this.engine.startContainer(record.developmentContainer.id);
     await this.stabilize(record);
     return { observedState: "running", serviceState: "running", errorCode: null, containerIdentity: record.developmentContainer.id };
