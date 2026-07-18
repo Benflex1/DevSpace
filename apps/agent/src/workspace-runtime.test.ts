@@ -26,6 +26,7 @@ class FakeEngine extends DockerEngineClient {
   imageFailures = 0;
   containerCreateFailures = 0;
   runningInspections = 0;
+  readonly networkIdsBeforeStart: string[] = [];
   onRunningInspect: ((inspection: number, container: DockerContainerInspection) => void) | null = null;
   constructor() { super("/fixture/rootless.sock"); }
   override assertRootlessAvailable(): Promise<void> { return Promise.resolve(); }
@@ -57,7 +58,7 @@ class FakeEngine extends DockerEngineClient {
         NanoCpus: input.cpuMillicores * 1_000_000, Memory: input.memoryBytes, PidsLimit: input.pidLimit,
         CapAdd: [], CapDrop: [], SecurityOpt: ["no-new-privileges:true"], AutoRemove: false, ReadonlyRootfs: false,
         RestartPolicy: { Name: "no", MaximumRetryCount: 0 } },
-      NetworkSettings: { Networks: { [input.networkName]: { NetworkID: network.Id } } },
+      NetworkSettings: { Networks: { [input.networkName]: { NetworkID: "" } } },
       Mounts: [{ Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" }] });
     return Promise.resolve(id);
   }
@@ -71,7 +72,11 @@ class FakeEngine extends DockerEngineClient {
       ? Promise.reject(new DockerEngineError(404, "missing")) : Promise.resolve(value);
   }
   override startContainer(id: string): Promise<void> { const value = this.containers.get(id); if (value === undefined) throw new DockerEngineError(404, "missing");
-    this.containers.set(id, { ...value, State: { Running: true, Status: "running" } }); return Promise.resolve(); }
+    this.networkIdsBeforeStart.push(value.NetworkSettings.Networks?.[value.HostConfig.NetworkMode]?.NetworkID ?? "missing");
+    const network = [...this.networks.values()].find((candidate) => candidate.Name === value.HostConfig.NetworkMode);
+    if (network === undefined) throw new DockerEngineError(404, "network missing");
+    this.containers.set(id, { ...value, State: { Running: true, Status: "running" },
+      NetworkSettings: { Networks: { [network.Name]: { NetworkID: network.Id } } } }); return Promise.resolve(); }
   override stopContainer(id: string): Promise<void> { const value = this.containers.get(id); if (value === undefined) throw new DockerEngineError(404, "missing");
     this.containers.set(id, { ...value, State: { Running: false, Status: "exited" } }); return Promise.resolve(); }
 }
@@ -166,6 +171,9 @@ describe("exact Docker runtime ownership", () => {
     expect(fixture.engine.lastContainerInput?.worktreePath).toBe(fixture.worktree);
     expect(fixture.engine.lastContainerInput?.networkName).toMatch(/^devspace-/u);
     expect(JSON.stringify(fixture.engine.lastContainerInput)).not.toContain("docker.sock");
+    expect(fixture.engine.networkIdsBeforeStart).toEqual([""]);
+    const network = [...fixture.engine.networks.values()][0]!;
+    expect(onlyContainer(fixture).NetworkSettings.Networks?.[network.Name]?.NetworkID).toBe(network.Id);
     await expect(fixture.manager.stop(fixture.association)).resolves.toMatchObject({ observedState: "stopped" });
     await expect(start(fixture, "018f1f34-7000-7000-8000-000000000011")).resolves.toMatchObject({ observedState: "running" });
     expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(1);
@@ -194,6 +202,8 @@ describe("exact Docker runtime ownership", () => {
   test.each<readonly [string, (container: DockerContainerInspection) => void]>([
     ["an unexpected second network", (container) => { container.NetworkSettings.Networks!.unexpected = { NetworkID: "foreign-network" }; }],
     ["a missing expected network", (container) => { container.NetworkSettings.Networks = {}; }],
+    ["an empty materialized network identity", (container) => { container.NetworkSettings.Networks![container.HostConfig.NetworkMode] = { NetworkID: "" }; }],
+    ["a substituted materialized network identity", (container) => { container.NetworkSettings.Networks![container.HostConfig.NetworkMode] = { NetworkID: "foreign-network" }; }],
     ["a changed CPU limit", (container) => { container.HostConfig.NanoCpus += 1; }],
     ["a changed memory limit", (container) => { container.HostConfig.Memory += 1; }],
     ["a changed PID limit", (container) => { container.HostConfig.PidsLimit = 1; }],
@@ -274,6 +284,31 @@ describe("crash-safe Docker runtime creation", () => {
     await expect(start(fixture)).rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
     expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(0);
     restart(fixture); await expectSingleStack(fixture);
+  });
+
+  test("distinguishes an active start from a failed recoverable creation across restart and retry", async () => {
+    const fixture = await runtimeFixture();
+    let originalState: "running" | "failed" = "running";
+    const findOperation = (id: string) => id === operationId ? {
+      operationName: "workspace.start", state: originalState,
+      request: { projectId: fixture.association.projectId, workspaceId: fixture.association.workspaceId }
+    } : undefined;
+    await fixture.manager.validateCreationJournalBindings(findOperation);
+    fixture.engine.containerCreateFailures = 1;
+    await expect(start(fixture)).rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+    expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(0);
+    await expect(fixture.manager.inspect(fixture.association)).resolves.toMatchObject({ observedState: "starting" });
+
+    originalState = "failed";
+    await expect(fixture.manager.inspect(fixture.association)).resolves.toMatchObject({ observedState: "stopped" });
+    restart(fixture);
+    await fixture.manager.validateCreationJournalBindings(findOperation);
+    await expect(fixture.manager.inspect(fixture.association)).resolves.toMatchObject({ observedState: "stopped" });
+
+    const retryOperationId = "018f1f34-7000-7000-8000-000000000013";
+    await expect(start(fixture, retryOperationId)).resolves.toMatchObject({ observedState: "running" });
+    expect(fixture.engine.networkCreates).toBe(1); expect(fixture.engine.containerCreates).toBe(1);
+    expect(onlyContainer(fixture).Config.Labels["devspace.creation-operation-id"]).toBe(operationId);
   });
 
   test("recovers when authoritative ownership committed before the creation phase transition", async () => {

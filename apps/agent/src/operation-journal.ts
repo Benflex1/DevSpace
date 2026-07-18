@@ -225,7 +225,7 @@ export class OperationJournal {
     this.assertHealthy();
     return [...this.records.values()].map((record) => agentOperationObservationSchema.parse({
       operationId: record.operationId,
-      state: record.state === "running" ? "accepted" : record.state,
+      state: record.state,
       updatedAt: record.updatedAt,
       failure: record.failure
     }));

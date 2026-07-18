@@ -37,8 +37,11 @@ Milestone 1 — in progress.
   independently recompiled and verified by the Agent through a separate journaled registration.
 - Ready primary workspaces show the real dedicated rootless Docker availability and can be started
   and stopped from the browser. Web persists desired state and an operation before each Agent
-  mutation, then stores authoritative workspace, runtime-stack, and development-service
-  observations in SQLite.
+  mutation, reconciles accepted/running/terminal Agent journal observations after timeout or Web
+  restart, and then stores authoritative workspace, runtime-stack, and development-service
+  observations in SQLite. Start retry requires the exact failed Agent operation plus a live
+  recoverable inspection, and the same derived actionability gates both browser controls and the
+  server mutation path.
 - The Agent talks directly to a configured rootless Docker Engine Unix socket, creates one isolated
   workspace network and one development container, applies administrator-bounded CPU, memory, and
   PID limits, and publishes no host ports or Docker socket. Before the first Docker side effect, an

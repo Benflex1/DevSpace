@@ -72,9 +72,29 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
     expect(journal).toMatchObject({ operationId: operation.operation_id, operationName: operation.operation_name, state: "succeeded" });
   }
 
+  const failFirstStart = await fetch("http://127.0.0.1:3199/fail-next-container-create", {
+    method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` }
+  });
+  expect(failFirstStart.status).toBe(204);
   await project.getByRole("button", { name: "Start environment" }).click();
+  await expect(project.getByText("The development container could not be created safely.")).toBeVisible({ timeout: 120_000 });
+  const staleWebOperation = await fetch("http://127.0.0.1:3199/simulate-stale-web-runtime-operation", {
+    method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` }
+  });
+  expect(staleWebOperation.status).toBe(204);
+  const failedStartRestart = await fetch("http://127.0.0.1:3199/restart", {
+    method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` }
+  });
+  expect(failedStartRestart.status).toBe(204);
+  await page.reload();
+  await expect(project.getByRole("button", { name: "Retry start" })).toBeVisible();
+  await project.getByRole("button", { name: "Retry start" }).click();
   await expect(project.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
   await expect(project.getByRole("button", { name: "Stop environment" })).toBeVisible();
+  const dockerSnapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", {
+    headers: { authorization: `Bearer ${fixture.controlToken}` }
+  }).then(async (response) => await response.json()) as { networks: number; containers: number };
+  expect(dockerSnapshot).toEqual({ networks: 1, containers: 1 });
   await page.reload(); await expect(project.getByText("Running", { exact: true })).toBeVisible();
   const restart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(restart.status).toBe(204);

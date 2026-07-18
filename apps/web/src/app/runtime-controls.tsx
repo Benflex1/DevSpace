@@ -3,14 +3,15 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-export function RuntimeControls({ projectId, runtimeState, runtimeAvailable }: {
-  projectId: string; runtimeState: string; runtimeAvailable: boolean;
+export function RuntimeControls({ projectId, runtimeAvailable, activeAction, canStart, canStop, retryStart }: {
+  projectId: string; runtimeAvailable: boolean;
+  activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  const action = runtimeState === "running" ? "stop" : "start";
-  const actionable = runtimeAvailable && (runtimeState === "running" || runtimeState === "stopped" || runtimeState === "absent");
+  const action = canStop ? "stop" : "start";
+  const actionable = activeAction === null && runtimeAvailable && (canStart || canStop);
   const mutate = async () => {
     setPending(true); setMessage(action === "start" ? "Starting environment…" : "Stopping environment…");
     try {
@@ -27,8 +28,12 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable }: {
     } catch (error) { setMessage(error instanceof Error ? error.message : "The runtime action failed."); setPending(false); }
   };
   return <div className="runtime-controls">
+    {activeAction !== null && <button type="button" disabled>
+      {activeAction === "start" ? "Starting…" : "Stopping…"}
+    </button>}
     {actionable && <button type="button" disabled={pending} onClick={() => { mutate().catch(() => setPending(false)); }}>
-      {pending ? (action === "start" ? "Starting…" : "Stopping…") : (action === "start" ? "Start environment" : "Stop environment")}
+      {pending ? (action === "start" ? "Starting…" : "Stopping…")
+        : action === "start" ? (retryStart ? "Retry start" : "Start environment") : "Stop environment"}
     </button>}
     {!runtimeAvailable && <p className="message error">The dedicated rootless runtime is unavailable.</p>}
     {message !== "" && <p className={`message ${message.includes("running") || message.includes("stopped") ? "success" : ""}`} role="status">{message}</p>}

@@ -17,6 +17,7 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
   const containers = new Map();
   const names = new Map();
   const lifecycles = new Map();
+  let containerCreateFailures = 0;
   let counter = 0;
   const id = (prefix) => `${prefix}${String(++counter).padStart(63, "0")}`;
   const server = http.createServer(async (request, response) => {
@@ -67,6 +68,9 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
         if (!valid) { send(response, 400, { message: "unsafe container request" }); return; }
         const networkId = names.get(body.HostConfig.NetworkMode);
         if (typeof networkId !== "string" || !networks.has(networkId)) { send(response, 400, { message: "unknown workspace network" }); return; }
+        if (containerCreateFailures > 0) {
+          containerCreateFailures -= 1; send(response, 500, { message: "fixture container creation failure" }); return;
+        }
         const containerId = id("c");
         const container = { Id: containerId, Name: `/${name}`, Config: { Labels: body.Labels, WorkingDir: body.WorkingDir },
           HostConfig: { Privileged: body.HostConfig.Privileged, PublishAllPorts: body.HostConfig.PublishAllPorts,
@@ -78,7 +82,7 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
             CapAdd: [...body.HostConfig.CapAdd], CapDrop: [...body.HostConfig.CapDrop], SecurityOpt: [...body.HostConfig.SecurityOpt],
             AutoRemove: body.HostConfig.AutoRemove, ReadonlyRootfs: body.HostConfig.ReadonlyRootfs,
             RestartPolicy: { ...body.HostConfig.RestartPolicy } },
-          NetworkSettings: { Networks: { [body.HostConfig.NetworkMode]: { NetworkID: networkId } } },
+          NetworkSettings: { Networks: { [body.HostConfig.NetworkMode]: { NetworkID: "" } } },
           Mounts: [{ Type: "bind", Source: mount.Source, Destination: mount.Target, RW: !mount.ReadOnly,
             Propagation: mount.BindOptions?.Propagation ?? "rprivate" }],
           State: { Running: false, Status: "created" } };
@@ -104,6 +108,11 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
         }
         if (request.method === "POST" && containerMatch[2] === "start") {
           if (container.State.Running) { response.writeHead(304).end(); return; }
+          const networkId = names.get(container.HostConfig.NetworkMode);
+          if (typeof networkId !== "string" || !networks.has(networkId)) {
+            send(response, 409, { message: "configured workspace network is unavailable" }); return;
+          }
+          container.NetworkSettings.Networks = { [container.HostConfig.NetworkMode]: { NetworkID: networkId } };
           container.State = { Running: true, Status: "running" }; response.writeHead(204).end(); return;
         }
         if (request.method === "POST" && containerMatch[2] === "stop") {
@@ -130,6 +139,7 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
     setContainerLifecycle: (containerId, options) => {
       if (!containers.has(containerId)) throw new Error("fixture container not found");
       lifecycles.set(containerId, { inspections: 0, ...options });
-    }
+    },
+    failNextContainerCreates: (count = 1) => { containerCreateFailures += count; }
   };
 }

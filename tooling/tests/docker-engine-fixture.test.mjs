@@ -57,6 +57,12 @@ test("Docker fixture persists effective create state and supports policy/lifecyc
     RestartPolicy: { Name: "no", MaximumRetryCount: 0 }
   });
   assert.deepEqual(inspected.NetworkSettings.Networks, {
+    "devspace-test-network": { NetworkID: "" }
+  });
+
+  await request(socket, "POST", `/containers/${containerId}/start`);
+  const materialized = (await request(socket, "GET", `/containers/${containerId}/json`)).body;
+  assert.deepEqual(materialized.NetworkSettings.Networks, {
     "devspace-test-network": { NetworkID: network.body.Id }
   });
 
@@ -76,7 +82,6 @@ test("Docker fixture persists effective create state and supports policy/lifecyc
     drifted.HostConfig.IpcMode, drifted.HostConfig.CapAdd, drifted.HostConfig.CapDrop, drifted.HostConfig.SecurityOpt],
   [1, 2, 3, "host", ["SYS_ADMIN"], ["NET_RAW"], []]);
 
-  await request(socket, "POST", `/containers/${containerId}/start`);
   fixture.setContainerLifecycle(containerId, { exitAt: 2 });
   assert.equal((await request(socket, "GET", `/containers/${containerId}/json`)).body.State.Running, true);
   assert.equal((await request(socket, "GET", `/containers/${containerId}/json`)).body.State.Running, false);

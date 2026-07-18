@@ -27,7 +27,8 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     if (error instanceof ProjectSetupConflictError) return json({ message: error.message }, 409);
     if (error instanceof WorkspaceRuntimeExecutionError) return json({ message: error.message, code: error.code },
-      error.code === "RUNTIME_ACTION_IN_PROGRESS" ? 202 : error.code === "RUNTIME_PLAN_UNSUPPORTED" ? 422 : 503);
+      error.code === "RUNTIME_ACTION_IN_PROGRESS" ? 202 : error.code === "RUNTIME_ACTION_NOT_AUTHORIZED" ? 409
+        : error.code === "RUNTIME_PLAN_UNSUPPORTED" ? 422 : 503);
     if (error instanceof RequestBodyTooLargeError) return json({ message: error.message }, 413);
     if (error instanceof RequestBodyMalformedError) return json({ message: "Request body must be valid JSON." }, 400);
     if (error instanceof Error && error.message === "CSRF_REJECTED") return json({ message: "Request origin could not be verified." }, 403);
