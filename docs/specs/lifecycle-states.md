@@ -148,7 +148,7 @@ stopping -> exited | killed | failed | lost
 lost -> exited | killed | failed
 ```
 
-`exited`, `failed`, and `killed` are terminal. An edge out of `lost` records a positively recovered terminal outcome; a process cannot return from `lost` to `running` in v1. A stop operation verifies container identity and process token before signaling.
+`exited`, `failed`, and `killed` are terminal. An edge out of `lost` records a positively recovered terminal outcome; a process cannot return from `lost` to `running` in v1. M1 does not signal individual task or terminal processes: `process.stop` fails closed with a state conflict, while stopping the whole workspace runtime uses the exact container lifecycle. Exact descendant ownership and individual termination are deferred to M2.
 
 ## Terminal
 

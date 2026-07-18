@@ -76,9 +76,12 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - no browser-supplied commands, working directories, environment keys, or ports;
 - working directories are relative to `/workspace` and validated;
 - system values such as preview ports are injected structurally;
-- each process receives an opaque ID and verified container/process fingerprint;
-- tasks use process groups and bounded logs;
-- CPU, memory, PID, disk, and timeout limits are configurable;
+- each process receives an opaque ID and exact workspace/container/exec ownership is checked;
+- task commands use structured executable/argument arrays and M1 does not attempt individual process
+  signaling or descendant sweeping;
+- CPU, memory, PID, and disk limits are configurable at the container/runtime layer; task
+  `timeoutSeconds`, long-running supervision, replacement, and exact descendant termination are
+  deferred execution controls;
 - terminal and AI sessions are separately classified and audited as arbitrary shell capability.
 
 ## Container/runtime risks

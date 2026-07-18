@@ -95,6 +95,11 @@ const environmentVariableNameSchema = text({ min: 1 }).regex(
 const registryKeySchema = keySchema;
 const displayNameSchema = nonEmptyText();
 const positiveInteger = z.number().int().positive();
+// Node's timer implementation clamps values above 2^31-1 milliseconds to
+// approximately 1 millisecond. Keep the Project Options maximum below that
+// limit so every accepted task timeout has one unambiguous execution path.
+export const PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS = Math.floor(2_147_483_647 / 1_000);
+const boundedTimeoutSeconds = positiveInteger.max(PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS);
 const nullablePositiveInteger = positiveInteger.nullable().default(null);
 const portNumberSchema = z.number().int().min(1).max(65535);
 const httpStatusSchema = z.number().int().min(100).max(599);
@@ -220,7 +225,7 @@ const taskSchema = z.strictObject({
   command: commandSchema,
   interactive: z.boolean().default(false),
   longRunning: z.boolean().default(false),
-  timeoutSeconds: positiveInteger.nullable().default(null),
+  timeoutSeconds: boundedTimeoutSeconds.nullable().default(null),
   concurrencyPolicy: z.enum(["reject", "allow", "replace"]).default("reject"),
   successExitCodes: z.array(z.number().int())
     .meta({ uniqueItems: true })

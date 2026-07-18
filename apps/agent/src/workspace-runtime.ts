@@ -157,6 +157,18 @@ export class WorkspaceRuntimeManager {
     catch { return "unavailable"; }
   }
 
+  async exactRunningOwnership(expected: RuntimeAssociation): Promise<RuntimeOwnership> {
+    const record = await this.load(expected.workspaceId);
+    if (record === null || !associationMatches(record, expected)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact Agent-owned workspace runtime is unavailable.");
+    }
+    const inspected = await this.inspectOwned(record);
+    if (!inspected.running) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact Agent-owned development container is not running.");
+    }
+    return record;
+  }
+
   private async load(workspaceId: string): Promise<RuntimeOwnership | null> {
     try { return await readStrictJson(this.ownershipPath(workspaceId), runtimeOwnershipSchema); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }

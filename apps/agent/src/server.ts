@@ -1,6 +1,7 @@
 import { chmod, link, lstat, unlink } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
+import type { Duplex } from "node:stream";
 import {
   AGENT_API_VERSION,
   AGENT_SOCKET_PATH,
@@ -11,11 +12,14 @@ import {
   type SourceInspectionData
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
+import { WebSocketServer } from "ws";
 import { GitInspectionPolicyError, GitInspectionUnavailableError, createProductionGitInspector, type GitInspector } from "./git-inspector.js";
 import { AgentEventLog } from "./event-log.js";
-import { ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
+import { AgentExecutionError, ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationConflictError, OperationJournal } from "./operation-journal.js";
+import { ExecutionManager } from "./execution-manager.js";
+import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -183,7 +187,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
-  const executor = new OperationExecutor(journal, managed, events, createId);
+  const execution = new ExecutionManager(managedRoots.state, managed,
+    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
+  const executor = new OperationExecutor(journal, managed, events, createId, execution);
+  const terminalWebSockets = new WebSocketServer({ noServer: true, clientTracking: false,
+    maxPayload: 65_537, perMessageDeflate: false, handleProtocols: (protocols) => protocols.size === 1 && protocols.has("devspace.terminal.v1")
+      ? "devspace.terminal.v1" : false });
   const eventResponses = new Set<ServerResponse>();
   let started = false;
   let ownedSocket: SocketIdentity | undefined;
@@ -205,6 +214,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.inspect"].path ? agentApiV1EndpointByOperation["workspace.inspect"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.start"].path ? agentApiV1EndpointByOperation["workspace.start"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.stop"].path ? agentApiV1EndpointByOperation["workspace.stop"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["task.start"].path ? agentApiV1EndpointByOperation["task.start"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["process.stop"].path ? agentApiV1EndpointByOperation["process.stop"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["process.inspect"].path ? agentApiV1EndpointByOperation["process.inspect"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["terminal.create"].path ? agentApiV1EndpointByOperation["terminal.create"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["terminal.close"].path ? agentApiV1EndpointByOperation["terminal.close"]
       : request.method === "GET" && url.pathname === snapshotEndpoint.path ? snapshotEndpoint
       : request.method === "GET" && url.pathname === eventEndpoint.path ? eventEndpoint
       : undefined;
@@ -303,7 +317,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
     }
 
-    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "workspace.create", "workspace.start", "workspace.stop"] as const;
+    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "workspace.create", "workspace.start", "workspace.stop",
+      "task.start", "process.stop", "terminal.create", "terminal.close"] as const;
     for (const operation of mutationRoutes) {
       const endpoint = agentApiV1EndpointByOperation[operation];
       if (request.method !== endpoint.method || url.pathname !== endpoint.path) continue;
@@ -386,6 +401,25 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
     }
 
+    if (request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["process.inspect"].path) {
+      const endpoint = agentApiV1EndpointByOperation["process.inspect"];
+      let body;
+      try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      try {
+        const data = await execution.inspect(body.data.projectId, body.data.workspaceId, body.data.processId);
+        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+      } catch (error) {
+        if (error instanceof AgentExecutionError) {
+          const status = error.failure.code === "RESOURCE_NOT_FOUND" ? 404 : error.failure.code === "PROCESS_IDENTITY_MISMATCH" ? 409 : 503;
+          return sendJson(response, status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
+        }
+        return sendJson(response, 500, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code: "AGENT_INTERNAL_ERROR", message: "The process could not be inspected safely.", retryable: true, details: { incidentId: createId() }
+        } }));
+      }
+    }
+
     if (request.method === "POST" && url.pathname === inspectEndpoint.path) {
       let body: ReturnType<typeof inspectEndpoint.requestBodySchema.parse>;
       try {
@@ -448,12 +482,41 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     });
   });
 
+  function rejectUpgrade(socket: Duplex, status: number): void {
+    const reason = status === 401 ? "Unauthorized" : status === 404 ? "Not Found" : status === 409 ? "Conflict" : "Bad Request";
+    socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  }
+
+  server.on("upgrade", (request, socket, head) => {
+    const match = /^\/v1\/terminals\/([0-9a-f-]+)\/stream$/u.exec(new URL(request.url ?? "/", "http://agent.local").pathname);
+    if (request.method !== "GET" || match === null || request.headers["sec-websocket-protocol"] !== "devspace.terminal.v1") {
+      rejectUpgrade(socket, 400); return;
+    }
+    const projection = extractDevSpaceProtocolHeaders(request.rawHeaders.reduce<[string, string][]>((all, value, index, raw) => {
+      if (index % 2 === 0) all.push([value, raw[index + 1] ?? ""]); return all;
+    }, []));
+    if (!projection.ok || !agentApiV1EndpointByOperation["terminal.stream"].headersSchema.safeParse(projection.headers).success) {
+      rejectUpgrade(socket, 401); return;
+    }
+    let reservation;
+    try { reservation = execution.reserveTerminalAttachment(match[1]!); }
+    catch (error) {
+      rejectUpgrade(socket, error instanceof AgentExecutionError && error.failure.code === "RESOURCE_STATE_CONFLICT" ? 409 : 404); return;
+    }
+    try {
+      terminalWebSockets.handleUpgrade(request, socket, head, (websocket) => {
+        void reservation.attach(websocket).catch(() => websocket.close(1011));
+      });
+    } catch { reservation.release(); socket.destroy(); }
+  });
+
   return {
     socketPath,
     async start() {
       if (started) return;
       await managed.initialize();
       await journal.initialize();
+      if (managed.isHealthy) await execution.initialize();
       if (managed.isHealthy && journal.isHealthy) {
         await managed.validateCreationJournalBindings((operationId) => journal.get(operationId)).catch(() => undefined);
         if (managed.isHealthy) {
@@ -498,6 +561,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!started) return;
       for (const response of eventResponses) response.destroy();
       eventResponses.clear();
+      execution.shutdownTransports();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await executor.drain();
       try {

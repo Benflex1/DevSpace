@@ -21,7 +21,8 @@ import {
 } from "@devspace/contracts";
 import {
   canonicalizeProjectOptionsV1, hashProjectOptionsV1, parseProjectOptionsV1,
-  canonicalizeRuntimePlanV1, hashRuntimePlanV1, parseRuntimePlanV1
+  canonicalizeRuntimePlanV1, hashRuntimePlanV1, parseRuntimePlanV1,
+  type ProjectOptionsV1
 } from "@devspace/project-options";
 import * as z from "zod";
 import { runBoundedProcess } from "./git-inspector.js";
@@ -39,7 +40,7 @@ import {
   type AtomicJsonWriter,
   type FileIdentity
 } from "./private-state.js";
-import { WorkspaceRuntimeError, WorkspaceRuntimeManager, verifyRuntimePlanAgainstOptions } from "./workspace-runtime.js";
+import { WorkspaceRuntimeError, WorkspaceRuntimeManager, verifyRuntimePlanAgainstOptions, type RuntimeOwnership } from "./workspace-runtime.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy } from "./docker-runtime.js";
 
 const GIT_TIMEOUT_MS = 120_000;
@@ -146,6 +147,16 @@ export async function runGit(args: readonly string[]): Promise<{ stdout: string;
 }
 
 export interface ManagedWorkspaceRoots { readonly projects: string; readonly workspaces: string; readonly state: string }
+export interface WorkspaceExecutionContext {
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly revisionId: string;
+  readonly revisionHash: string;
+  readonly runtimePlanHash: string;
+  readonly generation: number;
+  readonly ownership: RuntimeOwnership;
+  readonly options: ProjectOptionsV1;
+}
 export interface CreationJournalBinding {
   readonly operationId: string;
   readonly operationName: string;
@@ -916,6 +927,24 @@ export class ManagedWorkspaces {
   }
 
   async runtimeStatus(): Promise<"available" | "unavailable"> { return await this.runtime.status(); }
+
+  async executionContext(projectId: string, workspaceId: string): Promise<WorkspaceExecutionContext> {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
+    if (revision.runtimePlan === null) {
+      throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
+    }
+    const association = {
+      projectId, workspaceId, revisionId: workspace.revision.revisionId,
+      revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1
+    };
+    try {
+      const ownership = await this.runtime.exactRunningOwnership(association);
+      return { ...association, ownership, options: parseProjectOptionsV1(JSON.parse(revision.data.configuration.canonicalJson)) };
+    } catch (error) {
+      throw this.runtimeFailure(error, workspaceId, "start");
+    }
+  }
 
   private runtimeFailure(error: unknown, workspaceId: string, action: "start" | "stop"): AgentExecutionError {
     if (error instanceof WorkspaceRuntimeError) {

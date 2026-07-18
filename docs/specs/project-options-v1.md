@@ -6,7 +6,7 @@ Project Options is the UI surface for all project settings. Its General section 
 
 This specification defines only the immutable runtime-configuration portion of Project Options. Runtime configuration is stored as immutable SQLite revisions; no `.devspace.yml` or other manually maintained repository configuration is required. The primary workspace display name belongs to its `workspaces` row, may default to `Primary` at project creation, and is not repeated in configuration revisions.
 
-The Zod model that will live in `packages/project-options` is the executable source of truth. TypeScript types are inferred from it. `schemas/project-options-v1.schema.json` is a generated JSON Schema draft 2020-12 portability artifact and is not independently maintained. This task does not change that artifact.
+The Zod model that will live in `packages/project-options` is the executable source of truth. TypeScript types are inferred from it. `schemas/project-options-v1.schema.json` is a generated JSON Schema draft 2020-12 portability artifact and is not independently maintained; it is regenerated when the executable model changes.
 
 A repository detector may populate a draft, but only an authenticated user can activate it. Active revisions are immutable. Existing workspaces stay pinned to their revision until explicitly rebuilt or migrated.
 
@@ -96,7 +96,10 @@ Each task requires a unique stable `key`, `displayName`, and `command`. It also 
 
 - `interactive`, default `false`;
 - `longRunning`, default `false`;
-- `timeoutSeconds`, default `null`, meaning no task-specific override;
+- `timeoutSeconds`, default `null`, meaning no task-specific override. A non-null value is an
+  integer from `1` through `2,147,483` seconds (about 24.85 days). The maximum is chosen so the
+  Agent can represent the corresponding millisecond delay without Node timer overflow; values
+  above it are rejected rather than clamped;
 - `concurrencyPolicy`, one of `reject`, `allow`, or `replace`, default `reject`;
 - unordered unique integer `successExitCodes`, default `[0]`;
 - `logRetentionDays`, default `null`, meaning inherit the project resource policy.
@@ -194,9 +197,13 @@ Runtime refinements enforce all of the following:
 - every service-connection environment binding names an existing service and supported connection value;
 - every referenced secret, domain base, host variable, generated value, provider, and executable profile exists and is authorized for the project;
 - `interactive`, `longRunning`, `timeoutSeconds`, and `concurrencyPolicy` are independent task
-  fields: every structurally valid combination is supported in v1, with no additional cross-field
-  relationship imposed. `timeoutSeconds`, when non-null, still obeys its positive-integer bounds;
-  task execution semantics belong to a later runtime milestone;
+  fields: every structurally valid combination can be represented by Project Options v1, with no
+  additional cross-field relationship imposed. `timeoutSeconds`, when non-null, still obeys its
+  positive-integer bounds. The current M1 execution runtime deliberately supports only
+  `interactive: false`, `longRunning: false`, `timeoutSeconds: null`, and
+  `concurrencyPolicy: "reject" | "allow"`; it rejects the other valid configuration concepts
+  before Docker side effects. Runtime execution semantics are narrower than the configuration
+  schema and are expected to grow in M2.
 - administrator resource limits are not exceeded;
 - AI network disclosure is acknowledged before activation.
 

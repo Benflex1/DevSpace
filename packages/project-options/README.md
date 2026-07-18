@@ -34,8 +34,10 @@ named-volume mounts, service dependencies and cycles, health-check ports, servic
 workspace/service preview declared-port matching. Registry references remain identifiers for
 later authorization/runtime refinement; secret material is never part of this model.
 Task `interactive`, `longRunning`, `timeoutSeconds`, and `concurrencyPolicy` fields are independent
-in v1; all structurally valid combinations are accepted, and no additional task-combination rule
-is imposed beyond each field's own scalar validation.
+in Project Options v1; all structurally valid combinations remain representable and no additional
+schema combination rule is imposed. M1 runtime execution is narrower: it accepts only
+`interactive: false`, `longRunning: false`, `timeoutSeconds: null`, and `reject`/`allow`
+concurrency, rejecting the other valid configuration concepts before Docker side effects.
 
 The JSON Schema is generated from the Zod source with `z.toJSONSchema(..., { target:
 "draft-2020-12", io: "input" })`. `pnpm schema:check` builds the source package, regenerates

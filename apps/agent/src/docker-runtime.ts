@@ -1,5 +1,6 @@
 import { lstat } from "node:fs/promises";
 import http from "node:http";
+import type { Duplex } from "node:stream";
 import path from "node:path";
 import * as z from "zod";
 import { runtimePlanV1Schema, type RuntimePlanV1 } from "@devspace/project-options";
@@ -78,6 +79,12 @@ export interface DockerNetworkInspection {
   readonly Name: string;
   readonly Labels: Record<string, string>;
 }
+export interface DockerExecInspection {
+  readonly ID: string;
+  readonly Running: boolean;
+  readonly ExitCode: number | null;
+  readonly ContainerID: string;
+}
 
 const dockerContainerInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1),
@@ -97,6 +104,10 @@ const dockerContainerInspectionSchema = z.object({
 });
 const dockerNetworkInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1), Labels: z.record(z.string(), z.string())
+});
+const dockerExecInspectionSchema = z.object({
+  ID: z.string().min(1), Running: z.boolean(), ExitCode: z.number().int().nullable(),
+  ContainerID: z.string().min(1)
 });
 
 export class DockerEngineClient {
@@ -208,6 +219,59 @@ export class DockerEngineClient {
   async stopContainer(id: string): Promise<void> {
     await this.request("POST", `/containers/${encodeURIComponent(id)}/stop?t=10`, undefined, [204, 304]);
   }
+
+  async createExec(containerId: string, input: {
+    readonly command: readonly string[];
+    readonly workingDirectory: string;
+    readonly environment: Readonly<Record<string, string>>;
+    readonly attachStdin: boolean;
+    readonly tty: boolean;
+  }): Promise<string> {
+    const response = await this.json<{ Id: string }>("POST", `/containers/${encodeURIComponent(containerId)}/exec`, {
+      AttachStdin: input.attachStdin, AttachStdout: true, AttachStderr: true,
+      DetachKeys: "", Tty: input.tty, Cmd: [...input.command], WorkingDir: input.workingDirectory,
+      Env: Object.entries(input.environment).sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, value]) => `${name}=${value}`)
+    });
+    if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("docker-exec-id-missing");
+    return response.Id;
+  }
+
+  async startExecAttached(execId: string, tty: boolean): Promise<Duplex> {
+    const encoded = Buffer.from(JSON.stringify({ Detach: false, Tty: tty }));
+    return await new Promise((resolve, reject) => {
+      const request = http.request({
+        socketPath: this.socketPath, method: "POST", path: `/exec/${encodeURIComponent(execId)}/start`,
+        headers: {
+          "content-type": "application/json", "content-length": String(encoded.length),
+          connection: "Upgrade", upgrade: "tcp"
+        }
+      });
+      request.setTimeout(REQUEST_TIMEOUT_MS, () => request.destroy(new Error("docker-engine-timeout")));
+      request.once("upgrade", (_response, socket, head) => {
+        request.setTimeout(0);
+        if (head.length > 0) socket.unshift(head);
+        resolve(socket);
+      });
+      request.once("response", (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        response.once("end", () => reject(new DockerEngineError(response.statusCode ?? 0,
+          Buffer.concat(chunks).toString("utf8").slice(0, 512))));
+      });
+      request.once("error", reject);
+      request.end(encoded);
+    });
+  }
+
+  async resizeExec(execId: string, columns: number, rows: number): Promise<void> {
+    await this.request("POST", `/exec/${encodeURIComponent(execId)}/resize?h=${rows}&w=${columns}`, undefined, [200, 201]);
+  }
+
+  async inspectExec(execId: string): Promise<DockerExecInspection> {
+    return dockerExecInspectionSchema.parse(await this.json("GET", `/exec/${encodeURIComponent(execId)}/json`));
+  }
+
 }
 
 export interface EffectiveRuntimeResources { cpuMillicores: number; memoryBytes: number; pidLimit: number }

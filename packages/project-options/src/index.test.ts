@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import * as packageEntry from "@devspace/project-options";
 import {
+  PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS,
   generateProjectOptionsV1JsonSchema,
   parseProjectOptionsV1,
   projectOptionsV1JsonSchema,
@@ -289,6 +290,20 @@ test.each(taskExecutionFieldCombinations)(
 
 test("covers the complete finite task execution-field combination space", () => {
   expect(taskExecutionFieldCombinations).toHaveLength(24);
+});
+
+test("bounds task timeoutSeconds to the Agent timer-safe maximum", () => {
+  const input = minimalOptions() as { tasks: Array<Record<string, unknown>> };
+  input.tasks = [{ key: "task", displayName: "Task", command: { executable: "sleep" },
+    timeoutSeconds: PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS }];
+  expect(parseProjectOptionsV1(input).tasks[0]?.timeoutSeconds).toBe(PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS);
+
+  input.tasks[0]!.timeoutSeconds = PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS + 1;
+  expect(safeParseProjectOptionsV1(input).success).toBe(false);
+  input.tasks[0]!.timeoutSeconds = Number.MAX_SAFE_INTEGER;
+  expect(safeParseProjectOptionsV1(input).success).toBe(false);
+  input.tasks[0]!.timeoutSeconds = Number.MAX_VALUE;
+  expect(safeParseProjectOptionsV1(input).success).toBe(false);
 });
 
 test("parses the checked-in Project Options v1 example through the public parser", () => {
@@ -682,6 +697,11 @@ test("generates a deterministic JSON Schema 2020-12 artifact from the public Zod
     schemaChild(schemaChild(schemaChild(developmentProperties, "ports"), "items"), "properties"),
     "containerPort"
   )).toMatchObject({ minimum: 1, maximum: 65535 });
+  const taskItems = schemaChild(schemaChild(schemaChild(root, "properties"), "tasks"), "items");
+  const timeoutSchema = schemaChild(schemaChild(taskItems, "properties"), "timeoutSeconds");
+  expect(schemaNode(schemaArray(timeoutSchema.anyOf)[0])).toMatchObject({
+    exclusiveMinimum: 0, maximum: PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS
+  });
   expect(schemaChild(schemaChild(schemaNode(sourceVariants[2]), "properties"), "dockerfilePath").pattern).toBeUndefined();
 });
 

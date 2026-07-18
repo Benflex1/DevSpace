@@ -280,16 +280,12 @@ export const processes = sqliteTable("processes", {
   }),
   kind: text("kind", { enum: processKinds }).notNull(),
   definitionKey: text("definition_key"),
-  containerExecId: text("container_exec_id"),
-  processToken: text("process_token").notNull().unique("processes_process_token_unique"),
-  processGroupId: text("process_group_id"),
   desiredState: text("desired_state", { enum: processDesiredStates }).notNull(),
   observedState: text("observed_state", { enum: processObservedStates }).notNull(),
   exitCode: integer("exit_code"),
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
-  lastObservedAt: text("last_observed_at"),
-  logPath: text("log_path")
+  lastObservedAt: text("last_observed_at")
 }, (table) => [
   index("processes_workspace_id_idx").on(table.workspaceId),
   index("processes_service_id_idx").on(table.serviceId),
@@ -461,8 +457,7 @@ export const taskRuns = sqliteTable("task_runs", {
   exitCode: integer("exit_code"),
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
-  summaryJson: text("summary_json"),
-  logPath: text("log_path").notNull()
+  summaryJson: text("summary_json")
 }, (table) => [
   index("task_runs_workspace_id_idx").on(table.workspaceId),
   index("task_runs_process_id_idx").on(table.processId),

@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "@playwright/test";
+import WebSocket from "ws";
 
 const exec = promisify(execFile);
 const coordinationPath = path.resolve(".cache/e2e-runtime.json");
@@ -18,6 +19,7 @@ interface OperationRow { operation_id: string; operation_name: string; resource_
 interface WorkspaceRow { id: string }
 interface RuntimeRow { runtime_generation: number; desired_state: string; observed_state: string }
 interface ServiceRow { desired_state: string; observed_state: string }
+interface TerminalRow { id: string }
 function parseFixture(value: unknown): Fixture {
   if (value === null || typeof value !== "object") throw new Error("E2E fixture metadata is invalid");
   const record = value as Record<string, unknown>;
@@ -27,14 +29,24 @@ function parseFixture(value: unknown): Fixture {
   return record as unknown as Fixture;
 }
 
+async function rejectedWebSocket(url: string, origin: string): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const socket = new WebSocket(url, "devspace.terminal.v1", { origin });
+    socket.once("unexpected-response", (_request, response) => { response.resume(); resolve(response.statusCode ?? 0); });
+    socket.once("open", () => { socket.close(); reject(new Error("WebSocket unexpectedly opened.")); });
+    socket.once("error", () => undefined);
+  });
+}
+
 test("sets up and recovers the real managed primary workspace", async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(360_000);
   const fixtureJson: unknown = JSON.parse(await readFile(coordinationPath, "utf8"));
   const fixture = parseFixture(fixtureJson);
   await page.goto("/");
   const project = page.locator("article", { has: page.getByRole("heading", { name: "Managed Fixture" }) });
   await expect(project.getByText("Registered — workspace setup pending")).toBeVisible();
   await project.getByLabel("Development container image").fill("node:24-bookworm");
+  await project.getByLabel("Configure a task").check();
   await project.getByRole("button", { name: "Set up primary workspace" }).click();
   await expect(project.getByText("Ready", { exact: true })).toBeVisible({ timeout: 120_000 });
   await expect(project.getByText("Active revision v1")).toBeVisible();
@@ -93,8 +105,8 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(project.getByRole("button", { name: "Stop environment" })).toBeVisible();
   const dockerSnapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", {
     headers: { authorization: `Bearer ${fixture.controlToken}` }
-  }).then(async (response) => await response.json()) as { networks: number; containers: number };
-  expect(dockerSnapshot).toEqual({ networks: 1, containers: 1 });
+  }).then(async (response) => await response.json()) as { networks: number; containers: number; execs: unknown[] };
+  expect(dockerSnapshot).toMatchObject({ networks: 1, containers: 1 }); expect(dockerSnapshot.execs).toEqual([]);
   await page.reload(); await expect(project.getByText("Running", { exact: true })).toBeVisible();
   const restart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(restart.status).toBe(204);
@@ -103,9 +115,9 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   }).toBe(200);
   const browserContext = page.context();
   await page.close();
-  const recoveredPage = await browserContext.newPage();
+  let recoveredPage = await browserContext.newPage();
   await recoveredPage.goto("/");
-  const recovered = recoveredPage.locator("article", { has: recoveredPage.getByRole("heading", { name: "Managed Fixture" }) });
+  let recovered = recoveredPage.locator("article", { has: recoveredPage.getByRole("heading", { name: "Managed Fixture" }) });
   await expect(recovered.getByText("Ready", { exact: true })).toBeVisible();
   await expect(recovered.getByText("running · clean")).toBeVisible();
   await expect(recovered.getByText("Running", { exact: true })).toBeVisible();
@@ -126,4 +138,51 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   runtimeDatabase.close();
   expect(runtimeRows).toEqual([{ runtime_generation: 1, desired_state: "running", observed_state: "running" }]);
   expect(serviceRows).toEqual([{ desired_state: "running", observed_state: "running" }]);
+
+  await expect(recovered.getByRole("button", { name: "Open terminal" })).toBeEnabled();
+  await recovered.getByRole("button", { name: "Open terminal" }).click();
+  await expect(recovered.getByText("active", { exact: true })).toBeVisible({ timeout: 30_000 });
+  const terminal = recovered.getByRole("region", { name: "Workspace terminal" });
+  await terminal.locator(".xterm-helper-textarea").focus();
+  await recoveredPage.keyboard.type("echo terminal-e2e-ok"); await recoveredPage.keyboard.press("Enter");
+  await expect(terminal.getByText(/terminal-e2e-ok/u)).toBeVisible();
+  await recoveredPage.setViewportSize({ width: 800, height: 700 });
+  const terminalDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
+  const terminalRow = terminalDatabase.prepare<TerminalRow>("select id from terminal_sessions order by created_at desc limit 1").get();
+  terminalDatabase.close();
+  if (terminalRow === undefined) throw new Error("The terminal row was not persisted.");
+  const terminalUrl = `ws://127.0.0.1:3100/api/projects/${fixture.projectId}/workspaces/${workspaces[0].id}/terminals/${terminalRow.id}/stream`;
+  await expect(rejectedWebSocket(terminalUrl, "http://cross-origin.invalid")).resolves.toBe(400);
+  await expect(rejectedWebSocket(terminalUrl, "http://127.0.0.1:3100")).resolves.toBe(409);
+  await expect.poll(async () => {
+    const snapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", { headers: { authorization: `Bearer ${fixture.controlToken}` } })
+      .then(async (response) => await response.json()) as { execs: Array<{ command: string[]; rows: number; columns: number }> };
+    const shell = snapshot.execs.find((item) => item.command.at(-1) === "/bin/sh");
+    return shell === undefined ? "missing" : `${shell.columns}x${shell.rows}`;
+  }).not.toBe("80x24");
+  await terminal.getByRole("button", { name: "Detach" }).click();
+  await expect(recovered.getByText("disconnected", { exact: true })).toBeVisible();
+  await recovered.getByRole("button", { name: "Reconnect" }).click();
+  await expect(recovered.getByText("active", { exact: true })).toBeVisible();
+  const webRestart = await fetch("http://127.0.0.1:3199/restart-web", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
+  expect(webRestart.status).toBe(204);
+  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await recoveredPage.goto("/");
+  recovered = recoveredPage.locator("article", { has: recoveredPage.getByRole("heading", { name: "Managed Fixture" }) });
+  await expect(recovered.getByText("disconnected", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await recovered.getByRole("button", { name: "Reconnect" }).click();
+  await expect(recovered.getByText("active", { exact: true })).toBeVisible();
+  const agentRestart = await fetch("http://127.0.0.1:3199/restart-agent", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
+  expect(agentRestart.status).toBe(204);
+  await recoveredPage.reload();
+  await expect(recoveredPage.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible({ timeout: 30_000 });
+  await expect(recovered.getByText("lost", { exact: true })).toBeVisible({ timeout: 30_000 });
+
+  await recovered.getByRole("listitem").filter({ hasText: "Check workspace" }).getByRole("button", { name: "Run" }).click();
+  await expect(recovered.getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(recovered.getByText("Exit code: 0", { exact: true })).toBeVisible();
+  const taskWebRestart = await fetch("http://127.0.0.1:3199/restart-web", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
+  expect(taskWebRestart.status).toBe(204);
+  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await recoveredPage.goto("/");
+  recovered = recoveredPage.locator("article", { has: recoveredPage.getByRole("heading", { name: "Managed Fixture" }) });
+  await expect(recovered.locator(".task-runs li", { hasText: "check" }).first().getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
 });

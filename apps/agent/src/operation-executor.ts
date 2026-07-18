@@ -3,11 +3,13 @@ import { v7 as uuidv7 } from "uuid";
 import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
+import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string };
   if (typeof request.projectId !== "string") return null;
-  if (["workspace.create", "workspace.start", "workspace.stop"].includes(record.operationName) && typeof request.workspaceId === "string") {
+  if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close"].includes(record.operationName)
+    && typeof request.workspaceId === "string") {
     return { type: "workspace", projectId: request.projectId, workspaceId: request.workspaceId };
   }
   return { type: "project", projectId: request.projectId };
@@ -23,7 +25,15 @@ export class OperationExecutor {
     private readonly journal: OperationJournal,
     private readonly managed: ManagedWorkspaces,
     private readonly events: AgentEventLog,
-    private readonly createId: () => string = uuidv7
+    private readonly createId: () => string = uuidv7,
+    private readonly execution: Pick<ExecutionManager, "snapshotResources" | "startTask" | "stop" | "createTerminal" | "closeTerminal" | "stopWorkspace"> = {
+      snapshotResources: () => [],
+      startTask: () => Promise.reject(new Error("execution-manager-unavailable")),
+      stop: () => Promise.reject(new Error("execution-manager-unavailable")),
+      createTerminal: () => Promise.reject(new Error("execution-manager-unavailable")),
+      closeTerminal: () => Promise.reject(new Error("execution-manager-unavailable")),
+      stopWorkspace: () => Promise.resolve()
+    }
   ) {}
 
   get isHealthy(): boolean { return this.observationHealthy; }
@@ -31,7 +41,7 @@ export class OperationExecutor {
     try { this.resources = await this.managed.snapshotResources(); }
     catch { this.observationHealthy = false; this.resources = []; }
   }
-  snapshotResources(): AgentSnapshotResource[] { return this.resources; }
+  snapshotResources(): AgentSnapshotResource[] { return [...this.resources, ...this.execution.snapshotResources()]; }
 
   schedule(record: JournalRecord): void {
     if (record.state === "succeeded" || record.state === "failed" || this.inFlight.has(record.operationId)) return;
@@ -55,6 +65,7 @@ export class OperationExecutor {
     if (record === undefined || record.state === "succeeded" || record.state === "failed") return;
     const projectId = (record.request as { projectId: string }).projectId;
     const resource = resourceFor(record);
+    let taskStartCompleted = false;
     try {
       await this.managed.awaitProjectExecutionFence(projectId);
       record = await this.journal.markRunning(operationId);
@@ -93,12 +104,29 @@ export class OperationExecutor {
         }
         case "workspace.stop": {
           const request = record.request as { projectId: string; workspaceId: string };
+          await this.execution.stopWorkspace(request.projectId, request.workspaceId);
           await this.managed.stopWorkspace(request.projectId, request.workspaceId);
           this.events.workspaceRuntimeConverged(operationId, request.projectId, request.workspaceId, previousRuntime, "stopped");
           break;
         }
+        case "task.start":
+          await this.execution.startTask(record.request as Parameters<ExecutionManager["startTask"]>[0], operationId);
+          taskStartCompleted = true;
+          break;
+        case "process.stop": {
+          const request = record.request as { projectId: string; workspaceId: string; processId: string };
+          await this.execution.stop(request.projectId, request.workspaceId, request.processId);
+          break;
+        }
+        case "terminal.create":
+          await this.execution.createTerminal(record.request as Parameters<ExecutionManager["createTerminal"]>[0]);
+          break;
+        case "terminal.close":
+          await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
+          break;
       }
-      if (record.operationName !== "configuration-revision.register" && record.operationName !== "configuration-runtime-plan.register") {
+      if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close"]
+        .includes(record.operationName)) {
         try { this.resources = await this.managed.snapshotResources(); }
         catch (error) { this.observationHealthy = false; throw error; }
         const request = record.request as { projectId: string; workspaceId?: string };
@@ -119,6 +147,9 @@ export class OperationExecutor {
       await this.journal.succeed(operationId);
       this.events.succeeded(operationId, resource);
     } catch (error) {
+      // Once private execution evidence says the start occurred, a later journal write outage
+      // must leave this operation resumable; it must never rewrite successful start as failure.
+      if (record.operationName === "task.start" && (taskStartCompleted || error instanceof TaskStartRecoveryRequiredError)) return;
       const failure: AgentExecutionFailure = error instanceof AgentExecutionError ? error.failure : {
         code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
         details: { incidentId: this.createId() }

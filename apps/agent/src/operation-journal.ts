@@ -30,7 +30,11 @@ export const supportedMutationNames = [
   "project.fetch",
   "workspace.create",
   "workspace.start",
-  "workspace.stop"
+  "workspace.stop",
+  "task.start",
+  "process.stop",
+  "terminal.create",
+  "terminal.close"
 ] as const;
 export type SupportedMutationName = (typeof supportedMutationNames)[number];
 

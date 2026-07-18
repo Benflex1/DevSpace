@@ -16,7 +16,7 @@ The web application authenticates Cloudflare Access users, owns browser-facing A
 
 ### Workspace agent
 
-The agent is a private execution service under the dedicated `devspace` Unix account. It manages repository stores, Git worktrees, the dedicated rootless Docker daemon, PTY streams, process supervision, health checks, and gateway routes.
+The agent is a private execution service under the dedicated `devspace` Unix account. It manages repository stores, Git worktrees, the dedicated rootless Docker daemon, PTY streams, process observation, health checks, and gateway routes. M1 does not provide individual task or terminal process termination or descendant supervision.
 
 ### Rootless Docker runtime
 
@@ -64,9 +64,9 @@ Existing workspaces do not silently change when Project Options change. Rebuild/
 
 ## Process and terminal model
 
-Tasks, terminals, and AI CLIs execute inside the development container. The agent owns the long-lived Docker attach streams. Browser reconnect is supported while the agent remains alive. Surviving and reattaching after an agent restart is not required initially; such sessions become `lost` and are reconciled safely.
+Supported M1 tasks and terminals execute inside the development container. The agent owns the long-lived Docker attach streams. M1 supports interactive browser terminals through `create → attach → input/output → resize → detach → reconnect` and configured foreground one-shot tasks through structured executable/argument arrays. Recovered task starts retain their Agent-private ownership and exact task operation binding across an Agent restart; terminal sessions become `lost` because their PTY attachment is not replayed. M1 task/terminal Stop and forceful Close fail closed because exact individual termination is deferred; AI sessions remain future work.
 
-Predefined tasks use structured executable and argument arrays. Interactive terminal and AI sessions are explicit elevated capabilities and are audited.
+Predefined tasks use structured executable and argument arrays. Project Options v1 can represent interactive, long-running, timeout, and replacement policies, but the M1 task runtime accepts only `interactive: false`, `longRunning: false`, `timeoutSeconds: null`, and `concurrencyPolicy: "reject" | "allow"`; other valid combinations are rejected before Docker side effects. Interactive browser terminals are the supported elevated shell capability in M1; AI sessions are future work.
 
 ## Network model
 
