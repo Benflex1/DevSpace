@@ -55,13 +55,45 @@ Milestone 1 — in progress.
   mounts, devices, and port settings. Missing, replaced, colliding, drifted, or mismatched resources
   fail closed. Start succeeds only after bounded repeated exact inspection proves the container has
   remained continuously running for the configured stabilization window.
+- A running primary workspace exposes a same-origin interactive browser terminal backed by an Agent-owned
+  Docker exec PTY at `/workspace`. Web authenticates the HTTP upgrade, validates the configured
+  application origin, authorizes the exact project/workspace/terminal tuple, and relays only the
+  accepted bounded binary protocol to the private Agent Unix socket. The supported terminal path is
+  `create → attach → input/output → resize → detach → reconnect`, with one-attachment ownership,
+  bounded replay, and truthful `lost` state after an unrecoverable Agent restart. Detach is
+  non-destructive; forceful terminal Close is intentionally unavailable and fails closed.
+- Initial primary-workspace setup can materialize simple structured tasks in the immutable Project
+  Options revision without JSON or YAML editing. Ready workspaces list that exact revision's tasks,
+  start supported tasks by key inside the exact development container, reconcile process/task state
+  and exit code, and map configured success exit codes to passed/failed. Direct executable/argument
+  execution, confined working directories, literal environment overlay, and `reject`/`allow`
+  concurrency are supported. The supported task path is selecting a configured structured
+  foreground one-shot task, running its exact Docker exec, and observing lifecycle, exit code, and
+  configured success/failure mapping. M1 accepts exactly `interactive: false`, `longRunning: false`,
+  `timeoutSeconds: null`, and `concurrencyPolicy: "reject" | "allow"`. A task completes when its
+  exact Docker exec completes; M1 does not claim ownership of intentionally daemonized descendants.
+- Project Options v1 still structurally represents `interactive: true`, `longRunning: true`, non-null
+  `timeoutSeconds`, and `concurrencyPolicy: "replace"`. M1 rejects those valid configuration
+  concepts before Docker side effects with the typed runtime-policy violation. Task Stop and forceful
+  terminal Close fail closed with contract-valid state conflicts; stopping the whole workspace
+  runtime may still reclaim all container processes through the exact container lifecycle.
+- Agent-private task-start evidence advances through durable `reserved`, `exec-created`, private
+  `start-intent`/failure evidence, and `started` phases, bound to the exact accepted operation and
+  request before Docker sees its first side effect. Exact replay classifies the retained exec using
+  Docker's nullable exit evidence, never starts a retained exec twice, and preserves a later task
+  exit separately from successful start. Terminal attachment finalization is idempotent and retains
+  exclusivity through persistence, close, and cleanup races; an unrecoverable persistence failure
+  becomes terminal `lost` without an immortal in-memory attachment owner.
 - Permanent Playwright coverage drives the browser, Web orchestration, SQLite, Agent journal,
   loopback HTTPS Git fetch, real store/worktree creation, the production Docker Engine API adapter
   against a stateful Unix-socket fixture, start/stop, and Web+Agent restart without public internet.
 
 ## Still absent
 
-- tasks, processes, terminals, previews, and AI sessions.
-
-Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secrets,
-rebuild, tasks, terminals, previews, and AI sessions remain intentionally unimplemented.
+Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
+generated task-environment binding resolution, task output streaming, full Project Options revision
+editing, rebuild, previews, Caddy routing, and AI sessions remain intentionally unimplemented.
+Individual task termination and exact descendant ownership, task Stop, forceful terminal Close,
+long-running task supervision, runtime timeout enforcement, `replace` concurrency, and configured
+interactive tasks are deferred execution-supervision work for M2. M1's `foreground one-shot`
+description does not imply runtime timeout enforcement.

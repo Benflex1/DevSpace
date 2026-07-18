@@ -17,6 +17,8 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
   const containers = new Map();
   const names = new Map();
   const lifecycles = new Map();
+  const execs = new Map();
+  const execSockets = new Map();
   let containerCreateFailures = 0;
   let counter = 0;
   const id = (prefix) => `${prefix}${String(++counter).padStart(63, "0")}`;
@@ -88,6 +90,36 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
           State: { Running: false, Status: "created" } };
         containers.set(containerId, container); names.set(name, containerId); send(response, 201, { Id: containerId, Warnings: [] }); return;
       }
+      const containerExecMatch = /^\/containers\/([^/]+)\/exec$/u.exec(url.pathname);
+      if (request.method === "POST" && containerExecMatch !== null) {
+        const container = containers.get(decodeURIComponent(containerExecMatch[1]));
+        const body = await jsonBody(request);
+        const valid = container?.State.Running === true && Array.isArray(body.Cmd) && body.Cmd.length > 0
+          && body.Cmd.every((item) => typeof item === "string") && body.WorkingDir?.startsWith("/workspace")
+          && !body.WorkingDir.includes("..") && Array.isArray(body.Env)
+          && body.AttachStdout === true && body.AttachStderr === true && typeof body.Tty === "boolean";
+        if (!valid) { send(response, 400, { message: "unsafe exec request" }); return; }
+        const execId = id("e");
+        // Docker's ExecInspectResponse uses a nullable ExitCode. A created exec
+        // has no exit evidence until its exact start attempt produces an outcome.
+        execs.set(execId, { ID: execId, Running: false, ExitCode: null,
+          ContainerID: container.Id, command: [...body.Cmd], workingDirectory: body.WorkingDir,
+          environment: [...body.Env], tty: body.Tty, rows: 24, columns: 80, input: "" });
+        send(response, 201, { Id: execId }); return;
+      }
+      const execInspectMatch = /^\/exec\/([^/]+)\/json$/u.exec(url.pathname);
+      if (request.method === "GET" && execInspectMatch !== null) {
+        const execution = execs.get(decodeURIComponent(execInspectMatch[1]));
+        if (execution === undefined) send(response, 404, { message: "not found" }); else send(response, 200, execution); return;
+      }
+      const execResizeMatch = /^\/exec\/([^/]+)\/resize$/u.exec(url.pathname);
+      if (request.method === "POST" && execResizeMatch !== null) {
+        const execution = execs.get(decodeURIComponent(execResizeMatch[1]));
+        const rows = Number(url.searchParams.get("h")); const columns = Number(url.searchParams.get("w"));
+        if (execution === undefined) { send(response, 404, { message: "not found" }); return; }
+        if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(columns) || columns < 1) { send(response, 400, { message: "invalid resize" }); return; }
+        execution.rows = rows; execution.columns = columns; response.writeHead(200).end(); return;
+      }
       const containerMatch = /^\/containers\/([^/]+)(?:\/(json|start|stop))?$/u.exec(url.pathname);
       if (containerMatch !== null) {
         const container = containers.get(decodeURIComponent(containerMatch[1]));
@@ -123,6 +155,47 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
       send(response, 404, { message: "unsupported fixture endpoint" });
     } catch (error) { send(response, 500, { message: error instanceof Error ? error.message : "fixture failure" }); }
   });
+  server.on("upgrade", (request, socket, head) => {
+    const match = /^\/exec\/([^/]+)\/start$/u.exec(new URL(request.url ?? "/", "http://docker.local").pathname);
+    if (request.method !== "POST" || match === null || request.headers.upgrade !== "tcp") { socket.destroy(); return; }
+    const execution = execs.get(decodeURIComponent(match[1]));
+    if (execution === undefined) { socket.end("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"); return; }
+    const contentLength = Number(request.headers["content-length"] ?? 0); let body = Buffer.from(head);
+    const start = () => {
+      try {
+        const options = JSON.parse(body.subarray(0, contentLength).toString("utf8"));
+        if (options.Detach !== false || options.Tty !== execution.tty) throw new Error("invalid start options");
+      } catch { socket.end("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"); return; }
+      execution.Running = true; execution.ExitCode = null; execSockets.set(execution.ID, socket);
+      socket.write("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
+      const command = execution.command;
+      const executable = command[0]; const args = command.slice(1);
+      if (executable === "/bin/sh" && execution.tty) {
+        socket.write("/workspace $ ");
+        socket.on("data", (chunk) => {
+          execution.input += chunk.toString("utf8").replace(/\r\n?/gu, "\n");
+          let newline;
+          while ((newline = execution.input.indexOf("\n")) >= 0) {
+            const line = execution.input.slice(0, newline).replace(/\r$/u, ""); execution.input = execution.input.slice(newline + 1);
+            if (line === "pwd") socket.write("/workspace\r\n");
+            else if (line.startsWith("echo ")) socket.write(`${line.slice(5)}\r\n`);
+            else if (line.startsWith("printf ")) {
+              const value = line.slice(7).replace(/^['"]|['"]$/gu, "").replaceAll("\\n", "\r\n"); socket.write(value);
+            }
+            socket.write("/workspace $ ");
+          }
+        });
+        return;
+      }
+      if (executable === "/bin/sleep" || executable === "/usr/bin/sleep") return;
+      if (executable === "/usr/bin/printf") {
+        const output = args.join("").replaceAll("\\n", "\n"); if (execution.tty) socket.write(output);
+      }
+      setTimeout(() => { execution.Running = false; execution.ExitCode = executable.includes("false") ? 1 : 0; socket.end(); execSockets.delete(execution.ID); }, 25);
+    };
+    if (body.length >= contentLength) start();
+    else socket.on("data", function collect(chunk) { body = Buffer.concat([body, chunk]); if (body.length >= contentLength) { socket.off("data", collect); start(); } });
+  });
   await unlink(socketPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
   return {
@@ -130,7 +203,8 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
       await new Promise((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await unlink(socketPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
     },
-    snapshot: () => ({ networks: structuredClone([...networks.values()]), containers: structuredClone([...containers.values()]) }),
+    snapshot: () => ({ networks: structuredClone([...networks.values()]), containers: structuredClone([...containers.values()]),
+      execs: structuredClone([...execs.values()].map(({ input: _input, ...execution }) => execution)) }),
     driftContainer: (containerId, mutate) => {
       const container = containers.get(containerId);
       if (container === undefined) throw new Error("fixture container not found");

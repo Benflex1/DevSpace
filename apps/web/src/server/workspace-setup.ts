@@ -17,7 +17,10 @@ export class WorkspaceSetupExecutionError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "WorkspaceSetupExecutionError"; }
 }
 
-export interface WorkspaceSetupInput { readonly imageReference: string }
+export interface WorkspaceSetupInput {
+  readonly imageReference: string;
+  readonly tasks?: readonly { readonly key: string; readonly displayName: string; readonly executable: string; readonly args: readonly string[] }[];
+}
 export type WorkspaceSetupAgent = Pick<WorkspaceAgentClient,
   "health" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" | "fetchProject" |
   "createWorkspace" | "snapshot" | "inspectGit" | "inspectWorkspace">;
@@ -27,7 +30,7 @@ export function parseWorkspaceSetupInput(value: unknown): WorkspaceSetupInput {
     throw new WorkspaceSetupValidationError("Enter development environment details.");
   }
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => key !== "imageReference")) {
+  if (Object.keys(record).some((key) => key !== "imageReference" && key !== "tasks")) {
     throw new WorkspaceSetupValidationError("The request contains unknown fields.");
   }
   const imageReference = typeof record.imageReference === "string" ? record.imageReference.trim() : "";
@@ -38,13 +41,31 @@ export function parseWorkspaceSetupInput(value: unknown): WorkspaceSetupInput {
   if (imageReference.length < 1 || imageReference.length > 512 || hasControlCharacter) {
     throw new WorkspaceSetupValidationError("Enter a valid development container image reference.");
   }
-  return { imageReference };
+  const taskValues = record.tasks === undefined ? [] : record.tasks;
+  if (!Array.isArray(taskValues) || taskValues.length > 10) throw new WorkspaceSetupValidationError("Enter valid task definitions.");
+  const tasks = taskValues.map((value) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new WorkspaceSetupValidationError("Enter valid task definitions.");
+    const task = value as Record<string, unknown>;
+    if (Object.keys(task).some((key) => !["key", "displayName", "executable", "args"].includes(key))
+      || typeof task.key !== "string" || !/^[a-z][a-z0-9-]*$/u.test(task.key)
+      || typeof task.displayName !== "string" || task.displayName.trim().length < 1 || task.displayName.length > 120
+      || typeof task.executable !== "string" || task.executable.trim().length < 1 || task.executable.length > 512
+      || !Array.isArray(task.args) || task.args.length > 100 || task.args.some((argument) => typeof argument !== "string" || argument.length > 2_048)) {
+      throw new WorkspaceSetupValidationError("Each task needs a valid key, display name, executable, and ordered arguments.");
+    }
+    return { key: task.key, displayName: task.displayName.trim(), executable: task.executable.trim(), args: task.args as string[] };
+  });
+  if (new Set(tasks.map((task) => task.key)).size !== tasks.length) throw new WorkspaceSetupValidationError("Task keys must be unique.");
+  return { imageReference, tasks };
 }
 
 function initialProjectOptions(input: WorkspaceSetupInput) {
   return parseProjectOptionsV1({
     schemaVersion: 1,
-    developmentEnvironment: { source: { kind: "image", imageReference: input.imageReference } }
+    developmentEnvironment: { source: { kind: "image", imageReference: input.imageReference } },
+    tasks: (input.tasks ?? []).map((task) => ({ key: task.key, displayName: task.displayName,
+      command: { executable: task.executable, args: task.args, workingDirectory: ".", environment: {} },
+      interactive: false, longRunning: false, timeoutSeconds: null, concurrencyPolicy: "reject", successExitCodes: [0], logRetentionDays: null }))
   });
 }
 

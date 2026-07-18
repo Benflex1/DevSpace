@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 import { AddProjectForm } from "./project-form.js";
 import { WorkspaceSetupForm } from "./workspace-setup-form.js";
 import { RuntimeControls } from "./runtime-controls.js";
+import { ExecutionControls } from "./execution-controls.js";
 import { createAgentClient } from "../server/agent-client.js";
 import { authenticateHeaders } from "../server/auth.js";
 import { readWebRuntimeConfig } from "../server/config.js";
@@ -23,6 +24,7 @@ export default async function HomePage() {
   const agentRuntimeStatus = agentReachable ? await agent.runtimeStatus().catch(() => null) : null;
   const runtimeAvailability = agentRuntimeStatus?.rootlessRuntime ?? "unavailable" as const;
   const agentSnapshot = agentReachable ? await agent.snapshot().catch(() => null) : null;
+  if (agentSnapshot !== null) database.applyExecutionSnapshot(agentSnapshot);
   const liveStates = new Map((await Promise.all(projects.filter((project) => project.state === "ready" && project.primaryWorkspace !== null).map(async (project) => {
     try {
       const workspaceId = project.primaryWorkspace!.id;
@@ -104,6 +106,9 @@ function ProjectList({ initialProjects, liveStates, runtimeOperations, agentReac
         runtimeAvailable={runtimeAvailability === "available"} activeAction={activeAction}
         canStart={runtimeOperation?.canStart === true} canStop={runtimeOperation?.canStop === true}
         retryStart={runtimeOperation?.canRetryStart === true} />}
+      {project.state === "ready" && project.primaryWorkspace !== null && <ExecutionControls projectId={project.id}
+        workspaceId={project.primaryWorkspace.id} runtimeRunning={runtimeState === "running"}
+        initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} />}
     </article>;
     })}
   </div>;

@@ -90,7 +90,7 @@ describe("forward SQLite migration runner", () => {
         migrateDatabase(database, { migrationsFolder });
 
         expect(database.prepare(`select count(*) as count from ${drizzleMigrationTableName}`).get())
-          .toEqual({ count: 1 });
+          .toEqual({ count: latestSchemaVersion });
         expect(database.prepare("select name, type, sql from sqlite_schema order by type, name").all())
           .toEqual(before);
         expect(database.pragma("user_version", { simple: true })).toBe(latestSchemaVersion);
@@ -241,8 +241,8 @@ describe("forward SQLite migration runner", () => {
         `).run(serviceId, stackId);
         database.prepare(`
           insert into processes (
-            id, workspace_id, service_id, kind, process_token, desired_state, observed_state
-          ) values (?, ?, ?, 'task', 'process-token-1', 'running', 'running')
+            id, workspace_id, service_id, kind, desired_state, observed_state
+          ) values (?, ?, ?, 'task', 'running', 'running')
         `).run(processId, primaryWorkspaceId, serviceId);
         expect(() => database.prepare("delete from workspace_services where id = ?").run(serviceId))
           .toThrow(/FOREIGN KEY/);

@@ -2,6 +2,7 @@ import * as z from "zod";
 import { projectOptionsV1Schema } from "./schema.js";
 
 export {
+  PROJECT_OPTIONS_MAX_TIMEOUT_SECONDS,
   projectOptionsV1Schema,
   type ProjectOptionsV1,
   type ProjectOptionsV1Input

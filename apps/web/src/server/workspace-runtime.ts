@@ -9,9 +9,11 @@ import { reconcilePrimaryWorkspaceRuntimeOperation } from "./runtime-operation-r
 export class WorkspaceRuntimeExecutionError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "WorkspaceRuntimeExecutionError"; }
 }
+type WorkspaceRuntimeAgent = Pick<WorkspaceAgentClient,
+  "snapshot" | "runtimeStatus" | "inspectWorkspace" | "registerRuntimePlan" | "startWorkspace" | "stopWorkspace">;
 
 async function pollMutation(input: {
-  database: ProjectDatabase; agent: WorkspaceAgentClient; operationId: string;
+  database: ProjectDatabase; agent: WorkspaceRuntimeAgent; operationId: string;
   execute: () => Promise<void>; deadline: number; now: () => number; sleep: (milliseconds: number) => Promise<void>;
 }): Promise<void> {
   await input.execute();
@@ -29,7 +31,7 @@ async function pollMutation(input: {
 }
 
 export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", projectId: string, actor: string, dependencies: {
-  readonly database: ProjectDatabase; readonly agent: WorkspaceAgentClient; readonly orchestrationTimeoutMs?: number;
+  readonly database: ProjectDatabase; readonly agent: WorkspaceRuntimeAgent; readonly orchestrationTimeoutMs?: number;
   readonly nowMonotonic?: () => number; readonly sleep?: (milliseconds: number) => Promise<void>;
 }) {
   const context = dependencies.database.getRuntimeContext(projectId);

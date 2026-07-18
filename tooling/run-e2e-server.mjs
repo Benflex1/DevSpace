@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
+import { createConnection } from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -66,6 +67,7 @@ await Promise.all(["projects", "workspaces", "state/operations"]
   .map(async (relative) => await mkdir(path.join(managedRoot, relative), { recursive: true })));
 const environment = {
   ...process.env, DEVSPACE_AUTH_MODE: "development", DEVSPACE_APP_ORIGIN: "http://127.0.0.1:3100",
+  DEVSPACE_DEPS_PREPARED: "1",
   DEVSPACE_DATABASE_PATH: databasePath, DEVSPACE_AGENT_SOCKET_PATH: path.join(runtimeDirectory, "agent.sock"),
   DEVSPACE_MANAGED_ROOT: managedRoot, DEVSPACE_GIT_CA_FILE: certificate,
   DEVSPACE_DOCKER_SOCKET_PATH: path.join(runtimeDirectory, "docker-engine.sock")
@@ -73,17 +75,28 @@ const environment = {
 const dockerFixture = await createDockerEngineFixture(environment.DEVSPACE_DOCKER_SOCKET_PATH, path.join(managedRoot, "workspaces"));
 await writeFile(coordinationPath, `${JSON.stringify({ runtimeDirectory, databasePath, managedRoot, projectId, repositoryUrl, expectedHead, controlToken })}\n`, { mode: 0o600 });
 
-let children = []; let stopping = false; let restarting = false;
-function startChildren() {
-  const agent = spawn("pnpm", ["exec", "tsx", "apps/agent/test/e2e-server.ts"], { env: environment, stdio: "inherit" });
-  const web = spawn("pnpm", ["--filter", "@devspace/web", "exec", "next", "dev", "--webpack", "--hostname", "127.0.0.1", "--port", "3100"], { env: environment, stdio: "inherit" });
-  children = [agent, web];
-  for (const child of children) child.once("exit", (code) => { if (!stopping && !restarting && code !== 0) void stop(code ?? 1); });
+let agentChild = null; let webChild = null; let stopping = false; let restarting = false;
+function watchChild(child) {
+  child.once("exit", (code) => { if (!stopping && !restarting && code !== 0) void stop(code ?? 1); });
+}
+function startAgent() {
+  agentChild = spawn("pnpm", ["exec", "tsx", "apps/agent/test/e2e-server.ts"], { env: environment, stdio: "inherit", detached: true });
+  watchChild(agentChild);
+}
+function startWeb() {
+  webChild = spawn("pnpm", ["--filter", "@devspace/web", "run", "dev"], {
+    env: { ...environment, DEVSPACE_WEB_HOST: "127.0.0.1", PORT: "3100" }, stdio: "inherit", detached: true
+  });
+  watchChild(webChild);
+}
+function startChildren() { startAgent(); startWeb(); }
+async function stopProcesses(current) {
+  for (const child of current) if (child !== null && child.exitCode === null) process.kill(-child.pid, "SIGTERM");
+  await Promise.all(current.map((child) => child.exitCode !== null ? Promise.resolve() : new Promise((resolve) => child.once("exit", resolve))));
 }
 async function stopChildren() {
-  const current = children; children = [];
-  for (const child of current) if (child.exitCode === null) child.kill("SIGTERM");
-  await Promise.all(current.map((child) => child.exitCode !== null ? Promise.resolve() : new Promise((resolve) => child.once("exit", resolve))));
+  const current = [agentChild, webChild].filter((child) => child !== null); agentChild = null; webChild = null;
+  await stopProcesses(current);
 }
 async function waitForWeb() {
   const deadline = Date.now() + 60_000;
@@ -92,6 +105,19 @@ async function waitForWeb() {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Web did not restart in time.");
+}
+async function waitForAgent() {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const connected = await new Promise((resolve) => {
+      const socket = createConnection(environment.DEVSPACE_AGENT_SOCKET_PATH);
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => resolve(false));
+    });
+    if (connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Agent did not restart in time.");
 }
 startChildren();
 
@@ -111,12 +137,22 @@ const control = http.createServer(async (request, response) => {
   }
   if (request.method === "GET" && request.url === "/docker-snapshot") {
     const snapshot = dockerFixture.snapshot();
-    const body = JSON.stringify({ networks: snapshot.networks.length, containers: snapshot.containers.length });
+    const body = JSON.stringify({ networks: snapshot.networks.length, containers: snapshot.containers.length, execs: snapshot.execs });
     response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body); return;
   }
-  if (request.method !== "POST" || request.url !== "/restart") { response.writeHead(404).end(); return; }
+  if (request.method !== "POST" || !["/restart", "/restart-web", "/restart-agent"].includes(request.url ?? "")) {
+    response.writeHead(404).end(); return;
+  }
   restarting = true;
-  try { await stopChildren(); startChildren(); await waitForWeb(); response.writeHead(204).end(); }
+  try {
+    if (request.url === "/restart") { await stopChildren(); startChildren(); }
+    else if (request.url === "/restart-web") {
+      const previous = webChild; webChild = null; if (previous !== null) await stopProcesses([previous]); startWeb();
+    } else {
+      const previous = agentChild; agentChild = null; if (previous !== null) await stopProcesses([previous]); startAgent();
+    }
+    await Promise.all([waitForAgent(), waitForWeb()]); response.writeHead(204).end();
+  }
   catch { response.writeHead(500).end(); }
   finally { restarting = false; }
 });

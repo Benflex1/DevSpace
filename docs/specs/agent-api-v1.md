@@ -591,7 +591,7 @@ The exact timestamp relationships are:
   transitions to its terminal state.
 
 `exitCode` is null for every non-terminal state and may be either an `ExitCode` or null for a
-terminal state, because a signalled or unrecoverable outcome may have no code.
+terminal state, because a manually terminated or unrecoverable outcome may have no code.
 
 ```text
 PreviewInspectionData = {
@@ -635,7 +635,7 @@ document are not members of this registry, F09 runtime schemas, exports, or fixt
 | `RESOURCE_STATE_CONFLICT` | A non-workspace resource cannot perform the requested action in its current retained state or its caller-supplied ID is already bound incompatibly. | `409` | false | `{ resource: ResourceReference, action: one of ("create", "start", "stop", "close", "attach", "activate", "deactivate", "interrupt", "resume") }` | route-specific |
 | `DIRTY_WORKSPACE_REQUIRES_ACTION` | A dirty isolated workspace requires an allowed explicit handling choice. | `409` | false | `{ workspaceId: UuidV7, requestedAction: one of ("archive", "remove") }` | route-specific |
 | `TASK_NOT_DEFINED` | The registered revision does not define the requested task key. | `422` | false | `{ revisionId: UuidV7, taskKey: ConfigurationKey }` | route-specific |
-| `PROCESS_IDENTITY_MISMATCH` | Retained process ownership/token evidence does not match the live runtime process. | `409` | false | `{ processId: UuidV7 }` | route-specific |
+| `PROCESS_IDENTITY_MISMATCH` | Retained process ownership and exact runtime evidence do not match the live process. | `409` | false | `{ processId: UuidV7 }` | route-specific |
 | `PREVIEW_NOT_DEFINED` | The registered revision does not define the requested preview key. | `422` | false | `{ revisionId: UuidV7, previewKey: ConfigurationKey }` | route-specific |
 | `AI_NOT_CONFIGURED` | The workspace's registered Project Options revision has `aiProfile: null`. | `422` | false | `{ workspaceId: UuidV7, revisionId: UuidV7 }` | route-specific |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | The derived preview hostname is outside the approved domain registry. | `422` | false | `{ previewId: UuidV7 }` | route-specific |
@@ -1070,7 +1070,7 @@ The classification of all 23 F09 executable codes is exhaustive:
 | `RESOURCE_STATE_CONFLICT` | potentially post-acceptance | resource state or caller-supplied identity binding may race after validation |
 | `DIRTY_WORKSPACE_REQUIRES_ACTION` | potentially post-acceptance | an isolated worktree may become dirty before archive/removal executes |
 | `TASK_NOT_DEFINED` | potentially post-acceptance | the workspace's effective registered revision may change before task resolution/execution |
-| `PROCESS_IDENTITY_MISMATCH` | potentially post-acceptance | the required live identity check may fail immediately before signalling |
+| `PROCESS_IDENTITY_MISMATCH` | potentially post-acceptance | the required live ownership check may fail immediately before acting on a retained process |
 | `PREVIEW_NOT_DEFINED` | potentially post-acceptance | the workspace's effective revision may no longer define the preview |
 | `AI_NOT_CONFIGURED` | potentially post-acceptance | the workspace's effective revision may change to one with no AI profile |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | potentially post-acceptance | approved-domain policy may change before gateway application |

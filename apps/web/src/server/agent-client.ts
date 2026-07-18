@@ -12,6 +12,7 @@ import {
   type HealthData,
   type RuntimeStatusData,
   type SourceInspectionData,
+  type ProcessInspectionData,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
@@ -37,7 +38,8 @@ export function createAgentClient(socketPath: string, options: {
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
-    | "workspace.inspect" | "workspace.start" | "workspace.stop" | "snapshot.get";
+    | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
+    | "terminal.create" | "terminal.close" | "snapshot.get";
 
   async function call(operation: SupportedOperation, data?: unknown, operationId?: string): Promise<unknown> {
     const endpoint = operation === "snapshot.get"
@@ -121,9 +123,26 @@ export function createAgentClient(socketPath: string, options: {
     stopWorkspace: async (operationId: string, projectId: string, workspaceId: string): Promise<void> => {
       await call("workspace.stop", { projectId, workspaceId }, operationId);
     },
+    startTask: async (operationId: string, data: { projectId: string; workspaceId: string; taskRunId: string; processId: string; taskKey: string }): Promise<void> => {
+      await call("task.start", data, operationId);
+    },
+    stopProcess: async (operationId: string, projectId: string, workspaceId: string, processId: string): Promise<void> => {
+      await call("process.stop", { projectId, workspaceId, processId }, operationId);
+    },
+    inspectProcess: async (projectId: string, workspaceId: string, processId: string): Promise<ProcessInspectionData> =>
+      await call("process.inspect", { projectId, workspaceId, processId }) as ProcessInspectionData,
+    createTerminal: async (operationId: string, projectId: string, workspaceId: string, terminalId: string): Promise<void> => {
+      await call("terminal.create", { projectId, workspaceId, terminalId }, operationId);
+    },
+    closeTerminal: async (operationId: string, projectId: string, workspaceId: string, terminalId: string): Promise<void> => {
+      await call("terminal.close", { projectId, workspaceId, terminalId }, operationId);
+    },
     snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
   };
 }
 
-export type WorkspaceAgentClient = ReturnType<typeof createAgentClient>;
+export type FullAgentClient = ReturnType<typeof createAgentClient>;
+export type WorkspaceAgentClient = Pick<FullAgentClient,
+  "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" |
+  "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
 export type AgentClient = Pick<WorkspaceAgentClient, "health" | "inspectSource">;

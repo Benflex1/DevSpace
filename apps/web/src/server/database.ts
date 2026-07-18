@@ -1,14 +1,16 @@
 import BetterSqlite3 from "better-sqlite3";
-import type { WorkspaceInspectionData } from "@devspace/contracts";
+import type { AgentSnapshotData, WorkspaceInspectionData } from "@devspace/contracts";
 import { mkdirSync } from "node:fs";
 import pathModule from "node:path";
 import {
-  auditEvents, migrateDatabase, operations, projectConfigRevisions, projects, runtimeStacks, workspaceServices, workspaces,
+  auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
+  workspaceServices, workspaces,
   type Operation, type Project, type ProjectConfigRevision
 } from "@devspace/database";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
+import { parseProjectOptionsV1 } from "@devspace/project-options";
 
 export interface ProjectView {
   readonly id: string;
@@ -30,6 +32,10 @@ export interface ManagedProjectView extends ProjectView {
     readonly id: string; readonly desiredState: string; readonly observedState: string;
     readonly generation: number; readonly errorMessage: string | null; readonly serviceObservedState: string | null;
   };
+  readonly tasks: readonly { readonly key: string; readonly displayName: string }[];
+  readonly taskRuns: readonly { readonly id: string; readonly taskKey: string; readonly processId: string | null;
+    readonly state: string; readonly processState: string | null; readonly exitCode: number | null }[];
+  readonly terminals: readonly { readonly id: string; readonly processId: string; readonly state: string }[];
 }
 
 export interface CreateProjectInput {
@@ -80,6 +86,11 @@ export function openProjectDatabase(path: string, options: {
         const development = runtime === undefined ? undefined : db.select().from(workspaceServices).where(and(
           eq(workspaceServices.runtimeStackId, runtime.id), eq(workspaceServices.kind, "development")
         )).get();
+        const options = revision === undefined ? null : parseProjectOptionsV1(JSON.parse(revision.configurationJson));
+        const recentRuns = workspace === undefined ? [] : db.select().from(taskRuns).where(eq(taskRuns.workspaceId, workspace.id))
+          .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id)).limit(20).all();
+        const terminalRows = workspace === undefined ? [] : db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, workspace.id))
+          .orderBy(desc(terminalSessions.createdAt), desc(terminalSessions.id)).limit(10).all();
         return {
           ...toView(project),
           activeRevision: revision === undefined ? null : { id: revision.id, number: revision.revisionNumber, hash: revision.configurationHash },
@@ -89,7 +100,13 @@ export function openProjectDatabase(path: string, options: {
           },
           runtime: runtime === undefined ? null : { id: runtime.id, desiredState: runtime.desiredState,
             observedState: runtime.observedState, generation: runtime.runtimeGeneration,
-            errorMessage: runtime.lastErrorMessage, serviceObservedState: development?.observedState ?? null }
+            errorMessage: runtime.lastErrorMessage, serviceObservedState: development?.observedState ?? null },
+          tasks: options?.tasks.map((task) => ({ key: task.key, displayName: task.displayName })) ?? [],
+          taskRuns: recentRuns.map((run) => { const process = run.processId === null ? undefined
+            : db.select().from(processes).where(eq(processes.id, run.processId)).get();
+            return { id: run.id, taskKey: run.taskKey, processId: run.processId, state: run.state,
+              processState: process?.observedState ?? null, exitCode: run.exitCode }; }),
+          terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId, state: terminal.state }))
         };
       });
     },
@@ -319,6 +336,182 @@ export function openProjectDatabase(path: string, options: {
         this.finishOperation(input.operationId, input.outcome.state === "succeeded" ? { state: "succeeded" }
           : { state: "failed", code: input.outcome.code, message: input.outcome.message.slice(0, 512) });
       }).immediate();
+    },
+    prepareTerminalCreate(projectId: string, actor: string): { operation: Operation; workspaceId: string; terminalId: string } {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(projectId);
+        if (context.workspace.observedState !== "running") throw new ProjectSetupConflictError("The workspace runtime must be running.");
+        const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, context.workspace.id)).get();
+        const service = stack === undefined ? undefined : db.select().from(workspaceServices).where(and(
+          eq(workspaceServices.runtimeStackId, stack.id), eq(workspaceServices.kind, "development"))).get();
+        if (stack?.observedState !== "running" || service?.observedState !== "running") {
+          throw new ProjectSetupConflictError("The exact development container is not running.");
+        }
+        const existing = db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, context.workspace.id)).all()
+          .find((terminal) => ["creating", "active", "disconnected", "closing"].includes(terminal.state));
+        if (existing !== undefined) {
+          const retained = db.select().from(operations).where(and(eq(operations.resourceId, existing.id), eq(operations.operationName, "terminal.create")))
+            .orderBy(desc(operations.createdAt)).get();
+          if (retained !== undefined && (retained.state === "accepted" || retained.state === "running")) {
+            return { operation: retained, workspaceId: context.workspace.id, terminalId: existing.id };
+          }
+          throw new ProjectSetupConflictError("Close the existing terminal before opening another one.");
+        }
+        const terminalId = createId();
+        const timestamp = now().toISOString();
+        db.insert(processes).values({ id: terminalId, workspaceId: context.workspace.id, serviceId: service.id,
+          kind: "terminal", definitionKey: null, desiredState: "running", observedState: "queued", exitCode: null,
+          startedAt: null, finishedAt: null, lastObservedAt: null }).run();
+        db.insert(terminalSessions).values({ id: terminalId, workspaceId: context.workspace.id, processId: terminalId,
+          title: "Workspace terminal", shellProfileKey: "agent-default-sh", state: "creating", createdAt: timestamp,
+          lastActivityAt: null, closedAt: null }).run();
+        const operation: Operation = { operationId: createId(), projectId, workspaceId: context.workspace.id, actor,
+          operationName: "terminal.create", resourceType: "terminal", resourceId: terminalId, state: "accepted",
+          progressJson: null, errorCode: null, errorMessage: null, createdAt: timestamp, startedAt: null, finishedAt: null };
+        db.insert(operations).values(operation).run();
+        return { operation, workspaceId: context.workspace.id, terminalId };
+      }).immediate();
+    },
+    prepareTerminalClose(projectId: string, terminalId: string, actor: string): { operation: Operation; workspaceId: string } {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(projectId);
+        const terminal = db.select().from(terminalSessions).where(and(eq(terminalSessions.id, terminalId),
+          eq(terminalSessions.workspaceId, context.workspace.id))).get();
+        if (terminal === undefined) throw new ProjectSetupConflictError("The terminal was not found.");
+        const retained = db.select().from(operations).where(and(eq(operations.resourceId, terminalId), eq(operations.operationName, "terminal.close")))
+          .orderBy(desc(operations.createdAt)).get();
+        if (retained !== undefined && (retained.state === "accepted" || retained.state === "running")) {
+          return { operation: retained, workspaceId: context.workspace.id };
+        }
+        const timestamp = now().toISOString();
+        db.update(terminalSessions).set({ state: "closing" }).where(eq(terminalSessions.id, terminalId)).run();
+        db.update(processes).set({ desiredState: "stopped" }).where(eq(processes.id, terminal.processId)).run();
+        const operation: Operation = { operationId: createId(), projectId, workspaceId: context.workspace.id, actor,
+          operationName: "terminal.close", resourceType: "terminal", resourceId: terminalId, state: "accepted",
+          progressJson: null, errorCode: null, errorMessage: null, createdAt: timestamp, startedAt: null, finishedAt: null };
+        db.insert(operations).values(operation).run();
+        return { operation, workspaceId: context.workspace.id };
+      }).immediate();
+    },
+    prepareTaskStart(projectId: string, taskKey: string, actor: string): { operation: Operation; workspaceId: string; taskRunId: string; processId: string } {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(projectId);
+        if (context.workspace.observedState !== "running") throw new ProjectSetupConflictError("The workspace runtime must be running.");
+        const options = parseProjectOptionsV1(JSON.parse(context.revision.configurationJson));
+        const task = options.tasks.find((candidate) => candidate.key === taskKey);
+        if (task === undefined) throw new ProjectSetupConflictError("The configured task was not found.");
+        const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, context.workspace.id)).get();
+        const service = stack === undefined ? undefined : db.select().from(workspaceServices).where(and(
+          eq(workspaceServices.runtimeStackId, stack.id), eq(workspaceServices.kind, "development"))).get();
+        if (stack?.observedState !== "running" || service?.observedState !== "running") throw new ProjectSetupConflictError("The exact development container is not running.");
+        const activeRuns = db.select().from(taskRuns).where(and(eq(taskRuns.workspaceId, context.workspace.id), eq(taskRuns.taskKey, taskKey))).all()
+          .filter((run) => ["queued", "starting", "running"].includes(run.state));
+        if (task.concurrencyPolicy === "reject" && activeRuns.length > 0) throw new ProjectSetupConflictError("This task already has an active run.");
+        const staleRuns = db.select().from(taskRuns).where(eq(taskRuns.workspaceId, context.workspace.id)).all()
+          .filter((run) => ["passed", "failed", "cancelled", "timed_out", "lost"].includes(run.state))
+          .sort((left, right) => (right.finishedAt ?? right.id).localeCompare(left.finishedAt ?? left.id)).slice(99);
+        for (const stale of staleRuns) {
+          db.delete(taskRuns).where(eq(taskRuns.id, stale.id)).run();
+          if (stale.processId !== null) db.delete(processes).where(eq(processes.id, stale.processId)).run();
+        }
+        const taskRunId = createId(); const processId = createId(); const timestamp = now().toISOString();
+        db.insert(processes).values({ id: processId, workspaceId: context.workspace.id, serviceId: service.id,
+          kind: "task", definitionKey: taskKey, desiredState: "running", observedState: "queued", exitCode: null,
+          startedAt: null, finishedAt: null, lastObservedAt: null }).run();
+        db.insert(taskRuns).values({ id: taskRunId, workspaceId: context.workspace.id, taskKey, processId,
+          configRevisionId: context.revision.id, state: "queued", exitCode: null, startedAt: null, finishedAt: null,
+          summaryJson: null }).run();
+        const operation: Operation = { operationId: createId(), projectId, workspaceId: context.workspace.id, actor,
+          operationName: "task.start", resourceType: "task-run", resourceId: taskRunId, state: "accepted",
+          progressJson: null, errorCode: null, errorMessage: null, createdAt: timestamp, startedAt: null, finishedAt: null };
+        db.insert(operations).values(operation).run();
+        return { operation, workspaceId: context.workspace.id, taskRunId, processId };
+      }).immediate();
+    },
+    prepareProcessStop(projectId: string, processId: string, actor: string): { operation: Operation; workspaceId: string } {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(projectId);
+        const process = db.select().from(processes).where(and(eq(processes.id, processId), eq(processes.workspaceId, context.workspace.id))).get();
+        if (process === undefined || process.kind !== "task") throw new ProjectSetupConflictError("The task process was not found.");
+        const retained = db.select().from(operations).where(and(eq(operations.resourceId, processId), eq(operations.operationName, "process.stop")))
+          .orderBy(desc(operations.createdAt)).get();
+        if (retained !== undefined && (retained.state === "accepted" || retained.state === "running")) return { operation: retained, workspaceId: context.workspace.id };
+        const timestamp = now().toISOString();
+        db.update(processes).set({ desiredState: "stopped" }).where(eq(processes.id, processId)).run();
+        const operation: Operation = { operationId: createId(), projectId, workspaceId: context.workspace.id, actor,
+          operationName: "process.stop", resourceType: "process", resourceId: processId, state: "accepted",
+          progressJson: null, errorCode: null, errorMessage: null, createdAt: timestamp, startedAt: null, finishedAt: null };
+        db.insert(operations).values(operation).run(); return { operation, workspaceId: context.workspace.id };
+      }).immediate();
+    },
+    applyExecutionSnapshot(snapshot: AgentSnapshotData): void {
+      client.transaction(() => {
+        const timestamp = now().toISOString();
+        for (const operation of snapshot.operationObservations) {
+          const local = db.select().from(operations).where(eq(operations.operationId, operation.operationId)).get();
+          if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close"].includes(local.operationName)) continue;
+          if (operation.state === "succeeded") this.finishOperation(local.operationId, { state: "succeeded" });
+          else if (operation.state === "failed") {
+            this.finishOperation(local.operationId, { state: "failed",
+              code: operation.failure.code, message: operation.failure.message.slice(0, 512) });
+            if (local.operationName === "terminal.create") {
+              db.update(terminalSessions).set({ state: "failed", closedAt: timestamp }).where(eq(terminalSessions.id, local.resourceId)).run();
+              db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
+                .where(eq(processes.id, local.resourceId)).run();
+            } else if (local.operationName === "task.start") {
+              const run = db.select().from(taskRuns).where(eq(taskRuns.id, local.resourceId)).get();
+              db.update(taskRuns).set({ state: "failed", finishedAt: timestamp }).where(eq(taskRuns.id, local.resourceId)).run();
+              if (run?.processId !== null && run?.processId !== undefined) {
+                db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
+                  .where(eq(processes.id, run.processId)).run();
+              }
+            } else if (local.operationName === "process.stop") {
+              db.update(processes).set({ desiredState: "running" }).where(eq(processes.id, local.resourceId)).run();
+            } else if (local.operationName === "terminal.close") {
+              db.update(terminalSessions).set({ state: "disconnected" }).where(eq(terminalSessions.id, local.resourceId)).run();
+              db.update(processes).set({ desiredState: "running" }).where(eq(processes.id, local.resourceId)).run();
+            }
+          }
+          else db.update(operations).set({ state: operation.state, startedAt: operation.state === "running" ? timestamp : local.startedAt })
+            .where(eq(operations.operationId, local.operationId)).run();
+        }
+        for (const resource of snapshot.resources) {
+          if (resource.type === "process") {
+            const observed = resource.observation;
+            db.update(processes).set({ desiredState: observed.desiredState, observedState: observed.observedState,
+              exitCode: observed.exitCode, startedAt: observed.startedAt, finishedAt: observed.finishedAt, lastObservedAt: timestamp })
+              .where(and(eq(processes.id, observed.processId), eq(processes.workspaceId, observed.workspaceId))).run();
+          } else if (resource.type === "terminal") {
+            db.update(terminalSessions).set({ state: resource.state, lastActivityAt: timestamp,
+              closedAt: ["closed", "failed", "lost"].includes(resource.state) ? timestamp : null })
+              .where(and(eq(terminalSessions.id, resource.identity.terminalId), eq(terminalSessions.workspaceId, resource.identity.workspaceId))).run();
+          }
+        }
+        const allRuns = db.select().from(taskRuns).all();
+        for (const run of allRuns) {
+          if (run.processId === null) continue;
+          const process = db.select().from(processes).where(eq(processes.id, run.processId)).get();
+          if (process === undefined) continue;
+          const revision = db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.id, run.configRevisionId)).get();
+          const task = revision === undefined ? undefined : parseProjectOptionsV1(JSON.parse(revision.configurationJson)).tasks.find((item) => item.key === run.taskKey);
+          let state: typeof run.state;
+          if (["queued", "starting", "running"].includes(process.observedState)) state = process.observedState === "queued" ? "queued" : process.observedState === "starting" ? "starting" : "running";
+          else if (process.observedState === "lost") state = "lost";
+          else if (process.desiredState === "stopped" || process.observedState === "killed") {
+            const timedOut = task?.timeoutSeconds !== null && task?.timeoutSeconds !== undefined && process.startedAt !== null
+              && now().valueOf() >= new Date(process.startedAt).valueOf() + task.timeoutSeconds * 1_000;
+            state = timedOut ? "timed_out" : "cancelled";
+          } else state = process.exitCode !== null && task?.successExitCodes.includes(process.exitCode) ? "passed" : "failed";
+          db.update(taskRuns).set({ state, exitCode: process.exitCode, startedAt: process.startedAt,
+            finishedAt: process.finishedAt }).where(eq(taskRuns.id, run.id)).run();
+        }
+      }).immediate();
+    },
+    authorizeTerminal(projectId: string, workspaceId: string, terminalId: string): boolean {
+      const project = db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.primaryWorkspaceId, workspaceId))).get();
+      if (project === undefined || project.state !== "ready") return false;
+      const terminal = db.select().from(terminalSessions).where(and(eq(terminalSessions.id, terminalId), eq(terminalSessions.workspaceId, workspaceId))).get();
+      return terminal !== undefined && ["active", "disconnected", "creating"].includes(terminal.state);
     },
     finalizePrimaryWorkspace(input: {
       projectId: string; revisionId: string; workspaceId: string; branchName: string; baseRef: string; actor: string;

@@ -130,8 +130,6 @@ Unique: `(runtime_stack_id, service_key)`.
 - `kind`: `task | terminal | ai | system`
 - `definition_key` nullable
 - `container_exec_id` nullable
-- `process_token` unique
-- `process_group_id` nullable
 - `desired_state`: `running | stopped`
 - `observed_state`: `queued | starting | running | stopping | exited | failed | killed | lost`
 - `exit_code` nullable
@@ -140,7 +138,11 @@ Unique: `(runtime_stack_id, service_key)`.
 - `last_observed_at` nullable
 - `log_path` nullable
 
-A process is never stopped based only on a PID. Container identity and a generated process token must match.
+The current database schema stores public process observations only; Agent-private execution records
+retain exact workspace/container/exec ownership and operation binding. M1 does not expose or persist
+PID, process-group, or process-token ownership for task/terminal termination. Individual task Stop,
+terminal Close, timeout enforcement, and exact descendant ownership are deferred to M2; the whole
+workspace runtime remains reclaimable through its exact container lifecycle.
 
 ## terminal_sessions
 

@@ -17,7 +17,7 @@ function rows<T>(database: Database.Database, sql: string): T[] {
   return database.prepare(sql).all() as T[];
 }
 
-describe("database v1 schema metadata", () => {
+describe("database schema metadata", () => {
   test("exports exactly the accepted 13 application tables", () => {
     expect(Object.keys(schema)).toHaveLength(13);
     expect(Object.values(schema).map(getTableName)).toEqual(applicationTableNames);
@@ -41,11 +41,15 @@ describe("database v1 schema metadata", () => {
 
         const migrationRows = rows<{ hash: string; created_at: number }>(
           database,
-          `select hash, created_at from ${drizzleMigrationTableName}`
+          `select hash, created_at from ${drizzleMigrationTableName} order by created_at`
         );
-        expect(migrationRows).toHaveLength(1);
-        expect(migrationRows[0]?.hash).toMatch(/^[0-9a-f]{64}$/);
-        expect(migrationRows[0]?.created_at).toEqual(expect.any(Number));
+        expect(migrationRows).toHaveLength(latestSchemaVersion);
+        for (const migration of migrationRows) {
+          expect(migration.hash).toMatch(/^[0-9a-f]{64}$/);
+          expect(migration.created_at).toEqual(expect.any(Number));
+        }
+        expect(migrationRows.map(({ created_at }) => created_at))
+          .toEqual([...migrationRows.map(({ created_at }) => created_at)].sort((left, right) => left - right));
 
         const foreignKeys = applicationTableNames.flatMap((tableName) =>
           rows<{
