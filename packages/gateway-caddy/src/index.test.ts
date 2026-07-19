@@ -109,23 +109,49 @@ describe("typed private Caddy gateway adapter", () => {
   });
 
   test("provides the opaque lease probe and stable combined adapter methods", async () => {
-    const server = http.createServer((_request, response) => response.writeHead(200).end("ready"));
+    let targetRequests = 0;
+    const server = http.createServer((_request, response) => { targetRequests += 1; response.writeHead(200).end("ready"); });
     const hostPort = await listen(server);
     try {
       const resolveLease = async (leaseId: string) => leaseId === ids.leaseId
         ? { leaseId, hostIp: LOOPBACK_HOST, hostPort } : null;
-      const adapter = new PreviewGatewayAdapter({ transport: new MemoryTransport(), policy, resolveLease });
+      const adapter = new PreviewGatewayAdapter({ transport: new MemoryTransport(), policy, probe: new GatewayHostProbe(resolveLease) });
       const probeInput = {
         leaseId: ids.leaseId, path: "/health", acceptedStatuses: [200], deadlineMs: 1_000,
         signal: new AbortController().signal, webSocketForwarding: true
       } as const;
       expect(await new GatewayHostProbe(resolveLease).probe(probeInput)).toEqual({ kind: "response", statusCode: 200 });
+      expect(targetRequests).toBe(1);
       expect(await adapter.probe(probeInput)).toEqual({ kind: "response", statusCode: 200 });
+      expect(targetRequests).toBe(2);
       expect(typeof adapter.ensureRoute).toBe("function");
       expect(typeof adapter.replaceRoute).toBe("function");
       expect(typeof adapter.removeRoute).toBe("function");
       expect(typeof adapter.inspectRoute).toBe("function");
       expect(typeof adapter.reconcileRoutes).toBe("function");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  test("Agent-side adapter never opens the lease loopback; only the host-side probe does", async () => {
+    let targetRequests = 0;
+    const server = http.createServer((_request, response) => { targetRequests += 1; response.writeHead(200).end("ready"); });
+    const hostPort = await listen(server);
+    try {
+      const resolveLease = async (leaseId: string) => leaseId === ids.leaseId
+        ? { leaseId, hostIp: LOOPBACK_HOST, hostPort } : null;
+      const hostProbe = new GatewayHostProbe(resolveLease);
+      const boundaryCalls: string[] = [];
+      const adapter = new PreviewGatewayAdapter({ transport: new MemoryTransport(), policy,
+        probe: { probe: async (input) => { boundaryCalls.push(input.leaseId); return { kind: "response", statusCode: 200 }; } } });
+      const input = { leaseId: ids.leaseId, path: "/health", acceptedStatuses: [200], deadlineMs: 1_000,
+        signal: new AbortController().signal, webSocketForwarding: false } as const;
+      expect(await adapter.probe(input)).toEqual({ kind: "response", statusCode: 200 });
+      expect(boundaryCalls).toEqual([ids.leaseId]);
+      expect(targetRequests).toBe(0);
+      expect(await hostProbe.probe(input)).toEqual({ kind: "response", statusCode: 200 });
+      expect(targetRequests).toBe(1);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }

@@ -41,7 +41,7 @@ class PreviewGatewayAdapter {
 ```
 
 `PreviewGatewayAdapter` is constructed with a private typed Caddy transport,
-the administrator-approved preview-base registry, and an opaque lease resolver.
+the administrator-approved preview-base registry, and a typed host-side probe.
 It never accepts a browser field, raw upstream, Docker ID, or raw Caddy route
 document. It generates an exact host matcher and the only permitted upstream:
 `127.0.0.1:<hostPort>`. The route ID fences project, workspace, preview,
@@ -49,8 +49,14 @@ revision, approved-base, lease, generation, and WebSocket policy. Reconciliation
 replaces the dedicated route set, removing foreign or stale routes rather than
 adopting them by hostname.
 
-The probe accepts only an opaque `leaseId`; the resolver supplies the loopback
-lease on the gateway/daemon host. Invalid, missing, or non-loopback leases fail
-closed with a bounded infrastructure result. The production admin transport is
-Unix-socket-only; the loopback HTTP transport is available only as a private
-local/test adapter.
+The Agent-facing adapter never opens the lease loopback itself. The injected
+probe accepts only an opaque `leaseId`; `GatewayHostProbe` is the host-local
+implementation that resolves the lease and performs the loopback request.
+`PrivateGatewayProbeTransport` is the code-server-container implementation:
+it sends only the opaque lease ID, path, accepted statuses, WebSocket flag, and
+bounded deadline over a deployment-provided private Unix socket. The host-side
+`GatewayHostProbeServer` resolves the lease and performs the request in the
+gateway/rootless-Docker host namespace. Invalid, missing, or non-loopback leases
+fail closed with a bounded infrastructure result. The Caddy admin transport and
+probe transport are separate private interfaces; neither is public and neither
+exposes the Docker socket.

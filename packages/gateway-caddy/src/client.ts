@@ -1,11 +1,13 @@
 import http from "node:http";
+import { unlink } from "node:fs/promises";
 import { validateGatewayRoute, validateRoute, fromCaddyRoutes, routeIdentityKey, routeResourceKey, routeMatches, toCaddyRoute, validateRouteSet } from "./routes.js";
 import {
-  GatewayAdapterError, previewGatewayProbeRequestSchema, previewGatewayRouteIdentitySchema,
+  GatewayAdapterError, previewGatewayProbeRequestSchema, previewGatewayProbeResultSchema, previewGatewayRouteIdentitySchema,
   type CaddyAdminResponse, type CaddyAdminTransport,
   type CaddyGatewayClientOptions, type GatewayObservedRoute,
   type GatewayPolicy, type PreviewGatewayLease,
-  type GatewayRouteInspection, type OpaqueLeaseResolver, type PreviewGatewayAdapterContract,
+  type GatewayHostProbeContract,
+  type GatewayRouteInspection, type PreviewGatewayAdapterContract,
   type PreviewGatewayProbeRequest, type PreviewGatewayProbeResult, type PreviewGatewayRoute,
   type PreviewGatewayRouteIdentity
 } from "./types.js";
@@ -138,23 +140,16 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
     const { signal: _signal, ...wireInput } = input;
     const parsed = previewGatewayProbeRequestSchema.safeParse(wireInput);
     if (!parsed.success) return { kind: "infrastructure", message: "The gateway probe request is invalid." };
-    if (this.options.probe !== undefined) return await this.options.probe.probe(input);
-    let lease: Awaited<ReturnType<OpaqueLeaseResolver>> | null = null;
-    try {
-      lease = this.options.resolveLease === undefined ? this.leases.get(parsed.data.leaseId) ?? null : await this.options.resolveLease(parsed.data.leaseId);
-    } catch { return { kind: "infrastructure", message: "The opaque preview lease is unavailable." }; }
-    if (lease === null || lease.hostIp !== "127.0.0.1" || !Number.isSafeInteger(lease.hostPort) || lease.hostPort < 1 || lease.hostPort > 65535) {
-      return { kind: "infrastructure", message: "The opaque preview lease is unavailable." };
-    }
-    return await probeLoopback(lease.hostPort, parsed.data.path, parsed.data.deadlineMs, input.signal);
+    if (this.options.probe === undefined) return { kind: "infrastructure", message: "The private gateway-host probe is unavailable." };
+    return await this.options.probe.probe(input);
   }
 }
 
 /** Stable concrete Agent integration API. */
 export class PreviewGatewayAdapter extends CaddyGatewayClient {
-  constructor(options: { readonly transport: CaddyAdminTransport; readonly policy: GatewayPolicy; readonly resolveLease: (leaseId: string) => Promise<PreviewGatewayLease | null> }) {
+  constructor(options: { readonly transport: CaddyAdminTransport; readonly policy: GatewayPolicy; readonly probe: GatewayHostProbeContract }) {
     super(options.transport, { policy: options.policy, isApprovedHostname: (hostname) => options.policy.approvedPreviewBases.some((base) => hostname === base.domain || hostname.endsWith(`.${base.domain}`)),
-      resolveLease: options.resolveLease });
+      probe: options.probe });
   }
 }
 export const CaddyGatewayAdapter = PreviewGatewayAdapter;
@@ -162,9 +157,101 @@ export const CaddyGatewayAdapter = PreviewGatewayAdapter;
 export class GatewayHostProbe {
   constructor(private readonly resolveLease: (leaseId: string) => Promise<PreviewGatewayLease | null>) {}
   async probe(input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
-    const lease = await this.resolveLease(input.leaseId).catch(() => null);
+    const { signal: _signal, ...wireInput } = input;
+    const parsed = previewGatewayProbeRequestSchema.safeParse(wireInput);
+    if (!parsed.success) return { kind: "infrastructure", message: "The gateway probe request is invalid." };
+    const lease = await this.resolveLease(parsed.data.leaseId).catch(() => null);
     if (lease === null || lease.hostIp !== "127.0.0.1") return { kind: "infrastructure", message: "The opaque preview lease is unavailable." };
-    return await probeLoopback(lease.hostPort, input.path, input.deadlineMs, input.signal);
+    return await probeLoopback(lease.hostPort, parsed.data.path, parsed.data.deadlineMs, input.signal);
+  }
+}
+
+/**
+ * Agent-side client for a deployment-provided host gateway probe service.
+ * The socket peer resolves the lease; this client never receives or sends a
+ * host, address, port, URL, or Caddy document as part of health probing.
+ */
+export class PrivateGatewayProbeTransport implements GatewayHostProbeContract {
+  constructor(private readonly options: { readonly socketPath: string; readonly timeoutMs?: number }) {
+    if (options.socketPath.trim() === "") throw new GatewayAdapterError("validation", "A private gateway probe Unix socket is required.");
+  }
+
+  async probe(input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
+    const { signal, ...wireInput } = input;
+    const parsed = previewGatewayProbeRequestSchema.safeParse(wireInput);
+    if (!parsed.success) return { kind: "infrastructure", message: "The gateway probe request is invalid." };
+    const encoded = JSON.stringify(parsed.data);
+    const timeoutMs = Math.min(this.options.timeoutMs ?? parsed.data.deadlineMs + 1_000, 121_000);
+    return await new Promise((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (result: PreviewGatewayProbeResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(result);
+      };
+      const request = http.request({ socketPath: this.options.socketPath, method: "POST", path: "/v1/preview/probe",
+        signal, headers: { accept: "application/json", "content-type": "application/json", "content-length": Buffer.byteLength(encoded) } }, (response) => {
+        const chunks: Buffer[] = []; let bytes = 0;
+        response.on("data", (chunk: Buffer) => { bytes += chunk.length; if (bytes <= 16_384) chunks.push(chunk); });
+        response.on("end", () => {
+          if (bytes > 16_384 || response.statusCode !== 200) { finish({ kind: "infrastructure", message: "The private gateway probe is unavailable." }); return; }
+          try {
+            const result = previewGatewayProbeResultSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+            finish(result);
+          } catch { finish({ kind: "infrastructure", message: "The private gateway probe returned an invalid result." }); }
+        });
+      });
+      request.setTimeout(timeoutMs, () => { request.destroy(); finish({ kind: "timeout" }); });
+      request.once("error", () => finish(signal.aborted ? { kind: "timeout" } : { kind: "infrastructure", message: "The private gateway probe is unavailable." }));
+      timer = setTimeout(() => { request.destroy(); finish({ kind: "timeout" }); }, timeoutMs);
+      request.end(encoded);
+    });
+  }
+}
+
+/** Host-side private probe service used by direct development and deployment adapters. */
+export class GatewayHostProbeServer {
+  private readonly server: http.Server;
+  private started = false;
+  constructor(private readonly options: {
+    readonly socketPath: string;
+    readonly resolveLease: (leaseId: string) => Promise<PreviewGatewayLease | null>;
+  }) {
+    if (options.socketPath.trim() === "") throw new GatewayAdapterError("validation", "A private gateway probe Unix socket is required.");
+    const hostProbe = new GatewayHostProbe(options.resolveLease);
+    this.server = http.createServer(async (request, response) => {
+      if (request.method !== "POST" || request.url !== "/v1/preview/probe") { response.writeHead(404).end(); return; }
+      try {
+        const chunks: Buffer[] = []; let bytes = 0;
+        for await (const chunk of request) {
+          const buffer = Buffer.from(chunk); bytes += buffer.length;
+          if (bytes > 16_384) throw new Error("probe-body-too-large");
+          chunks.push(buffer);
+        }
+        const parsed = previewGatewayProbeRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), parsed.deadlineMs); timer.unref();
+        request.once("aborted", () => controller.abort());
+        const result = await hostProbe.probe({ ...parsed, signal: controller.signal });
+        clearTimeout(timer);
+        const encoded = JSON.stringify(result);
+        response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);
+      } catch {
+        if (!response.headersSent) response.writeHead(400).end();
+      }
+    });
+  }
+  async start(): Promise<void> {
+    await unlink(this.options.socketPath).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    await new Promise<void>((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.options.socketPath, resolve); });
+    this.started = true;
+  }
+  async stop(): Promise<void> {
+    if (this.started) await new Promise<void>((resolve, reject) => this.server.close((error) => error === undefined ? resolve() : reject(error)));
+    await unlink(this.options.socketPath).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    this.started = false;
   }
 }
 

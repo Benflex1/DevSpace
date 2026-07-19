@@ -42,6 +42,11 @@ export const previewGatewayProbeRequestSchema = z.strictObject({
   deadlineMs: z.number().int().positive().max(120_000),
   webSocketForwarding: z.boolean()
 });
+export const previewGatewayProbeResultSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("response"), statusCode: z.number().int().min(100).max(599) }),
+  z.strictObject({ kind: z.literal("timeout") }),
+  z.strictObject({ kind: z.literal("infrastructure"), message: z.string().min(1).max(256) })
+]);
 export interface PreviewGatewayProbeRequest {
   readonly leaseId: string;
   readonly path: string;
@@ -102,7 +107,6 @@ export interface CaddyGatewayClientOptions {
   readonly policy?: GatewayPolicy;
   readonly isApprovedHostname?: (hostname: string) => boolean;
   readonly probe?: GatewayHostProbeContract;
-  readonly resolveLease?: OpaqueLeaseResolver;
   readonly timeoutMs?: number;
 }
 

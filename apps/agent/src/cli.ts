@@ -1,6 +1,6 @@
 import { createAgentServer } from "./server.js";
 import { readPreviewBaseRegistry } from "./preview-runtime.js";
-import { PreviewGatewayAdapter, PrivateCaddyAdminTransport, type GatewayPolicy } from "@devspace/gateway-caddy";
+import { GatewayHostProbe, PreviewGatewayAdapter, PrivateCaddyAdminTransport, PrivateGatewayProbeTransport, type GatewayPolicy } from "@devspace/gateway-caddy";
 
 function readGatewayPolicy(environment: NodeJS.ProcessEnv): GatewayPolicy | null {
   const raw = environment.DEVSPACE_PREVIEW_BASES?.trim();
@@ -21,6 +21,7 @@ function readGatewayPolicy(environment: NodeJS.ProcessEnv): GatewayPolicy | null
 const configuredSocketPath = process.env.DEVSPACE_AGENT_SOCKET_PATH;
 const localRoot = process.env.DEVSPACE_MANAGED_ROOT;
 const caddyAdminSocket = process.env.DEVSPACE_CADDY_ADMIN_SOCKET;
+const previewProbeSocket = process.env.DEVSPACE_PREVIEW_PROBE_SOCKET;
 const gatewayPolicy = readGatewayPolicy(process.env);
 const server = createAgentServer({
   ...(configuredSocketPath === undefined ? {} : { socketPath: configuredSocketPath }),
@@ -36,7 +37,9 @@ const server = createAgentServer({
       new PreviewGatewayAdapter({
         transport: new PrivateCaddyAdminTransport({ socketPath: caddyAdminSocket }),
         policy: gatewayPolicy,
-        resolveLease
+        probe: previewProbeSocket === undefined
+          ? new GatewayHostProbe(resolveLease)
+          : new PrivateGatewayProbeTransport({ socketPath: previewProbeSocket })
       })
   } : {})
 });
