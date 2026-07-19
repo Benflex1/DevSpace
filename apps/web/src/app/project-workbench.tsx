@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalVisibleState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import {
   activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, terminalTabId, type WorkbenchTab, type WorkbenchTabState
@@ -70,6 +70,12 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     for (const terminal of data.terminals) getTerminalTitle(terminal);
     return data;
   }, [getTerminalTitle, projectId]);
+  const updateTerminalState = useCallback((terminalId: string, state: string) => {
+    setTerminals((current) => updateTerminalCollectionState(current, terminalId, state));
+  }, []);
+  const handleRefresh = useCallback(() => {
+    refresh().catch(() => undefined);
+  }, [refresh]);
 
   useEffect(() => {
     if (!runs.some((run) => ["queued", "starting", "running"].includes(run.state))) return;
@@ -97,7 +103,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     };
   }, [refresh, runs]);
 
-  const visibleTerminals = useMemo(() => terminals.filter((terminal) => isTerminalVisibleState(terminal.state)), [terminals]);
+  const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) => isTerminalVisibleState(terminal.state))), [terminals]);
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);
   useEffect(() => {
     const visibleIds = new Set(visibleTerminals.map((terminal) => terminal.id));
@@ -161,7 +167,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
           canCreateTerminal={actionsAvailable} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} projectId={projectId} workspaceId={workspaceId}
-          onRefresh={() => { refresh().catch(() => undefined); }} />
+          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} />
         {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
       </section>
     </div>
@@ -242,15 +248,15 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, projectId, workspaceId, onRefresh }: {
+function WorkbenchSurface({ tabs, terminalById, projectId, workspaceId, onRefresh, onTerminalStateChange }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; projectId: string; workspaceId: string;
-  onRefresh: () => void;
+  onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a terminal to start working in this project.</p></div>}
     {tabs.tabs.map((tab) => tab.kind === "terminal" ? <TerminalTab key={tab.id} projectId={projectId} workspaceId={workspaceId}
       terminal={terminalById.get(tab.terminalId) ?? { id: tab.terminalId, processId: tab.terminalId, title: tab.title, state: "disconnected" }}
-      active={tab.id === tabs.activeTabId} onRefresh={onRefresh} /> : null)}
+      active={tab.id === tabs.activeTabId} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} /> : null)}
   </div>;
 }
 

@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
-import { isTerminalAttachableState, isTerminalVisibleState, reconcileTerminalState, terminalSocketCloseAction, terminalUiState } from "./terminal-lifecycle.js";
+import {
+  isTerminalAttachableState, isTerminalVisibleState, reconcileTerminalState, sortTerminalViewsByTitle, terminalSocketCloseAction,
+  terminalUiState, updateTerminalCollectionState
+} from "./terminal-lifecycle.js";
 
 describe("terminal lifecycle reconciliation", () => {
   test.each(["creating", "closing", "closed", "failed", "lost"])("does not treat %s as attachable", (state) => {
@@ -27,6 +30,28 @@ describe("terminal lifecycle reconciliation", () => {
     expect(isTerminalAttachableState("creating")).toBe(false);
   });
 
+  test("keeps the sidebar collection synchronized across attach, detach, reopen, and exit", () => {
+    const terminal = { id: "terminal-1", title: "Terminal 1", state: "disconnected" };
+    const attached = updateTerminalCollectionState([terminal], terminal.id, "active");
+    expect(attached[0]?.state).toBe("active");
+    const detached = updateTerminalCollectionState(attached, terminal.id, "disconnected");
+    expect(detached[0]?.state).toBe("disconnected");
+    const reopened = updateTerminalCollectionState(detached, terminal.id, "active");
+    expect(reopened[0]?.state).toBe("active");
+    const exited = updateTerminalCollectionState(reopened, terminal.id, "closed");
+    expect(exited[0]?.state).toBe("closed");
+    expect(isTerminalVisibleState(exited[0]?.state ?? "")).toBe(false);
+  });
+
+  test("sorts terminal labels naturally and deterministically when a gap is reused", () => {
+    const sorted = sortTerminalViewsByTitle([
+      { id: "terminal-3", title: "Terminal 3", state: "active" },
+      { id: "terminal-2-reused", title: "Terminal 2", state: "disconnected" },
+      { id: "terminal-1", title: "Terminal 1", state: "active" }
+    ]);
+    expect(sorted.map((terminal) => terminal.title)).toEqual(["Terminal 1", "Terminal 2", "Terminal 3"]);
+  });
+
   test("refreshes after process exit or intentional detach, without reconnecting an ended socket", () => {
     expect(terminalSocketCloseAction({ terminalEnded: true, cancelled: false, terminalState: "active", closeCode: 1000 })).toBe("refresh");
     expect(terminalSocketCloseAction({ terminalEnded: false, cancelled: true, terminalState: "active", closeCode: 1000 })).toBe("refresh");
@@ -39,5 +64,8 @@ describe("terminal lifecycle reconciliation", () => {
     expect(css).toContain(".terminal-tab-surface { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }");
     expect(css).toContain(".terminal-tab-surface .terminal-canvas { flex: 1 1 auto; height: auto; min-height: 0; min-width: 0; overflow: hidden; }");
     expect(css).toContain(".terminal-tab-surface .terminal-canvas .xterm-viewport { max-height: 100%; max-width: 100%; overflow-x: hidden; overflow-y: auto; }");
+    const terminalTab = await readFile(new URL("./terminal-tab.tsx", import.meta.url), "utf8");
+    expect(terminalTab).not.toContain("terminal-tab-header");
+    expect(terminalTab).not.toContain("terminal-identity");
   });
 });

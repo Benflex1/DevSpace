@@ -7,12 +7,13 @@ import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFra
 import { isTerminalAttachableState, reconcileTerminalState, terminalSocketCloseAction, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
 export type TerminalView = { id: string; processId: string; title: string; state: string };
 
-export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh }: {
+export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh, onTerminalStateChange }: {
   projectId: string;
   workspaceId: string;
   terminal: TerminalView;
   active: boolean;
   onRefresh: () => void;
+  onTerminalStateChange: (terminalId: string, state: string) => void;
 }) {
   const [state, setState] = useState<TerminalUiState>(() => terminalUiState(terminal.state));
   const [message, setMessage] = useState("");
@@ -63,16 +64,13 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
     let currentSocket: WebSocket | null = null;
     let ready = false;
     let terminalEnded = false;
-    let refreshRequested = false;
     let disposeResources = () => undefined;
     const requestRefresh = () => {
-      if (refreshRequested) return;
-      refreshRequested = true;
       onRefresh();
     };
     const start = window.setTimeout(() => {
-      if (!isTerminalAttachableState(terminal.state)) {
-        updateState(terminalUiState(terminal.state));
+      if (!isTerminalAttachableState(authoritativeState.current)) {
+        updateState(terminalUiState(authoritativeState.current));
         return;
       }
       updateState("connecting");
@@ -137,6 +135,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (decoded.frame.type === "ready") {
             ready = true;
             updateState("active");
+            onTerminalStateChange(terminal.id, "active");
+            requestRefresh();
             scheduleResize();
             if (stableConnectionTimer !== null) window.clearTimeout(stableConnectionTimer);
             stableConnectionTimer = window.setTimeout(() => { reconnectAttempts = 0; }, 1_000);
@@ -145,6 +145,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (decoded.frame.type === "output") { terminalInstance.write(decoded.frame.data); return; }
           terminalEnded = true;
           updateState("closed");
+          onTerminalStateChange(terminal.id, "closed");
           setMessage(decoded.frame.exitCode === null ? "Terminal exited." : `Terminal exited with code ${decoded.frame.exitCode}.`);
           requestRefresh();
         };
@@ -155,10 +156,23 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (socket.current === webSocket) socket.current = null;
           const action = terminalSocketCloseAction({ terminalEnded, cancelled, terminalState: authoritativeState.current, closeCode: event.code });
           if (action === "ignore") return;
-          if (action === "refresh") { requestRefresh(); return; }
+          if (action === "refresh") {
+            if (!terminalEnded && cancelled && isTerminalAttachableState(authoritativeState.current)) {
+              updateState("disconnected");
+              onTerminalStateChange(terminal.id, "disconnected");
+            }
+            requestRefresh();
+            return;
+          }
           updateState("disconnected");
+          onTerminalStateChange(terminal.id, "disconnected");
           reconnectAttempts += 1;
-          if (reconnectAttempts > 8) { updateState("failed"); requestRefresh(); return; }
+          if (reconnectAttempts > 8) {
+            updateState("failed");
+            onTerminalStateChange(terminal.id, "failed");
+            requestRefresh();
+            return;
+          }
           reconnectTimer = window.setTimeout(connectSocket, Math.min(150 * (2 ** (reconnectAttempts - 1)), 2_000));
         };
         webSocket.onerror = () => undefined;
@@ -195,13 +209,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
       closeAttachment.current = null;
     };
     // A tab owns one terminal attachment for its entire mounted lifetime.
-  }, [projectId, terminal.id, terminal.state, workspaceId]);
+  }, [onRefresh, onTerminalStateChange, projectId, terminal.id, workspaceId]);
 
   return <section className={`terminal-tab-surface ${active ? "is-active" : "is-inactive"}`} aria-hidden={!active}
     aria-label="Terminal session" role={active ? "region" : undefined}>
-    <div className="terminal-tab-header">
-      <span className={`terminal-state ${state}`}>{state}</span>
-    </div>
     <div ref={terminalElement} className="terminal-canvas" />
     {message !== "" && <p className="message" role={active ? "status" : undefined}>{message}</p>}
     {active && ["creating", "closing", "closed", "failed", "lost"].includes(state) && <p className="terminal-help">

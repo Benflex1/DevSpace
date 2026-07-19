@@ -496,6 +496,12 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
   expect(later).toBeDefined();
   expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
     .toMatchObject({ type: "terminal", identity: { terminalId }, state: "disconnected" });
+  const reopened = new FakeSocket();
+  await later!.attach(reopened as never);
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "active" });
+  reopened.readyState = reopened.CLOSED;
+  reopened.emit("close");
 });
 
 test("an attached terminal process exit becomes closed without requiring a reopen", async () => {
