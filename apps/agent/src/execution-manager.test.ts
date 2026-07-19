@@ -461,6 +461,16 @@ class FakeSocket extends EventEmitter {
   terminate(): void { this.readyState = this.CLOSED; queueMicrotask(() => this.emit("close")); }
 }
 
+async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, terminalId: string): Promise<void> {
+  let cleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { cleanup = manager.reserveTerminalAttachment(terminalId); break; }
+    catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
+  }
+  expect(cleanup).toBeDefined();
+  cleanup?.release();
+}
+
 test("a CLOSING terminal attachment retains the slot until close cleanup has persisted", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-attachment-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -494,6 +504,82 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
     catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
   }
   expect(later).toBeDefined();
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "disconnected" });
+  const reopened = new FakeSocket();
+  await later!.attach(reopened as never);
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "active" });
+  reopened.readyState = reopened.CLOSED;
+  reopened.emit("close");
+  await waitForTerminalAttachmentCleanup(manager, terminalId);
+});
+
+test("an attached terminal process exit becomes closed without requiring a reopen", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-exit-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const stream = new PassThrough();
+  let running = true;
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    createExec: async () => "exec-owned", startExecAttached: async () => stream,
+    inspectExec: async () => ({ ID: "exec-owned", Running: running, ExitCode: running ? null : 0, ContainerID: "container-owned" }),
+    resizeExec: async () => undefined
+  } as never);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  await manager.reserveTerminalAttachment(terminalId).attach(new FakeSocket() as never);
+
+  running = false;
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "exited", exitCode: 0 });
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+});
+
+test("distinct terminals keep distinct Docker exec identities and independent attachments", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-identities-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const secondTerminalId = "018f0f00-0000-7000-8000-000000000005";
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let creates = 0;
+  const engine = {
+    createExec: async () => `exec-${++creates}`,
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" }),
+    resizeExec: async () => undefined
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId: secondTerminalId });
+
+  const executions = (manager as unknown as { executions: Map<string, { record: { execId: string | null } }> }).executions;
+  expect(executions.get(terminalId)?.record.execId).toBe("exec-1");
+  expect(executions.get(secondTerminalId)?.record.execId).toBe("exec-2");
+
+  const firstSocket = new FakeSocket();
+  const secondSocket = new FakeSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
+  await manager.reserveTerminalAttachment(secondTerminalId).attach(secondSocket as never);
+  expect(manager.snapshotResources().filter((resource) => resource.type === "terminal").map((resource) =>
+    resource.type === "terminal" ? [resource.identity.terminalId, resource.state] : []))
+    .toEqual(expect.arrayContaining([[terminalId, "active"], [secondTerminalId, "active"]]));
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(() => manager.reserveTerminalAttachment(secondTerminalId)).toThrow("cannot accept another attachment");
+
+  firstSocket.readyState = firstSocket.CLOSED; firstSocket.emit("close");
+  secondSocket.readyState = secondSocket.CLOSED; secondSocket.emit("close");
+  await waitForTerminalAttachmentCleanup(manager, terminalId);
+  await waitForTerminalAttachmentCleanup(manager, secondTerminalId);
 });
 
 test("attachment cleanup persistence failure becomes lost without overlap or an immortal CLOSING lock", async () => {

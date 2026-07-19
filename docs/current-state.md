@@ -14,9 +14,10 @@ Milestone 1 — in progress.
 - Persisted projects are shown as `Registered — workspace setup pending` and remain in the
   `registering` state until primary-workspace setup completes.
 - The dashboard is a lightweight project overview with Agent status, summary cards, and Add
-  Project. Project-scoped setup, Git/workspace inspection, runtime controls, terminal, configured
-  tasks, and recent task runs live at `/projects/[projectId]`, which performs exact server-owned
-  project lookup and returns normal not-found behavior for unknown IDs.
+  Project. Registering projects retain the setup flow; ready projects at `/projects/[projectId]`
+  now render the full-height Project Workbench with a compact context bar, project sidebar,
+  application tab strip, shared central surface, and status bar. The Workbench performs exact
+  server-owned project lookup and returns normal not-found behavior for unknown IDs.
 - Onboarding currently accepts HTTPS Git repository URLs without query parameters; SSH identities
   and repository credential storage are not implemented.
 - A registered repository-backed project can activate an immutable Project Options v1 revision
@@ -65,7 +66,10 @@ Milestone 1 — in progress.
   accepted bounded binary protocol to the private Agent Unix socket. The supported terminal path is
   `create → attach → input/output → resize → detach → reconnect`, with one-attachment ownership,
   bounded replay, and truthful `lost` state after an unrecoverable Agent restart. Detach is
-  non-destructive; forceful terminal Close is intentionally unavailable and fails closed.
+  non-destructive; forceful terminal Close is intentionally unavailable and fails closed. A workspace
+  may own multiple independent live terminal sessions, each with its own server identity, Agent exec,
+  and one-attachment limit. Workbench terminal panels remain mounted while their tabs are open and
+  inactive panels are hidden so switching tabs preserves xterm state and the browser attachment.
 - Initial primary-workspace setup can materialize simple structured tasks in the immutable Project
   Options revision without JSON or YAML editing. Ready workspaces list that exact revision's tasks,
   start supported tasks by key inside the exact development container, reconcile process/task state

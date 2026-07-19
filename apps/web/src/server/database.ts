@@ -40,7 +40,7 @@ export interface ManagedProjectView extends ProjectView {
   readonly tasks: readonly { readonly key: string; readonly displayName: string }[];
   readonly taskRuns: readonly { readonly id: string; readonly taskKey: string; readonly processId: string | null;
     readonly state: string; readonly processState: string | null; readonly exitCode: number | null }[];
-  readonly terminals: readonly { readonly id: string; readonly processId: string; readonly state: string }[];
+  readonly terminals: readonly { readonly id: string; readonly processId: string; readonly title: string; readonly state: string }[];
 }
 
 export interface CreateProjectInput {
@@ -56,6 +56,52 @@ export class DuplicateProjectSlugError extends Error {
 }
 export class ProjectSetupConflictError extends Error {
   constructor(message: string) { super(message); this.name = "ProjectSetupConflictError"; }
+}
+
+const terminalNamespaceStates = new Set(["creating", "active", "disconnected"]);
+const terminalDisplayNumberPattern = /^Terminal ([1-9][0-9]*)$/u;
+
+type TerminalNamespaceRow = { readonly id: string; readonly title: string; readonly state: string };
+
+function terminalDisplayNumber(title: string): number | undefined {
+  const match = terminalDisplayNumberPattern.exec(title);
+  return match === null ? undefined : Number(match[1]);
+}
+
+function terminalTitleAssignments(rows: readonly TerminalNamespaceRow[]): Map<string, string> {
+  const assignments = new Map<string, string>();
+  const reserved = new Set<number>();
+  const unnumbered: TerminalNamespaceRow[] = [];
+  for (const row of rows) {
+    if (!terminalNamespaceStates.has(row.state)) continue;
+    const number = terminalDisplayNumber(row.title);
+    if (number === undefined || reserved.has(number)) unnumbered.push(row);
+    else {
+      reserved.add(number);
+      assignments.set(row.id, row.title);
+    }
+  }
+  let next = 1;
+  for (const row of unnumbered) {
+    while (reserved.has(next)) next += 1;
+    const title = `Terminal ${next}`;
+    reserved.add(next);
+    assignments.set(row.id, title);
+    next += 1;
+  }
+  return assignments;
+}
+
+function nextTerminalTitle(rows: readonly TerminalNamespaceRow[]): string {
+  const assignments = terminalTitleAssignments(rows);
+  const reserved = new Set<number>();
+  for (const title of assignments.values()) {
+    const number = terminalDisplayNumber(title);
+    if (number !== undefined) reserved.add(number);
+  }
+  let next = 1;
+  while (reserved.has(next)) next += 1;
+  return `Terminal ${next}`;
 }
 
 function toView(project: Project): ProjectView {
@@ -91,7 +137,14 @@ export function openProjectDatabase(path: string, options: {
     const recentRuns = workspace === undefined ? [] : db.select().from(taskRuns).where(eq(taskRuns.workspaceId, workspace.id))
       .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id)).limit(20).all();
     const terminalRows = workspace === undefined ? [] : db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, workspace.id))
-      .orderBy(desc(terminalSessions.createdAt), desc(terminalSessions.id)).limit(10).all();
+      .orderBy(desc(terminalSessions.createdAt), desc(terminalSessions.id)).all();
+    const terminalTitles = terminalTitleAssignments(terminalRows);
+    for (const terminal of terminalRows) {
+      const title = terminalTitles.get(terminal.id);
+      if (title !== undefined && title !== terminal.title) {
+        db.update(terminalSessions).set({ title }).where(eq(terminalSessions.id, terminal.id)).run();
+      }
+    }
     return {
       ...toView(project),
       activeRevision: revision === undefined ? null : { id: revision.id, number: revision.revisionNumber, hash: revision.configurationHash },
@@ -107,7 +160,8 @@ export function openProjectDatabase(path: string, options: {
         : db.select().from(processes).where(eq(processes.id, run.processId)).get();
         return { id: run.id, taskKey: run.taskKey, processId: run.processId, state: run.state,
           processState: process?.observedState ?? null, exitCode: run.exitCode }; }),
-      terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId, state: terminal.state }))
+      terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId,
+        title: terminalTitles.get(terminal.id) ?? terminal.title, state: terminal.state }))
     };
   };
   return {
@@ -368,29 +422,40 @@ export function openProjectDatabase(path: string, options: {
         if (stack?.observedState !== "running" || service?.observedState !== "running") {
           throw new ProjectSetupConflictError("The exact development container is not running.");
         }
-        const existing = db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, context.workspace.id)).all()
-          .find((terminal) => ["creating", "active", "disconnected", "closing"].includes(terminal.state));
-        if (existing !== undefined) {
-          const retained = db.select().from(operations).where(and(eq(operations.resourceId, existing.id), eq(operations.operationName, "terminal.create")))
-            .orderBy(desc(operations.createdAt)).get();
-          if (retained !== undefined && (retained.state === "accepted" || retained.state === "running")) {
-            return { operation: retained, workspaceId: context.workspace.id, terminalId: existing.id };
-          }
-          throw new ProjectSetupConflictError("Close the existing terminal before opening another one.");
-        }
         const terminalId = createId();
         const timestamp = now().toISOString();
         db.insert(processes).values({ id: terminalId, workspaceId: context.workspace.id, serviceId: service.id,
           kind: "terminal", definitionKey: null, desiredState: "running", observedState: "queued", exitCode: null,
           startedAt: null, finishedAt: null, lastObservedAt: null }).run();
+        const terminalRows = db.select({ id: terminalSessions.id, title: terminalSessions.title, state: terminalSessions.state })
+          .from(terminalSessions).where(eq(terminalSessions.workspaceId, context.workspace.id))
+          .orderBy(desc(terminalSessions.createdAt), desc(terminalSessions.id)).all();
+        const liveTerminalRows = terminalRows.filter((terminal) => terminalNamespaceStates.has(terminal.state));
+        const assignments = terminalTitleAssignments(liveTerminalRows);
+        for (const terminal of liveTerminalRows) {
+          const title = assignments.get(terminal.id);
+          if (title !== undefined && title !== terminal.title) {
+            db.update(terminalSessions).set({ title }).where(eq(terminalSessions.id, terminal.id)).run();
+          }
+        }
         db.insert(terminalSessions).values({ id: terminalId, workspaceId: context.workspace.id, processId: terminalId,
-          title: "Workspace terminal", shellProfileKey: "agent-default-sh", state: "creating", createdAt: timestamp,
+          title: nextTerminalTitle(liveTerminalRows), shellProfileKey: "agent-default-sh", state: "creating", createdAt: timestamp,
           lastActivityAt: null, closedAt: null }).run();
         const operation: Operation = { operationId: createId(), projectId, workspaceId: context.workspace.id, actor,
           operationName: "terminal.create", resourceType: "terminal", resourceId: terminalId, state: "accepted",
           progressJson: null, errorCode: null, errorMessage: null, createdAt: timestamp, startedAt: null, finishedAt: null };
         db.insert(operations).values(operation).run();
         return { operation, workspaceId: context.workspace.id, terminalId };
+      }).immediate();
+    },
+    failTerminalCreate(input: { operationId: string; terminalId: string; code: string; message: string }): void {
+      client.transaction(() => {
+        const timestamp = now().toISOString();
+        this.finishOperation(input.operationId, { state: "failed", code: input.code, message: input.message.slice(0, 512) });
+        db.update(terminalSessions).set({ state: "failed", closedAt: timestamp })
+          .where(and(eq(terminalSessions.id, input.terminalId), eq(terminalSessions.state, "creating"))).run();
+        db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
+          .where(and(eq(processes.id, input.terminalId), eq(processes.observedState, "queued"))).run();
       }).immediate();
     },
     prepareTerminalClose(projectId: string, terminalId: string, actor: string): { operation: Operation; workspaceId: string } {
@@ -403,6 +468,9 @@ export function openProjectDatabase(path: string, options: {
           .orderBy(desc(operations.createdAt)).get();
         if (retained !== undefined && (retained.state === "accepted" || retained.state === "running")) {
           return { operation: retained, workspaceId: context.workspace.id };
+        }
+        if (!["active", "disconnected"].includes(terminal.state)) {
+          throw new ProjectSetupConflictError("The terminal is no longer attachable.");
         }
         const timestamp = now().toISOString();
         db.update(terminalSessions).set({ state: "closing" }).where(eq(terminalSessions.id, terminalId)).run();
@@ -489,8 +557,12 @@ export function openProjectDatabase(path: string, options: {
             } else if (local.operationName === "process.stop") {
               db.update(processes).set({ desiredState: "running" }).where(eq(processes.id, local.resourceId)).run();
             } else if (local.operationName === "terminal.close") {
-              db.update(terminalSessions).set({ state: "disconnected" }).where(eq(terminalSessions.id, local.resourceId)).run();
-              db.update(processes).set({ desiredState: "running" }).where(eq(processes.id, local.resourceId)).run();
+              const terminal = db.select({ state: terminalSessions.state }).from(terminalSessions)
+                .where(eq(terminalSessions.id, local.resourceId)).get();
+              if (terminal !== undefined && ["active", "disconnected"].includes(terminal.state)) {
+                db.update(terminalSessions).set({ state: "disconnected" }).where(eq(terminalSessions.id, local.resourceId)).run();
+                db.update(processes).set({ desiredState: "running" }).where(eq(processes.id, local.resourceId)).run();
+              }
             }
           }
           else db.update(operations).set({ state: operation.state, startedAt: operation.state === "running" ? timestamp : local.startedAt })
@@ -532,7 +604,7 @@ export function openProjectDatabase(path: string, options: {
       const project = db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.primaryWorkspaceId, workspaceId))).get();
       if (project === undefined || project.state !== "ready") return false;
       const terminal = db.select().from(terminalSessions).where(and(eq(terminalSessions.id, terminalId), eq(terminalSessions.workspaceId, workspaceId))).get();
-      return terminal !== undefined && ["active", "disconnected", "creating"].includes(terminal.state);
+      return terminal !== undefined && ["active", "disconnected"].includes(terminal.state);
     },
     finalizePrimaryWorkspace(input: {
       projectId: string; revisionId: string; workspaceId: string; branchName: string; baseRef: string; actor: string;
