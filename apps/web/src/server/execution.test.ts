@@ -65,6 +65,44 @@ test("allows multiple live terminals per workspace while keeping distinct server
   ]));
 });
 
+test("allocates stable lowest available terminal numbers and reuses dead-terminal gaps", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const first = database.prepareTerminalCreate(project.id, "actor");
+  const second = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: first.terminalId, title: "Terminal 1" }),
+    expect.objectContaining({ id: second.terminalId, title: "Terminal 2" })
+  ]));
+
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare("update terminal_sessions set state = 'disconnected' where id in (?, ?)").run(first.terminalId, second.terminalId);
+  raw.prepare("update terminal_sessions set state = 'closed' where id = ?").run(second.terminalId);
+  raw.close();
+
+  const reused = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: first.terminalId, title: "Terminal 1", state: "disconnected" }),
+    expect.objectContaining({ id: reused.terminalId, title: "Terminal 2" })
+  ]));
+
+  const rawAgain = new BetterSqlite3(databasePath);
+  rawAgain.prepare("update terminal_sessions set state = 'lost' where workspace_id = ?").run(workspaceId);
+  rawAgain.close();
+  const reset = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: reset.terminalId, title: "Terminal 1" })
+  ]));
+});
+
+test("allocates concurrent terminal creation intents without duplicate live labels", async () => {
+  const { database, project } = await createReadyProject();
+  const intents = Array.from({ length: 12 }, () => database.prepareTerminalCreate(project.id, "actor"));
+  const terminals = database.getManagedProject(project.id)?.terminals ?? [];
+  expect(new Set(intents.map((intent) => terminals.find((terminal) => terminal.id === intent.terminalId)?.title))).toEqual(
+    new Set(Array.from({ length: 12 }, (_value, index) => `Terminal ${index + 1}`))
+  );
+});
+
 test("rejects terminal creation before persisting an intent when the Agent is unavailable", async () => {
   const { database, project } = await createReadyProject();
   const agent = { health: () => Promise.reject(new AgentUnavailableError()) } as never;

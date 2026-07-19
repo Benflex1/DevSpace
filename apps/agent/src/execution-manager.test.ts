@@ -494,6 +494,34 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
     catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
   }
   expect(later).toBeDefined();
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "disconnected" });
+});
+
+test("an attached terminal process exit becomes closed without requiring a reopen", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-exit-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const stream = new PassThrough();
+  let running = true;
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    createExec: async () => "exec-owned", startExecAttached: async () => stream,
+    inspectExec: async () => ({ ID: "exec-owned", Running: running, ExitCode: running ? null : 0, ContainerID: "container-owned" }),
+    resizeExec: async () => undefined
+  } as never);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  await manager.reserveTerminalAttachment(terminalId).attach(new FakeSocket() as never);
+
+  running = false;
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "exited", exitCode: 0 });
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
 });
 
 test("distinct terminals keep distinct Docker exec identities and independent attachments", async () => {
@@ -525,6 +553,9 @@ test("distinct terminals keep distinct Docker exec identities and independent at
   const secondSocket = new FakeSocket();
   await manager.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
   await manager.reserveTerminalAttachment(secondTerminalId).attach(secondSocket as never);
+  expect(manager.snapshotResources().filter((resource) => resource.type === "terminal").map((resource) =>
+    resource.type === "terminal" ? [resource.identity.terminalId, resource.state] : []))
+    .toEqual(expect.arrayContaining([[terminalId, "active"], [secondTerminalId, "active"]]));
   expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
   expect(() => manager.reserveTerminalAttachment(secondTerminalId)).toThrow("cannot accept another attachment");
 

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalVisibleState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import {
   activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, terminalTabId, type WorkbenchTab, type WorkbenchTabState
@@ -37,14 +37,24 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
-  const terminalLabels = useRef(new Map(initialTerminals.map((terminal, index) => [terminal.id, `Terminal ${index + 1}`])));
+  const terminalLabels = useRef(new Map(initialTerminals.map((terminal) => [terminal.id, terminal.title])));
+  const currentTerminals = useRef(initialTerminals);
   const [tasks, setTasks] = useState<readonly Task[]>(initialTasks);
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
   const [message, setMessage] = useState("");
+  currentTerminals.current = terminals;
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
     const existing = terminalLabels.current.get(terminal.id);
     if (existing !== undefined) return existing;
-    const nextNumber = terminalLabels.current.size + 1;
+    const used = new Set<number>();
+    for (const current of currentTerminals.current) {
+      if (!isTerminalVisibleState(current.state)) continue;
+      const title = terminalLabels.current.get(current.id) ?? current.title;
+      const match = /^Terminal ([1-9][0-9]*)$/u.exec(title);
+      if (match !== null) used.add(Number(match[1]));
+    }
+    let nextNumber = 1;
+    while (used.has(nextNumber)) nextNumber += 1;
     const title = `Terminal ${nextNumber}`;
     terminalLabels.current.set(terminal.id, title);
     return title;
@@ -87,7 +97,18 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     };
   }, [refresh, runs]);
 
+  const visibleTerminals = useMemo(() => terminals.filter((terminal) => isTerminalVisibleState(terminal.state)), [terminals]);
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);
+  useEffect(() => {
+    const visibleIds = new Set(visibleTerminals.map((terminal) => terminal.id));
+    setTabs((current) => {
+      let next = current;
+      for (const tab of current.tabs) {
+        if (tab.kind === "terminal" && !visibleIds.has(tab.terminalId)) next = closeWorkbenchTab(next, tab.id);
+      }
+      return next;
+    });
+  }, [visibleTerminals]);
   const actionsAvailable = runtimeRunning && runtimeAvailable && agentReachable && agentStatus === "connected";
   const openTerminalTab = useCallback((terminal: TerminalView) => {
     if (!actionsAvailable || !isTerminalAttachableState(terminal.state)) return;
@@ -132,7 +153,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
       retryStart={retryStart} />
     <div className="workbench-body">
-      <WorkbenchSidebar terminals={terminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
+      <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
@@ -144,8 +165,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
       </section>
     </div>
-    <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable}
-      activeTab={tabs.tabs.find((tab) => tab.id === tabs.activeTabId)} terminals={terminals} actor={actor} />
+    <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
 
@@ -229,18 +249,16 @@ function WorkbenchSurface({ tabs, terminalById, projectId, workspaceId, onRefres
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a terminal to start working in this project.</p></div>}
     {tabs.tabs.map((tab) => tab.kind === "terminal" ? <TerminalTab key={tab.id} projectId={projectId} workspaceId={workspaceId}
-      terminal={terminalById.get(tab.terminalId) ?? { id: tab.terminalId, processId: tab.terminalId, state: "disconnected" }}
+      terminal={terminalById.get(tab.terminalId) ?? { id: tab.terminalId, processId: tab.terminalId, title: tab.title, state: "disconnected" }}
       active={tab.id === tabs.activeTabId} onRefresh={onRefresh} /> : null)}
   </div>;
 }
 
-function WorkbenchStatusBar({ runtimeState, agentStatus, agentReachable, activeTab, terminals, actor }: {
-  runtimeState: string; agentStatus: string; agentReachable: boolean; activeTab: WorkbenchTab | undefined; terminals: readonly TerminalView[]; actor: string;
+function WorkbenchStatusBar({ runtimeState, agentStatus, agentReachable, actor }: {
+  runtimeState: string; agentStatus: string; agentReachable: boolean; actor: string;
 }) {
-  const activeTerminal = activeTab?.kind === "terminal" ? terminals.find((terminal) => terminal.id === activeTab.terminalId) : undefined;
   return <footer className="workbench-statusbar"><span><i className={`status-dot ${runtimeState}`} aria-hidden="true" /> Runtime {runtimeLabel(runtimeState)}</span>
     <span role="status"><i className={`status-dot ${agentReachable ? "online" : "offline"}`} aria-hidden="true" /> Agent {agentStatus}</span>
-    {activeTerminal !== undefined && <span>Active {activeTab?.kind === "terminal" ? activeTab.title : "tab"} · {activeTerminal.state}</span>}
     <span className="status-spacer" /><span className="status-actor">{actor}</span></footer>;
 }
 

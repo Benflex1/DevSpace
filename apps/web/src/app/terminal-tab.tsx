@@ -4,8 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
-import { isTerminalAttachableState, reconcileTerminalState, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
-export type TerminalView = { id: string; processId: string; state: string };
+import { isTerminalAttachableState, reconcileTerminalState, terminalSocketCloseAction, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
+export type TerminalView = { id: string; processId: string; title: string; state: string };
 
 export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh }: {
   projectId: string;
@@ -63,7 +63,13 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
     let currentSocket: WebSocket | null = null;
     let ready = false;
     let terminalEnded = false;
+    let refreshRequested = false;
     let disposeResources = () => undefined;
+    const requestRefresh = () => {
+      if (refreshRequested) return;
+      refreshRequested = true;
+      onRefresh();
+    };
     const start = window.setTimeout(() => {
       if (!isTerminalAttachableState(terminal.state)) {
         updateState(terminalUiState(terminal.state));
@@ -140,17 +146,19 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           terminalEnded = true;
           updateState("closed");
           setMessage(decoded.frame.exitCode === null ? "Terminal exited." : `Terminal exited with code ${decoded.frame.exitCode}.`);
+          requestRefresh();
         };
         webSocket.onclose = (event) => {
           if (currentSocket !== webSocket) return;
           ready = false;
           currentSocket = null;
           if (socket.current === webSocket) socket.current = null;
-          if (cancelled || terminalEnded) return;
-          if (event.code === 4000) { onRefresh(); return; }
+          const action = terminalSocketCloseAction({ terminalEnded, cancelled, terminalState: authoritativeState.current, closeCode: event.code });
+          if (action === "ignore") return;
+          if (action === "refresh") { requestRefresh(); return; }
           updateState("disconnected");
           reconnectAttempts += 1;
-          if (reconnectAttempts > 8) { updateState("failed"); onRefresh(); return; }
+          if (reconnectAttempts > 8) { updateState("failed"); requestRefresh(); return; }
           reconnectTimer = window.setTimeout(connectSocket, Math.min(150 * (2 ** (reconnectAttempts - 1)), 2_000));
         };
         webSocket.onerror = () => undefined;
@@ -190,10 +198,9 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
   }, [projectId, terminal.id, terminal.state, workspaceId]);
 
   return <section className={`terminal-tab-surface ${active ? "is-active" : "is-inactive"}`} aria-hidden={!active}
-    aria-label={`Terminal ${terminal.id}`} role={active ? "region" : undefined}>
+    aria-label="Terminal session" role={active ? "region" : undefined}>
     <div className="terminal-tab-header">
       <span className={`terminal-state ${state}`}>{state}</span>
-      <span className="terminal-identity">{terminal.processId.slice(0, 8)}</span>
     </div>
     <div ref={terminalElement} className="terminal-canvas" />
     {message !== "" && <p className="message" role={active ? "status" : undefined}>{message}</p>}
