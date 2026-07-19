@@ -3103,16 +3103,9 @@
                   "type": "boolean"
                 },
                 "hostname": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 253
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
                 }
               },
               "required": [
@@ -3784,16 +3777,9 @@
                         "type": "boolean"
                       },
                       "hostname": {
-                        "anyOf": [
-                          {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 253
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
                       }
                     },
                     "required": [
@@ -7619,16 +7605,9 @@
                       "type": "boolean"
                     },
                     "hostname": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 253
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253
                     }
                   },
                   "required": [
@@ -28188,16 +28167,9 @@
               "type": "boolean"
             },
             "hostname": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 253
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
             }
           },
           "required": [
@@ -32978,16 +32950,9 @@
                             "type": "boolean"
                           },
                           "hostname": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 253
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253
                           }
                         },
                         "required": [

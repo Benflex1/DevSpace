@@ -37,6 +37,7 @@ const workspaceDirtyStates = ["unknown", "clean", "dirty"] as const;
 const workspaceServiceKinds = ["development", "supporting"] as const;
 const processKinds = ["task", "terminal", "ai", "system"] as const;
 const previewProtocols = ["http"] as const;
+const previewTargetKinds = ["workspace", "service"] as const;
 const portLeaseStates = ["reserved", "active", "released", "stale"] as const;
 
 function quotedValues(values: readonly string[]): SQL {
@@ -331,33 +332,75 @@ export const previews = sqliteTable("previews", {
     onDelete: "cascade",
     onUpdate: "no action"
   }),
-  serviceId: text("service_id").notNull().references(() => workspaceServices.id, {
+  configRevisionId: text("config_revision_id").notNull().references(() => projectConfigRevisions.id, {
+    onDelete: "restrict",
+    onUpdate: "no action"
+  }),
+  serviceId: text("service_id").references(() => workspaceServices.id, {
     onDelete: "restrict",
     onUpdate: "no action"
   }),
   previewKey: text("preview_key").notNull(),
+  displayName: text("display_name").notNull(),
+  targetKind: text("target_kind", { enum: previewTargetKinds }).notNull(),
+  targetKey: text("target_key").notNull(),
+  domainBaseId: text("domain_base_id").notNull(),
+  hostnamePattern: text("hostname_pattern").notNull(),
   hostname: text("hostname").notNull().unique("previews_hostname_unique"),
   containerPort: integer("container_port").notNull(),
   protocol: text("protocol", { enum: previewProtocols }).notNull(),
   healthPath: text("health_path").notNull(),
+  healthStatusesJson: text("health_statuses_json").notNull(),
+  startupTimeoutSeconds: integer("startup_timeout_seconds").notNull(),
+  webSocketForwarding: integer("web_socket_forwarding", { mode: "boolean" }).notNull(),
   desiredState: text("desired_state", { enum: previewDesiredStates }).notNull(),
   observedState: text("observed_state", { enum: previewObservedStates }).notNull(),
+  routePresent: integer("route_present", { mode: "boolean" }).notNull().default(false),
   routeRevision: integer("route_revision"),
+  runtimeGeneration: integer("runtime_generation"),
+  lastObservationJson: text("last_observation_json"),
+  lastErrorCode: text("last_error_code"),
+  lastErrorMessage: text("last_error_message"),
+  operationId: text("operation_id").references(() => operations.operationId, {
+    onDelete: "set null",
+    onUpdate: "no action"
+  }),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   activatedAt: text("activated_at"),
   deactivatedAt: text("deactivated_at")
 }, (table) => [
   unique("previews_workspace_preview_key_unique").on(table.workspaceId, table.previewKey),
+  index("previews_config_revision_id_idx").on(table.configRevisionId),
   index("previews_service_id_idx").on(table.serviceId),
+  index("previews_operation_id_idx").on(table.operationId),
   uuidV7Check("previews_id_uuid_v7_check", table.id),
   uuidV7Check("previews_workspace_id_uuid_v7_check", table.workspaceId),
-  uuidV7Check("previews_service_id_uuid_v7_check", table.serviceId),
+  uuidV7Check("previews_config_revision_id_uuid_v7_check", table.configRevisionId),
+  nullableUuidV7Check("previews_service_id_uuid_v7_check", table.serviceId),
+  nullableUuidV7Check("previews_operation_id_uuid_v7_check", table.operationId),
+  enumCheck("previews_target_kind_check", table.targetKind, previewTargetKinds),
+  check("previews_target_key_check", sql`length(${table.targetKey}) between 1 and 64`),
+  check("previews_domain_base_id_check", sql`length(${table.domainBaseId}) between 1 and 64`),
+  check("previews_hostname_pattern_check", sql`length(${table.hostnamePattern}) between 1 and 253`),
+  check("previews_hostname_check", sql`
+    length(${table.hostname}) between 1 and 253
+    and ${table.hostname} not glob '*[^a-z0-9.-]*'
+    and ${table.hostname} not like '.%'
+    and ${table.hostname} not like '%.'
+    and ${table.hostname} not like '%..%'
+  `),
   check("previews_container_port_check", sql`${table.containerPort} between 1 and 65535`),
   enumCheck("previews_protocol_check", table.protocol, previewProtocols),
+  check("previews_health_path_check", sql`length(${table.healthPath}) between 1 and 2048 and substr(${table.healthPath}, 1, 1) = '/'`),
+  check("previews_health_statuses_json_check", sql`length(${table.healthStatusesJson}) between 2 and 1024 and json_valid(${table.healthStatusesJson})`),
+  check("previews_startup_timeout_seconds_check", sql`${table.startupTimeoutSeconds} between 1 and 3600`),
   enumCheck("previews_desired_state_check", table.desiredState, previewDesiredStates),
   enumCheck("previews_observed_state_check", table.observedState, previewObservedStates),
+  check("previews_route_present_check", sql`${table.routePresent} in (0, 1)`),
   check("previews_route_revision_check", sql`${table.routeRevision} is null or ${table.routeRevision} >= 0`),
+  check("previews_runtime_generation_check", sql`${table.runtimeGeneration} is null or ${table.runtimeGeneration} >= 0`),
+  jsonCheck("previews_last_observation_json_check", table.lastObservationJson, true),
   timestampCheck("previews_created_at_timestamp_check", table.createdAt),
   timestampCheck("previews_updated_at_timestamp_check", table.updatedAt),
   timestampCheck("previews_activated_at_timestamp_check", table.activatedAt, true),
@@ -376,6 +419,7 @@ export const portLeases = sqliteTable("port_leases", {
   }),
   port: integer("port").notNull(),
   bindAddress: text("bind_address").notNull(),
+  runtimeGeneration: integer("runtime_generation"),
   state: text("state", { enum: portLeaseStates }).notNull(),
   leaseToken: text("lease_token").notNull().unique("port_leases_lease_token_unique"),
   createdAt: text("created_at").notNull(),
@@ -393,6 +437,7 @@ export const portLeases = sqliteTable("port_leases", {
   nullableUuidV7Check("port_leases_preview_id_uuid_v7_check", table.previewId),
   check("port_leases_port_check", sql`${table.port} between 1 and 65535`),
   check("port_leases_bind_address_check", sql`${table.bindAddress} in ('127.0.0.1', '::1')`),
+  check("port_leases_runtime_generation_check", sql`${table.runtimeGeneration} is null or ${table.runtimeGeneration} >= 0`),
   enumCheck("port_leases_state_check", table.state, portLeaseStates),
   timestampCheck("port_leases_created_at_timestamp_check", table.createdAt),
   timestampCheck("port_leases_activated_at_timestamp_check", table.activatedAt, true),

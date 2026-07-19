@@ -225,6 +225,20 @@ describe("approved-base preview hostname composition", () => {
       .toEqual({ ok: true, value: "demo.other.example.com" });
   });
 
+  test("is deterministic for the same project, workspace, preview, and short ID", () => {
+    const values = {
+      project: label("devspace"), workspace: label("primary"), preview: label("web"), shortId: label("a1b2c3d4")
+    };
+    const first = composePreviewHostname(
+      pattern("{project}-{workspace}-{preview}-{shortId}"), values, "primary", approvedBases
+    );
+    const second = composePreviewHostname(
+      pattern("{project}-{workspace}-{preview}-{shortId}"), values, "primary", approvedBases
+    );
+    expect(first).toEqual({ ok: true, value: "devspace-primary-web-a1b2c3d4.preview.example.com" });
+    expect(second).toEqual(first);
+  });
+
   test("rejects a cross-mixed structural approved base at registry construction", () => {
     const mixed = { id: primaryBase.id, domain: secondaryBase.domain };
     expect(createApprovedPreviewBaseRegistry([

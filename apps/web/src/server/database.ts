@@ -4,13 +4,14 @@ import { mkdirSync } from "node:fs";
 import pathModule from "node:path";
 import {
   auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
-  workspaceServices, workspaces,
-  type Operation, type Project, type ProjectConfigRevision
+  previews, workspaceServices, workspaces,
+  type Operation, type Preview, type Project, type ProjectConfigRevision
 } from "@devspace/database";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
 import { parseProjectOptionsV1 } from "@devspace/project-options";
+import { materializePreviews as materializePreviewRows } from "./preview-persistence.js";
 
 export interface ProjectView {
   readonly id: string;
@@ -41,6 +42,26 @@ export interface ManagedProjectView extends ProjectView {
   readonly taskRuns: readonly { readonly id: string; readonly taskKey: string; readonly processId: string | null;
     readonly state: string; readonly processState: string | null; readonly exitCode: number | null }[];
   readonly terminals: readonly { readonly id: string; readonly processId: string; readonly title: string; readonly state: string }[];
+  readonly previews: readonly PreviewView[];
+}
+
+export interface PreviewView {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly configRevisionId: string;
+  readonly previewKey: string;
+  readonly displayName: string;
+  readonly targetKind: "workspace" | "service";
+  readonly targetKey: string;
+  readonly hostname: string;
+  readonly containerPort: number;
+  readonly desiredState: string;
+  readonly observedState: string;
+  readonly routePresent: boolean;
+  readonly runtimeGeneration: number | null;
+  readonly lastObservationJson: string | null;
+  readonly lastErrorCode: string | null;
+  readonly lastErrorMessage: string | null;
 }
 
 export interface CreateProjectInput {
@@ -111,6 +132,27 @@ function toView(project: Project): ProjectView {
   };
 }
 
+function toPreviewView(preview: Preview): PreviewView {
+  return {
+    id: preview.id,
+    workspaceId: preview.workspaceId,
+    configRevisionId: preview.configRevisionId,
+    previewKey: preview.previewKey,
+    displayName: preview.displayName,
+    targetKind: preview.targetKind,
+    targetKey: preview.targetKey,
+    hostname: preview.hostname,
+    containerPort: preview.containerPort,
+    desiredState: preview.desiredState,
+    observedState: preview.observedState,
+    routePresent: preview.routePresent,
+    runtimeGeneration: preview.runtimeGeneration,
+    lastObservationJson: preview.lastObservationJson,
+    lastErrorCode: preview.lastErrorCode,
+    lastErrorMessage: preview.lastErrorMessage
+  };
+}
+
 export function openProjectDatabase(path: string, options: {
   now?: () => Date;
   createId?: () => string;
@@ -145,6 +187,8 @@ export function openProjectDatabase(path: string, options: {
         db.update(terminalSessions).set({ title }).where(eq(terminalSessions.id, terminal.id)).run();
       }
     }
+    const previewRows = workspace === undefined ? [] : db.select().from(previews)
+      .where(eq(previews.workspaceId, workspace.id)).orderBy(previews.previewKey, previews.id).all();
     return {
       ...toView(project),
       activeRevision: revision === undefined ? null : { id: revision.id, number: revision.revisionNumber, hash: revision.configurationHash },
@@ -161,7 +205,8 @@ export function openProjectDatabase(path: string, options: {
         return { id: run.id, taskKey: run.taskKey, processId: run.processId, state: run.state,
           processState: process?.observedState ?? null, exitCode: run.exitCode }; }),
       terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId,
-        title: terminalTitles.get(terminal.id) ?? terminal.title, state: terminal.state }))
+        title: terminalTitles.get(terminal.id) ?? terminal.title, state: terminal.state })),
+      previews: previewRows.map(toPreviewView)
     };
   };
   return {
@@ -184,6 +229,112 @@ export function openProjectDatabase(path: string, options: {
     getManagedProject(projectId: string): ManagedProjectView | undefined {
       const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
       return project === undefined ? undefined : readManagedProject(project);
+    },
+    listPreviews(projectId: string, workspaceId: string): PreviewView[] {
+      const workspace = db.select({ id: workspaces.id }).from(workspaces).where(and(
+        eq(workspaces.id, workspaceId), eq(workspaces.projectId, projectId)
+      )).get();
+      if (workspace === undefined) return [];
+      return db.select().from(previews).where(eq(previews.workspaceId, workspace.id))
+        .orderBy(previews.previewKey, previews.id).all().map(toPreviewView);
+    },
+    materializePreviews(input: {
+      projectId: string;
+      workspaceId: string;
+      revisionId: string;
+      previewBaseRegistry: Parameters<typeof materializePreviewRows>[0]["previewBaseRegistry"];
+      now?: string;
+    }): PreviewView[] {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        if (context.workspace.id !== input.workspaceId || context.revision.id !== input.revisionId) {
+          throw new ProjectSetupConflictError("Preview materialization has a stale workspace or configuration revision.");
+        }
+        const options = parseProjectOptionsV1(JSON.parse(context.revision.configurationJson));
+        const existing = db.select().from(previews).where(eq(previews.workspaceId, input.workspaceId)).all();
+        const existingByKey = new Map(existing.map((preview) => [preview.previewKey, preview]));
+        const ids: Record<string, string> = {};
+        for (const preview of options.previews) ids[preview.key] = existingByKey.get(preview.key)?.id ?? createId();
+        const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
+        const serviceIds = runtime === undefined ? {} : Object.fromEntries(
+          db.select({ id: workspaceServices.id, key: workspaceServices.serviceKey }).from(workspaceServices)
+            .where(eq(workspaceServices.runtimeStackId, runtime.id)).all().map((service) => [service.key, service.id])
+        );
+        const timestamp = input.now ?? now().toISOString();
+        const rows = materializePreviewRows({
+          projectId: context.project.id,
+          projectSlug: context.project.slug,
+          workspaceId: context.workspace.id,
+          workspaceSlug: context.workspace.slug,
+          configRevisionId: context.revision.id,
+          previews: options.previews,
+          ids,
+          serviceIds,
+          previewBaseRegistry: input.previewBaseRegistry,
+          now: timestamp
+        });
+        for (const row of rows) {
+          const retained = existingByKey.get(row.previewKey);
+          if (retained !== undefined) {
+            if (retained.configRevisionId !== row.configRevisionId || retained.hostname !== row.hostname) {
+              throw new ProjectSetupConflictError("A retained preview belongs to a different immutable configuration revision.");
+            }
+            continue;
+          }
+          db.insert(previews).values(row).run();
+        }
+        return db.select().from(previews).where(eq(previews.workspaceId, input.workspaceId))
+          .orderBy(previews.previewKey, previews.id).all().map(toPreviewView);
+      }).immediate();
+    },
+    updatePreviewObservation(input: {
+      projectId: string;
+      workspaceId: string;
+      previewId: string;
+      revisionId: string;
+      observedState: Preview["observedState"];
+      routePresent: boolean;
+      routeRevision?: number | null;
+      runtimeGeneration?: number | null;
+      observationJson?: string | null;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+      operationId?: string | null;
+    }): PreviewView {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        if (context.workspace.id !== input.workspaceId || context.revision.id !== input.revisionId) {
+          throw new ProjectSetupConflictError("Preview observation has a stale workspace or configuration revision.");
+        }
+        if (input.observationJson !== undefined && input.observationJson !== null
+          && input.observationJson.length > 4096) throw new ProjectSetupConflictError("Preview observation is too large.");
+        const preview = db.select().from(previews).where(and(
+          eq(previews.id, input.previewId), eq(previews.workspaceId, input.workspaceId),
+          eq(previews.configRevisionId, input.revisionId)
+        )).get();
+        if (preview === undefined) throw new ProjectSetupConflictError("The preview identity is not owned by this workspace revision.");
+        if (input.operationId !== undefined && input.operationId !== null) {
+          const operation = db.select().from(operations).where(eq(operations.operationId, input.operationId)).get();
+          if (operation === undefined || operation.projectId !== input.projectId
+            || operation.workspaceId !== input.workspaceId || operation.resourceId !== input.previewId) {
+            throw new ProjectSetupConflictError("Preview operation identity does not match its workspace resource.");
+          }
+        }
+        db.update(previews).set({
+          observedState: input.observedState,
+          routePresent: input.routePresent,
+          routeRevision: input.routeRevision === undefined ? preview.routeRevision : input.routeRevision,
+          runtimeGeneration: input.runtimeGeneration === undefined ? preview.runtimeGeneration : input.runtimeGeneration,
+          lastObservationJson: input.observationJson === undefined ? preview.lastObservationJson : input.observationJson,
+          lastErrorCode: input.errorCode === undefined ? preview.lastErrorCode : input.errorCode,
+          lastErrorMessage: input.errorMessage === undefined ? preview.lastErrorMessage : input.errorMessage?.slice(0, 512) ?? null,
+          operationId: input.operationId === undefined ? preview.operationId : input.operationId,
+          updatedAt: now().toISOString()
+        }).where(eq(previews.id, input.previewId)).run();
+        const updated = db.select().from(previews).where(eq(previews.id, input.previewId)).get();
+        if (updated === undefined) throw new ProjectSetupConflictError("The preview observation was not retained.");
+        return toPreviewView(updated);
+      }).immediate();
     },
     createProject(input: CreateProjectInput): ProjectView {
       const projectId = createId();

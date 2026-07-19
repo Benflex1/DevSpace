@@ -50,7 +50,7 @@ const processObservation = {
 };
 const previewObservation = {
   projectId, workspaceId, previewId, previewKey: "app", desiredState: "inactive",
-  observedState: "inactive", routePresent: false, hostname: null
+  observedState: "inactive", routePresent: false, hostname: "app.example.com"
 };
 const projectInspectionPayload = {
   scope: { kind: "managed-store" },
@@ -316,7 +316,7 @@ describe("F10 preview recovery event", () => {
       "healthy",
       { ...healthy, desiredState: "inactive" }
     )).toBe(true);
-    const withoutRoute = { ...healthy, routePresent: false, hostname: null };
+    const withoutRoute = { ...healthy, routePresent: false };
     expect(validatePreviewObservationChange(
       withoutRoute,
       "healthy",
@@ -332,7 +332,7 @@ describe("F10 preview recovery event", () => {
     expect(validatePreviewObservationChange(healthy, "healthy", healthy)).toBe(false);
     expect(agentEventSchema.safeParse({
       ...representativeEvents[10],
-      payload: { previousState: "healthy", observation: { ...healthy, routePresent: false } }
+      payload: { previousState: "healthy", observation: { ...healthy, hostname: "not a hostname" } }
     }).success).toBe(false);
     expect(agentEventSchema.safeParse({
       ...representativeEvents[10],

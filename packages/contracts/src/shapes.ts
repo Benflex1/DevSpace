@@ -241,11 +241,8 @@ export const previewInspectionDataSchema = z.strictObject({
   desiredState: previewDesiredStateSchema,
   observedState: previewObservedStateSchema,
   routePresent: z.boolean(),
-  hostname: hostnameSchema.nullable()
+  hostname: hostnameSchema
 }).superRefine((data, context) => {
-  if ((data.hostname !== null) !== data.routePresent) {
-    context.addIssue({ code: "custom", path: ["hostname"], message: "Hostname presence must match route presence" });
-  }
   if (data.routePresent && ["inactive", "failed", "lost"].includes(data.observedState)) {
     context.addIssue({ code: "custom", path: ["routePresent"], message: "This preview state cannot have a route" });
   }

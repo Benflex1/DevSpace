@@ -602,14 +602,15 @@ PreviewInspectionData = {
   desiredState: PreviewDesiredState,
   observedState: PreviewObservedState,
   routePresent: boolean,
-  hostname: string | null
+  hostname: string
 }
 ```
 
-When non-null, `hostname` is a lowercase ASCII DNS hostname of 1 through 253 characters: labels are
-1 through 63 characters, match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`, and are separated by literal
-dots. `hostname` is non-null exactly when `routePresent` is true. `routePresent` must be false when
-the observed state is `inactive`, `failed`, or `lost`.
+`hostname` is always the materialized lowercase ASCII DNS hostname of 1 through 253 characters,
+including while the preview is Waiting and no route is present. Labels are 1 through 63 characters,
+match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`, and are separated by literal dots. `routePresent` is an
+independent readiness signal and must be false when the observed state is `inactive`, `failed`, or
+`lost`.
 
 ## Stable error registry
 
