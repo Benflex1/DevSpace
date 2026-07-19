@@ -20,6 +20,8 @@ import { OperationExecutor } from "./operation-executor.js";
 import { OperationConflictError, OperationJournal } from "./operation-journal.js";
 import { ExecutionManager } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
+import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
+import type { PreviewGatewayProbe } from "./preview-runtime.js";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -39,6 +41,8 @@ export interface AgentServerOptions {
   readonly managedRoots?: ManagedWorkspaceRoots;
   readonly operationJournalPath?: string;
   readonly managedWorkspaces?: ManagedWorkspaces;
+  readonly previewBaseRegistry?: ApprovedPreviewBaseRegistry;
+  readonly previewProbe?: PreviewGatewayProbe;
   readonly operationJournal?: OperationJournal;
   readonly eventRetention?: number;
   readonly now?: () => Date;
@@ -183,7 +187,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     workspaces: path.join(fallbackManagedRoot, "workspaces"),
     state: path.join(fallbackManagedRoot, "state")
   };
-  const managed = options.managedWorkspaces ?? new ManagedWorkspaces(managedRoots);
+  const managed = options.managedWorkspaces ?? new ManagedWorkspaces(managedRoots, undefined, undefined, undefined, undefined,
+    options.previewBaseRegistry, options.previewProbe);
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
@@ -219,6 +224,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["process.inspect"].path ? agentApiV1EndpointByOperation["process.inspect"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["terminal.create"].path ? agentApiV1EndpointByOperation["terminal.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["terminal.close"].path ? agentApiV1EndpointByOperation["terminal.close"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["preview.activate"].path ? agentApiV1EndpointByOperation["preview.activate"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["preview.deactivate"].path ? agentApiV1EndpointByOperation["preview.deactivate"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["preview.inspect"].path ? agentApiV1EndpointByOperation["preview.inspect"]
       : request.method === "GET" && url.pathname === snapshotEndpoint.path ? snapshotEndpoint
       : request.method === "GET" && url.pathname === eventEndpoint.path ? eventEndpoint
       : undefined;
@@ -318,7 +326,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     }
 
     const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "workspace.create", "workspace.start", "workspace.stop",
-      "task.start", "process.stop", "terminal.create", "terminal.close"] as const;
+      "task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"] as const;
     for (const operation of mutationRoutes) {
       const endpoint = agentApiV1EndpointByOperation[operation];
       if (request.method !== endpoint.method || url.pathname !== endpoint.path) continue;
@@ -360,6 +368,27 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
       executor.schedule(record);
       return sendJson(response, 202, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: { operationId } }));
+    }
+
+    if (request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["preview.inspect"].path) {
+      const endpoint = agentApiV1EndpointByOperation["preview.inspect"];
+      let body;
+      try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      try {
+        const data = await managed.inspectPreview(body.data);
+        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+      } catch (error) {
+        if (error instanceof AgentExecutionError) {
+          const status = error.failure.code === "RESOURCE_NOT_FOUND" ? 404
+            : error.failure.code === "ROOTLESS_RUNTIME_UNAVAILABLE" ? 503 : 500;
+          return sendJson(response, status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
+        }
+        return sendJson(response, 500, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely.", retryable: true,
+          details: { incidentId: createId() }
+        } }));
+      }
     }
 
     if (request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.inspect"].path) {

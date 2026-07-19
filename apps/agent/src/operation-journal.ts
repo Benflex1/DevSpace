@@ -34,7 +34,9 @@ export const supportedMutationNames = [
   "task.start",
   "process.stop",
   "terminal.create",
-  "terminal.close"
+  "terminal.close",
+  "preview.activate",
+  "preview.deactivate"
 ] as const;
 export type SupportedMutationName = (typeof supportedMutationNames)[number];
 

@@ -25,6 +25,7 @@ import {
   type ProjectOptionsV1
 } from "@devspace/project-options";
 import * as z from "zod";
+import { v7 as uuidv7 } from "uuid";
 import { runBoundedProcess } from "./git-inspector.js";
 import { ExternalExecutionFence, type ExternalExecutionRole } from "./external-execution.js";
 import {
@@ -42,6 +43,8 @@ import {
 } from "./private-state.js";
 import { WorkspaceRuntimeError, WorkspaceRuntimeManager, verifyRuntimePlanAgainstOptions, type RuntimeOwnership } from "./workspace-runtime.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy } from "./docker-runtime.js";
+import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, type PreviewGatewayProbe } from "./preview-runtime.js";
+import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 
 const GIT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -171,16 +174,20 @@ export class ManagedWorkspaces {
   private stateRoot = "";
   private executionFence: ExternalExecutionFence | null = null;
   private readonly runtime: WorkspaceRuntimeManager;
+  private readonly preview: PreviewRuntimeManager;
 
   constructor(
     private readonly roots: ManagedWorkspaceRoots,
     private readonly git: GitRunner = runGit,
     private readonly writer: AtomicJsonWriter = durableJsonWriter,
-    runtime?: WorkspaceRuntimeManager
+    runtime?: WorkspaceRuntimeManager,
+    previewRuntime?: PreviewRuntimeManager,
+    previewBaseRegistry: ApprovedPreviewBaseRegistry = readPreviewBaseRegistry(),
+    previewProbe?: PreviewGatewayProbe
   ) {
-    this.runtime = runtime ?? new WorkspaceRuntimeManager(roots.state,
-      new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
-      readRuntimePolicy(), writer);
+    const engine = new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
+    this.runtime = runtime ?? new WorkspaceRuntimeManager(roots.state, engine, readRuntimePolicy(), writer);
+    this.preview = previewRuntime ?? new PreviewRuntimeManager(roots.state, engine, this.runtime, previewBaseRegistry, writer, previewProbe);
   }
 
   get isHealthy(): boolean { return this.corruption === null && (this.executionFence?.isHealthy ?? true); }
@@ -208,7 +215,8 @@ export class ManagedWorkspaces {
     const internalDirectories = [
       path.join(this.stateRoot, "revisions"), path.join(this.stateRoot, "ownership", "projects"),
       path.join(this.stateRoot, "ownership", "workspaces"), path.join(this.stateRoot, "ownership", "runtimes"), path.join(this.stateRoot, "creations"),
-      path.join(this.stateRoot, "runtime-creations"), path.join(this.stateRoot, "executions"), path.join(this.projectRoot, ".staging"),
+      path.join(this.stateRoot, "runtime-creations"), path.join(this.stateRoot, "executions"), path.join(this.stateRoot, "previews"),
+      path.join(this.stateRoot, "preview-leases"), path.join(this.projectRoot, ".staging"),
       path.join(this.projectRoot, ".cleanup"), path.join(this.workspaceRoot, ".cleanup")
     ];
     this.guardedDirectories.set(this.projectRoot, configuredRoots[0].identity);
@@ -239,6 +247,8 @@ export class ManagedWorkspaces {
     await this.validateStateTree(path.join(this.stateRoot, "creations"), "creation");
     try { await this.runtime.validateStateTree(); }
     catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "ownership", "runtimes"), error instanceof Error ? error.message : "runtime ownership state validation failed"); }
+    try { await this.preview.initialize(); }
+    catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "previews"), error instanceof Error ? error.message : "preview state validation failed"); }
   }
 
   private async validateStateTree(root: string, kind: "revision" | "project" | "workspace" | "creation"): Promise<void> {
@@ -968,11 +978,25 @@ export class ManagedWorkspaces {
     if (revision.runtimePlan === null) {
       throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
     }
+    const association = { projectId, workspaceId, revisionId: workspace.revision.revisionId,
+      revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 };
+    let bindings;
     try {
-      await this.runtime.start({ projectId, workspaceId, revisionId: workspace.revision.revisionId,
-        revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 },
-      JSON.parse(revision.runtimePlan.canonicalJson), workspace.worktreePath, operationId);
-    } catch (error) { throw this.runtimeFailure(error, workspaceId, "start"); }
+      const options = parseProjectOptionsV1(JSON.parse(revision.data.configuration.canonicalJson));
+      bindings = await this.preview.reserveWorkspaceLeases(association, options, operationId);
+      await this.runtime.start(association, JSON.parse(revision.runtimePlan.canonicalJson), workspace.worktreePath, operationId, bindings);
+      const ownership = await this.runtime.exactRunningOwnership(association);
+      await this.preview.bindRuntimeContainer(association, ownership.developmentContainer.id, bindings);
+      await this.preview.workspaceStarted(association);
+    } catch (error) {
+      await this.preview.releaseOperationLeases(association, operationId).catch(() => undefined);
+      if (error instanceof PreviewRuntimeError) {
+        const code = error.code === "ROOTLESS_RUNTIME_UNAVAILABLE" ? "ROOTLESS_RUNTIME_UNAVAILABLE"
+          : error.code === "RUNTIME_POLICY_VIOLATION" ? "RUNTIME_POLICY_VIOLATION" : "WORKSPACE_STATE_CONFLICT";
+        throw this.runtimeFailure(new WorkspaceRuntimeError(code, error.message), workspaceId, "start");
+      }
+      throw this.runtimeFailure(error, workspaceId, "start");
+    }
   }
 
   async stopWorkspace(projectId: string, workspaceId: string): Promise<void> {
@@ -980,9 +1004,79 @@ export class ManagedWorkspaces {
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
     if (revision.runtimePlan === null) throw workspaceConflict(workspaceId, "stopped");
     try {
-      await this.runtime.stop({ projectId, workspaceId, revisionId: workspace.revision.revisionId,
-        revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 });
+      const association = { projectId, workspaceId, revisionId: workspace.revision.revisionId,
+        revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 };
+      await this.runtime.stop(association);
+      await this.preview.workspaceStopped(association);
     } catch (error) { throw this.runtimeFailure(error, workspaceId, "stop"); }
+  }
+
+  private previewFailure(error: unknown, workspaceId: string, action: "activate" | "deactivate", previewId: string | null,
+    previewKey: string | null, revisionId: string | null = null): AgentExecutionError {
+    if (error instanceof AgentExecutionError) return error;
+    if (error instanceof PreviewRuntimeError) {
+      switch (error.code) {
+        case "PREVIEW_NOT_DEFINED":
+          if (error.details.revisionId !== undefined || revisionId !== null) {
+            return new AgentExecutionError(executionFailure("PREVIEW_NOT_DEFINED", error.message, {
+              revisionId: error.details.revisionId ?? revisionId!, previewKey: error.details.previewKey ?? previewKey ?? "preview"
+            }));
+          }
+          break;
+        case "RESOURCE_NOT_FOUND":
+          return new AgentExecutionError(executionFailure("RESOURCE_NOT_FOUND", error.message, {
+            resource: { type: previewId === null ? "workspace" : "preview", id: previewId ?? workspaceId }
+          }));
+        case "PREVIEW_DOMAIN_NOT_APPROVED":
+          return new AgentExecutionError(executionFailure("PREVIEW_DOMAIN_NOT_APPROVED", error.message, {
+            previewId: error.details.previewId ?? previewId ?? workspaceId
+          }));
+        case "GATEWAY_UPDATE_FAILED":
+          return new AgentExecutionError(executionFailure("GATEWAY_UPDATE_FAILED", error.message, { previewId: previewId ?? workspaceId }));
+        case "ROOTLESS_RUNTIME_UNAVAILABLE":
+          return new AgentExecutionError(executionFailure("ROOTLESS_RUNTIME_UNAVAILABLE", error.message, { component: "docker" }));
+        case "RUNTIME_POLICY_VIOLATION":
+          return new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", error.message, { policy: "preview-action-rejected" }));
+        case "WORKSPACE_STATE_CONFLICT":
+          return new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", error.message, {
+            workspaceId, desiredState: action === "activate" ? "running" : "stopped",
+            observedState: "lost", action: action === "activate" ? "activate-preview" : "stop"
+          }));
+      }
+    }
+    return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The preview operation failed safely.", { incidentId: uuidv7() }));
+  }
+
+  private async previewContext(projectId: string, workspaceId: string) {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
+    if (revision.runtimePlan === null) {
+      throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
+    }
+    return {
+      workspace,
+      options: parseProjectOptionsV1(JSON.parse(revision.data.configuration.canonicalJson)),
+      association: { projectId, workspaceId, revisionId: workspace.revision.revisionId,
+        revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 }
+    };
+  }
+
+  async activatePreview(input: { projectId: string; workspaceId: string; previewId: string; previewKey: string }, operationId: string): Promise<void> {
+    let context;
+    try { context = await this.previewContext(input.projectId, input.workspaceId); }
+    catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, input.previewKey); }
+    try { await this.preview.activate(input, context.association, context.options, operationId); }
+    catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, input.previewKey, context.association.revisionId); }
+  }
+
+  async deactivatePreview(input: { projectId: string; workspaceId: string; previewId: string }, operationId: string): Promise<void> {
+    try { await this.preview.deactivate(input, operationId); }
+    catch (error) { throw this.previewFailure(error, input.workspaceId, "deactivate", input.previewId, null); }
+  }
+
+  async inspectPreview(input: { projectId: string; workspaceId: string; previewId: string }): Promise<import("@devspace/contracts").PreviewInspectionData> {
+    try { return await this.preview.inspect(input); }
+    catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, null); }
   }
 
   async snapshotResources(): Promise<AgentSnapshotResource[]> {
@@ -1008,7 +1102,7 @@ export class ManagedWorkspaces {
       resources.push({ type: "service", projectId: record.projectId, workspaceId: record.workspaceId, serviceKey: "development",
         observation: { desiredState: observation.runtimeStack.desiredState, observedState: observation.runtimeStack.observedState, health: "unknown" } });
     }
-    return resources;
+    return [...resources, ...await this.preview.snapshotResources()];
   }
 
   async validateCreationJournalBindings(findOperation: (operationId: string) => CreationJournalBinding | undefined): Promise<void> {

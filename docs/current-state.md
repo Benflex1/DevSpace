@@ -100,12 +100,22 @@ Milestone 1 — in progress.
 - Permanent Playwright coverage drives the browser, Web orchestration, SQLite, Agent journal,
   loopback HTTPS Git fetch, real store/worktree creation, the production Docker Engine API adapter
   against a stateful Unix-socket fixture, start/stop, and Web+Agent restart without public internet.
+- Checkpoint 2 of the preview path is implemented in the Agent: exact immutable workspace-target
+  validation, Agent-private loopback lease allocation and reconciliation, retained stopped-container
+  lease ownership, strict `127.0.0.1` Docker bindings, and exact revision/runtime-generation checks
+  are enforced before preview runtime side effects. The typed gateway-host probe boundary provides
+  bounded health attempts with retryable Waiting/unhealthy observations; service-target previews
+  fail closed as an unsupported runtime policy. Agent preview activate/deactivate/inspect routes,
+  restart recovery, and lease/container reconciliation are present. Caddy route management and
+  Workbench preview UI remain intentionally deferred to Checkpoints 3–4.
 
 ## Still absent
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
-editing, rebuild, previews, Caddy routing, and AI sessions remain intentionally unimplemented.
+editing, rebuild, Caddy routing, gateway-host adapter wiring, and AI sessions remain intentionally
+unimplemented. The Agent preview runtime foundation is present, but the Web Workbench preview
+surface and browser-facing preview state integration remain deferred to Checkpoints 3–4.
 Individual task termination and exact descendant ownership, task Stop, forceful terminal Close,
 long-running task supervision, runtime timeout enforcement, `replace` concurrency, and configured
 interactive tasks are deferred execution-supervision work for M2. M1's `foreground one-shot`

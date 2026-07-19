@@ -1,4 +1,5 @@
 import { createAgentServer } from "./server.js";
+import { readPreviewBaseRegistry } from "./preview-runtime.js";
 
 const configuredSocketPath = process.env.DEVSPACE_AGENT_SOCKET_PATH;
 const localRoot = process.env.DEVSPACE_MANAGED_ROOT;
@@ -9,7 +10,8 @@ const server = createAgentServer({
       projects: `${localRoot}/projects`, workspaces: `${localRoot}/workspaces`, state: `${localRoot}/state`
     },
     operationJournalPath: `${localRoot}/state/operations`
-  })
+  }),
+  previewBaseRegistry: readPreviewBaseRegistry()
 });
 await server.start();
 console.log(`DevSpace Agent listening on ${server.socketPath}`);
