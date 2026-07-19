@@ -100,22 +100,31 @@ Milestone 1 — in progress.
 - Permanent Playwright coverage drives the browser, Web orchestration, SQLite, Agent journal,
   loopback HTTPS Git fetch, real store/worktree creation, the production Docker Engine API adapter
   against a stateful Unix-socket fixture, start/stop, and Web+Agent restart without public internet.
-- Checkpoint 2 of the preview path is implemented in the Agent: exact immutable workspace-target
-  validation, Agent-private loopback lease allocation and reconciliation, retained stopped-container
-  lease ownership, strict `127.0.0.1` Docker bindings, and exact revision/runtime-generation checks
-  are enforced before preview runtime side effects. The typed gateway-host probe boundary provides
-  bounded health attempts with retryable Waiting/unhealthy observations; service-target previews
-  fail closed as an unsupported runtime policy. Agent preview activate/deactivate/inspect routes,
-  restart recovery, and lease/container reconciliation are present. Caddy route management and
-  Workbench preview UI remain intentionally deferred to Checkpoints 3–4.
+- Preview hostname authority is Web-owned: Web materializes the exact hostname from the immutable
+  Project Options revision, approved preview-base registry, and project/workspace slugs, persists it
+  in SQLite, and sends that persisted value to the Agent. The Agent does not derive a competing
+  identity from IDs; it validates the Web value against the exact revision, preview identity, slug
+  composition, approved registry, and hostname policy before private-state or route use.
+- Checkpoints 2 and 3 of the preview path are implemented in the Agent and gateway: exact immutable
+  workspace-target validation, Agent-private loopback lease allocation, retained stopped-container
+  lease ownership, strict `127.0.0.1` Docker bindings, exact revision/runtime-generation checks,
+  bounded gateway-host health attempts, private Caddy route replacement, stale/foreign route removal,
+  HTTP streaming, and WebSocket/HMR upgrade forwarding. The active gateway package has no Docker
+  socket, no public admin endpoint, accepts only Agent-owned approved hostnames, and probes only
+  opaque Agent-owned leases.
+- Checkpoint 4 is implemented in Web: preview mutations are authorized and persisted by SQLite,
+  Agent observations retain exact operation/revision fencing, and the Project Workbench has a
+  first-class Previews section with deduplicated `preview:<previewId>` tabs, Waiting/Ready/
+  Unavailable/Inactive presentation, readiness-gated iframe, exact-host external navigation,
+  bounded reload/reconciliation, and visibility-aware refresh only while a preview changes.
 
 ## Still absent
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
-editing, rebuild, Caddy routing, gateway-host adapter wiring, and AI sessions remain intentionally
-unimplemented. The Agent preview runtime foundation is present, but the Web Workbench preview
-surface and browser-facing preview state integration remain deferred to Checkpoints 3–4.
+editing, rebuild, and AI sessions remain intentionally unimplemented. Permanent preview E2E,
+restart/reconciliation hardening, independent review, and PR preparation remain deferred to
+Checkpoint 5; no Checkpoint 5 work has begun.
 Individual task termination and exact descendant ownership, task Stop, forceful terminal Close,
 long-running task supervision, runtime timeout enforcement, `replace` concurrency, and configured
 interactive tasks are deferred execution-supervision work for M2. M1's `foreground one-shot`

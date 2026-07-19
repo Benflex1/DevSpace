@@ -238,6 +238,47 @@ export function openProjectDatabase(path: string, options: {
       return db.select().from(previews).where(eq(previews.workspaceId, workspace.id))
         .orderBy(previews.previewKey, previews.id).all().map(toPreviewView);
     },
+    preparePreviewMutation(input: {
+      projectId: string;
+      workspaceId: string;
+      previewId: string;
+      actor: string;
+      action: "activate" | "deactivate";
+    }): { operation: Operation; preview: PreviewView; projectSlug: string; workspaceSlug: string; revisionId: string } {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        if (context.workspace.id !== input.workspaceId) {
+          throw new ProjectSetupConflictError("Preview mutation has a stale workspace identity.");
+        }
+        const preview = db.select().from(previews).where(and(
+          eq(previews.id, input.previewId), eq(previews.workspaceId, input.workspaceId),
+          eq(previews.configRevisionId, context.revision.id)
+        )).get();
+        if (preview === undefined) throw new ProjectSetupConflictError("The preview is not owned by the active workspace revision.");
+        const operationName = `preview.${input.action}`;
+        const retained = db.select().from(operations).where(and(
+          eq(operations.projectId, input.projectId), eq(operations.workspaceId, input.workspaceId),
+          eq(operations.operationName, operationName), eq(operations.resourceType, "preview"),
+          eq(operations.resourceId, input.previewId)
+        )).orderBy(desc(operations.createdAt), desc(operations.operationId)).all()
+          .find((candidate) => candidate.state === "accepted" || candidate.state === "running" || candidate.state === "succeeded");
+        const operation = retained ?? {
+          operationId: createId(), projectId: input.projectId, workspaceId: input.workspaceId, actor: input.actor,
+          operationName, resourceType: "preview", resourceId: input.previewId, state: "accepted" as const,
+          progressJson: null, errorCode: null, errorMessage: null, createdAt: now().toISOString(), startedAt: null, finishedAt: null
+        } satisfies Operation;
+        if (retained === undefined) db.insert(operations).values(operation).run();
+        db.update(previews).set({
+          desiredState: input.action === "activate" ? "active" : "inactive",
+          operationId: operation.operationId,
+          updatedAt: now().toISOString()
+        }).where(eq(previews.id, input.previewId)).run();
+        const updated = db.select().from(previews).where(eq(previews.id, input.previewId)).get();
+        if (updated === undefined) throw new ProjectSetupConflictError("The preview mutation intent was not retained.");
+        return { operation, preview: toPreviewView(updated), projectSlug: context.project.slug,
+          workspaceSlug: context.workspace.slug, revisionId: context.revision.id };
+      }).immediate();
+    },
     materializePreviews(input: {
       projectId: string;
       workspaceId: string;
@@ -300,7 +341,7 @@ export function openProjectDatabase(path: string, options: {
       errorCode?: string | null;
       errorMessage?: string | null;
       operationId?: string | null;
-    }): PreviewView {
+  }): PreviewView {
       return client.transaction(() => {
         const context = this.getRuntimeContext(input.projectId);
         if (context.workspace.id !== input.workspaceId || context.revision.id !== input.revisionId) {
@@ -689,12 +730,17 @@ export function openProjectDatabase(path: string, options: {
         const timestamp = now().toISOString();
         for (const operation of snapshot.operationObservations) {
           const local = db.select().from(operations).where(eq(operations.operationId, operation.operationId)).get();
-          if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close"].includes(local.operationName)) continue;
+          if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"].includes(local.operationName)) continue;
           if (operation.state === "succeeded") this.finishOperation(local.operationId, { state: "succeeded" });
           else if (operation.state === "failed") {
             this.finishOperation(local.operationId, { state: "failed",
               code: operation.failure.code, message: operation.failure.message.slice(0, 512) });
-            if (local.operationName === "terminal.create") {
+            if (local.operationName === "preview.activate" || local.operationName === "preview.deactivate") {
+              db.update(previews).set({ observedState: "failed", routePresent: false,
+                lastErrorCode: operation.failure.code, lastErrorMessage: operation.failure.message.slice(0, 512),
+                operationId: local.operationId, updatedAt: timestamp
+              }).where(and(eq(previews.id, local.resourceId), eq(previews.workspaceId, local.workspaceId!))).run();
+            } else if (local.operationName === "terminal.create") {
               db.update(terminalSessions).set({ state: "failed", closedAt: timestamp }).where(eq(terminalSessions.id, local.resourceId)).run();
               db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
                 .where(eq(processes.id, local.resourceId)).run();
@@ -718,6 +764,10 @@ export function openProjectDatabase(path: string, options: {
           }
           else db.update(operations).set({ state: operation.state, startedAt: operation.state === "running" ? timestamp : local.startedAt })
             .where(eq(operations.operationId, local.operationId)).run();
+          if (operation.state === "succeeded" && (local.operationName === "preview.activate" || local.operationName === "preview.deactivate")) {
+            db.update(previews).set({ desiredState: local.operationName === "preview.activate" ? "active" : "inactive", operationId: local.operationId,
+              updatedAt: timestamp }).where(and(eq(previews.id, local.resourceId), eq(previews.workspaceId, local.workspaceId!))).run();
+          }
         }
         for (const resource of snapshot.resources) {
           if (resource.type === "process") {
@@ -729,6 +779,28 @@ export function openProjectDatabase(path: string, options: {
             db.update(terminalSessions).set({ state: resource.state, lastActivityAt: timestamp,
               closedAt: ["closed", "failed", "lost"].includes(resource.state) ? timestamp : null })
               .where(and(eq(terminalSessions.id, resource.identity.terminalId), eq(terminalSessions.workspaceId, resource.identity.workspaceId))).run();
+          } else if (resource.type === "preview") {
+            const observed = resource.observation;
+            const project = db.select().from(projects).where(and(
+              eq(projects.id, observed.projectId), eq(projects.primaryWorkspaceId, observed.workspaceId), eq(projects.state, "ready")
+            )).get();
+            const revision = project?.activeConfigRevisionId === null || project?.activeConfigRevisionId === undefined ? undefined
+              : db.select().from(projectConfigRevisions).where(and(
+                eq(projectConfigRevisions.id, project.activeConfigRevisionId), eq(projectConfigRevisions.projectId, observed.projectId)
+              )).get();
+            const preview = db.select().from(previews).where(and(
+              eq(previews.id, observed.previewId), eq(previews.workspaceId, observed.workspaceId),
+              eq(previews.configRevisionId, revision?.id ?? ""), eq(previews.hostname, observed.hostname)
+            )).get();
+            if (preview !== undefined) {
+              db.update(previews).set({ observedState: observed.observedState, routePresent: observed.routePresent,
+                routeRevision: observed.routePresent ? preview.routeRevision ?? 1 : null,
+                lastObservationJson: JSON.stringify(observed),
+                lastErrorCode: observed.observedState === "healthy" ? null : preview.lastErrorCode,
+                lastErrorMessage: observed.observedState === "healthy" ? null : preview.lastErrorMessage,
+                updatedAt: timestamp
+              }).where(eq(previews.id, preview.id)).run();
+            }
           }
         }
         const allRuns = db.select().from(taskRuns).all();

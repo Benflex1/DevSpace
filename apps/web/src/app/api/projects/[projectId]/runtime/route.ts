@@ -20,7 +20,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       || (body.action !== "start" && body.action !== "stop")) return json({ message: "Choose a valid runtime action." }, 422);
     const { projectId } = await context.params;
     const observed = await mutatePrimaryWorkspaceRuntime(body.action, projectId, actor.identity, {
-      agent: createAgentClient(config.agentSocketPath), database: getProjectDatabase(config.databasePath)
+      agent: createAgentClient(config.agentSocketPath), database: getProjectDatabase(config.databasePath), previewBaseRegistry: config.previewBaseRegistry
     });
     return json({ workspaceState: observed.observedState, runtimeState: observed.runtimeStack.observedState }, 200);
   } catch (error) {

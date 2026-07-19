@@ -17,6 +17,10 @@ export function terminalTabId(terminalId: string): `terminal:${string}` {
   return `terminal:${terminalId}`;
 }
 
+export function previewTabId(previewId: string): `preview:${string}` {
+  return `preview:${previewId}`;
+}
+
 export function openWorkbenchTab(state: WorkbenchTabState, tab: WorkbenchTab): WorkbenchTabState {
   const existing = state.tabs.find((candidate) => candidate.id === tab.id);
   if (existing !== undefined) return { ...state, activeTabId: existing.id };
