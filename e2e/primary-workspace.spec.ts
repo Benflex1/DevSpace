@@ -38,6 +38,19 @@ async function rejectedWebSocket(url: string, origin: string): Promise<number> {
   });
 }
 
+async function gotoProject(page: import("@playwright/test").Page, projectId: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await page.goto(`/projects/${projectId}`);
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("interrupted by another navigation")) throw error;
+      await page.waitForTimeout(500);
+    }
+  }
+  throw new Error("Project navigation was repeatedly interrupted.");
+}
+
 test("sets up and recovers the real managed primary workspace", async ({ page }) => {
   test.setTimeout(360_000);
   const fixtureJson: unknown = JSON.parse(await readFile(coordinationPath, "utf8"));
@@ -50,19 +63,18 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   const missingProjectResponse = await page.request.get("/projects/018f0f00-0000-7000-8000-ffffffffffff");
   expect(missingProjectResponse.status()).toBe(404);
   await dashboardProject.getByRole("link", { name: "Open project" }).click();
-  const project = page.locator("main.project-page");
+  const project = page.locator("main");
   await expect(page).toHaveURL(new RegExp(`/projects/${fixture.projectId}$`, "u"));
   await expect(project.getByText("Registered — workspace setup pending")).toBeVisible();
   await project.getByLabel("Development container image").fill("node:24-bookworm");
   await project.getByLabel("Configure a task").check();
   await project.getByRole("button", { name: "Set up primary workspace" }).click();
-  await expect(project.getByText("Ready", { exact: true })).toBeVisible({ timeout: 120_000 });
-  await expect(project.getByText("Active revision v1")).toBeVisible();
-  await expect(project.getByText(/Present · [0-9a-f]{12}/u)).toBeVisible();
-  await expect(project.getByText("Primary · stopped")).toBeVisible();
-  await expect(project.getByText(/^clean · [0-9a-f]{12}$/u)).toBeVisible();
-  await expect(project.getByText("No container created")).toBeVisible();
-  await expect(project.getByText("Available", { exact: true })).toBeVisible();
+  await expect(page.locator("main.workbench")).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator(".workbench-breadcrumb")).toContainText("Managed Fixture");
+  await expect(page.locator(".workbench-tabstrip")).toContainText("Open a terminal");
+  await expect(page.locator(".workbench-sidebar")).toContainText("Tasks");
+  await expect(page.locator(".workbench-statusbar")).toContainText("Agent connected");
+  await expect(page.locator(".runtime-chip.absent")).toHaveText("Offline");
   await expect(project.getByRole("button", { name: "Start environment" })).toBeVisible();
 
   const database = new BetterSqlite3(fixture.databasePath, { readonly: true });
@@ -110,7 +122,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect.poll(async () => await fetch(`http://127.0.0.1:3100/projects/${fixture.projectId}`).then((response) => response.status).catch(() => 0), {
     timeout: 30_000
   }).toBe(200);
-  await page.goto(`/projects/${fixture.projectId}`);
+  await gotoProject(page, fixture.projectId);
   await expect(project.getByRole("button", { name: "Retry start" })).toBeVisible();
   await project.getByRole("button", { name: "Retry start" }).click();
   await expect(project.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
@@ -134,16 +146,15 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   const browserContext = page.context();
   await page.close();
   let recoveredPage = await browserContext.newPage();
-  await recoveredPage.goto(`/projects/${fixture.projectId}`);
-  let recovered = recoveredPage.locator("main.project-page");
+  await gotoProject(recoveredPage, fixture.projectId);
+  let recovered = recoveredPage.locator("main.workbench");
   let recoveredTaskGetRequests = 0;
   recoveredPage.on("request", (request) => {
     if (request.method() === "GET" && request.url().endsWith(`/api/projects/${fixture.projectId}/tasks`)) recoveredTaskGetRequests += 1;
   });
-  await expect(recovered.getByText("Ready", { exact: true })).toBeVisible();
-  await expect(recovered.getByText("Primary · running")).toBeVisible();
-  await expect(recovered.getByText(/^clean · [0-9a-f]{12}$/u)).toBeVisible();
-  await expect(recovered.getByText("Running", { exact: true })).toBeVisible();
+  await expect(recovered).toBeVisible();
+  await expect(recovered.locator(".runtime-chip.running")).toHaveText("Running");
+  await expect(recovered.locator(".workbench-sidebar")).toContainText("Terminals");
   await recovered.getByRole("button", { name: "Stop environment" }).click();
   await expect(recovered.getByText("Stopped", { exact: true })).toBeVisible({ timeout: 120_000 });
   const stoppedRestart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
@@ -152,10 +163,8 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect.poll(async () => await fetch(`http://127.0.0.1:3100/projects/${fixture.projectId}`).then((response) => response.status).catch(() => 0), {
     timeout: 30_000
   }).toBe(200);
-  await recoveredPage.goto(`/projects/${fixture.projectId}`);
-  await expect(recovered.getByText("Primary · stopped")).toBeVisible();
-  await expect(recovered.getByText(/^clean · [0-9a-f]{12}$/u)).toBeVisible();
-  await expect(recovered.getByText("Stopped", { exact: true })).toBeVisible();
+  await gotoProject(recoveredPage, fixture.projectId);
+  await expect(recovered.locator(".runtime-chip.stopped")).toHaveText("Stopped");
   await recovered.getByRole("button", { name: "Start environment" }).click();
   await expect(recovered.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
 
@@ -166,10 +175,10 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   expect(runtimeRows).toEqual([{ runtime_generation: 1, desired_state: "running", observed_state: "running" }]);
   expect(serviceRows).toEqual([{ desired_state: "running", observed_state: "running" }]);
 
-  await expect(recovered.getByRole("button", { name: "Open terminal" })).toBeEnabled();
-  await recovered.getByRole("button", { name: "Open terminal" }).click();
-  await expect(recovered.getByText("active", { exact: true })).toBeVisible({ timeout: 30_000 });
-  const terminal = recovered.getByRole("region", { name: "Workspace terminal" });
+  await expect(recovered.getByRole("button", { name: "Create terminal", exact: true })).toBeEnabled();
+  await recovered.getByRole("button", { name: "Create terminal", exact: true }).click();
+  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active", { timeout: 30_000 });
+  const terminal = recovered.locator(".terminal-tab-surface.is-active");
   await terminal.locator(".xterm-helper-textarea").focus();
   await recoveredPage.keyboard.type("echo terminal-e2e-ok"); await recoveredPage.keyboard.press("Enter");
   await expect(terminal.getByText(/terminal-e2e-ok/u)).toBeVisible();
@@ -187,28 +196,34 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
     const shell = snapshot.execs.find((item) => item.command.at(-1) === "/bin/sh");
     return shell === undefined ? "missing" : `${shell.columns}x${shell.rows}`;
   }).not.toBe("80x24");
-  await terminal.getByRole("button", { name: "Detach" }).click();
-  await expect(recovered.getByText("disconnected", { exact: true })).toBeVisible();
-  await recovered.getByRole("button", { name: "Reconnect" }).click();
-  await expect(recovered.getByText("active", { exact: true })).toBeVisible();
+  await recovered.getByRole("button", { name: "Create terminal tab" }).click();
+  await expect(recovered.getByRole("tab", { name: "Terminal 2" })).toBeVisible();
+  await recovered.getByRole("tab", { name: "Terminal 1" }).click();
+  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active");
+  await expect(recovered.locator(".terminal-tab-surface.is-active")).toContainText("terminal-e2e-ok");
+  await recovered.getByRole("button", { name: "Close Terminal 1" }).click();
+  const detachedTerminal = recovered.locator(".terminal-list li").filter({ hasText: "Terminal 1" });
+  await expect(detachedTerminal).toContainText("disconnected");
+  await detachedTerminal.getByRole("button").click();
+  await expect(recovered.locator(".terminal-tab-surface.is-active")).toBeVisible();
   const webRestart = await fetch("http://127.0.0.1:3199/restart-web", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(webRestart.status).toBe(204);
-  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await recoveredPage.goto(`/projects/${fixture.projectId}`);
-  recovered = recoveredPage.locator("main.project-page");
-  await expect(recovered.getByText("disconnected", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await recovered.getByRole("button", { name: "Reconnect" }).click();
-  await expect(recovered.getByText("active", { exact: true })).toBeVisible();
+  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await gotoProject(recoveredPage, fixture.projectId);
+  recovered = recoveredPage.locator("main.workbench");
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "disconnected" }).first()).toBeVisible({ timeout: 30_000 });
+  await recovered.locator(".terminal-list li").filter({ hasText: "disconnected" }).first().getByRole("button").click();
+  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active");
   const agentRestart = await fetch("http://127.0.0.1:3199/restart-agent", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(agentRestart.status).toBe(204);
   await expect.poll(async () => await fetch(`http://127.0.0.1:3100/projects/${fixture.projectId}`).then((response) => response.status).catch(() => 0), {
     timeout: 30_000
   }).toBe(200);
-  await recoveredPage.goto(`/projects/${fixture.projectId}`);
+  await gotoProject(recoveredPage, fixture.projectId);
   await expect(recoveredPage.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.getByText("lost", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.getByRole("button", { name: "Open new terminal" })).toBeVisible();
-  await recovered.getByRole("button", { name: "Open new terminal" }).click();
-  await expect(recovered.getByText("active", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" }).first()).toBeVisible({ timeout: 30_000 });
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" }).first().getByRole("button")).toBeDisabled();
+  await recovered.getByRole("button", { name: "Create terminal tab" }).click();
+  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active", { timeout: 30_000 });
   const replacementDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
   const terminalRows = replacementDatabase.prepare<TerminalRow>("select id, state from terminal_sessions order by created_at desc, id desc").all();
   replacementDatabase.close();
@@ -216,18 +231,17 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   expect(terminalRows[0]?.id).not.toBe(terminalRow.id);
   expect(terminalRows.find((row) => row.id === terminalRow.id)?.state).toBe("lost");
 
-  await recoveredPage.goto(`/projects/${fixture.projectId}`);
-  recovered = recoveredPage.locator("main.project-page");
-  await expect(recovered.getByText("disconnected", { exact: true })).toBeVisible();
-  await expect(recovered.getByRole("button", { name: "Open new terminal" })).toHaveCount(0);
+  await gotoProject(recoveredPage, fixture.projectId);
+  recovered = recoveredPage.locator("main.workbench");
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" }).first()).toBeVisible();
 
-  await recovered.getByRole("listitem").filter({ hasText: "Check workspace" }).getByRole("button", { name: "Run" }).click();
+  await recovered.locator(".sidebar-task-list li").filter({ hasText: "Check workspace" }).getByRole("button", { name: "Run" }).click();
   await expect(recovered.getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.getByText("Exit code: 0", { exact: true })).toBeVisible();
+  await expect(recovered.locator(".sidebar-task-runs")).toContainText("Exit code: 0");
   expect(recoveredTaskGetRequests).toBeGreaterThan(0);
   const taskWebRestart = await fetch("http://127.0.0.1:3199/restart-web", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(taskWebRestart.status).toBe(204);
-  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await recoveredPage.goto(`/projects/${fixture.projectId}`);
-  recovered = recoveredPage.locator("main.project-page");
-  await expect(recovered.locator(".task-runs li", { hasText: "check" }).first().getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await gotoProject(recoveredPage, fixture.projectId);
+  recovered = recoveredPage.locator("main.workbench");
+  await expect(recovered.locator(".sidebar-task-runs").filter({ hasText: "check" }).getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
 });

@@ -368,16 +368,6 @@ export function openProjectDatabase(path: string, options: {
         if (stack?.observedState !== "running" || service?.observedState !== "running") {
           throw new ProjectSetupConflictError("The exact development container is not running.");
         }
-        const existing = db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, context.workspace.id)).all()
-          .find((terminal) => ["creating", "active", "disconnected", "closing"].includes(terminal.state));
-        if (existing !== undefined) {
-          const retained = db.select().from(operations).where(and(eq(operations.resourceId, existing.id), eq(operations.operationName, "terminal.create")))
-            .orderBy(desc(operations.createdAt)).get();
-          if (retained !== undefined && (retained.state === "accepted" || retained.state === "running")) {
-            return { operation: retained, workspaceId: context.workspace.id, terminalId: existing.id };
-          }
-          throw new ProjectSetupConflictError("Close the existing terminal before opening another one.");
-        }
         const terminalId = createId();
         const timestamp = now().toISOString();
         db.insert(processes).values({ id: terminalId, workspaceId: context.workspace.id, serviceId: service.id,

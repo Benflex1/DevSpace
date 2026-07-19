@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
-import { ExecutionControls } from "../../execution-controls.js";
-import { RuntimeControls } from "../../runtime-controls.js";
+import { ProjectWorkbench } from "../../project-workbench.js";
 import { WorkspaceSetupForm } from "../../workspace-setup-form.js";
 import { authenticateHeaders } from "../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../server/config.js";
@@ -24,6 +23,15 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
     : inspectedWorkspace?.observedState ?? `${project.primaryWorkspace?.observedState ?? "unknown"} (persisted)`;
   const inspectedRuntimeState = inspectedWorkspace?.runtimeStack.observedState ?? project.runtime?.observedState ?? "absent";
   const runtimeState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping" : inspectedRuntimeState;
+
+  if (project.state === "ready" && project.primaryWorkspace !== null) {
+    return <ProjectWorkbench projectId={project.id} workspaceId={project.primaryWorkspace.id} projectName={project.name}
+      branchName={project.primaryWorkspace.branchName} repositoryUrl={project.repositoryUrl} runtimeState={runtimeState}
+      runtimeRunning={runtimeState === "running"} runtimeAvailable={runtimeAvailability === "available"} agentStatus={agentStatus}
+      agentReachable={agentReachable} activeAction={activeAction} canStart={runtimeOperation?.canStart === true}
+      canStop={runtimeOperation?.canStop === true} retryStart={runtimeOperation?.canRetryStart === true}
+      initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} actor={actor.identity} />;
+  }
 
   return <main className="project-page">
     <header className="project-header">
@@ -52,24 +60,6 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       <WorkspaceSetupForm projectId={project.id} agentReachable={agentReachable} />
     </section>}
 
-    {project.state === "ready" && project.primaryWorkspace !== null && <>
-      <section className="workspace-section" aria-labelledby="runtime-heading">
-        <h2 id="runtime-heading">Workspace / Runtime</h2>
-        <dl>
-          <div><dt>Workspace</dt><dd>{project.primaryWorkspace.name} · {project.primaryWorkspace.branchName}</dd></div>
-          <div><dt>Git state</dt><dd>{live === null ? "Inspection unavailable" : `${live.workspaceGit.dirty ? "dirty" : "clean"} · ${shortCommit(live.workspaceGit.headCommit)}`}</dd></div>
-          <div><dt>Managed repository</dt><dd>{live === null ? "Inspection unavailable" : `Present · ${shortCommit(live.storeGit.headCommit)}`}</dd></div>
-        </dl>
-        <RuntimeControls projectId={project.id} runtimeAvailable={runtimeAvailability === "available"} activeAction={activeAction}
-          canStart={runtimeOperation?.canStart === true} canStop={runtimeOperation?.canStop === true}
-          retryStart={runtimeOperation?.canRetryStart === true} />
-      </section>
-      <section className="workspace-section execution-section" aria-labelledby="execution-heading">
-        <h2 id="execution-heading">Execution</h2>
-        <ExecutionControls projectId={project.id} workspaceId={project.primaryWorkspace.id} runtimeRunning={runtimeState === "running"}
-          initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} />
-      </section>
-    </>}
     <footer>Signed in as {actor.identity}</footer>
   </main>;
 }
