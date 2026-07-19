@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -215,6 +215,9 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(recovered.locator(".terminal-list li").filter({ hasText: "active" }).first()).toBeVisible();
   const agentRestart = await fetch("http://127.0.0.1:3199/restart-agent", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(agentRestart.status).toBe(204);
+  const executionOwnershipDirectory = path.join(fixture.managedRoot, "state", "ownership", "executions");
+  const executionOwnershipEntries = await readdir(executionOwnershipDirectory);
+  expect(executionOwnershipEntries.every((entry) => entry.endsWith(".json"))).toBe(true);
   await expect.poll(async () => await fetch(`http://127.0.0.1:3100/projects/${fixture.projectId}`).then((response) => response.status).catch(() => 0), {
     timeout: 30_000
   }).toBe(200);

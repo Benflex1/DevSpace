@@ -80,7 +80,9 @@ function watchChild(child) {
   child.once("exit", (code) => { if (!stopping && !restarting && code !== 0) void stop(code ?? 1); });
 }
 function startAgent() {
-  agentChild = spawn("pnpm", ["exec", "tsx", "apps/agent/test/e2e-server.ts"], { env: environment, stdio: "inherit", detached: true });
+  agentChild = spawn(process.execPath, ["--import", "tsx", "apps/agent/test/e2e-server.ts"], {
+    env: environment, stdio: "inherit", detached: true
+  });
   watchChild(agentChild);
 }
 function startWeb() {
