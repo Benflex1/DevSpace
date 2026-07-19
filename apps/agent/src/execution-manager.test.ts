@@ -496,6 +496,42 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
   expect(later).toBeDefined();
 });
 
+test("distinct terminals keep distinct Docker exec identities and independent attachments", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-identities-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const secondTerminalId = "018f0f00-0000-7000-8000-000000000005";
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let creates = 0;
+  const engine = {
+    createExec: async () => `exec-${++creates}`,
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" }),
+    resizeExec: async () => undefined
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId: secondTerminalId });
+
+  const executions = (manager as unknown as { executions: Map<string, { record: { execId: string | null } }> }).executions;
+  expect(executions.get(terminalId)?.record.execId).toBe("exec-1");
+  expect(executions.get(secondTerminalId)?.record.execId).toBe("exec-2");
+
+  const firstSocket = new FakeSocket();
+  const secondSocket = new FakeSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
+  await manager.reserveTerminalAttachment(secondTerminalId).attach(secondSocket as never);
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(() => manager.reserveTerminalAttachment(secondTerminalId)).toThrow("cannot accept another attachment");
+
+  firstSocket.readyState = firstSocket.CLOSED; firstSocket.emit("close");
+  secondSocket.readyState = secondSocket.CLOSED; secondSocket.emit("close");
+});
+
 test("attachment cleanup persistence failure becomes lost without overlap or an immortal CLOSING lock", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-cleanup-failure-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });

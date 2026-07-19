@@ -4,23 +4,17 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
-
-export type TerminalUiState = "connecting" | "active" | "disconnected" | "closed" | "failed" | "lost";
+import { isTerminalAttachableState, reconcileTerminalState, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
 export type TerminalView = { id: string; processId: string; state: string };
 
-export function terminalUiState(view: TerminalView): TerminalUiState {
-  return view.state === "active" ? "disconnected" : (view.state as TerminalUiState);
-}
-
-export function TerminalTab({ projectId, workspaceId, terminal, active, onStateChange, onRefresh }: {
+export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh }: {
   projectId: string;
   workspaceId: string;
   terminal: TerminalView;
   active: boolean;
-  onStateChange: (terminalId: string, state: TerminalUiState) => void;
   onRefresh: () => void;
 }) {
-  const [state, setState] = useState<TerminalUiState>(() => terminalUiState(terminal));
+  const [state, setState] = useState<TerminalUiState>(() => terminalUiState(terminal.state));
   const [message, setMessage] = useState("");
   const terminalElement = useRef<HTMLDivElement>(null);
   const xterm = useRef<Terminal | null>(null);
@@ -28,12 +22,22 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onStateC
   const activeRef = useRef(active);
   activeRef.current = active;
   const socket = useRef<WebSocket | null>(null);
-  const stateChange = useRef(onStateChange);
-  stateChange.current = onStateChange;
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const authoritativeState = useRef(terminal.state);
+  authoritativeState.current = terminal.state;
+  const closeAttachment = useRef<(() => void) | null>(null);
   const updateState = (next: TerminalUiState) => {
     setState(next);
-    stateChange.current(terminal.id, next);
   };
+
+  useEffect(() => {
+    const reconciliation = reconcileTerminalState(terminal.state, stateRef.current);
+    if (!reconciliation.closeAttachment) return;
+    updateState(reconciliation.state);
+    setMessage(terminal.state === "creating" ? "Terminal is still being created." : "This terminal is no longer attachable.");
+    closeAttachment.current?.();
+  }, [terminal.id, terminal.state]);
 
   useEffect(() => {
     const element = terminalElement.current;
@@ -61,6 +65,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onStateC
     let terminalEnded = false;
     let disposeResources = () => undefined;
     const start = window.setTimeout(() => {
+      if (!isTerminalAttachableState(terminal.state)) {
+        updateState(terminalUiState(terminal.state));
+        return;
+      }
       updateState("connecting");
       setMessage("");
       const terminalInstance = new Terminal({ cursorBlink: true, convertEol: true, fontSize: 14, screenReaderMode: true,
@@ -148,12 +156,18 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onStateC
         webSocket.onerror = () => undefined;
       };
       connectSocket();
+      closeAttachment.current = () => {
+        terminalEnded = true;
+        if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        currentSocket?.close();
+      };
       disposeResources = () => {
         dataDisposable.dispose();
         binaryDisposable.dispose();
         resize.disconnect();
         window.removeEventListener("resize", scheduleResize);
-        if (ready && currentSocket?.readyState === WebSocket.OPEN) {
+        if (ready && isTerminalAttachableState(authoritativeState.current) && currentSocket?.readyState === WebSocket.OPEN) {
           currentSocket.send(encodeTerminalClientFrame({ type: "detach" }));
         }
         if (currentSocket?.readyState !== WebSocket.CLOSED) currentSocket?.close();
@@ -170,10 +184,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onStateC
       if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
       if (resizeRetryTimer !== null) window.clearTimeout(resizeRetryTimer);
       disposeResources();
+      closeAttachment.current = null;
     };
     // A tab owns one terminal attachment for its entire mounted lifetime.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, terminal.id, workspaceId]);
+  }, [projectId, terminal.id, terminal.state, workspaceId]);
 
   return <section className={`terminal-tab-surface ${active ? "is-active" : "is-inactive"}`} aria-hidden={!active}
     aria-label={`Terminal ${terminal.id}`} role={active ? "region" : undefined}>
@@ -183,6 +197,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onStateC
     </div>
     <div ref={terminalElement} className="terminal-canvas" />
     {message !== "" && <p className="message" role={active ? "status" : undefined}>{message}</p>}
-    {active && ["closed", "failed", "lost"].includes(state) && <p className="terminal-help">This terminal is no longer attachable. Create a replacement from the sidebar.</p>}
+    {active && ["creating", "closing", "closed", "failed", "lost"].includes(state) && <p className="terminal-help">
+      {state === "creating" ? "This terminal is still being created." : "This terminal is no longer attachable. Create a replacement from the sidebar."}
+    </p>}
   </section>;
 }

@@ -64,8 +64,6 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
   </main>;
 }
 
-function shortCommit(commit: string | null): string { return commit === null ? "unborn repository" : commit.slice(0, 12); }
-
 function projectStateLabel(state: "registering" | "ready" | "invalid" | "archived"): string {
   return { registering: "Registered — workspace setup pending", ready: "Ready", invalid: "Needs attention", archived: "Archived" }[state];
 }

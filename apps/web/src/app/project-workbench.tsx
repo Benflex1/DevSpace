@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { TerminalTab, type TerminalUiState, type TerminalView } from "./terminal-tab.js";
+import { isTerminalAttachableState } from "./terminal-lifecycle.js";
+import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import {
   activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
@@ -87,16 +88,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, [refresh, runs]);
 
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);
-  const updateTerminalState = useCallback((terminalId: string, state: TerminalUiState) => {
-    setTerminals((current) => current.map((terminal) => terminal.id === terminalId ? { ...terminal, state } : terminal));
-  }, []);
+  const actionsAvailable = runtimeRunning && runtimeAvailable && agentReachable && agentStatus === "connected";
   const openTerminalTab = useCallback((terminal: TerminalView) => {
+    if (!actionsAvailable || !isTerminalAttachableState(terminal.state)) return;
     setTabs((current) => openWorkbenchTab(current, {
       id: terminalTabId(terminal.id), kind: "terminal", terminalId: terminal.id, title: getTerminalTitle(terminal)
     }));
-  }, [getTerminalTitle]);
+  }, [actionsAvailable, getTerminalTitle]);
   const createTerminal = async () => {
-    if (!runtimeRunning) return;
+    if (!actionsAvailable) return;
     setMessage("Creating terminal…");
     const response = await fetch(`/api/projects/${projectId}/terminals`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "create" }) });
@@ -106,16 +106,19 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       return;
     }
     const data = await refresh();
-    const terminal = data.terminals.find((candidate) => candidate.id === body.terminalId)
-      ?? { id: body.terminalId, processId: body.terminalId, state: "disconnected" };
+    const terminal = data.terminals.find((candidate) => candidate.id === body.terminalId);
+    if (terminal === undefined || !isTerminalAttachableState(terminal.state)) {
+      setMessage("Terminal creation succeeded, but its current state is not attachable.");
+      return;
+    }
     openTerminalTab(terminal);
     setMessage("");
   };
   const closeTab = (tab: WorkbenchTab) => {
     setTabs((current) => closeWorkbenchTab(current, tab.id));
-    if (tab.kind === "terminal") updateTerminalState(tab.terminalId, "disconnected");
   };
   const runTask = async (taskKey: string) => {
+    if (!actionsAvailable) return;
     setMessage("Starting task…");
     const response = await fetch(`/api/projects/${projectId}/tasks`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "run", taskKey }) });
@@ -129,15 +132,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
       retryStart={retryStart} />
     <div className="workbench-body">
-      <WorkbenchSidebar terminals={terminals} getTerminalTitle={getTerminalTitle} tabs={tabs} runtimeRunning={runtimeRunning} tasks={tasks} runs={runs}
+      <WorkbenchSidebar terminals={terminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
         <WorkbenchTabStrip tabs={tabs} onActivate={(tabId) => setTabs((current) => activateWorkbenchTab(current, tabId))}
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
-          canCreateTerminal={runtimeRunning} />
+          canCreateTerminal={actionsAvailable} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} projectId={projectId} workspaceId={workspaceId}
-          onTerminalStateChange={updateTerminalState} onRefresh={() => { refresh().catch(() => undefined); }} />
+          onRefresh={() => { refresh().catch(() => undefined); }} />
         {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
       </section>
     </div>
@@ -162,8 +165,8 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, runtimeRunning, tasks, runs, onOpenTerminal, onCreateTerminal, onRunTask }: {
-  terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; runtimeRunning: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
+function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, onOpenTerminal, onCreateTerminal, onRunTask }: {
+  terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
   return <aside className="workbench-sidebar" aria-label="Project navigation">
@@ -177,12 +180,12 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, runtimeRunning, t
         </button>)}
     </nav>
     <div className="sidebar-section">
-      <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!runtimeRunning}
-        onClick={onCreateTerminal} aria-label="Create terminal" title={runtimeRunning ? "Create terminal" : "Start the runtime to create a terminal"}>+</button></div>
+      <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!actionsAvailable}
+        onClick={onCreateTerminal} aria-label="Create terminal" title={actionsAvailable ? "Create terminal" : "The Agent and runtime must be available to create a terminal"}>+</button></div>
       {terminals.length === 0 ? <p className="sidebar-empty">No terminal sessions yet.</p> : <ul className="terminal-list">
         {terminals.map((terminal) => {
           const tab = tabs.tabs.find((candidate) => candidate.kind === "terminal" && candidate.terminalId === terminal.id);
-          const attachable = ["active", "disconnected", "creating"].includes(terminal.state);
+          const attachable = actionsAvailable && isTerminalAttachableState(terminal.state);
           return <li key={terminal.id} className={tab?.id === tabs.activeTabId ? "selected" : ""}>
             <button type="button" disabled={!attachable} onClick={() => onOpenTerminal(terminal)} title={attachable ? "Open terminal tab" : "This terminal is no longer attachable"}>
               <span className={`sidebar-state ${terminal.state}`} aria-hidden="true" />
@@ -197,7 +200,7 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, runtimeRunning, t
       <div className="sidebar-section-heading"><h2>Tasks</h2></div>
       {tasks.length === 0 ? <p className="sidebar-empty">No configured tasks.</p> : <ul className="sidebar-task-list">
         {tasks.map((task) => <li key={task.key}><span><strong>{task.displayName}</strong><code>{task.key}</code></span>
-          <button type="button" disabled={!runtimeRunning} onClick={() => onRunTask(task.key)}>Run</button></li>)}
+          <button type="button" disabled={!actionsAvailable} onClick={() => onRunTask(task.key)}>Run</button></li>)}
       </ul>}
       {runs.length > 0 && <div className="sidebar-task-runs"><h3>Recent runs</h3>{runs.slice(0, 5).map((run) =>
         <div key={run.id}><code>{run.taskKey}</code><span className={`run-state ${run.state}`}>{run.state}</span>{run.exitCode !== null && <span>Exit code: {run.exitCode}</span>}</div>)}</div>}
@@ -219,15 +222,15 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, projectId, workspaceId, onTerminalStateChange, onRefresh }: {
+function WorkbenchSurface({ tabs, terminalById, projectId, workspaceId, onRefresh }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; projectId: string; workspaceId: string;
-  onTerminalStateChange: (terminalId: string, state: TerminalUiState) => void; onRefresh: () => void;
+  onRefresh: () => void;
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a terminal to start working in this project.</p></div>}
     {tabs.tabs.map((tab) => tab.kind === "terminal" ? <TerminalTab key={tab.id} projectId={projectId} workspaceId={workspaceId}
       terminal={terminalById.get(tab.terminalId) ?? { id: tab.terminalId, processId: tab.terminalId, state: "disconnected" }}
-      active={tab.id === tabs.activeTabId} onStateChange={onTerminalStateChange} onRefresh={onRefresh} /> : null)}
+      active={tab.id === tabs.activeTabId} onRefresh={onRefresh} /> : null)}
   </div>;
 }
 
