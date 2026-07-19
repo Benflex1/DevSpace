@@ -11,7 +11,7 @@ test("registers and reloads a persisted project through the real Web and Agent s
   let project = page.locator("article", { has: page.getByRole("heading", { name: "Rocket" }) });
   await expect(project.getByRole("heading", { name: "Rocket" })).toBeVisible();
   await expect(project.getByText("Registered — workspace setup pending")).toBeVisible();
-  await expect(project.getByText("main", { exact: true })).toBeVisible();
+  await expect(project.getByRole("link", { name: "Open project" })).toBeVisible();
   await page.reload();
   project = page.locator("article", { has: page.getByRole("heading", { name: "Rocket" }) });
   await expect(project.getByRole("heading", { name: "Rocket" })).toBeVisible();

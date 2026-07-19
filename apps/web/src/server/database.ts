@@ -22,6 +22,11 @@ export interface ProjectView {
   readonly createdAt: string;
 }
 
+export interface ProjectSummaryView extends ProjectView {
+  readonly primaryWorkspace: null | { readonly name: string; readonly observedState: string };
+  readonly runtime: null | { readonly observedState: string };
+}
+
 export interface ManagedProjectView extends ProjectView {
   readonly activeRevision: null | { readonly id: string; readonly number: number; readonly hash: string };
   readonly primaryWorkspace: null | {
@@ -72,43 +77,59 @@ export function openProjectDatabase(path: string, options: {
   const db = drizzle({ client });
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? uuidv7;
+  const readManagedProject = (project: Project): ManagedProjectView => {
+    const revision = project.activeConfigRevisionId === null ? undefined
+      : db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.id, project.activeConfigRevisionId)).get();
+    const workspace = project.primaryWorkspaceId === null ? undefined
+      : db.select().from(workspaces).where(eq(workspaces.id, project.primaryWorkspaceId)).get();
+    const runtime = workspace === undefined ? undefined
+      : db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, workspace.id)).get();
+    const development = runtime === undefined ? undefined : db.select().from(workspaceServices).where(and(
+      eq(workspaceServices.runtimeStackId, runtime.id), eq(workspaceServices.kind, "development")
+    )).get();
+    const projectOptions = revision === undefined ? null : parseProjectOptionsV1(JSON.parse(revision.configurationJson));
+    const recentRuns = workspace === undefined ? [] : db.select().from(taskRuns).where(eq(taskRuns.workspaceId, workspace.id))
+      .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id)).limit(20).all();
+    const terminalRows = workspace === undefined ? [] : db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, workspace.id))
+      .orderBy(desc(terminalSessions.createdAt), desc(terminalSessions.id)).limit(10).all();
+    return {
+      ...toView(project),
+      activeRevision: revision === undefined ? null : { id: revision.id, number: revision.revisionNumber, hash: revision.configurationHash },
+      primaryWorkspace: workspace === undefined ? null : {
+        id: workspace.id, name: workspace.name, branchName: workspace.branchName,
+        desiredState: workspace.desiredState, observedState: workspace.observedState, dirtyState: workspace.dirtyState
+      },
+      runtime: runtime === undefined ? null : { id: runtime.id, desiredState: runtime.desiredState,
+        observedState: runtime.observedState, generation: runtime.runtimeGeneration,
+        errorMessage: runtime.lastErrorMessage, serviceObservedState: development?.observedState ?? null },
+      tasks: projectOptions?.tasks.map((task) => ({ key: task.key, displayName: task.displayName })) ?? [],
+      taskRuns: recentRuns.map((run) => { const process = run.processId === null ? undefined
+        : db.select().from(processes).where(eq(processes.id, run.processId)).get();
+        return { id: run.id, taskKey: run.taskKey, processId: run.processId, state: run.state,
+          processState: process?.observedState ?? null, exitCode: run.exitCode }; }),
+      terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId, state: terminal.state }))
+    };
+  };
   return {
     close: () => client.close(),
     listProjects: (): ProjectView[] => db.select().from(projects).orderBy(desc(projects.createdAt)).all().map(toView),
-    listManagedProjects(): ManagedProjectView[] {
+    listProjectSummaries(): ProjectSummaryView[] {
       return db.select().from(projects).orderBy(desc(projects.createdAt)).all().map((project) => {
-        const revision = project.activeConfigRevisionId === null ? undefined
-          : db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.id, project.activeConfigRevisionId)).get();
         const workspace = project.primaryWorkspaceId === null ? undefined
           : db.select().from(workspaces).where(eq(workspaces.id, project.primaryWorkspaceId)).get();
         const runtime = workspace === undefined ? undefined
           : db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, workspace.id)).get();
-        const development = runtime === undefined ? undefined : db.select().from(workspaceServices).where(and(
-          eq(workspaceServices.runtimeStackId, runtime.id), eq(workspaceServices.kind, "development")
-        )).get();
-        const options = revision === undefined ? null : parseProjectOptionsV1(JSON.parse(revision.configurationJson));
-        const recentRuns = workspace === undefined ? [] : db.select().from(taskRuns).where(eq(taskRuns.workspaceId, workspace.id))
-          .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id)).limit(20).all();
-        const terminalRows = workspace === undefined ? [] : db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, workspace.id))
-          .orderBy(desc(terminalSessions.createdAt), desc(terminalSessions.id)).limit(10).all();
-        return {
-          ...toView(project),
-          activeRevision: revision === undefined ? null : { id: revision.id, number: revision.revisionNumber, hash: revision.configurationHash },
-          primaryWorkspace: workspace === undefined ? null : {
-            id: workspace.id, name: workspace.name, branchName: workspace.branchName,
-            desiredState: workspace.desiredState, observedState: workspace.observedState, dirtyState: workspace.dirtyState
-          },
-          runtime: runtime === undefined ? null : { id: runtime.id, desiredState: runtime.desiredState,
-            observedState: runtime.observedState, generation: runtime.runtimeGeneration,
-            errorMessage: runtime.lastErrorMessage, serviceObservedState: development?.observedState ?? null },
-          tasks: options?.tasks.map((task) => ({ key: task.key, displayName: task.displayName })) ?? [],
-          taskRuns: recentRuns.map((run) => { const process = run.processId === null ? undefined
-            : db.select().from(processes).where(eq(processes.id, run.processId)).get();
-            return { id: run.id, taskKey: run.taskKey, processId: run.processId, state: run.state,
-              processState: process?.observedState ?? null, exitCode: run.exitCode }; }),
-          terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId, state: terminal.state }))
-        };
+        return { ...toView(project), primaryWorkspace: workspace === undefined ? null
+          : { name: workspace.name, observedState: workspace.observedState },
+        runtime: runtime === undefined ? null : { observedState: runtime.observedState } };
       });
+    },
+    listManagedProjects(): ManagedProjectView[] {
+      return db.select().from(projects).orderBy(desc(projects.createdAt)).all().map(readManagedProject);
+    },
+    getManagedProject(projectId: string): ManagedProjectView | undefined {
+      const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
+      return project === undefined ? undefined : readManagedProject(project);
     },
     createProject(input: CreateProjectInput): ProjectView {
       const projectId = createId();

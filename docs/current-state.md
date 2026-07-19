@@ -13,6 +13,10 @@ Milestone 1 — in progress.
 - Cloudflare Access JWT validation in production, with an explicit local development auth mode.
 - Persisted projects are shown as `Registered — workspace setup pending` and remain in the
   `registering` state until primary-workspace setup completes.
+- The dashboard is a lightweight project overview with Agent status, summary cards, and Add
+  Project. Project-scoped setup, Git/workspace inspection, runtime controls, terminal, configured
+  tasks, and recent task runs live at `/projects/[projectId]`, which performs exact server-owned
+  project lookup and returns normal not-found behavior for unknown IDs.
 - Onboarding currently accepts HTTPS Git repository URLs without query parameters; SSH identities
   and repository credential storage are not implemented.
 - A registered repository-backed project can activate an immutable Project Options v1 revision
@@ -77,6 +81,11 @@ Milestone 1 — in progress.
   concepts before Docker side effects with the typed runtime-policy violation. Task Stop and forceful
   terminal Close fail closed with contract-valid state conflicts; stopping the whole workspace
   runtime may still reclaim all container processes through the exact container lifecycle.
+- Project task state refresh is targeted: the browser refreshes after task actions and polls only
+  while observed task runs are `queued`, `starting`, or `running`; idle project pages and terminal
+  sessions do not create a permanent task-endpoint polling loop. Terminal sizing remains driven by
+  xterm.js FitAddon, stable visible layout measurements, ResizeObserver, viewport changes, and
+  deduplicated PTY resize frames.
 - Agent-private task-start evidence advances through durable `reserved`, `exec-created`, private
   `start-intent`/failure evidence, and `started` phases, bound to the exact accepted operation and
   request before Docker sees its first side effect. Exact replay classifies the retained exec using

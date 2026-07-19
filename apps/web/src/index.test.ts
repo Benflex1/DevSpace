@@ -92,3 +92,13 @@ test("does not mislabel a non-slug uniqueness violation as a duplicate slug", as
   expect(database.listAuditEvents()).toHaveLength(1);
   database.close();
 });
+
+test("reads dashboard summaries separately and resolves only the exact managed project", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-web-db-")); directories.push(directory);
+  const database = openProjectDatabase(path.join(directory, "devspace.sqlite"), { createId: () => ids[0]! });
+  const created = database.createProject({ name: "Rocket", slug: "rocket", repositoryUrl: "https://example.com/rocket.git", defaultBranch: "main", actor: "actor" });
+  expect(database.listProjectSummaries()).toEqual([expect.objectContaining({ id: created.id, name: "Rocket", primaryWorkspace: null, runtime: null })]);
+  expect(database.getManagedProject(created.id)).toMatchObject({ id: created.id, state: "registering", tasks: [], taskRuns: [], terminals: [] });
+  expect(database.getManagedProject("018f0f00-0000-7000-8000-ffffffffffff")).toBeUndefined();
+  database.close();
+});

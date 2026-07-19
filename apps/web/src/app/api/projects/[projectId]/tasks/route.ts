@@ -12,7 +12,7 @@ export async function GET(request: Request, context: { params: Promise<{ project
   try {
     const config = readWebRuntimeConfig(); await authenticateHeaders(request.headers, config.auth);
     const database = getProjectDatabase(config.databasePath); await reconcileExecutions({ database, agent: createAgentClient(config.agentSocketPath) });
-    const { projectId } = await context.params; const project = database.listManagedProjects().find((item) => item.id === projectId);
+    const { projectId } = await context.params; const project = database.getManagedProject(projectId);
     if (project === undefined) return json({ message: "The project was not found." }, 404);
     return json({ tasks: project.tasks, taskRuns: project.taskRuns, terminals: project.terminals }, 200);
   } catch (error) {
