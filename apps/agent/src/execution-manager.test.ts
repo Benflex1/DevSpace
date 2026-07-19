@@ -461,6 +461,16 @@ class FakeSocket extends EventEmitter {
   terminate(): void { this.readyState = this.CLOSED; queueMicrotask(() => this.emit("close")); }
 }
 
+async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, terminalId: string): Promise<void> {
+  let cleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { cleanup = manager.reserveTerminalAttachment(terminalId); break; }
+    catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
+  }
+  expect(cleanup).toBeDefined();
+  cleanup?.release();
+}
+
 test("a CLOSING terminal attachment retains the slot until close cleanup has persisted", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-attachment-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -502,14 +512,7 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
     .toMatchObject({ type: "terminal", identity: { terminalId }, state: "active" });
   reopened.readyState = reopened.CLOSED;
   reopened.emit("close");
-
-  let finalCleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try { finalCleanup = manager.reserveTerminalAttachment(terminalId); break; }
-    catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
-  }
-  expect(finalCleanup).toBeDefined();
-  finalCleanup?.release();
+  await waitForTerminalAttachmentCleanup(manager, terminalId);
 });
 
 test("an attached terminal process exit becomes closed without requiring a reopen", async () => {
@@ -575,6 +578,8 @@ test("distinct terminals keep distinct Docker exec identities and independent at
 
   firstSocket.readyState = firstSocket.CLOSED; firstSocket.emit("close");
   secondSocket.readyState = secondSocket.CLOSED; secondSocket.emit("close");
+  await waitForTerminalAttachmentCleanup(manager, terminalId);
+  await waitForTerminalAttachmentCleanup(manager, secondTerminalId);
 });
 
 test("attachment cleanup persistence failure becomes lost without overlap or an immortal CLOSING lock", async () => {
