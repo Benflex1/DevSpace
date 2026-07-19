@@ -34,4 +34,3 @@ describe("Workbench tab state", () => {
     expect(closeWorkbenchTab(state, "terminal:one").activeTabId).toBe("terminal:three");
   });
 });
-

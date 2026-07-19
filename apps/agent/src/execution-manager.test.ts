@@ -502,6 +502,14 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
     .toMatchObject({ type: "terminal", identity: { terminalId }, state: "active" });
   reopened.readyState = reopened.CLOSED;
   reopened.emit("close");
+
+  let finalCleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { finalCleanup = manager.reserveTerminalAttachment(terminalId); break; }
+    catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
+  }
+  expect(finalCleanup).toBeDefined();
+  finalCleanup?.release();
 });
 
 test("an attached terminal process exit becomes closed without requiring a reopen", async () => {

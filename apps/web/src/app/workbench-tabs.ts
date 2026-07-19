@@ -35,4 +35,3 @@ export function closeWorkbenchTab(state: WorkbenchTabState, tabId: string): Work
   const fallback = tabs[index] ?? tabs[index - 1] ?? null;
   return { tabs, activeTabId: fallback?.id ?? null };
 }
-
