@@ -40,6 +40,17 @@ function pattern(value: string) {
   return result.value;
 }
 
+function compositionValues(input: {
+  readonly pattern: string;
+  readonly project: DnsLabel;
+  readonly workspace: DnsLabel;
+  readonly preview: DnsLabel;
+  readonly shortId: DnsLabel;
+}) {
+  const values = { project: input.project, workspace: input.workspace, preview: input.preview, shortId: input.shortId };
+  return Object.fromEntries(Object.entries(values).filter(([name]) => input.pattern.includes(`{${name}}`))) as Partial<typeof values>;
+}
+
 /**
  * Converts one immutable Project Options preview into the Web-owned durable row.
  * This function deliberately has no runtime, Docker, gateway, or lease side effects.
@@ -48,12 +59,13 @@ export function materializePreview(input: PreviewMaterializationInput): NewPrevi
   const { preview } = input;
   const hostnameResult = composePreviewHostname(
     pattern(preview.hostnamePattern),
-    {
+    compositionValues({
+      pattern: preview.hostnamePattern,
       project: label(input.projectSlug, "projectSlug"),
       workspace: label(input.workspaceSlug, "workspaceSlug"),
       preview: label(preview.key, "previewKey"),
       shortId: label(input.id.slice(0, 8), "previewShortId")
-    },
+    }),
     preview.domainBaseId,
     input.previewBaseRegistry
   );

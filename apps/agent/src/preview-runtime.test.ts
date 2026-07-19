@@ -40,6 +40,14 @@ const plan = compileRuntimePlanV1(options);
 const association: RuntimeAssociation = { projectId: ids.projectId, workspaceId: ids.workspaceId, revisionId: ids.revisionId,
   revisionHash: `sha256-jcs-v1:${"1".repeat(64)}`,
   runtimePlanHash: hashRuntimePlanV1(plan), generation: 1 };
+const activation = {
+  ...ids,
+  revisionId: ids.revisionId,
+  previewKey: "web",
+  hostname: "project-workspace-web-018f1f34.preview.example.com",
+  projectSlug: "project",
+  workspaceSlug: "workspace"
+} as const;
 
 class FakeEngine extends DockerEngineClient {
   readonly networks = new Map<string, DockerNetworkInspection>();
@@ -137,17 +145,17 @@ describe("Agent preview runtime policy", () => {
   test("keeps a running workspace with no application listener in the health-waiting state", async () => {
     const probe = new Probe([{ kind: "response", statusCode: 503 }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
-    await fixtureValue.manager.activate({ ...ids, previewKey: "web" }, association, options, ids.operationId);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
     const inspection = await fixtureValue.manager.inspect({ ...ids });
     expect(inspection.observedState).toBe("unhealthy");
     expect(inspection.routePresent).toBe(false);
-    expect(inspection.hostname).toBe("018f1f34-018f1f34-web-018f1f34.preview.example.com");
+    expect(inspection.hostname).toBe(activation.hostname);
   });
 
   test("accepts configured status codes and preserves WebSocket probe metadata", async () => {
     const probe = new Probe([{ kind: "response", statusCode: 200 }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
-    await fixtureValue.manager.activate({ ...ids, previewKey: "web" }, association, options, ids.operationId);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
     await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "healthy", routePresent: false });
     expect(probe.requests[0]).toMatchObject({ leaseId: fixtureValue.bindings[0]!.leaseId, path: "/health", webSocketForwarding: true });
     expect(probe.requests[0]).not.toHaveProperty("host");
@@ -157,7 +165,7 @@ describe("Agent preview runtime policy", () => {
   test("does not retry before the bounded backoff and can become healthy on a later attempt", async () => {
     const probe = new Probe([{ kind: "response", statusCode: 503 }, { kind: "response", statusCode: 200 }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
-    await fixtureValue.manager.activate({ ...ids, previewKey: "web" }, association, options, ids.operationId);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
     await fixtureValue.manager.inspect({ ...ids });
     expect(probe.requests).toHaveLength(1);
     fixtureValue.clock.value = 251;
@@ -169,7 +177,7 @@ describe("Agent preview runtime policy", () => {
     const probe: PreviewGatewayProbe = { probe: async () => await new Promise<PreviewGatewayProbeResult>(() => undefined) };
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
     const started = Date.now();
-    await fixtureValue.manager.activate({ ...ids, previewKey: "web" }, association, options, ids.operationId);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
     expect(Date.now() - started).toBeLessThan(2_000);
     await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy" });
   });
@@ -181,7 +189,7 @@ describe("Agent preview runtime policy", () => {
       services: [{ key: "api", imageReference: "node:24", ports: [{ name: "http", containerPort: 4000 }] }],
       previews: [{ ...rawOptions.previews[0]!, target: { kind: "service", serviceKey: "api" }, containerPort: 4000 }]
     });
-    await expect(fixtureValue.manager.activate({ ...ids, previewKey: "web" }, association, serviceOptions, ids.operationId))
+    await expect(fixtureValue.manager.activate(activation, association, serviceOptions, ids.operationId))
       .rejects.toMatchObject({ code: "RUNTIME_POLICY_VIOLATION", message: expect.stringContaining("unsupported-runtime-policy") });
     expect(fixtureValue.engine.createCalls).toBe(1);
     expect(probe.requests).toHaveLength(0);
@@ -204,10 +212,18 @@ describe("Agent preview runtime policy", () => {
 
   test("loses route eligibility when the exact runtime generation drifts", async () => {
     const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
-    await fixtureValue.manager.activate({ ...ids, previewKey: "web" }, association, options, ids.operationId);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
     const container = [...fixtureValue.engine.containers.values()][0]!;
     container.Config.Labels["devspace.runtime-generation"] = "2";
     fixtureValue.clock.value = 251;
     await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "lost", routePresent: false });
+  });
+
+  test("rejects a hostname that is arbitrary or inconsistent with the exact revision", async () => {
+    const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
+    await expect(fixtureValue.manager.activate({ ...activation, hostname: "arbitrary.example.net" }, association, options, ids.operationId))
+      .rejects.toMatchObject({ code: "PREVIEW_DOMAIN_NOT_APPROVED" });
+    await expect(fixtureValue.manager.activate({ ...activation, projectSlug: "other" }, association, options, ids.operationId))
+      .rejects.toMatchObject({ code: "PREVIEW_DOMAIN_NOT_APPROVED" });
   });
 });

@@ -1,0 +1,26 @@
+{
+  "name": "@devspace/gateway-caddy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
+    "build": "tsc --build tsconfig.build.json --force --pretty false",
+    "test": "pnpm --dir ../.. exec vitest run --project @devspace/gateway-caddy"
+  },
+  "dependencies": {
+    "@devspace/security": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3"
+  }
+}

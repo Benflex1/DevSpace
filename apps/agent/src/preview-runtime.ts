@@ -3,7 +3,8 @@ import { v7 as uuidv7 } from "uuid";
 import path from "node:path";
 import * as z from "zod";
 import {
-  previewInspectionDataSchema, uuidV7Schema, type PreviewInspectionData, type AgentSnapshotResource
+  previewHostnameSchema, previewInspectionDataSchema, uuidV7Schema, type PreviewInspectionData, type AgentSnapshotResource,
+  type ActivatePreviewData
 } from "@devspace/contracts";
 import {
   composePreviewHostname, createApprovedPreviewBase, createApprovedPreviewBaseRegistry,
@@ -21,6 +22,7 @@ import {
 import {
   durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter
 } from "./private-state.js";
+import type { PreviewGatewayAdapterContract as PrivatePreviewGatewayAdapter } from "@devspace/gateway-caddy";
 
 const previewKeySchema = z.string().regex(/^[a-z][a-z0-9-]*$/u);
 const hostnameSchema = z.string().min(1).max(253).refine((value) => value.split(".").every((label) =>
@@ -42,6 +44,23 @@ export type PreviewGatewayProbeResult =
 export interface PreviewGatewayProbe {
   probe(input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult>;
 }
+
+export interface PreviewGatewayRoute {
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly previewId: string;
+  readonly revisionId: string;
+  readonly generation: number;
+  readonly hostname: string;
+  readonly approvedBaseId: string;
+  readonly leaseId: string;
+  readonly hostIp: "127.0.0.1";
+  readonly hostPort: number;
+  readonly webSocketForwarding: boolean;
+}
+
+/** The Agent-facing structural seam for the active private gateway adapter. */
+export interface PreviewGatewayAdapter extends PrivatePreviewGatewayAdapter {}
 
 /** Used until the Checkpoint 3 gateway adapter is installed. It is fail-closed. */
 export class UnavailablePreviewGatewayProbe implements PreviewGatewayProbe {
@@ -79,12 +98,13 @@ const previewStateSchema = z.strictObject({
   revisionHash: z.string().regex(/^sha256-jcs-v1:[0-9a-f]{64}$/u),
   runtimePlanHash: z.string().regex(/^sha256-jcs-v1:[0-9a-f]{64}$/u),
   generation: z.number().int().positive(), hostname: hostnameSchema,
+  domainBaseId: z.string().min(1).max(64).default("unknown"),
   containerPort: z.number().int().min(1).max(65535), healthPath: z.string().regex(/^\//u),
   healthStatuses: z.array(z.number().int().min(100).max(599)).min(1), startupTimeoutSeconds: z.number().int().positive(),
   webSocketForwarding: z.boolean(), leaseId: uuidV7Schema, containerId: z.string().min(1).nullable(),
   desiredState: z.enum(["inactive", "active"]),
   observedState: z.enum(["inactive", "starting", "healthy", "unhealthy", "stopping", "failed", "lost"]),
-  routePresent: z.literal(false), attempt: z.number().int().nonnegative(),
+  routePresent: z.boolean(), attempt: z.number().int().nonnegative(),
   nextAttemptAt: z.number().int().nonnegative(), lastStatusCode: z.number().int().nullable(),
   lastError: z.string().max(256).nullable(), operationId: uuidV7Schema.nullable()
 });
@@ -156,6 +176,15 @@ function safeLabel(value: string, field: string): DnsLabel {
   const result = validateDnsLabel(value, field);
   if (!result.ok) throw new PreviewRuntimeError("PREVIEW_DOMAIN_NOT_APPROVED", `The preview ${field} is not a valid DNS label.`);
   return result.value;
+}
+
+function compositionValues(pattern: string, values: {
+  readonly project: DnsLabel;
+  readonly workspace: DnsLabel;
+  readonly preview: DnsLabel;
+  readonly shortId: DnsLabel;
+}) {
+  return Object.fromEntries(Object.entries(values).filter(([name]) => pattern.includes(`{${name}}`))) as Partial<typeof values>;
 }
 
 export class PreviewLeaseAllocator {
@@ -296,6 +325,13 @@ export class PreviewLeaseAllocator {
     await this.reconcileDetachedLeases();
     return (await this.all()).filter((record) => sameAssociation(record, association));
   }
+  async resolveLease(leaseId: string): Promise<{ readonly leaseId: string; readonly hostIp: "127.0.0.1"; readonly hostPort: number } | null> {
+    const parsedLeaseId = uuidV7Schema.safeParse(leaseId);
+    if (!parsedLeaseId.success) return null;
+    const record = (await this.all()).find((candidate) => candidate.leaseId === parsedLeaseId.data);
+    if (record === undefined || record.state !== "owned" || record.containerId === null) return null;
+    return { leaseId: record.leaseId, hostIp: record.hostIp, hostPort: record.hostPort };
+  }
   async bindContainer(association: RuntimeAssociation, containerId: string, bindings: readonly RuntimePreviewBinding[]): Promise<void> {
     await this.withLock(async () => {
       for (const binding of bindings) {
@@ -346,16 +382,19 @@ export class PreviewRuntimeManager {
     private readonly runtime: WorkspaceRuntimeManager,
     private readonly previewBaseRegistry: ApprovedPreviewBaseRegistry = readPreviewBaseRegistry(),
     writer: AtomicJsonWriter = durableJsonWriter,
-    private readonly probe: PreviewGatewayProbe = new UnavailablePreviewGatewayProbe(),
+    probe: PreviewGatewayProbe = new UnavailablePreviewGatewayProbe(),
     private readonly createId: () => string = uuidv7,
     private readonly clock: PreviewRuntimeClock = { now: () => Date.now() },
-    leasePolicy: PreviewLeasePolicy = readPreviewLeasePolicy()
+    leasePolicy: PreviewLeasePolicy = readPreviewLeasePolicy(),
+    private readonly gateway: PreviewGatewayAdapter | null = null
   ) {
     this.previewsRoot = path.join(path.resolve(stateRoot), "previews");
     this.leases = new PreviewLeaseAllocator(stateRoot, engine, leasePolicy, writer, createId);
     this.writer = writer;
+    this.probe = gateway ?? probe;
   }
   private readonly writer: AtomicJsonWriter;
+  private readonly probe: PreviewGatewayProbe;
   async initialize(): Promise<void> {
     await establishPinnedDirectory(this.previewsRoot);
     await this.leases.initialize();
@@ -371,6 +410,22 @@ export class PreviewRuntimeManager {
   }
   private async save(record: PreviewState): Promise<void> {
     await this.writer.write(previewPath(this.previewsRoot, record.previewId), previewStateSchema.parse(record));
+  }
+  private route(record: PreviewState, lease: PreviewLease): PreviewGatewayRoute {
+    return { projectId: record.projectId, workspaceId: record.workspaceId, previewId: record.previewId,
+      revisionId: record.revisionId, generation: record.generation, hostname: record.hostname,
+      approvedBaseId: record.domainBaseId,
+      leaseId: lease.leaseId, hostIp: lease.hostIp, hostPort: lease.hostPort,
+      webSocketForwarding: record.webSocketForwarding };
+  }
+  private association(record: PreviewState): RuntimeAssociation {
+    return { projectId: record.projectId, workspaceId: record.workspaceId, revisionId: record.revisionId,
+      revisionHash: record.revisionHash, runtimePlanHash: record.runtimePlanHash, generation: record.generation };
+  }
+  private async removeRoute(record: PreviewState): Promise<void> {
+    if (this.gateway === null) return;
+    const lease = (await this.leases.leasesFor(this.association(record))).find((candidate) => candidate.leaseId === record.leaseId);
+    if (lease !== undefined) await this.gateway.removeRoute(this.route(record, lease));
   }
   private config(options: ProjectOptionsV1, previewKey: string, revisionId?: string) {
     const preview = options.previews.find((candidate) => candidate.key === previewKey);
@@ -388,28 +443,39 @@ export class PreviewRuntimeManager {
     });
     return preview;
   }
-  private hostname(association: RuntimeAssociation, previewId: string, preview: ProjectOptionsV1["previews"][number]): string {
+  private validatePersistedHostname(input: Pick<ActivatePreviewData, "hostname" | "projectSlug" | "workspaceSlug">,
+    previewId: string, preview: ProjectOptionsV1["previews"][number]): string {
+    const persisted = previewHostnameSchema.safeParse(input.hostname);
+    if (!persisted.success) throw new PreviewRuntimeError("PREVIEW_DOMAIN_NOT_APPROVED", "The persisted preview hostname is malformed.", {
+      previewId
+    });
     const pattern = validatePreviewHostnamePattern(preview.hostnamePattern);
     if (!pattern.ok) throw new PreviewRuntimeError("PREVIEW_DOMAIN_NOT_APPROVED", "The configured preview hostname pattern is not approved.", {
       previewId
     });
-    const result = composePreviewHostname(pattern.value, {
-      project: safeLabel(association.projectId.slice(0, 8), "project"),
-      workspace: safeLabel(association.workspaceId.slice(0, 8), "workspace"),
+    const result = composePreviewHostname(pattern.value, compositionValues(preview.hostnamePattern, {
+      project: safeLabel(input.projectSlug, "project"),
+      workspace: safeLabel(input.workspaceSlug, "workspace"),
       preview: safeLabel(preview.key, "preview"),
       shortId: safeLabel(previewId.slice(0, 8), "shortId")
-    }, preview.domainBaseId, this.previewBaseRegistry);
+    }), preview.domainBaseId, this.previewBaseRegistry);
     if (!result.ok) throw new PreviewRuntimeError("PREVIEW_DOMAIN_NOT_APPROVED", `The preview hostname is not approved: ${result.error.code}.`, {
       previewId
     });
-    return result.value;
+    if (result.value !== persisted.data) {
+      throw new PreviewRuntimeError("PREVIEW_DOMAIN_NOT_APPROVED", "The persisted preview hostname does not match the exact preview configuration.", {
+        previewId
+      });
+    }
+    return persisted.data;
   }
   private observation(record: PreviewState): PreviewInspectionData {
     return previewInspectionDataSchema.parse({ projectId: record.projectId, workspaceId: record.workspaceId,
       previewId: record.previewId, previewKey: record.previewKey, desiredState: record.desiredState,
-      observedState: record.observedState, routePresent: false, hostname: record.hostname });
+      observedState: record.observedState, routePresent: record.routePresent, hostname: record.hostname });
   }
   private async markRuntimeLoss(record: PreviewState, error: unknown): Promise<PreviewState> {
+    await this.removeRoute(record).catch(() => undefined);
     const next = { ...record, routePresent: false as const,
       observedState: "lost" as const, containerId: null,
       lastError: error instanceof Error ? error.message.slice(0, 256) : "exact-runtime-unavailable" };
@@ -446,7 +512,17 @@ export class PreviewRuntimeManager {
     } finally { if (timeout !== undefined) clearTimeout(timeout); }
     const nextAttemptAt = this.clock.now() + Math.min(30_000, 250 * 2 ** Math.min(attempt - 1, 7));
     if (result.kind === "response" && record.healthStatuses.includes(result.statusCode)) {
-      const next = { ...record, observedState: "healthy" as const, routePresent: false as const,
+      if (this.gateway !== null) {
+        try { await this.gateway.ensureRoute(this.route(record, lease)); }
+        catch (error) {
+          const next = { ...record, observedState: "failed" as const, routePresent: false,
+            attempt, nextAttemptAt, lastStatusCode: result.statusCode,
+            lastError: error instanceof Error ? error.message.slice(0, 256) : "gateway-route-update-failed",
+            containerId: ownership.developmentContainer.id };
+          await this.save(next); return next;
+        }
+      }
+      const next = { ...record, observedState: "healthy" as const, routePresent: this.gateway !== null,
         attempt, nextAttemptAt, lastStatusCode: result.statusCode, lastError: null, containerId: ownership.developmentContainer.id };
       await this.save(next); return next;
     }
@@ -470,15 +546,19 @@ export class PreviewRuntimeManager {
   async releaseOperationLeases(association: RuntimeAssociation, operationId: string): Promise<void> {
     await this.leases.releaseOperationLeases(association, operationId);
   }
-  async activate(input: { projectId: string; workspaceId: string; previewId: string; previewKey: string },
+  async resolvePreviewLease(leaseId: string): Promise<{ readonly leaseId: string; readonly hostIp: "127.0.0.1"; readonly hostPort: number } | null> {
+    return await this.leases.resolveLease(leaseId);
+  }
+  async activate(input: ActivatePreviewData,
     association: RuntimeAssociation, options: ProjectOptionsV1, operationId: string): Promise<void> {
     uuidV7Schema.parse(input.projectId); uuidV7Schema.parse(input.workspaceId); uuidV7Schema.parse(input.previewId);
     previewKeySchema.parse(input.previewKey); uuidV7Schema.parse(operationId);
-    if (input.projectId !== association.projectId || input.workspaceId !== association.workspaceId) {
+    if (input.projectId !== association.projectId || input.workspaceId !== association.workspaceId
+      || input.revisionId !== association.revisionId) {
       throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview request does not match exact workspace ownership.");
     }
     const preview = this.config(options, input.previewKey, association.revisionId);
-    const hostname = this.hostname(association, input.previewId, preview);
+    const hostname = this.validatePersistedHostname(input, input.previewId, preview);
     const existing = await this.load(input.previewId);
     if (existing !== null) {
       if (!sameAssociation(existing, association) || existing.previewKey !== input.previewKey || existing.containerPort !== preview.containerPort) {
@@ -492,25 +572,45 @@ export class PreviewRuntimeManager {
     const state = previewStateSchema.parse(existing ?? { version: 1, previewId: input.previewId, projectId: association.projectId,
       workspaceId: association.workspaceId, previewKey: input.previewKey, revisionId: association.revisionId,
       revisionHash: association.revisionHash, runtimePlanHash: association.runtimePlanHash, generation: association.generation,
-      hostname, containerPort: preview.containerPort, healthPath: preview.healthPath, healthStatuses: [...preview.healthStatuses],
+      hostname, domainBaseId: preview.domainBaseId, containerPort: preview.containerPort, healthPath: preview.healthPath, healthStatuses: [...preview.healthStatuses],
       startupTimeoutSeconds: preview.startupTimeoutSeconds, webSocketForwarding: preview.webSocketForwarding,
       leaseId: lease.leaseId, containerId: lease.containerId, desiredState: "active", observedState: "starting",
       routePresent: false, attempt: 0, nextAttemptAt: 0, lastStatusCode: null, lastError: null, operationId });
-    await this.save({ ...state, desiredState: "active", observedState: "starting", routePresent: false, operationId });
-    await this.healthAttempt({ ...state, desiredState: "active", observedState: "starting", routePresent: false, operationId }, association, true);
+    const activated = { ...state, hostname, domainBaseId: preview.domainBaseId, desiredState: "active" as const,
+      observedState: "starting" as const, routePresent: false, operationId };
+    await this.save(activated);
+    await this.healthAttempt(activated, association, true);
   }
-  async deactivate(input: { projectId: string; workspaceId: string; previewId: string }, operationId: string): Promise<void> {
+  async deactivate(input: { projectId: string; workspaceId: string; revisionId: string; previewId: string }, operationId: string): Promise<void> {
+    uuidV7Schema.parse(input.projectId); uuidV7Schema.parse(input.workspaceId); uuidV7Schema.parse(input.revisionId);
     const state = await this.load(input.previewId);
-    if (state === null || state.projectId !== input.projectId || state.workspaceId !== input.workspaceId) {
+    if (state === null || state.projectId !== input.projectId || state.workspaceId !== input.workspaceId
+      || state.revisionId !== input.revisionId) {
       throw new PreviewRuntimeError("RESOURCE_NOT_FOUND", "The preview is not owned by this workspace.");
     }
     if (state.operationId === operationId && state.desiredState === "inactive") return;
+    try { await this.removeRoute(state); }
+    catch (error) {
+      throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message : "The preview route could not be removed.", {
+        previewId: state.previewId
+      });
+    }
     await this.save({ ...state, desiredState: "inactive", observedState: "inactive", routePresent: false, operationId, nextAttemptAt: 0 });
   }
-  async inspect(input: { projectId: string; workspaceId: string; previewId: string }): Promise<PreviewInspectionData> {
-    const state = await this.load(input.previewId);
-    if (state === null || state.projectId !== input.projectId || state.workspaceId !== input.workspaceId) {
+  async inspect(input: { projectId: string; workspaceId: string; revisionId: string; previewId: string }): Promise<PreviewInspectionData> {
+    uuidV7Schema.parse(input.projectId); uuidV7Schema.parse(input.workspaceId); uuidV7Schema.parse(input.revisionId);
+    const loaded = await this.load(input.previewId);
+    if (loaded === null || loaded.projectId !== input.projectId || loaded.workspaceId !== input.workspaceId
+      || loaded.revisionId !== input.revisionId) {
       throw new PreviewRuntimeError("RESOURCE_NOT_FOUND", "The preview is not owned by this workspace.");
+    }
+    let state: PreviewState = loaded;
+    if (state.routePresent && this.gateway !== null) {
+      const lease = (await this.leases.leasesFor(this.association(state))).find((candidate) => candidate.leaseId === state.leaseId);
+      if (lease === undefined || !(await this.gateway.inspectRoute(this.route(state, lease))).present) {
+        await this.save({ ...state, routePresent: false });
+        state = { ...state, routePresent: false };
+      }
     }
     const next = state.desiredState === "active" ? await this.healthAttempt(state, {
       projectId: state.projectId, workspaceId: state.workspaceId, revisionId: state.revisionId,
@@ -521,6 +621,7 @@ export class PreviewRuntimeManager {
   async workspaceStopped(association: RuntimeAssociation): Promise<void> {
     for (const record of await this.allStates()) {
       if (!sameAssociation(record, association) || record.desiredState !== "active") continue;
+      await this.removeRoute(record).catch(() => undefined);
       await this.save({ ...record, observedState: "lost", routePresent: false, containerId: record.containerId });
     }
   }
@@ -529,6 +630,18 @@ export class PreviewRuntimeManager {
       if (!sameAssociation(record, association) || record.desiredState !== "active") continue;
       await this.healthAttempt(record, association, true);
     }
+  }
+  async reconcileRoutes(): Promise<void> {
+    if (this.gateway === null) return;
+    const desired: PreviewGatewayRoute[] = [];
+    for (const record of await this.allStates()) {
+      if (record.desiredState !== "active") continue;
+      const next = await this.healthAttempt(record, this.association(record), true);
+      if (!next.routePresent) continue;
+      const lease = (await this.leases.leasesFor(this.association(next))).find((candidate) => candidate.leaseId === next.leaseId);
+      if (lease !== undefined) desired.push(this.route(next, lease));
+    }
+    await this.gateway.reconcileRoutes(desired);
   }
   private async allStates(): Promise<PreviewState[]> {
     return await Promise.all((await readdir(this.previewsRoot)).filter((name) => name.endsWith(".json")).map(async (name) =>

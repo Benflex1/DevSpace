@@ -22,6 +22,7 @@ import { ExecutionManager } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import type { PreviewGatewayProbe } from "./preview-runtime.js";
+import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -43,6 +44,8 @@ export interface AgentServerOptions {
   readonly managedWorkspaces?: ManagedWorkspaces;
   readonly previewBaseRegistry?: ApprovedPreviewBaseRegistry;
   readonly previewProbe?: PreviewGatewayProbe;
+  readonly previewGateway?: PreviewGatewayAdapterContract;
+  readonly previewGatewayFactory?: (resolveLease: OpaqueLeaseResolver) => PreviewGatewayAdapterContract;
   readonly operationJournal?: OperationJournal;
   readonly eventRetention?: number;
   readonly now?: () => Date;
@@ -187,8 +190,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     workspaces: path.join(fallbackManagedRoot, "workspaces"),
     state: path.join(fallbackManagedRoot, "state")
   };
-  const managed = options.managedWorkspaces ?? new ManagedWorkspaces(managedRoots, undefined, undefined, undefined, undefined,
-    options.previewBaseRegistry, options.previewProbe);
+  let managed!: ManagedWorkspaces;
+  const previewGateway = options.previewGateway ?? options.previewGatewayFactory?.(async (leaseId) => await managed.resolvePreviewLease(leaseId));
+  managed = options.managedWorkspaces ?? new ManagedWorkspaces(managedRoots, undefined, undefined, undefined, undefined,
+    options.previewBaseRegistry, options.previewProbe, previewGateway);
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);

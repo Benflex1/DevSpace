@@ -44,6 +44,7 @@ import {
 import { WorkspaceRuntimeError, WorkspaceRuntimeManager, verifyRuntimePlanAgainstOptions, type RuntimeOwnership } from "./workspace-runtime.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy } from "./docker-runtime.js";
 import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, type PreviewGatewayProbe } from "./preview-runtime.js";
+import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 
 const GIT_TIMEOUT_MS = 120_000;
@@ -183,11 +184,17 @@ export class ManagedWorkspaces {
     runtime?: WorkspaceRuntimeManager,
     previewRuntime?: PreviewRuntimeManager,
     previewBaseRegistry: ApprovedPreviewBaseRegistry = readPreviewBaseRegistry(),
-    previewProbe?: PreviewGatewayProbe
+    previewProbe?: PreviewGatewayProbe,
+    previewGateway?: PreviewGatewayAdapterContract
   ) {
     const engine = new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
     this.runtime = runtime ?? new WorkspaceRuntimeManager(roots.state, engine, readRuntimePolicy(), writer);
-    this.preview = previewRuntime ?? new PreviewRuntimeManager(roots.state, engine, this.runtime, previewBaseRegistry, writer, previewProbe);
+    this.preview = previewRuntime ?? new PreviewRuntimeManager(roots.state, engine, this.runtime, previewBaseRegistry, writer, previewProbe,
+      uuidv7, { now: () => Date.now() }, undefined, previewGateway);
+  }
+
+  async resolvePreviewLease(leaseId: string): Promise<{ readonly leaseId: string; readonly hostIp: "127.0.0.1"; readonly hostPort: number } | null> {
+    return await this.preview.resolvePreviewLease(leaseId);
   }
 
   get isHealthy(): boolean { return this.corruption === null && (this.executionFence?.isHealthy ?? true); }
@@ -1061,7 +1068,7 @@ export class ManagedWorkspaces {
     };
   }
 
-  async activatePreview(input: { projectId: string; workspaceId: string; previewId: string; previewKey: string }, operationId: string): Promise<void> {
+  async activatePreview(input: import("@devspace/contracts").ActivatePreviewData, operationId: string): Promise<void> {
     let context;
     try { context = await this.previewContext(input.projectId, input.workspaceId); }
     catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, input.previewKey); }
@@ -1069,12 +1076,24 @@ export class ManagedWorkspaces {
     catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, input.previewKey, context.association.revisionId); }
   }
 
-  async deactivatePreview(input: { projectId: string; workspaceId: string; previewId: string }, operationId: string): Promise<void> {
+  async deactivatePreview(input: import("@devspace/contracts").PreviewIdentityData, operationId: string): Promise<void> {
+    let context;
+    try { context = await this.previewContext(input.projectId, input.workspaceId); }
+    catch (error) { throw this.previewFailure(error, input.workspaceId, "deactivate", input.previewId, null); }
+    if (input.revisionId !== context.association.revisionId) {
+      throw this.previewFailure(new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview request has a stale configuration revision."), input.workspaceId, "deactivate", input.previewId, null, context.association.revisionId);
+    }
     try { await this.preview.deactivate(input, operationId); }
     catch (error) { throw this.previewFailure(error, input.workspaceId, "deactivate", input.previewId, null); }
   }
 
-  async inspectPreview(input: { projectId: string; workspaceId: string; previewId: string }): Promise<import("@devspace/contracts").PreviewInspectionData> {
+  async inspectPreview(input: import("@devspace/contracts").PreviewIdentityData): Promise<import("@devspace/contracts").PreviewInspectionData> {
+    let context;
+    try { context = await this.previewContext(input.projectId, input.workspaceId); }
+    catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, null); }
+    if (input.revisionId !== context.association.revisionId) {
+      throw this.previewFailure(new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview request has a stale configuration revision."), input.workspaceId, "activate", input.previewId, null, context.association.revisionId);
+    }
     try { return await this.preview.inspect(input); }
     catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, null); }
   }

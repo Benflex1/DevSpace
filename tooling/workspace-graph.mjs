@@ -10,7 +10,8 @@ export const expectedPackages = new Map([
     "@devspace/contracts",
     "@devspace/domain",
     "@devspace/project-options",
-    "@devspace/security"
+    "@devspace/security",
+    "@devspace/gateway-caddy"
   ] }],
   ["packages/contracts", { name: "@devspace/contracts", kind: "library", dependencies: [
     "@devspace/domain"
@@ -24,6 +25,9 @@ export const expectedPackages = new Map([
   ] }],
   ["packages/security", { name: "@devspace/security", kind: "library", dependencies: [
     "@devspace/domain"
+  ] }],
+  ["packages/gateway-caddy", { name: "@devspace/gateway-caddy", kind: "library", dependencies: [
+    "@devspace/security"
   ] }],
   ["packages/testkit", { name: "@devspace/testkit", kind: "library", dependencies: [] }]
 ]);
@@ -40,8 +44,8 @@ export function isTestOnlyPath(relativePath) {
     || pathSegments.includes("tests");
 }
 
-export const deferredDirectories = ["packages/gateway-caddy"];
-export const deferredPackageNames = new Set(["@devspace/gateway-caddy"]);
+export const deferredDirectories = [];
+export const deferredPackageNames = new Set();
 export const expectedNames = new Set([...expectedPackages.values()].map((definition) => definition.name));
 export const applicationNames = new Set(
   [...expectedPackages.values()]

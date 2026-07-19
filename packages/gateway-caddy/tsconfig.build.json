@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "../../.cache/packages-gateway-caddy.build.tsbuildinfo"
+  },
+  "include": ["src/index.ts", "src/types.ts", "src/routes.ts", "src/client.ts"]
+}

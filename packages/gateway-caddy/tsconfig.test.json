@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../../.cache/packages-gateway-caddy.test.typecheck.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}
