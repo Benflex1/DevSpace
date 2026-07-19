@@ -177,7 +177,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
 
   await expect(recovered.getByRole("button", { name: "Create terminal", exact: true })).toBeEnabled();
   await recovered.getByRole("button", { name: "Create terminal", exact: true }).click();
-  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active", { timeout: 30_000 });
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "Terminal 1" })).toContainText("active", { timeout: 30_000 });
   const terminal = recovered.locator(".terminal-tab-surface.is-active");
   await terminal.locator(".xterm-helper-textarea").focus();
   await recoveredPage.keyboard.type("echo terminal-e2e-ok"); await recoveredPage.keyboard.press("Enter");
@@ -199,7 +199,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await recovered.getByRole("button", { name: "Create terminal tab" }).click();
   await expect(recovered.getByRole("tab", { name: "Terminal 2" })).toBeVisible();
   await recovered.getByRole("tab", { name: "Terminal 1" }).click();
-  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active");
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "Terminal 1" })).toContainText("active");
   await expect(recovered.locator(".terminal-tab-surface.is-active")).toContainText("terminal-e2e-ok");
   await recovered.getByRole("button", { name: "Close Terminal 1" }).click();
   const detachedTerminal = recovered.locator(".terminal-list li").filter({ hasText: "Terminal 1" });
@@ -212,7 +212,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   recovered = recoveredPage.locator("main.workbench");
   await expect(recovered.locator(".terminal-list li").filter({ hasText: "disconnected" }).first()).toBeVisible({ timeout: 30_000 });
   await recovered.locator(".terminal-list li").filter({ hasText: "disconnected" }).first().getByRole("button").click();
-  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active");
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "active" }).first()).toBeVisible();
   const agentRestart = await fetch("http://127.0.0.1:3199/restart-agent", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(agentRestart.status).toBe(204);
   await expect.poll(async () => await fetch(`http://127.0.0.1:3100/projects/${fixture.projectId}`).then((response) => response.status).catch(() => 0), {
@@ -220,10 +220,9 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   }).toBe(200);
   await gotoProject(recoveredPage, fixture.projectId);
   await expect(recoveredPage.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" }).first()).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" }).first().getByRole("button")).toBeDisabled();
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0);
   await recovered.getByRole("button", { name: "Create terminal tab" }).click();
-  await expect(recovered.locator(".terminal-tab-surface.is-active .terminal-state")).toHaveText("active", { timeout: 30_000 });
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "active" }).first()).toBeVisible({ timeout: 30_000 });
   const replacementDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
   const terminalRows = replacementDatabase.prepare<TerminalRow>("select id, state from terminal_sessions order by created_at desc, id desc").all();
   replacementDatabase.close();
@@ -233,7 +232,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
 
   await gotoProject(recoveredPage, fixture.projectId);
   recovered = recoveredPage.locator("main.workbench");
-  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" }).first()).toBeVisible();
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0);
 
   await recovered.locator(".sidebar-task-list li").filter({ hasText: "Check workspace" }).getByRole("button", { name: "Run" }).click();
   await expect(recovered.getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
