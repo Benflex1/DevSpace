@@ -19,6 +19,7 @@ test("local development scripts resolve Agent from the workspace and prepare dep
 
   assert.equal(agent.scripts.dev, "pnpm --dir ../.. exec tsx apps/agent/src/cli.ts");
   assert.equal(root.scripts["dev:prepare"], "pnpm --filter @devspace/web run prepare:deps");
+  assert.match(web.scripts["prepare:deps"], /@devspace\/gateway-caddy build/u);
   assert.match(root.scripts.dev, /pnpm run dev:prepare &&/u);
   assert.match(root.scripts["dev:web"], /pnpm run dev:prepare &&/u);
   assert.match(root.scripts["dev:agent"], /pnpm run dev:prepare &&/u);

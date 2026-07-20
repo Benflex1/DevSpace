@@ -205,12 +205,17 @@ export async function reconcileWorkspacePreviews(projectId: string, actor: strin
         const observation = await dependencies.agent.inspectPreview(projectId, context.workspace.id, context.revision.id, preview.id);
         persistObservation(dependencies.database, context, preview, observation, undefined);
       } catch (error) {
-        if (!(error instanceof AgentResponseError && error.code === "RESOURCE_NOT_FOUND")) {
-          const code = error instanceof AgentResponseError ? error.code : error instanceof AgentUnavailableError ? "AGENT_UNAVAILABLE" : "AGENT_INTERNAL_ERROR";
-          const message = error instanceof Error ? error.message : "The preview could not be inspected safely.";
-          persistObservation(dependencies.database, context, preview, { observedState: preview.observedState as PreviewInspectionData["observedState"], routePresent: false },
-            undefined, code, message);
-        }
+        const code = error instanceof AgentResponseError ? error.code : error instanceof AgentUnavailableError ? "AGENT_UNAVAILABLE" : "AGENT_INTERNAL_ERROR";
+        const message = error instanceof AgentResponseError && error.code === "RESOURCE_NOT_FOUND"
+          ? "The Agent no longer has the exact preview state."
+          : error instanceof Error ? error.message : "The preview could not be inspected safely.";
+        const observedState = error instanceof AgentResponseError && error.code === "RESOURCE_NOT_FOUND"
+          ? "lost" as const
+          : preview.observedState as PreviewInspectionData["observedState"];
+        const routePresent = error instanceof AgentResponseError && error.code === "RESOURCE_NOT_FOUND"
+          ? false
+          : preview.routePresent;
+        persistObservation(dependencies.database, context, preview, { observedState, routePresent }, undefined, code, message);
       }
     }
   }

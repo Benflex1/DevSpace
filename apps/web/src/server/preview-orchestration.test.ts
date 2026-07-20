@@ -20,7 +20,7 @@ function preview(overrides: Partial<PreviewView> = {}): PreviewView {
 
 function fakeDatabase(initial: PreviewView) {
   let current = initial;
-  const observations: Array<{ observedState: string; routePresent: boolean; observationJson?: string | null }> = [];
+  const observations: Array<{ observedState: string; routePresent: boolean; observationJson?: string | null; errorCode?: string | null; errorMessage?: string | null }> = [];
   const operations = new Map<string, { operationId: string; state: "accepted" | "succeeded"; operationName: string; resourceId: string }>();
   const context = {
     project: { id: projectId, slug: "alpha" }, workspace: { id: workspaceId, slug: "primary", observedState: "running" },
@@ -47,9 +47,10 @@ function fakeDatabase(initial: PreviewView) {
         }
       }
     },
-    updatePreviewObservation: (input: { observedState: PreviewView["observedState"]; routePresent: boolean; observationJson?: string | null }) => {
+    updatePreviewObservation: (input: { observedState: PreviewView["observedState"]; routePresent: boolean; observationJson?: string | null; errorCode?: string | null; errorMessage?: string | null }) => {
       observations.push(input);
-      current = { ...current, observedState: input.observedState, routePresent: input.routePresent, lastObservationJson: input.observationJson ?? null };
+      current = { ...current, observedState: input.observedState, routePresent: input.routePresent, lastObservationJson: input.observationJson ?? null,
+        lastErrorCode: input.errorCode ?? null, lastErrorMessage: input.errorMessage ?? null };
       return current;
     },
     finishOperation: () => undefined
@@ -101,5 +102,34 @@ describe("Web preview orchestration", () => {
     };
     await reconcileWorkspacePreviews(projectId, "actor", "stopped", { database: fixture.database, agent: agent as never, observationTimeoutMs: 20 });
     expect(fixture.observations.at(-1)).toMatchObject({ observedState: "failed", routePresent: true });
+  });
+
+  test("marks a previously Ready preview lost when ordinary Agent observation cannot find it", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      inspectPreview: () => Promise.reject(new AgentResponseError("RESOURCE_NOT_FOUND", "preview state missing")),
+      snapshot: () => Promise.reject(new Error("must not snapshot"))
+    };
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
+    expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
+      observedState: "lost", routePresent: false, lastErrorCode: "RESOURCE_NOT_FOUND",
+      lastErrorMessage: "The Agent no longer has the exact preview state."
+    });
+  });
+
+  test("lets a later exact observation clear a route retained after operation failure", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.reject(new AgentResponseError("GATEWAY_UPDATE_FAILED", "route removal failed")),
+      inspectPreview: () => Promise.resolve(inspection({ desiredState: "inactive", observedState: "inactive", routePresent: false })),
+      snapshot: () => Promise.resolve({ operationObservations: [] })
+    };
+    await reconcileWorkspacePreviews(projectId, "actor", "stopped", { database: fixture.database, agent: agent as never });
+    expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({ observedState: "failed", routePresent: true });
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
+    expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({ observedState: "inactive", routePresent: false });
   });
 });

@@ -14,6 +14,8 @@ const boot = "018f0f00-0000-7000-8000-000000000001";
 const project = "018f0f00-0000-7000-8000-000000000002";
 const operation1 = "018f0f00-0000-7000-8000-000000000003";
 const operation2 = "018f0f00-0000-7000-8000-000000000004";
+const operation3 = "018f0f00-0000-7000-8000-000000000005";
+const operation4 = "018f0f00-0000-7000-8000-000000000006";
 const timestamp = "2026-07-17T12:00:00.000Z";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))); });
@@ -164,4 +166,46 @@ test("operations for one project are serialized even when accepted concurrently"
   executor.schedule(first); executor.schedule(second);
   await waitFor(journal, [operation1, operation2]);
   expect(maximum).toBe(1);
+});
+
+test("refreshes cached preview resources after successful and failed lifecycle mutations", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-operation-snapshot-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const revision = "018f0f00-0000-7000-8000-000000000007";
+  const previewId = "018f0f00-0000-7000-8000-000000000008";
+  let routePresent = false;
+  let snapshotCalls = 0;
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: async () => {
+      snapshotCalls += 1;
+      return [{ type: "preview" as const, observation: {
+        projectId: project, workspaceId: boot, previewId, previewKey: "web", desiredState: "active" as const,
+        observedState: routePresent ? "healthy" as const : "starting" as const, routePresent,
+        hostname: "project-workspace-web-018f0f00.preview.example.com"
+      } }];
+    },
+    activatePreview: async () => { routePresent = true; },
+    deactivatePreview: async () => { throw new Error("route cleanup failed"); }
+  } as never;
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+  await executor.initialize();
+  const activation = await journal.accept(operation3, "preview.activate", {
+    projectId: project, workspaceId: boot, revisionId: revision, previewId, previewKey: "web",
+    hostname: "project-workspace-web-018f0f00.preview.example.com", projectSlug: "project", workspaceSlug: "workspace"
+  });
+  executor.schedule(activation); await executor.drain();
+  expect(journal.get(operation3)?.state).toBe("succeeded");
+  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "preview", observation: expect.objectContaining({ routePresent: true, observedState: "healthy" }) })
+  ]));
+
+  const deactivation = await journal.accept(operation4, "preview.deactivate", { projectId: project, workspaceId: boot, revisionId: revision, previewId });
+  executor.schedule(deactivation); await executor.drain();
+  expect(journal.get(operation4)?.state).toBe("failed");
+  expect(snapshotCalls).toBe(3);
+  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "preview", observation: expect.objectContaining({ routePresent: true, observedState: "healthy" }) })
+  ]));
 });

@@ -47,6 +47,11 @@ export class OperationExecutor {
   }
   snapshotResources(): AgentSnapshotResource[] { return [...this.resources, ...this.execution.snapshotResources()]; }
 
+  private async refreshAfterPreviewMutation(): Promise<void> {
+    try { this.resources = await this.managed.snapshotResources(); }
+    catch { this.observationHealthy = false; this.resources = []; }
+  }
+
   schedule(record: JournalRecord): void {
     if (record.state === "succeeded" || record.state === "failed" || this.inFlight.has(record.operationId)) return;
     const projectId = (record.request as { projectId: string }).projectId;
@@ -69,6 +74,7 @@ export class OperationExecutor {
     if (record === undefined || record.state === "succeeded" || record.state === "failed") return;
     const projectId = (record.request as { projectId: string }).projectId;
     const resource = resourceFor(record);
+    const previewMutation = record.operationName === "preview.activate" || record.operationName === "preview.deactivate";
     let taskStartCompleted = false;
     try {
       await this.managed.awaitProjectExecutionFence(projectId);
@@ -135,6 +141,7 @@ export class OperationExecutor {
           await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
           break;
       }
+      if (previewMutation) await this.refreshAfterPreviewMutation();
       if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close",
         "preview.activate", "preview.deactivate"]
         .includes(record.operationName)) {
@@ -158,6 +165,7 @@ export class OperationExecutor {
       await this.journal.succeed(operationId);
       this.events.succeeded(operationId, resource);
     } catch (error) {
+      if (previewMutation) await this.refreshAfterPreviewMutation();
       // Once private execution evidence says the start occurred, a later journal write outage
       // must leave this operation resumable; it must never rewrite successful start as failure.
       if (record.operationName === "task.start" && (taskStartCompleted || error instanceof TaskStartRecoveryRequiredError)) return;

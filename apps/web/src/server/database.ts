@@ -735,6 +735,17 @@ export function openProjectDatabase(path: string, options: {
     applyExecutionSnapshot(snapshot: AgentSnapshotData): void {
       client.transaction(() => {
         const timestamp = now().toISOString();
+        const currentPreviewForOperation = (operation: Operation): Preview | undefined => {
+          if (operation.workspaceId === null) return undefined;
+          const project = db.select({ activeConfigRevisionId: projects.activeConfigRevisionId }).from(projects).where(and(
+            eq(projects.id, operation.projectId), eq(projects.primaryWorkspaceId, operation.workspaceId), eq(projects.state, "ready")
+          )).get();
+          if (project?.activeConfigRevisionId === null || project?.activeConfigRevisionId === undefined) return undefined;
+          return db.select().from(previews).where(and(
+            eq(previews.id, operation.resourceId), eq(previews.workspaceId, operation.workspaceId),
+            eq(previews.configRevisionId, project.activeConfigRevisionId)
+          )).get();
+        };
         for (const operation of snapshot.operationObservations) {
           const local = db.select().from(operations).where(eq(operations.operationId, operation.operationId)).get();
           if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"].includes(local.operationName)) continue;
@@ -743,10 +754,11 @@ export function openProjectDatabase(path: string, options: {
             this.finishOperation(local.operationId, { state: "failed",
               code: operation.failure.code, message: operation.failure.message.slice(0, 512) });
             if (local.operationName === "preview.activate" || local.operationName === "preview.deactivate") {
-              db.update(previews).set({ observedState: "failed", routePresent: false,
-                lastErrorCode: operation.failure.code, lastErrorMessage: operation.failure.message.slice(0, 512),
-                operationId: local.operationId, updatedAt: timestamp
-              }).where(and(eq(previews.id, local.resourceId), eq(previews.workspaceId, local.workspaceId!))).run();
+              const preview = currentPreviewForOperation(local);
+              if (preview !== undefined) db.update(previews).set({ observedState: "failed", routePresent: preview.routePresent,
+                  lastErrorCode: operation.failure.code, lastErrorMessage: operation.failure.message.slice(0, 512),
+                  operationId: local.operationId, updatedAt: timestamp
+                }).where(eq(previews.id, preview.id)).run();
             } else if (local.operationName === "terminal.create") {
               db.update(terminalSessions).set({ state: "failed", closedAt: timestamp }).where(eq(terminalSessions.id, local.resourceId)).run();
               db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
@@ -772,8 +784,9 @@ export function openProjectDatabase(path: string, options: {
           else db.update(operations).set({ state: operation.state, startedAt: operation.state === "running" ? timestamp : local.startedAt })
             .where(eq(operations.operationId, local.operationId)).run();
           if (operation.state === "succeeded" && (local.operationName === "preview.activate" || local.operationName === "preview.deactivate")) {
-            db.update(previews).set({ desiredState: local.operationName === "preview.activate" ? "active" : "inactive", operationId: local.operationId,
-              updatedAt: timestamp }).where(and(eq(previews.id, local.resourceId), eq(previews.workspaceId, local.workspaceId!))).run();
+            const preview = currentPreviewForOperation(local);
+            if (preview !== undefined) db.update(previews).set({ desiredState: local.operationName === "preview.activate" ? "active" : "inactive", operationId: local.operationId,
+                updatedAt: timestamp }).where(eq(previews.id, preview.id)).run();
           }
         }
         for (const resource of snapshot.resources) {

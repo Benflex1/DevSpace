@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prepare:deps": "pnpm --dir ../.. --filter @devspace/domain build && pnpm --dir ../.. --filter @devspace/security build && pnpm --dir ../.. --filter @devspace/contracts build && pnpm --dir ../.. --filter @devspace/project-options build && pnpm --dir ../.. --filter @devspace/database build",
+    "prepare:deps": "pnpm --dir ../.. --filter @devspace/domain build && pnpm --dir ../.. --filter @devspace/security build && pnpm --dir ../.. --filter @devspace/gateway-caddy build && pnpm --dir ../.. --filter @devspace/contracts build && pnpm --dir ../.. --filter @devspace/project-options build && pnpm --dir ../.. --filter @devspace/database build",
     "prepare:types": "next typegen",
     "predev": "if [ \"$DEVSPACE_DEPS_PREPARED\" != \"1\" ]; then pnpm run prepare:deps; fi",
     "prebuild": "pnpm run prepare:deps",

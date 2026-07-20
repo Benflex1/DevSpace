@@ -15,6 +15,7 @@
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/domain/tsconfig.build.json" },
     { "path": "../../packages/project-options/tsconfig.build.json" },
-    { "path": "../../packages/security/tsconfig.build.json" }
+    { "path": "../../packages/security/tsconfig.build.json" },
+    { "path": "../../packages/gateway-caddy/tsconfig.build.json" }
   ]
 }

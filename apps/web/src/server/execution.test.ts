@@ -51,6 +51,80 @@ async function createReadyProject() {
   return { database, project, databasePath, workspaceId };
 }
 
+function insertWorkspacePreview(databasePath: string, input: { previewId: string; workspaceId: string; revisionId: string; hostname: string; observedState?: "healthy" | "lost"; routePresent?: boolean }) {
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare(`insert into previews
+    (id, workspace_id, config_revision_id, service_id, preview_key, display_name, target_kind, target_key, domain_base_id,
+      hostname_pattern, hostname, container_port, protocol, health_path, health_statuses_json, startup_timeout_seconds,
+      web_socket_forwarding, desired_state, observed_state, route_present, route_revision, runtime_generation,
+      last_observation_json, last_error_code, last_error_message, operation_id, created_at, updated_at, activated_at, deactivated_at)
+    values (?, ?, ?, null, 'web', 'Web', 'workspace', 'workspace', 'preview-main', '{project}-{workspace}-{preview}-{shortId}', ?, 3000,
+      'http', '/health', '[200]', 5, 1, 'active', ?, ?, 1, 1, null, null, null, null,
+      '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z', null)`)
+    .run(input.previewId, input.workspaceId, input.revisionId, input.hostname, input.observedState ?? "healthy", (input.routePresent ?? true) ? 1 : 0);
+  raw.close();
+}
+
+function failedPreviewSnapshot(operationId: string, previewId: string, preview?: { projectId: string; workspaceId: string; hostname: string; observedState: "healthy" | "lost"; routePresent: boolean }) {
+  return {
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.3" as const,
+    resources: preview === undefined ? [] : [{ type: "preview" as const, observation: {
+      projectId: preview.projectId, workspaceId: preview.workspaceId, previewId, previewKey: "web",
+      desiredState: "active" as const, observedState: preview.observedState, routePresent: preview.routePresent,
+      hostname: preview.hostname
+    } }],
+    operationObservations: [{ operationId, state: "failed" as const, updatedAt: "2026-07-19T00:00:00.000Z", failure: {
+      code: "GATEWAY_UPDATE_FAILED" as const, message: "The preview route could not be removed.", retryable: true as const,
+      details: { previewId }
+    } }]
+  };
+}
+
+test("failed preview operation snapshots preserve the last proven route", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const previewId = "018f0f00-0000-7000-8000-000000000010";
+  const revisionId = "018f0f00-0000-7000-8000-000000000002";
+  const hostname = "workbench-primary-web-018f0f00.preview.example.com";
+  insertWorkspacePreview(databasePath, { previewId, workspaceId, revisionId, hostname });
+  const intent = database.preparePreviewMutation({ projectId: project.id, workspaceId, previewId, actor: "actor", action: "deactivate" });
+
+  database.applyExecutionSnapshot(failedPreviewSnapshot(intent.operation.operationId, previewId));
+
+  expect(database.listPreviews(project.id, workspaceId)).toEqual([expect.objectContaining({
+    id: previewId, observedState: "failed", routePresent: true, lastErrorCode: "GATEWAY_UPDATE_FAILED"
+  })]);
+});
+
+test("stale preview snapshot data cannot cross the active revision fence", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const oldRevisionId = "018f0f00-0000-7000-8000-000000000002";
+  const newRevisionId = "018f0f00-0000-7000-8000-000000000011";
+  const previewId = "018f0f00-0000-7000-8000-000000000012";
+  const hostname = "workbench-primary-web-018f0f00.preview.example.com";
+  insertWorkspacePreview(databasePath, { previewId, workspaceId, revisionId: oldRevisionId, hostname, observedState: "lost", routePresent: false });
+  const intent = database.preparePreviewMutation({ projectId: project.id, workspaceId, previewId, actor: "actor", action: "deactivate" });
+  const raw = new BetterSqlite3(databasePath);
+  const timestamp = "2026-07-19T00:00:00.000Z";
+  const hash = `sha256-jcs-v1:${"b".repeat(64)}`;
+  raw.prepare("update project_config_revisions set state = 'superseded', superseded_at = ? where id = ?").run(timestamp, oldRevisionId);
+  raw.prepare(`insert into project_config_revisions
+    (id, project_id, revision_number, schema_version, configuration_json, configuration_hash, source, state, created_by, created_at, activated_at)
+    values (?, ?, 2, 1, '{"schemaVersion":1,"developmentEnvironment":{"source":{"kind":"image","imageReference":"node:24"}}}', ?, 'user', 'active', 'actor', ?, ?)`)
+    .run(newRevisionId, project.id, hash, timestamp, timestamp);
+  raw.prepare("update workspaces set config_revision_id = ? where id = ?").run(newRevisionId, workspaceId);
+  raw.prepare("update projects set active_config_revision_id = ? where id = ?").run(newRevisionId, project.id);
+  raw.close();
+
+  database.applyExecutionSnapshot(failedPreviewSnapshot(intent.operation.operationId, previewId, {
+    projectId: project.id, workspaceId, hostname, observedState: "healthy", routePresent: true
+  }));
+
+  expect(database.listPreviews(project.id, workspaceId)).toEqual([expect.objectContaining({
+    id: previewId, configRevisionId: oldRevisionId, observedState: "lost", routePresent: false, lastErrorCode: null
+  })]);
+});
+
 test("allows multiple live terminals per workspace while keeping distinct server identities", async () => {
   const { database, project } = await createReadyProject();
 
