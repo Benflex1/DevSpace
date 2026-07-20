@@ -13,7 +13,7 @@
     "dev:prepare": "pnpm --filter @devspace/web run prepare:deps",
     "start:web": "pnpm --filter @devspace/web run start",
     "test:e2e": "pnpm --filter @devspace/web run prepare:deps && playwright test",
-    "lint": "pnpm workspace:check && pnpm --filter @devspace/web run prepare:deps && eslint . --max-warnings 0 && node tooling/check-architecture-boundaries.mjs && node tooling/check-text.mjs",
+    "lint": "pnpm workspace:check && pnpm --filter @devspace/gateway-caddy run build && pnpm --filter @devspace/web run prepare:deps && eslint . --max-warnings 0 && node tooling/check-architecture-boundaries.mjs && node tooling/check-text.mjs",
     "test": "node tooling/check-workspace-graph.mjs --test-projects && node --test tooling/tests/*.test.mjs && vitest run",
     "test:coverage": "node tooling/check-workspace-graph.mjs --test-projects && vitest run --coverage",
     "typecheck": "pnpm --filter @devspace/domain run typecheck && pnpm --filter @devspace/security run typecheck && pnpm --filter @devspace/testkit run typecheck && pnpm --filter @devspace/contracts run typecheck && pnpm --filter @devspace/project-options run typecheck && pnpm --filter @devspace/database run typecheck && pnpm --filter @devspace/agent run typecheck && pnpm --filter @devspace/web run typecheck",
