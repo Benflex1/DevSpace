@@ -37,7 +37,7 @@ export type PreviewRouteIdentity = PreviewGatewayRouteIdentity;
 
 export const previewGatewayProbeRequestSchema = z.strictObject({
   leaseId: uuidSchema,
-  path: z.string().regex(/^\//u).max(2048),
+  path: z.string().regex(/^\/[^\r\n]*$/u).max(2048),
   acceptedStatuses: z.array(z.number().int().min(100).max(599)).min(1).max(32),
   deadlineMs: z.number().int().positive().max(120_000),
   webSocketForwarding: z.boolean()
@@ -47,6 +47,12 @@ export const previewGatewayProbeResultSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("timeout") }),
   z.strictObject({ kind: z.literal("infrastructure"), message: z.string().min(1).max(256) })
 ]);
+export const previewGatewayLeaseSchema = z.strictObject({
+  leaseId: uuidSchema,
+  hostIp: z.literal(LOOPBACK_HOST),
+  hostPort: z.number().int().min(1).max(65535)
+});
+export type PreviewGatewayLease = z.infer<typeof previewGatewayLeaseSchema>;
 export interface PreviewGatewayProbeRequest {
   readonly leaseId: string;
   readonly path: string;
@@ -96,11 +102,6 @@ export type GatewayObservedRoute =
   | { readonly kind: "managed"; readonly route: PreviewGatewayRoute }
   | { readonly kind: "foreign"; readonly routeId: string | null; readonly hostnames: readonly string[] };
 
-export interface PreviewGatewayLease {
-  readonly leaseId: string;
-  readonly hostIp: "127.0.0.1";
-  readonly hostPort: number;
-}
 export type OpaqueLeaseResolver = (leaseId: string) => Promise<PreviewGatewayLease | null>;
 
 export interface CaddyGatewayClientOptions {
@@ -133,6 +134,5 @@ export class GatewayAdapterError extends GatewayOperationError {
 
 
 export function leaseFromRoute(input: PreviewGatewayRoute): PreviewGatewayLease {
-  const lease = { leaseId: input.leaseId, hostIp: input.hostIp, hostPort: input.hostPort };
-  return z.strictObject({ leaseId: uuidSchema, hostIp: z.literal("127.0.0.1"), hostPort: z.number().int().min(1).max(65535) }).parse(lease);
+  return previewGatewayLeaseSchema.parse({ leaseId: input.leaseId, hostIp: input.hostIp, hostPort: input.hostPort });
 }

@@ -23,6 +23,12 @@ const localRoot = process.env.DEVSPACE_MANAGED_ROOT;
 const caddyAdminSocket = process.env.DEVSPACE_CADDY_ADMIN_SOCKET;
 const previewProbeSocket = process.env.DEVSPACE_PREVIEW_PROBE_SOCKET;
 const gatewayPolicy = readGatewayPolicy(process.env);
+if (previewProbeSocket !== undefined && previewProbeSocket.trim() === "") {
+  throw new Error("DEVSPACE_PREVIEW_PROBE_SOCKET must be a non-empty private Unix-socket path.");
+}
+if (previewProbeSocket !== undefined && (caddyAdminSocket === undefined || gatewayPolicy === null)) {
+  throw new Error("DEVSPACE_PREVIEW_PROBE_SOCKET requires DEVSPACE_CADDY_ADMIN_SOCKET and DEVSPACE_PREVIEW_BASES.");
+}
 const server = createAgentServer({
   ...(configuredSocketPath === undefined ? {} : { socketPath: configuredSocketPath }),
   ...(localRoot === undefined ? {} : {

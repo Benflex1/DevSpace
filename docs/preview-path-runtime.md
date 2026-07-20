@@ -10,8 +10,8 @@ The Agent uses these administrator-owned settings:
   for example `[ {"id":"local","domain":"localhost"} ]`.
 - `DEVSPACE_CADDY_ADMIN_SOCKET`: the private Unix socket for the dedicated
   Caddy Admin API.
-- `DEVSPACE_PREVIEW_PROBE_SOCKET`: optional private Unix socket for the
-  gateway-host probe service.
+- `DEVSPACE_PREVIEW_PROBE_SOCKET`: private Unix socket for the gateway-host
+  probe service when the Agent does not share the gateway host namespace.
 
 On a production host or direct Linux/WSL development, the Agent, dedicated
 rootless Docker daemon, Caddy, and `GatewayHostProbe` may share one host
@@ -19,6 +19,9 @@ namespace; the Agent can use the host-local probe implementation when the probe
 socket is omitted. When the Agent runs inside the code-server container while
 Docker and Caddy run on the host, mount both private sockets into that container
 at the exact paths configured above and set `DEVSPACE_PREVIEW_PROBE_SOCKET`.
+Once that variable is set, the Agent always uses that Unix-socket transport; it
+does not fall back to a loopback probe if the socket is unavailable. The
+variable requires `DEVSPACE_CADDY_ADMIN_SOCKET` and `DEVSPACE_PREVIEW_BASES`.
 The probe service must be authorized only for the Agent identity (for example
 through the Unix socket group and filesystem mode). A representative container
 mount configuration is:

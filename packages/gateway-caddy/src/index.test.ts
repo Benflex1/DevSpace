@@ -1,14 +1,19 @@
 import http from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, test } from "vitest";
 import {
   CaddyAdminHttpTransport,
   CaddyGatewayClient,
   GatewayAdapterError,
   GatewayHostProbe,
+  GatewayHostProbeServer,
   GatewayOperationError,
   LOOPBACK_HOST,
   PreviewGatewayAdapter,
   PrivateCaddyAdminTransport,
+  PrivateGatewayProbeTransport,
   fromCaddyRoutes,
   toCaddyRoute,
   type CaddyAdminTransport,
@@ -49,6 +54,48 @@ async function listen(server: http.Server): Promise<number> {
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("server-address-missing");
   return address.port;
+}
+
+function probeInput(overrides: Partial<{
+  readonly leaseId: string;
+  readonly path: string;
+  readonly acceptedStatuses: readonly number[];
+  readonly deadlineMs: number;
+  readonly webSocketForwarding: boolean;
+}> = {}) {
+  return {
+    leaseId: ids.leaseId, path: "/health", acceptedStatuses: [200], deadlineMs: 1_000,
+    signal: new AbortController().signal, webSocketForwarding: false, ...overrides
+  } as const;
+}
+
+async function createSocketServer(handler: http.RequestListener): Promise<{ readonly directory: string; readonly socketPath: string; readonly server: http.Server }> {
+  const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+  const socketPath = join(directory, "probe.sock");
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+  return { directory, socketPath, server };
+}
+
+async function closeSocketServer(fixture: { readonly directory: string; readonly server: http.Server }): Promise<void> {
+  await new Promise<void>((resolve, reject) => fixture.server.close((error) => error === undefined ? resolve() : reject(error)));
+  await rm(fixture.directory, { recursive: true, force: true });
+}
+
+async function requestSocket(socketPath: string, body: unknown): Promise<{ readonly status: number; readonly body: string }> {
+  return await new Promise((resolve, reject) => {
+    const wireBody = typeof body === "object" && body !== null
+      ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "signal")) : body;
+    const encoded = JSON.stringify(wireBody);
+    const request = http.request({ socketPath, method: "POST", path: "/v1/preview/probe",
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) } }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.once("error", reject);
+    request.end(encoded);
+  });
 }
 
 describe("typed private Caddy gateway adapter", () => {
@@ -154,6 +201,131 @@ describe("typed private Caddy gateway adapter", () => {
       expect(targetRequests).toBe(1);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  test("private transport sends only the closed typed request over the configured Unix socket", async () => {
+    let wireBody: unknown;
+    const socket = await createSocketServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        wireBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const result = JSON.stringify({ kind: "response", statusCode: 200 });
+        response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(result) }).end(result);
+      });
+    });
+    try {
+      const result = await new PrivateGatewayProbeTransport({ socketPath: socket.socketPath }).probe(probeInput({
+        path: "/healthz", acceptedStatuses: [200, 204], deadlineMs: 250, webSocketForwarding: true
+      }));
+      expect(result).toEqual({ kind: "response", statusCode: 200 });
+      expect(wireBody).toEqual({ leaseId: ids.leaseId, path: "/healthz", acceptedStatuses: [200, 204], deadlineMs: 250, webSocketForwarding: true });
+      expect(JSON.stringify(wireBody)).not.toMatch(/host|ip|port|url|upstream/iu);
+    } finally { await closeSocketServer(socket); }
+  });
+
+  test("private-socket mode never opens the lease loopback from the Agent side", async () => {
+    let targetRequests = 0;
+    const target = http.createServer((_request, response) => { targetRequests += 1; response.writeHead(200).end("must-not-be-called"); });
+    await listen(target);
+    const socket = await createSocketServer((_request, response) => {
+      const result = JSON.stringify({ kind: "response", statusCode: 200 });
+      response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(result) }).end(result);
+    });
+    try {
+      const result = await new PrivateGatewayProbeTransport({ socketPath: socket.socketPath }).probe(probeInput());
+      expect(result).toEqual({ kind: "response", statusCode: 200 });
+      expect(targetRequests).toBe(0);
+    } finally {
+      await closeSocketServer(socket);
+      await new Promise<void>((resolve, reject) => target.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  test("private transport reports an unavailable socket as infrastructure failure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    try {
+      const result = await new PrivateGatewayProbeTransport({ socketPath: join(directory, "missing.sock"), timeoutMs: 50 }).probe(probeInput());
+      expect(result).toEqual({ kind: "infrastructure", message: "The private gateway probe is unavailable." });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test.each([
+    { name: "malformed", body: "not-json" },
+    { name: "oversized", body: "x".repeat(16_385) }
+  ])("private transport fails closed for a $name response", async ({ body }) => {
+    const socket = await createSocketServer((_request, response) => response.writeHead(200).end(body));
+    try {
+      const result = await new PrivateGatewayProbeTransport({ socketPath: socket.socketPath, timeoutMs: 100 }).probe(probeInput());
+      expect(result).toEqual({ kind: "infrastructure", message: body === "not-json"
+        ? "The private gateway probe returned an invalid result."
+        : "The private gateway probe is unavailable." });
+    } finally { await closeSocketServer(socket); }
+  });
+
+  test("private transport bounds cancellation and deadline", async () => {
+    const socket = await createSocketServer((_request, _response) => { /* leave the response pending */ });
+    try {
+      const started = Date.now();
+      const result = await new PrivateGatewayProbeTransport({ socketPath: socket.socketPath, timeoutMs: 40 }).probe(probeInput({ deadlineMs: 20 }));
+      expect(result).toEqual({ kind: "timeout" });
+      expect(Date.now() - started).toBeLessThan(500);
+      const controller = new AbortController();
+      const cancellation = new PrivateGatewayProbeTransport({ socketPath: socket.socketPath, timeoutMs: 1_000 }).probe({
+        ...probeInput({ deadlineMs: 1_000 }), signal: controller.signal
+      });
+      setTimeout(() => controller.abort(), 10);
+      await expect(cancellation).resolves.toEqual({ kind: "timeout" });
+    } finally { await closeSocketServer(socket); }
+  });
+
+  test("host probe service accepts only the closed request and resolves unknown leases server-side", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    const socketPath = join(directory, "probe.sock");
+    const resolved: string[] = [];
+    const service = new GatewayHostProbeServer({ socketPath, resolveLease: async (leaseId) => { resolved.push(leaseId); return null; } });
+    await service.start();
+    try {
+      const invalid = await requestSocket(socketPath, { ...probeInput(), host: "127.0.0.1", port: 43123 });
+      expect(invalid.status).toBe(400);
+      expect(resolved).toEqual([]);
+      const unknown = await requestSocket(socketPath, probeInput());
+      expect(unknown.status).toBe(200);
+      expect(JSON.parse(unknown.body)).toEqual({ kind: "infrastructure", message: "The opaque preview lease is unavailable." });
+      expect(resolved).toEqual([ids.leaseId]);
+    } finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("host probe service rejects non-loopback leases and probes only after trusted resolution", async () => {
+    let targetRequests = 0;
+    let resolved = false;
+    const target = http.createServer((_request, response) => {
+      targetRequests += 1;
+      expect(resolved).toBe(true);
+      response.writeHead(200).end("ready");
+    });
+    const hostPort = await listen(target);
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    const socketPath = join(directory, "probe.sock");
+    const service = new GatewayHostProbeServer({ socketPath, resolveLease: async (leaseId) => {
+      resolved = true;
+      if (leaseId === "01900000-0000-7000-8000-000000000006") return { leaseId, hostIp: "10.0.0.1", hostPort } as never;
+      return { leaseId, hostIp: LOOPBACK_HOST, hostPort };
+    } });
+    await service.start();
+    try {
+      const rejected = await requestSocket(socketPath, { ...probeInput(), leaseId: "01900000-0000-7000-8000-000000000006" });
+      expect(JSON.parse(rejected.body)).toEqual({ kind: "infrastructure", message: "The opaque preview lease is unavailable." });
+      expect(targetRequests).toBe(0);
+      resolved = false;
+      const accepted = await requestSocket(socketPath, probeInput());
+      expect(JSON.parse(accepted.body)).toEqual({ kind: "response", statusCode: 200 });
+      expect(targetRequests).toBe(1);
+    } finally {
+      await service.stop();
+      await rm(directory, { recursive: true, force: true });
+      await new Promise<void>((resolve, reject) => target.close((error) => error === undefined ? resolve() : reject(error)));
     }
   });
 

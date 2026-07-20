@@ -1,8 +1,8 @@
 import http from "node:http";
-import { unlink } from "node:fs/promises";
+import { chmod, unlink } from "node:fs/promises";
 import { validateGatewayRoute, validateRoute, fromCaddyRoutes, routeIdentityKey, routeResourceKey, routeMatches, toCaddyRoute, validateRouteSet } from "./routes.js";
 import {
-  GatewayAdapterError, previewGatewayProbeRequestSchema, previewGatewayProbeResultSchema, previewGatewayRouteIdentitySchema,
+  GatewayAdapterError, previewGatewayLeaseSchema, previewGatewayProbeRequestSchema, previewGatewayProbeResultSchema, previewGatewayRouteIdentitySchema,
   type CaddyAdminResponse, type CaddyAdminTransport,
   type CaddyGatewayClientOptions, type GatewayObservedRoute,
   type GatewayPolicy, type PreviewGatewayLease,
@@ -160,9 +160,14 @@ export class GatewayHostProbe {
     const { signal: _signal, ...wireInput } = input;
     const parsed = previewGatewayProbeRequestSchema.safeParse(wireInput);
     if (!parsed.success) return { kind: "infrastructure", message: "The gateway probe request is invalid." };
-    const lease = await this.resolveLease(parsed.data.leaseId).catch(() => null);
-    if (lease === null || lease.hostIp !== "127.0.0.1") return { kind: "infrastructure", message: "The opaque preview lease is unavailable." };
-    return await probeLoopback(lease.hostPort, parsed.data.path, parsed.data.deadlineMs, input.signal);
+    let resolved: unknown;
+    try { resolved = await this.resolveLease(parsed.data.leaseId); }
+    catch { resolved = null; }
+    const lease = previewGatewayLeaseSchema.safeParse(resolved);
+    if (!lease.success || lease.data.leaseId !== parsed.data.leaseId) {
+      return { kind: "infrastructure", message: "The opaque preview lease is unavailable." };
+    }
+    return await probeLoopback(lease.data.hostPort, parsed.data.path, parsed.data.deadlineMs, input.signal);
   }
 }
 
@@ -174,6 +179,9 @@ export class GatewayHostProbe {
 export class PrivateGatewayProbeTransport implements GatewayHostProbeContract {
   constructor(private readonly options: { readonly socketPath: string; readonly timeoutMs?: number }) {
     if (options.socketPath.trim() === "") throw new GatewayAdapterError("validation", "A private gateway probe Unix socket is required.");
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1)) {
+      throw new GatewayAdapterError("validation", "The private gateway probe timeout is invalid.");
+    }
   }
 
   async probe(input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
@@ -185,28 +193,41 @@ export class PrivateGatewayProbeTransport implements GatewayHostProbeContract {
     return await new Promise((resolve) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
+      let request: ReturnType<typeof http.request> | undefined;
+      const onAbort = () => {
+        request?.destroy();
+        finish({ kind: "timeout" });
+      };
       const finish = (result: PreviewGatewayProbeResult) => {
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
         resolve(result);
       };
-      const request = http.request({ socketPath: this.options.socketPath, method: "POST", path: "/v1/preview/probe",
-        signal, headers: { accept: "application/json", "content-type": "application/json", "content-length": Buffer.byteLength(encoded) } }, (response) => {
-        const chunks: Buffer[] = []; let bytes = 0;
-        response.on("data", (chunk: Buffer) => { bytes += chunk.length; if (bytes <= 16_384) chunks.push(chunk); });
-        response.on("end", () => {
-          if (bytes > 16_384 || response.statusCode !== 200) { finish({ kind: "infrastructure", message: "The private gateway probe is unavailable." }); return; }
-          try {
-            const result = previewGatewayProbeResultSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-            finish(result);
-          } catch { finish({ kind: "infrastructure", message: "The private gateway probe returned an invalid result." }); }
+      try {
+        request = http.request({ socketPath: this.options.socketPath, method: "POST", path: "/v1/preview/probe",
+          headers: { accept: "application/json", "content-type": "application/json", "content-length": Buffer.byteLength(encoded) } }, (response) => {
+          const chunks: Buffer[] = []; let bytes = 0;
+          response.on("data", (chunk: Buffer) => { bytes += chunk.length; if (bytes <= 16_384) chunks.push(chunk); });
+          response.on("error", () => finish({ kind: "infrastructure", message: "The private gateway probe is unavailable." }));
+          response.on("end", () => {
+            if (bytes > 16_384 || response.statusCode !== 200) { finish({ kind: "infrastructure", message: "The private gateway probe is unavailable." }); return; }
+            try {
+              const result = previewGatewayProbeResultSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+              finish(result);
+            } catch { finish({ kind: "infrastructure", message: "The private gateway probe returned an invalid result." }); }
+          });
         });
-      });
-      request.setTimeout(timeoutMs, () => { request.destroy(); finish({ kind: "timeout" }); });
-      request.once("error", () => finish(signal.aborted ? { kind: "timeout" } : { kind: "infrastructure", message: "The private gateway probe is unavailable." }));
-      timer = setTimeout(() => { request.destroy(); finish({ kind: "timeout" }); }, timeoutMs);
-      request.end(encoded);
+        request.setTimeout(timeoutMs, () => { request?.destroy(); finish({ kind: "timeout" }); });
+        request.once("error", () => finish(signal.aborted ? { kind: "timeout" } : { kind: "infrastructure", message: "The private gateway probe is unavailable." }));
+        signal.addEventListener("abort", onAbort, { once: true });
+        timer = setTimeout(() => { request?.destroy(); finish({ kind: "timeout" }); }, timeoutMs);
+        if (signal.aborted) onAbort();
+        else request.end(encoded);
+      } catch {
+        finish({ kind: "infrastructure", message: "The private gateway probe is unavailable." });
+      }
     });
   }
 }
@@ -234,10 +255,11 @@ export class GatewayHostProbeServer {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), parsed.deadlineMs); timer.unref();
         request.once("aborted", () => controller.abort());
-        const result = await hostProbe.probe({ ...parsed, signal: controller.signal });
-        clearTimeout(timer);
-        const encoded = JSON.stringify(result);
-        response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);
+        try {
+          const result = await hostProbe.probe({ ...parsed, signal: controller.signal });
+          const encoded = JSON.stringify(result);
+          response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);
+        } finally { clearTimeout(timer); }
       } catch {
         if (!response.headersSent) response.writeHead(400).end();
       }
@@ -246,6 +268,7 @@ export class GatewayHostProbeServer {
   async start(): Promise<void> {
     await unlink(this.options.socketPath).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     await new Promise<void>((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.options.socketPath, resolve); });
+    await chmod(this.options.socketPath, 0o660);
     this.started = true;
   }
   async stop(): Promise<void> {
@@ -292,12 +315,28 @@ async function probeLoopback(hostPort: number, path: string, deadlineMs: number,
   return await new Promise((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    const finish = (result: PreviewGatewayProbeResult) => { if (settled) return; settled = true; if (timer !== undefined) clearTimeout(timer); resolve(result); };
-    const request = http.request({ host: "127.0.0.1", port: hostPort, path, method: "GET", headers: { connection: "close" }, signal }, (response) => {
-      response.resume(); response.once("end", () => finish({ kind: "response", statusCode: response.statusCode ?? 0 }));
-    });
-    timer = setTimeout(() => { request.destroy(); finish({ kind: "timeout" }); }, deadlineMs);
-    request.once("error", () => finish(signal.aborted ? { kind: "timeout" } : { kind: "infrastructure", message: "The loopback preview target is unavailable." }));
-    request.end();
+    let request: ReturnType<typeof http.request> | undefined;
+    const onAbort = () => { request?.destroy(); finish({ kind: "timeout" }); };
+    const finish = (result: PreviewGatewayProbeResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    try {
+      request = http.request({ host: "127.0.0.1", port: hostPort, path, method: "GET", headers: { connection: "close" } }, (response) => {
+        response.resume();
+        response.once("error", () => finish({ kind: "infrastructure", message: "The loopback preview target is unavailable." }));
+        response.once("end", () => finish({ kind: "response", statusCode: response.statusCode ?? 0 }));
+      });
+      request.once("error", () => finish(signal.aborted ? { kind: "timeout" } : { kind: "infrastructure", message: "The loopback preview target is unavailable." }));
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => { request?.destroy(); finish({ kind: "timeout" }); }, deadlineMs);
+      if (signal.aborted) onAbort();
+      else request.end();
+    } catch {
+      finish({ kind: "infrastructure", message: "The loopback preview target is unavailable." });
+    }
   });
 }
