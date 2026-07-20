@@ -125,7 +125,13 @@ Milestone 1 — in progress.
   `DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET` and the `@devspace/preview-gateway-host` runtime. The
   resolver accepts only a closed lease-ID request and returns only the exact loopback lease shape;
   the host runtime composes that transport with `GatewayHostProbeServer` over temporary/private Unix
-  sockets without Docker access or a public listener. The dedicated Caddy deployment remains deferred.
+  sockets without Docker access or a public listener.
+- Checkpoint 2 completes the repository-side deployment path. The dedicated Caddy JSON configuration
+  listens only on `127.0.0.1:18080`, exposes Admin only through the private Unix socket, and keeps a
+  gateway-owned terminal HTTP 404 fallback after exact Agent-managed routes. A Coolify-supervised
+  Compose stack runs pinned Caddy and `@devspace/preview-gateway-host` sibling services with host
+  networking, shared runtime-directory sockets, no Docker socket, and no public Docker ports. The
+  code-server and static Cloudflare requirements are documented in `docs/preview-gateway-deployment.md`.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means

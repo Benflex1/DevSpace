@@ -2,7 +2,7 @@ import http from "node:http";
 import net from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { acquirePrivateSocketLifecycleLock, type PrivateSocketLifecycleLock } from "./private-socket.js";
-import { validateGatewayRoute, validateRoute, fromCaddyRoutes, routeIdentityKey, routeResourceKey, routeMatches, toCaddyRoute, validateRouteSet } from "./routes.js";
+import { validateGatewayRoute, validateRoute, fromCaddyRoutes, routeIdentityKey, routeResourceKey, routeMatches, toCaddyRoute, toCaddyRouteSet, validateRouteSet } from "./routes.js";
 import {
   GatewayAdapterError, previewGatewayLeaseSchema, previewGatewayProbeRequestSchema, previewGatewayProbeResultSchema, previewGatewayRouteIdentitySchema,
   previewLeaseResolverRequestSchema, previewLeaseResolverResponseSchema,
@@ -106,7 +106,7 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
     let response: CaddyAdminResponse;
     try {
       response = await this.transport.request("PUT", routesPath,
-        routes.map((route) => toCaddyRoute(route, this.options.policy ?? this.options.isApprovedHostname)), this.options.timeoutMs);
+        toCaddyRouteSet(routes, this.options.policy ?? this.options.isApprovedHostname), this.options.timeoutMs);
     } catch (error) { if (error instanceof GatewayAdapterError) throw error; throw new GatewayAdapterError("admin", "Caddy admin is unavailable.", "ADMIN_UNAVAILABLE", true); }
     ensureStatus(response);
   }
@@ -479,7 +479,7 @@ export class CaddyAdminHttpTransport implements CaddyAdminTransport {
     return fromCaddyRoutes(response.body, this.policy);
   }
   async replaceRoutes(routes: readonly PreviewGatewayRoute[]): Promise<void> {
-    const response = await this.request("PUT", routesPath, routes.map((route) => toCaddyRoute(route, this.policy)));
+    const response = await this.request("PUT", routesPath, toCaddyRouteSet(routes, this.policy));
     if (![200, 204].includes(response.statusCode)) throw new GatewayAdapterError("admin", "Caddy admin rejected the route set.", "ADMIN_REJECTED");
   }
   private get optionsForPolicy(): (hostname: string) => boolean {

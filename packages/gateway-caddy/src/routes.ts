@@ -8,6 +8,7 @@ import {
 } from "./types.js";
 
 export const CADDY_ROUTE_ID_PREFIX = "devspace-preview-v1.";
+export const CADDY_FALLBACK_ROUTE_ID = "devspace-preview-fallback-v1";
 
 export interface CaddyReverseProxyRoute {
   readonly "@id": string;
@@ -19,6 +20,34 @@ export interface CaddyReverseProxyRoute {
   }];
   readonly terminal: true;
 }
+
+export interface CaddyFallbackRoute {
+  readonly "@id": typeof CADDY_FALLBACK_ROUTE_ID;
+  readonly handle: readonly [{
+    readonly handler: "static_response";
+    readonly status_code: 404;
+    readonly body: "Not Found";
+  }];
+  readonly terminal: true;
+}
+
+export function toCaddyFallbackRoute(): CaddyFallbackRoute {
+  return {
+    "@id": CADDY_FALLBACK_ROUTE_ID,
+    handle: [{ handler: "static_response", status_code: 404, body: "Not Found" }],
+    terminal: true
+  };
+}
+
+function isCaddyFallbackRoute(input: unknown): input is CaddyFallbackRoute {
+  const record = object(input);
+  if (record === null || record["@id"] !== CADDY_FALLBACK_ROUTE_ID || record.terminal !== true
+    || "match" in record || !Array.isArray(record.handle) || record.handle.length !== 1) return false;
+  const handler = object(record.handle[0]);
+  return handler !== null && handler.handler === "static_response" && handler.status_code === 404
+    && handler.body === "Not Found" && Object.keys(record).every((key) => ["@id", "handle", "terminal"].includes(key));
+}
+
 const routeDocuments = new WeakMap<object, PreviewGatewayRoute>();
 
 function reject(message: string, stage: "validation" | "reconcile" = "validation"): never {
@@ -109,6 +138,13 @@ export function toCaddyRoute(input: PreviewGatewayRoute, isApprovedHostname?: ((
 
 export const toCaddyRouteDocument = toCaddyRoute;
 
+export function toCaddyRouteSet(
+  inputs: readonly PreviewGatewayRoute[],
+  isApprovedHostname?: ((hostname: string) => boolean) | GatewayPolicy
+): readonly (CaddyReverseProxyRoute | CaddyFallbackRoute)[] {
+  return [...validateRouteSet(inputs, isApprovedHostname).map((route) => toCaddyRoute(route, isApprovedHostname)), toCaddyFallbackRoute()];
+}
+
 function object(input: unknown): Record<string, unknown> | null {
   return input !== null && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : null;
 }
@@ -142,7 +178,8 @@ function parseManagedRoute(input: Record<string, unknown>, id: string, isApprove
 
 export function fromCaddyRoutes(body: unknown, isApprovedHostname?: ((hostname: string) => boolean) | GatewayPolicy): readonly GatewayObservedRoute[] {
   if (!Array.isArray(body)) throw new GatewayAdapterError("admin", "Caddy returned an invalid route set.", "ADMIN_REJECTED");
-  return body.map((candidate) => {
+  return body.flatMap((candidate) => {
+    if (isCaddyFallbackRoute(candidate)) return [];
     const record = object(candidate);
     if (record === null) return { kind: "foreign", routeId: null, hostnames: [] } as const;
     const id = typeof record["@id"] === "string" ? record["@id"] : null;

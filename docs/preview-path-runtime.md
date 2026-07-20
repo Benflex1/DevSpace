@@ -51,6 +51,12 @@ host, IP, port, URL, or upstream. If the private probe socket is unavailable,
 the preview is reported as infrastructure `Unavailable`; the Agent must not
 fall back to its own container loopback.
 
+The deployable host-namespace stack, code-server mount, static Cloudflare
+origin, and manual validation runbook are documented in
+[`preview-gateway-deployment.md`](./preview-gateway-deployment.md). The stack
+uses the fixed Caddy listener `127.0.0.1:18080` and the Caddy Admin socket
+`/run/devspace/gateway/caddy-admin.sock`.
+
 ## Runtime and route lifecycle
 
 Web is authoritative for the materialized hostname, while Agent-private workspace ownership retains

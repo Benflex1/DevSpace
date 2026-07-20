@@ -14,8 +14,11 @@ import {
   PreviewGatewayAdapter,
   PrivateCaddyAdminTransport,
   PrivateGatewayProbeTransport,
+  CADDY_FALLBACK_ROUTE_ID,
   fromCaddyRoutes,
   toCaddyRoute,
+  toCaddyFallbackRoute,
+  toCaddyRouteSet,
   type CaddyAdminTransport,
   type PreviewGatewayRoute
 } from "./index.js";
@@ -103,6 +106,48 @@ async function requestSocket(socketPath: string, body: unknown): Promise<{ reado
 }
 
 describe("typed private Caddy gateway adapter", () => {
+  test("builds only the gateway-owned fallback for an empty route set", () => {
+    expect(toCaddyRouteSet([], approved)).toEqual([toCaddyFallbackRoute()]);
+    expect(toCaddyFallbackRoute()).toEqual({
+      "@id": CADDY_FALLBACK_ROUTE_ID,
+      handle: [{ handler: "static_response", status_code: 404, body: "Not Found" }],
+      terminal: true
+    });
+  });
+
+  test("recognizes the deterministic unmatched-host 404 and orders it after managed routes", () => {
+    const documents = toCaddyRouteSet([route()], approved);
+    expect(documents).toHaveLength(2);
+    expect(documents[0]).toEqual(toCaddyRoute(route(), approved));
+    expect(documents[1]).toEqual(toCaddyFallbackRoute());
+    expect(documents[1]).not.toHaveProperty("match");
+    expect(documents[1]).toMatchObject({ handle: [{ handler: "static_response", status_code: 404 }] });
+    expect(fromCaddyRoutes([documents[1]], approved)).toEqual([]);
+  });
+
+  test("keeps the fallback through ensure, remove, reconcile, and preview inspection", async () => {
+    const transport = new MemoryTransport();
+    transport.documents = [toCaddyFallbackRoute()];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+
+    await adapter.ensureRoute(route());
+    expect(transport.documents).toEqual([...toCaddyRouteSet([route()], approved)]);
+    expect((await adapter.inspectRoute(route())).present).toBe(true);
+    await adapter.removeRoute(route());
+    expect(transport.documents).toEqual([toCaddyFallbackRoute()]);
+    expect(await adapter.inspectRoute(route())).toEqual({ present: false, status: "absent" });
+    await adapter.reconcileRoutes([]);
+    expect(transport.documents).toEqual([toCaddyFallbackRoute()]);
+    expect(fromCaddyRoutes(transport.documents, approved)).toEqual([]);
+  });
+
+  test("does not treat the fallback as a hostname owner", async () => {
+    const transport = new MemoryTransport();
+    transport.documents = [toCaddyFallbackRoute()];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    await expect(adapter.ensureRoute(route())).resolves.toBeUndefined();
+  });
+
   test("generates an exact host route with only a loopback upstream and streaming/upgrade support", () => {
     const document = toCaddyRoute(route(), policy);
     expect(document.match).toEqual([{ host: ["web.localhost"] }]);

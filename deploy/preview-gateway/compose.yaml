@@ -1,0 +1,37 @@
+services:
+  caddy:
+    image: caddy:2.11.3
+    user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
+    network_mode: host
+    restart: unless-stopped
+    command: ["run", "--config", "/etc/caddy/caddy.json", "--adapter", "json"]
+    volumes:
+      - type: bind
+        source: ./caddy.json
+        target: /etc/caddy/caddy.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${DEVSPACE_GATEWAY_RUNTIME_DIR:?DEVSPACE_GATEWAY_RUNTIME_DIR must be an administrator-provisioned absolute directory}"
+        target: /run/devspace/gateway
+        bind:
+          create_host_path: false
+
+  preview-gateway-host:
+    build:
+      context: ../..
+      dockerfile: deploy/preview-gateway/Dockerfile
+    user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DEVSPACE_PREVIEW_PROBE_SOCKET: /run/devspace/gateway/preview-probe.sock
+      DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: /run/devspace/gateway/lease-resolver.sock
+    volumes:
+      - type: bind
+        source: "${DEVSPACE_GATEWAY_RUNTIME_DIR:?DEVSPACE_GATEWAY_RUNTIME_DIR must be an administrator-provisioned absolute directory}"
+        target: /run/devspace/gateway
+        bind:
+          create_host_path: false
