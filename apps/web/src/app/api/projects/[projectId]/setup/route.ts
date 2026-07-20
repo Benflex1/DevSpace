@@ -19,7 +19,8 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     const input = parseWorkspaceSetupInput(await readBoundedJsonBody(request));
     const { projectId } = await context.params;
     const result = await setupPrimaryWorkspace(input, projectId, actor.identity, {
-      agent: createAgentClient(config.agentSocketPath), database: getProjectDatabase(config.databasePath)
+      agent: createAgentClient(config.agentSocketPath), database: getProjectDatabase(config.databasePath),
+      previewBaseRegistry: config.previewBaseRegistry
     });
     return json(result, 200);
   } catch (error) {

@@ -58,7 +58,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
     {project.state === "registering" && <section className="workspace-section" aria-labelledby="setup-heading">
       <h2 id="setup-heading">Workspace setup</h2>
       <p>Configure the primary workspace and its immutable Project Options.</p>
-      <WorkspaceSetupForm projectId={project.id} agentReachable={agentReachable} />
+      <WorkspaceSetupForm projectId={project.id} agentReachable={agentReachable} previewBases={config.previewBases} />
     </section>}
 
     <footer>Signed in as {actor.identity}</footer>

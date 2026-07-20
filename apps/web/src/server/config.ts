@@ -15,6 +15,7 @@ export interface WebRuntimeConfig {
   readonly appOrigin: string;
   readonly auth: AuthConfig;
   readonly previewBaseRegistry: ApprovedPreviewBaseRegistry;
+  readonly previewBases: readonly { readonly id: string; readonly domain: string }[];
   readonly previewGatewayProtocol: "http:" | "https:";
   readonly previewGatewayPort: number | null;
 }
@@ -27,12 +28,15 @@ function required(env: RuntimeEnvironment, name: string): string {
   return value;
 }
 
-function readPreviewBaseRegistry(env: RuntimeEnvironment): ApprovedPreviewBaseRegistry {
+function readPreviewBaseRegistry(env: RuntimeEnvironment): {
+  readonly registry: ApprovedPreviewBaseRegistry;
+  readonly publicBases: readonly { readonly id: string; readonly domain: string }[];
+} {
   const raw = env.DEVSPACE_PREVIEW_BASES?.trim();
   if (raw === undefined || raw === "") {
     const empty = createApprovedPreviewBaseRegistry([]);
     if (!empty.ok) throw new Error("The default preview-base registry is invalid.");
-    return empty.value;
+    return { registry: empty.value, publicBases: [] };
   }
   let parsed: unknown;
   try {
@@ -61,7 +65,7 @@ function readPreviewBaseRegistry(env: RuntimeEnvironment): ApprovedPreviewBaseRe
   }
   const registry = createApprovedPreviewBaseRegistry(bases);
   if (!registry.ok) throw new Error(`DEVSPACE_PREVIEW_BASES is invalid: ${registry.error.code}.`);
-  return registry.value;
+  return { registry: registry.value, publicBases: bases.map(({ id, domain }) => ({ id, domain })) };
 }
 
 export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): WebRuntimeConfig {
@@ -95,11 +99,13 @@ export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): Web
   } else {
     throw new Error("DEVSPACE_AUTH_MODE must be cloudflare-access or development.");
   }
+  const previewBases = readPreviewBaseRegistry(env);
   return {
     databasePath,
     agentSocketPath: env.DEVSPACE_AGENT_SOCKET_PATH?.trim() || AGENT_SOCKET_PATH,
     appOrigin: appOrigin.origin,
     auth,
-    previewBaseRegistry: readPreviewBaseRegistry(env), previewGatewayProtocol: previewGatewayProtocolValue, previewGatewayPort
+    previewBaseRegistry: previewBases.registry, previewBases: previewBases.publicBases,
+    previewGatewayProtocol: previewGatewayProtocolValue, previewGatewayPort
   };
 }
