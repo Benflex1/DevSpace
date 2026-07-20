@@ -96,7 +96,7 @@ test("successful startup preview reconciliation leaves Agent health healthy", as
   const fixture = await provisionDurableInactivePreview(socketPath);
   let reconciliationCalls = 0;
   const server = createAgentServer({ socketPath, managedRoots: fixture.roots, now: () => now, createId: () => id,
-    previewGateway: startupPreviewGateway(async () => { reconciliationCalls += 1; }) });
+    previewGateway: startupPreviewGateway(() => { reconciliationCalls += 1; return Promise.resolve(); }) });
   await server.start();
   try {
     await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({ body: { data: { status: "ok" } } });
@@ -112,9 +112,10 @@ test("failed startup preview reconciliation degrades health, preserves state, an
   let unavailable = true;
   let reconciliationCalls = 0;
   const server = createAgentServer({ socketPath, managedRoots: fixture.roots, now: () => now, createId: () => id,
-    previewGateway: startupPreviewGateway(async () => {
+    previewGateway: startupPreviewGateway(() => {
       reconciliationCalls += 1;
-      if (unavailable) throw new Error("gateway-unavailable");
+      if (unavailable) return Promise.reject(new Error("gateway-unavailable"));
+      return Promise.resolve();
     }) });
   await server.start();
   await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({ body: { data: { status: "degraded" } } });
