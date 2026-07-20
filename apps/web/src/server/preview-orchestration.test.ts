@@ -112,7 +112,7 @@ describe("Web preview orchestration", () => {
       inspectPreview: () => Promise.reject(new AgentResponseError("RESOURCE_NOT_FOUND", "preview state missing")),
       snapshot: () => Promise.reject(new Error("must not snapshot"))
     };
-    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent });
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
       observedState: "lost", routePresent: false, lastErrorCode: "RESOURCE_NOT_FOUND",
       lastErrorMessage: "The Agent no longer has the exact preview state."

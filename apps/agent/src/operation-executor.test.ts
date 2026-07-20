@@ -197,15 +197,15 @@ test("refreshes cached preview resources after successful and failed lifecycle m
   });
   executor.schedule(activation); await executor.drain();
   expect(journal.get(operation3)?.state).toBe("succeeded");
-  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "preview", observation: expect.objectContaining({ routePresent: true, observedState: "healthy" }) })
-  ]));
+  expect(executor.snapshotResources().find((resource) => resource.type === "preview")).toMatchObject({
+    type: "preview", observation: { routePresent: true, observedState: "healthy" }
+  });
 
   const deactivation = await journal.accept(operation4, "preview.deactivate", { projectId: project, workspaceId: boot, revisionId: revision, previewId });
   executor.schedule(deactivation); await executor.drain();
   expect(journal.get(operation4)?.state).toBe("failed");
   expect(snapshotCalls).toBe(3);
-  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "preview", observation: expect.objectContaining({ routePresent: true, observedState: "healthy" }) })
-  ]));
+  expect(executor.snapshotResources().find((resource) => resource.type === "preview")).toMatchObject({
+    type: "preview", observation: { routePresent: true, observedState: "healthy" }
+  });
 });
