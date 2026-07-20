@@ -5,6 +5,7 @@
     "paths": {
       "@devspace/web": ["apps/web/src/index.ts"],
       "@devspace/agent": ["apps/agent/src/index.ts"],
+      "@devspace/preview-gateway-host": ["apps/preview-gateway-host/src/runtime.ts"],
       "@devspace/contracts": ["packages/contracts/src/index.ts"],
       "@devspace/domain": ["packages/domain/src/index.ts"],
       "@devspace/database": ["packages/database/src/index.ts"],

@@ -12,6 +12,9 @@ The Agent uses these administrator-owned settings:
   Caddy Admin API.
 - `DEVSPACE_PREVIEW_PROBE_SOCKET`: private Unix socket for the gateway-host
   probe service when the Agent does not share the gateway host namespace.
+- `DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET`: private Unix socket for the
+  Agent-owned opaque preview lease resolver. It is used only by the host-side
+  probe runtime and is not an Agent API or browser endpoint.
 
 On a production host or direct Linux/WSL development, the Agent, dedicated
 rootless Docker daemon, Caddy, and `GatewayHostProbe` may share one host
@@ -29,7 +32,16 @@ mount configuration is:
 ```text
 --mount type=bind,src=/run/devspace/gateway/caddy-admin.sock,dst=/run/devspace/gateway/caddy-admin.sock
 --mount type=bind,src=/run/devspace/gateway/preview-probe.sock,dst=/run/devspace/gateway/preview-probe.sock
+--mount type=bind,src=/run/devspace/gateway/preview-lease-resolver.sock,dst=/run/devspace/gateway/preview-lease-resolver.sock
 ```
+
+The optional `@devspace/preview-gateway-host` runtime owns the host-side
+`DEVSPACE_PREVIEW_PROBE_SOCKET`. It uses the resolver transport over
+`DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET`, then starts `GatewayHostProbeServer`;
+it does not connect to Docker, expose a public listener, or inspect Agent state.
+The resolver protocol is the closed `POST /v1/preview/lease/resolve` request
+`{ "leaseId": "<opaque lease id>" }` and the exact three-field loopback lease
+response. Unknown, malformed, mismatched, or non-loopback values fail closed.
 
 The probe request contains only the Agent-owned opaque lease ID and bounded
 health parameters. The host-side service resolves that ID against the exact
@@ -38,6 +50,12 @@ gateway/lease registry and performs the HTTP request against its own
 host, IP, port, URL, or upstream. If the private probe socket is unavailable,
 the preview is reported as infrastructure `Unavailable`; the Agent must not
 fall back to its own container loopback.
+
+The deployable host-namespace stack, code-server mount, static Cloudflare
+origin, and manual validation runbook are documented in
+[`preview-gateway-deployment.md`](./preview-gateway-deployment.md). The stack
+uses the fixed Caddy listener `127.0.0.1:18080` and the Caddy Admin socket
+`/run/devspace/gateway/caddy-admin.sock`.
 
 ## Runtime and route lifecycle
 

@@ -115,12 +115,28 @@ Milestone 1 — in progress.
   project/workspace/preview/revision/generation/lease identity, and forwards HTTP/WebSocket traffic
   only to the resolved loopback lease. Foreign, stale, missing-runtime, and stale-generation routes
   are not adopted and are removed during reconciliation.
+- The preview gateway deployment runs the pinned Caddy image with the checked-in native JSON
+  configuration, exposes only its private Admin Unix socket, and replaces the complete managed
+  route array with Caddy Admin PATCH while retaining the terminal fallback. A Docker-backed real
+  Caddy smoke command covers startup, socket availability, GET, PATCH replacement, and fallback
+  restoration in CI.
 - Health probing is namespace-safe. When Agent and gateway share a host namespace, the gateway-host
   probe uses the host-local implementation. When Agent is containerized, `DEVSPACE_PREVIEW_PROBE_SOCKET`
   is required alongside the private Caddy socket and approved-base registry; the Agent sends only an
   opaque lease ID and bounded health policy over that private Unix socket and never falls back to
   Agent-local loopback when the socket is configured but unavailable. Probe timeouts and retries are
   bounded.
+- Checkpoint 1 of the private deployment bridge adds the optional Agent-owned
+  `DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET` and the `@devspace/preview-gateway-host` runtime. The
+  resolver accepts only a closed lease-ID request and returns only the exact loopback lease shape;
+  the host runtime composes that transport with `GatewayHostProbeServer` over temporary/private Unix
+  sockets without Docker access or a public listener.
+- Checkpoint 2 completes the repository-side deployment path. The dedicated Caddy JSON configuration
+  listens only on `127.0.0.1:18080`, exposes Admin only through the private Unix socket, and keeps a
+  gateway-owned terminal HTTP 404 fallback after exact Agent-managed routes. A Coolify-supervised
+  Compose stack runs pinned Caddy and `@devspace/preview-gateway-host` sibling services with host
+  networking, shared runtime-directory sockets, no Docker socket, and no public Docker ports. The
+  code-server and static Cloudflare requirements are documented in `docs/preview-gateway-deployment.md`.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means

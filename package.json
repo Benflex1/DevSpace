@@ -16,14 +16,16 @@
     "lint": "pnpm workspace:check && pnpm --filter @devspace/web run prepare:deps && eslint . --max-warnings 0 && node tooling/check-architecture-boundaries.mjs && node tooling/check-text.mjs",
     "test": "node tooling/check-workspace-graph.mjs --test-projects && node --test tooling/tests/*.test.mjs && vitest run",
     "test:coverage": "node tooling/check-workspace-graph.mjs --test-projects && vitest run --coverage",
-    "typecheck": "pnpm --filter @devspace/domain run typecheck && pnpm --filter @devspace/security run typecheck && pnpm --filter @devspace/gateway-caddy run typecheck && pnpm --filter @devspace/testkit run typecheck && pnpm --filter @devspace/contracts run typecheck && pnpm --filter @devspace/project-options run typecheck && pnpm --filter @devspace/database run typecheck && pnpm --filter @devspace/agent run typecheck && pnpm --filter @devspace/web run typecheck",
-    "build": "pnpm --filter @devspace/domain run build && pnpm --filter @devspace/security run build && pnpm --filter @devspace/gateway-caddy run build && pnpm --filter @devspace/testkit run build && pnpm --filter @devspace/contracts run build && pnpm --filter @devspace/project-options run build && pnpm --filter @devspace/database run build && pnpm --filter @devspace/agent run build && pnpm --filter @devspace/web run build",
+    "typecheck": "pnpm --filter @devspace/domain run typecheck && pnpm --filter @devspace/security run typecheck && pnpm --filter @devspace/gateway-caddy run typecheck && pnpm --filter @devspace/testkit run typecheck && pnpm --filter @devspace/contracts run typecheck && pnpm --filter @devspace/project-options run typecheck && pnpm --filter @devspace/database run typecheck && pnpm --filter @devspace/agent run typecheck && pnpm --filter @devspace/preview-gateway-host run typecheck && pnpm --filter @devspace/web run typecheck",
+    "build": "pnpm --filter @devspace/domain run build && pnpm --filter @devspace/security run build && pnpm --filter @devspace/gateway-caddy run build && pnpm --filter @devspace/testkit run build && pnpm --filter @devspace/contracts run build && pnpm --filter @devspace/project-options run build && pnpm --filter @devspace/database run build && pnpm --filter @devspace/agent run build && pnpm --filter @devspace/preview-gateway-host run build && pnpm --filter @devspace/web run build",
     "contracts:check": "pnpm --filter @devspace/contracts run build && node tooling/check-agent-contracts.mjs",
     "schema:check": "pnpm --filter @devspace/project-options run build && node tooling/check-project-options-schema.mjs",
     "db:generate": "pnpm --filter @devspace/database run db:generate",
     "db:check": "pnpm --filter @devspace/database run db:check",
     "db:migrate:test": "pnpm --filter @devspace/database run db:migrate:test",
-    "workspace:check": "node tooling/check-workspace-graph.mjs"
+    "workspace:check": "node tooling/check-workspace-graph.mjs",
+    "preview-gateway:check": "node tooling/check-preview-gateway-deployment.mjs",
+    "preview-gateway:caddy-smoke": "node tooling/preview-gateway-caddy-smoke.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

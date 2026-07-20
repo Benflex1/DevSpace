@@ -148,7 +148,8 @@ class Gateway implements PreviewGatewayAdapter {
   }
 }
 
-async function fixture(probe: PreviewGatewayProbe = new Probe([{ kind: "response", statusCode: 200 }]), gateway: Gateway | null = null) {
+async function fixture(probe: PreviewGatewayProbe = new Probe([{ kind: "response", statusCode: 200 }]), gateway: Gateway | null = null,
+  setup: { readonly startRuntime?: boolean; readonly bindLease?: boolean } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-runtime-"));
   const state = path.join(root, "state");
   await mkdir(path.join(state, "ownership", "runtimes"), { recursive: true });
@@ -166,9 +167,13 @@ async function fixture(probe: PreviewGatewayProbe = new Probe([{ kind: "response
     () => Promise.resolve({ projectSlug: "project", workspaceSlug: "workspace" }));
   await manager.initialize();
   const bindings = await manager.reserveWorkspaceLeases(association, options, ids.operationId);
-  await runtime.start(association, plan, worktree, ids.operationId, bindings);
-  const ownership = await runtime.exactRunningOwnership(association);
-  await manager.bindRuntimeContainer(association, ownership.developmentContainer.id, bindings);
+  if (setup.startRuntime ?? true) {
+    await runtime.start(association, plan, worktree, ids.operationId, bindings);
+    if (setup.bindLease ?? true) {
+      const ownership = await runtime.exactRunningOwnership(association);
+      await manager.bindRuntimeContainer(association, ownership.developmentContainer.id, bindings);
+    }
+  }
   return { root, state, engine, runtime, manager, bindings, clock, worktree };
 }
 
@@ -176,6 +181,34 @@ const cleanup: string[] = [];
 afterEach(async () => { await Promise.all(cleanup.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))); });
 
 describe("Agent preview runtime policy", () => {
+  test("resolves only the exact Agent-owned loopback lease shape", async () => {
+    const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
+    const binding = fixtureValue.bindings[0]!;
+    await expect(fixtureValue.manager.resolvePreviewLease(binding.leaseId)).resolves.toEqual({
+      leaseId: binding.leaseId, hostIp: "127.0.0.1", hostPort: binding.hostPort
+    });
+    await expect(fixtureValue.manager.resolvePreviewLease("01900000-0000-7000-8000-000000000099")).resolves.toBeNull();
+  });
+
+  test("never resolves a reserved lease, a released lease, or a malformed/unknown lease", async () => {
+    const reserved = await fixture(undefined, null, { startRuntime: false }); cleanup.push(reserved.root);
+    const reservedLease = reserved.bindings[0]!;
+    await expect(reserved.manager.resolvePreviewLease(reservedLease.leaseId)).resolves.toBeNull();
+    await expect(reserved.manager.resolvePreviewLease("not-a-lease-uuid")).resolves.toBeNull();
+    await expect(reserved.manager.resolvePreviewLease("01900000-0000-7000-8000-000000000099")).resolves.toBeNull();
+
+    await reserved.manager.releaseOperationLeases(association, ids.operationId);
+    await expect(reserved.manager.resolvePreviewLease(reservedLease.leaseId)).resolves.toBeNull();
+
+    const owned = await fixture(); cleanup.push(owned.root);
+    const ownedLease = owned.bindings[0]!;
+    await owned.runtime.stop(association);
+    await owned.manager.workspaceStopped(association);
+    owned.engine.containers.clear();
+    await expect(owned.manager.leases.releaseIfContainerRemoved(ownedLease.leaseId)).resolves.toBe(true);
+    await expect(owned.manager.resolvePreviewLease(ownedLease.leaseId)).resolves.toBeNull();
+  });
+
   test("keeps a running workspace with no application listener in the health-waiting state", async () => {
     const probe = new Probe([{ kind: "response", statusCode: 503 }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);

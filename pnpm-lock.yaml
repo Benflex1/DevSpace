@@ -76,6 +76,12 @@ importers:
         specifier: 8.18.1
         version: 8.18.1
 
+  apps/preview-gateway-host:
+    dependencies:
+      '@devspace/gateway-caddy':
+        specifier: workspace:*
+        version: link:../../packages/gateway-caddy
+
   apps/web:
     dependencies:
       '@devspace/contracts':

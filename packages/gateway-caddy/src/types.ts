@@ -53,6 +53,14 @@ export const previewGatewayLeaseSchema = z.strictObject({
   hostPort: z.number().int().min(1).max(65535)
 });
 export type PreviewGatewayLease = z.infer<typeof previewGatewayLeaseSchema>;
+
+/** Closed private wire request for the Agent-owned preview lease resolver. */
+export const previewLeaseResolverRequestSchema = z.strictObject({
+  leaseId: previewGatewayLeaseSchema.shape.leaseId
+});
+/** The resolver deliberately reuses the existing three-field lease shape. */
+export const previewLeaseResolverResponseSchema = previewGatewayLeaseSchema;
+export type PreviewLeaseResolverRequest = z.infer<typeof previewLeaseResolverRequestSchema>;
 export interface PreviewGatewayProbeRequest {
   readonly leaseId: string;
   readonly path: string;
@@ -73,7 +81,7 @@ export interface CaddyAdminResponse {
 
 /** Private transport only; callers never provide raw Caddy documents. */
 export interface CaddyAdminTransport {
-  request?(method: "GET" | "PUT", path: string, body?: readonly unknown[], timeoutMs?: number): Promise<CaddyAdminResponse>;
+  request?(method: "GET" | "PATCH", path: string, body?: readonly unknown[], timeoutMs?: number): Promise<CaddyAdminResponse>;
   listRoutes?(): Promise<readonly GatewayObservedRoute[]>;
   replaceRoutes?(routes: readonly PreviewGatewayRoute[]): Promise<void>;
 }

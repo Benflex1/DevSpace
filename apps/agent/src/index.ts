@@ -15,3 +15,4 @@ export {
   parseLsRemoteOutput,
   type GitInspector
 } from "./git-inspector.js";
+export { PreviewLeaseResolverServer, PREVIEW_LEASE_RESOLVER_PATH, type PreviewLeaseResolverServerOptions } from "./preview-lease-resolver.js";

@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "vitest";
@@ -14,8 +14,11 @@ import {
   PreviewGatewayAdapter,
   PrivateCaddyAdminTransport,
   PrivateGatewayProbeTransport,
+  CADDY_FALLBACK_ROUTE_ID,
   fromCaddyRoutes,
   toCaddyRoute,
+  toCaddyFallbackRoute,
+  toCaddyRouteSet,
   type CaddyAdminTransport,
   type PreviewGatewayRoute
 } from "./index.js";
@@ -43,9 +46,9 @@ class MemoryTransport implements CaddyAdminTransport {
   failReads = false;
   failNextReplace = false;
 
-  request(method: "GET" | "PUT", _path: string, body?: readonly unknown[]) {
+  request(method: "GET" | "PATCH", _path: string, body?: readonly unknown[]) {
     if (this.failReads && method === "GET") return Promise.reject(new Error("http://127.0.0.1:2019 unavailable"));
-    if (method === "PUT") {
+    if (method === "PATCH") {
       if (this.failNextReplace) { this.failNextReplace = false; return Promise.reject(new Error("injected-replace-failure")); }
       this.documents = body ?? []; this.replaceCount += 1; return Promise.resolve({ statusCode: 204, body: null });
     }
@@ -103,6 +106,48 @@ async function requestSocket(socketPath: string, body: unknown): Promise<{ reado
 }
 
 describe("typed private Caddy gateway adapter", () => {
+  test("builds only the gateway-owned fallback for an empty route set", () => {
+    expect(toCaddyRouteSet([], approved)).toEqual([toCaddyFallbackRoute()]);
+    expect(toCaddyFallbackRoute()).toEqual({
+      "@id": CADDY_FALLBACK_ROUTE_ID,
+      handle: [{ handler: "static_response", status_code: 404, body: "Not Found" }],
+      terminal: true
+    });
+  });
+
+  test("recognizes the deterministic unmatched-host 404 and orders it after managed routes", () => {
+    const documents = toCaddyRouteSet([route()], approved);
+    expect(documents).toHaveLength(2);
+    expect(documents[0]).toEqual(toCaddyRoute(route(), approved));
+    expect(documents[1]).toEqual(toCaddyFallbackRoute());
+    expect(documents[1]).not.toHaveProperty("match");
+    expect(documents[1]).toMatchObject({ handle: [{ handler: "static_response", status_code: 404 }] });
+    expect(fromCaddyRoutes([documents[1]], approved)).toEqual([]);
+  });
+
+  test("keeps the fallback through ensure, remove, reconcile, and preview inspection", async () => {
+    const transport = new MemoryTransport();
+    transport.documents = [toCaddyFallbackRoute()];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+
+    await adapter.ensureRoute(route());
+    expect(transport.documents).toEqual([...toCaddyRouteSet([route()], approved)]);
+    expect((await adapter.inspectRoute(route())).present).toBe(true);
+    await adapter.removeRoute(route());
+    expect(transport.documents).toEqual([toCaddyFallbackRoute()]);
+    expect(await adapter.inspectRoute(route())).toEqual({ present: false, status: "absent" });
+    await adapter.reconcileRoutes([]);
+    expect(transport.documents).toEqual([toCaddyFallbackRoute()]);
+    expect(fromCaddyRoutes(transport.documents, approved)).toEqual([]);
+  });
+
+  test("does not treat the fallback as a hostname owner", async () => {
+    const transport = new MemoryTransport();
+    transport.documents = [toCaddyFallbackRoute()];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    await expect(adapter.ensureRoute(route())).resolves.toBeUndefined();
+  });
+
   test("generates an exact host route with only a loopback upstream and streaming/upgrade support", () => {
     const document = toCaddyRoute(route(), policy);
     expect(document.match).toEqual([{ host: ["web.localhost"] }]);
@@ -348,6 +393,39 @@ describe("typed private Caddy gateway adapter", () => {
     } finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
   });
 
+  test("cleans the bound host-probe socket after a post-bind startup failure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    const socketPath = join(directory, "probe.sock");
+    const service = new GatewayHostProbeServer({ socketPath, resolveLease: () => Promise.resolve(null),
+      afterBind: () => Promise.reject(new Error("forced post-bind failure")) });
+    try {
+      await expect(service.start()).rejects.toThrow("forced post-bind failure");
+      await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(`${socketPath}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("serializes concurrent host-probe ownership attempts and supports repeated start/stop", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    const socketPath = join(directory, "probe.sock");
+    const first = new GatewayHostProbeServer({ socketPath, resolveLease: () => Promise.resolve(null) });
+    const second = new GatewayHostProbeServer({ socketPath, resolveLease: () => Promise.resolve(null) });
+    try {
+      const results = await Promise.allSettled([first.start(), second.start()]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      const winner = results[0].status === "fulfilled" ? first : second;
+      await winner.start();
+      await winner.stop();
+      await winner.stop();
+      await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await first.stop().catch(() => undefined);
+      await second.stop().catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("host probe service rejects non-loopback leases and probes only after trusted resolution", async () => {
     let targetRequests = 0;
     let resolved = false;
@@ -389,12 +467,14 @@ describe("typed private Caddy gateway adapter", () => {
       fetch: (url, init) => {
         const printableUrl = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
         calls.push({ url: printableUrl, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
-        return Promise.resolve(init?.method === "PUT" ? new Response(null, { status: 204 }) : Response.json([document]));
+        return Promise.resolve(init?.method === "PATCH" ? new Response(null, { status: 204 }) : Response.json([document]));
       }
     }, policy);
     expect((await transport.request("GET", "/config/apps/http/servers/devspace-preview/routes")).statusCode).toBe(200);
-    await transport.request("PUT", "/config/apps/http/servers/devspace-preview/routes", [document]);
+    await transport.replaceRoutes([route()]);
     expect(calls).toHaveLength(2);
+    expect(calls[1]?.method).toBe("PATCH");
+    expect(calls[1]?.method).not.toBe("PUT");
     const routeDocument = JSON.parse(calls[1]!.body!) as { handle: Array<{ upstreams: unknown }> }[];
     expect(routeDocument[0]?.handle[0]?.upstreams).toEqual([{ dial: "127.0.0.1:43123" }]);
   });

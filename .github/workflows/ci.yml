@@ -38,6 +38,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Smoke test pinned Caddy preview gateway
+        run: pnpm preview-gateway:caddy-smoke
+
       - name: Verify workspace graph
         run: pnpm workspace:check
 

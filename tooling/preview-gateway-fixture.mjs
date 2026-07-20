@@ -7,6 +7,7 @@ const defaultBases = [{ id: "local", domain: "localhost" }];
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const dnsLabelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const caddyRouteIdPrefix = "devspace-preview-v1.";
+const caddyFallbackRouteId = "devspace-preview-fallback-v1";
 const caddyRoutesPath = "/config/apps/http/servers/devspace-preview/routes";
 
 function fail(message) {
@@ -113,6 +114,10 @@ function caddyDocument(route) {
 }
 function routeFromCaddyDocument(document, bases) {
   const candidate = object(document, "caddy-route");
+  if (candidate["@id"] === caddyFallbackRouteId && candidate.terminal === true
+    && !("match" in candidate) && Array.isArray(candidate.handle) && candidate.handle.length === 1
+    && candidate.handle[0]?.handler === "static_response" && candidate.handle[0]?.status_code === 404
+    && candidate.handle[0]?.body === "Not Found") return null;
   if (typeof candidate["@id"] !== "string" || !candidate["@id"].startsWith(caddyRouteIdPrefix)
     || !Array.isArray(candidate.match) || candidate.match.length !== 1 || !Array.isArray(candidate.match[0]?.host)
     || candidate.match[0].host.length !== 1 || !Array.isArray(candidate.handle) || candidate.handle.length !== 1
@@ -181,7 +186,7 @@ export async function createPreviewGatewayFixture(options = {}) {
   const fixture = {};
   const adminServer = options.adminSocketPath === undefined ? null : http.createServer(async (request, response) => {
     try {
-      if (request.url !== caddyRoutesPath || !["GET", "PUT"].includes(request.method ?? "")) { response.writeHead(404).end(); return; }
+      if (request.url !== caddyRoutesPath || !["GET", "PATCH"].includes(request.method ?? "")) { response.writeHead(404).end(); return; }
       if (request.method === "GET") {
         const encoded = JSON.stringify([...routes.values()].map(caddyDocument));
         response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);
@@ -189,7 +194,7 @@ export async function createPreviewGatewayFixture(options = {}) {
       }
       const body = await requestBody(request, 1_048_576);
       if (!Array.isArray(body)) { response.writeHead(400).end(); return; }
-      const desired = body.map((document) => routeFromCaddyDocument(document, bases));
+      const desired = body.map((document) => routeFromCaddyDocument(document, bases)).filter((route) => route !== null);
       if (new Set(desired.map(identityKey)).size !== desired.length || new Set(desired.map((route) => route.hostname)).size !== desired.length) {
         response.writeHead(409).end(); return;
       }
