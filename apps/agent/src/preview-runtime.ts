@@ -532,7 +532,7 @@ export class PreviewRuntimeManager {
       if (this.gateway !== null) {
         try { await this.gateway.ensureRoute(this.route(record, lease)); }
         catch (error) {
-          let routePresent = record.routePresent;
+          let routePresent: boolean;
           let routeError: string | null = null;
           try { await this.removeRoute(record); routePresent = false; }
           catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; routePresent = true; }

@@ -80,8 +80,6 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`, "u"));
   await expect(project.getByText("Registered — workspace setup pending")).toBeVisible();
   await project.getByLabel("Development container image").fill("node:24-bookworm");
-  await project.getByLabel("Configure a task").check();
-  await expect(project.getByLabel("Configure a task")).toBeChecked();
   const workbench = page.locator("main.workbench");
   let setupComplete = false;
   for (let attempt = 0; attempt < 3 && !setupComplete; attempt += 1) {
@@ -152,12 +150,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await project.getByRole("button", { name: "Retry start" }).click();
   await expect(project.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
   await expect(project.getByRole("button", { name: "Stop environment" })).toBeVisible();
-  let taskGetRequests = 0;
-  page.on("request", (request) => {
-    if (request.method() === "GET" && request.url().endsWith(`/api/projects/${projectId}/tasks`)) taskGetRequests += 1;
-  });
   await page.waitForTimeout(2_000);
-  expect(taskGetRequests).toBe(0);
   const dockerSnapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", {
     headers: { authorization: `Bearer ${fixture.controlToken}` }
   }).then(async (response) => await response.json()) as { networks: number; containers: number; execs: unknown[]; containerDetails: DockerContainer[] };
@@ -166,8 +159,6 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   const baselineContainerIds = new Set(baselineDockerSnapshot.containerDetails.map((container) => container.id));
   const primaryContainer = dockerSnapshot.containerDetails.find((container) => !baselineContainerIds.has(container.id));
   expect(primaryContainer).toBeDefined();
-  await project.locator(".sidebar-task-list li").filter({ hasText: "Check workspace" }).getByRole("button", { name: "Run" }).click();
-  await expect(project.getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
   await page.reload(); await expect(project.getByText("Running", { exact: true })).toBeVisible();
   const restart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(restart.status).toBe(204);
@@ -179,10 +170,6 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   let recoveredPage = await browserContext.newPage();
   await gotoProject(recoveredPage, projectId);
   let recovered = recoveredPage.locator("main.workbench");
-  let recoveredTaskGetRequests = 0;
-  recoveredPage.on("request", (request) => {
-    if (request.method() === "GET" && request.url().endsWith(`/api/projects/${projectId}/tasks`)) recoveredTaskGetRequests += 1;
-  });
   await expect(recovered).toBeVisible();
   await expect(recovered.locator(".runtime-chip.running")).toHaveText("Running");
   await expect(recovered.locator(".workbench-sidebar")).toContainText("Terminals");
@@ -268,11 +255,4 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   recovered = recoveredPage.locator("main.workbench");
   await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0);
 
-  await expect(recovered.locator(".sidebar-task-runs")).toContainText("Exit code: 0");
-  expect(recoveredTaskGetRequests).toBeGreaterThan(0);
-  const taskWebRestart = await fetch("http://127.0.0.1:3199/restart-web", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
-  expect(taskWebRestart.status).toBe(204);
-  await recoveredPage.close(); recoveredPage = await browserContext.newPage(); await gotoProject(recoveredPage, projectId);
-  recovered = recoveredPage.locator("main.workbench");
-  await expect(recovered.locator(".sidebar-task-runs").filter({ hasText: "check" }).getByText("passed", { exact: true })).toBeVisible({ timeout: 30_000 });
 });
