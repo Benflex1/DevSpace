@@ -2,6 +2,7 @@ import type { GitInspectionData, WorkspaceInspectionData } from "@devspace/contr
 import { createAgentClient } from "./agent-client.js";
 import { readWebRuntimeConfig } from "./config.js";
 import { getProjectDatabase, type ManagedProjectView } from "./database.js";
+import { reconcileWorkspacePreviews } from "./preview-orchestration.js";
 import { reconcilePrimaryWorkspaceRuntimeOperation, type RuntimeOperationReconciliation } from "./runtime-operation-reconciliation.js";
 
 export type AgentConnectionStatus = "connected" | "degraded" | "unavailable";
@@ -52,8 +53,18 @@ export async function loadDashboardData(): Promise<DashboardData> {
 export async function loadProjectWorkspaceData(projectId: string): Promise<ProjectWorkspaceData | null> {
   const config = readWebRuntimeConfig();
   const database = getProjectDatabase(config.databasePath);
-  const project = database.getManagedProject(projectId);
+  let project = database.getManagedProject(projectId);
   if (project === undefined) return null;
+  if (project.state === "ready" && project.primaryWorkspace !== null && project.activeRevision !== null) {
+    try {
+      database.materializePreviews({ projectId: project.id, workspaceId: project.primaryWorkspace.id,
+        revisionId: project.activeRevision.id, previewBaseRegistry: config.previewBaseRegistry });
+      project = database.getManagedProject(projectId) ?? project;
+    } catch {
+      // An invalid deployment registry or stale revision is retained as a safe
+      // unavailable preview condition rather than blocking the project page.
+    }
+  }
   const agent = createAgentClient(config.agentSocketPath);
   const agentState = await readAgentStatus(agent);
   const agentSnapshot = agentState.reachable ? await agent.snapshot().catch(() => null) : null;
@@ -72,10 +83,22 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
       runtimeAvailable: agentState.runtimeStatus?.rootlessRuntime === "available"
         && agentState.runtimeStatus.operationJournal === "available"
     });
+    if (live !== null) {
+      const runtimeState = live.workspace.runtimeStack.observedState;
+      const mode = runtimeState === "running" && live.workspace.observedState === "running" ? "running"
+        : live.workspace.observedState === "lost" || runtimeState === "lost" ? "lost" : "observe";
+      await reconcileWorkspacePreviews(project.id, actorForPreviewReconciliation(), mode, {
+        database, agent, previewBaseRegistry: config.previewBaseRegistry
+      }).catch(() => undefined);
+    }
   }
 
   const reconciledProject = database.getManagedProject(projectId);
   if (reconciledProject === undefined) return null;
   return { project: reconciledProject, agentStatus: agentState.status, agentReachable: agentState.reachable,
     runtimeAvailability: agentState.runtimeAvailability, live, runtimeOperation };
+}
+
+function actorForPreviewReconciliation(): string {
+  return "web-reconciliation";
 }

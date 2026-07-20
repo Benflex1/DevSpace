@@ -1,9 +1,10 @@
 import http from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { agentApiV1EndpointByOperation, sourceInspectionDataSchema } from "@devspace/contracts";
+import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { createAgentServer } from "./server.js";
 import { parseLsRemoteOutput } from "./git-inspector.js";
 
@@ -28,6 +29,38 @@ async function provisionDefaultRoots(socketPath: string): Promise<void> {
   const root = path.join(path.dirname(socketPath), ".devspace-managed");
   await Promise.all(["projects", "workspaces", "state/operations"]
     .map(async (relative) => await mkdir(path.join(root, relative), { recursive: true })));
+}
+
+function startupPreviewGateway(reconcileRoutes: () => Promise<void>): PreviewGatewayAdapterContract {
+  return {
+    probe: () => Promise.resolve({ kind: "infrastructure", message: "not used by inactive startup fixture" }),
+    ensureRoute: () => Promise.resolve(),
+    replaceRoute: () => Promise.resolve(),
+    removeRoute: () => Promise.resolve(),
+    inspectRoute: () => Promise.resolve({ present: false, status: "absent" }),
+    reconcileRoutes
+  };
+}
+
+async function provisionDurableInactivePreview(socketPath: string): Promise<{ readonly roots: {
+  readonly projects: string; readonly workspaces: string; readonly state: string;
+}; readonly statePath: string; readonly contents: string }> {
+  await provisionDefaultRoots(socketPath);
+  const root = path.join(path.dirname(socketPath), ".devspace-managed");
+  const roots = { projects: path.join(root, "projects"), workspaces: path.join(root, "workspaces"), state: path.join(root, "state") } as const;
+  const previewId = "018f0f00-0000-7000-8000-000000000010";
+  const statePath = path.join(roots.state, "previews", `${previewId}.json`);
+  await mkdir(path.dirname(statePath), { recursive: true });
+  const contents = `${JSON.stringify({
+    version: 1, previewId, projectId: "018f0f00-0000-7000-8000-000000000005", workspaceId: "018f0f00-0000-7000-8000-000000000009", previewKey: "web",
+    revisionId: "018f0f00-0000-7000-8000-000000000006", revisionHash: `sha256-jcs-v1:${"1".repeat(64)}`, runtimePlanHash: `sha256-jcs-v1:${"2".repeat(64)}`,
+    generation: 1, hostname: "project-workspace-web-018f0f00.preview.example.com", domainBaseId: "local", containerPort: 3000,
+    healthPath: "/health", healthStatuses: [200], startupTimeoutSeconds: 1, webSocketForwarding: true,
+    leaseId: "018f0f00-0000-7000-8000-000000000011", containerId: null, desiredState: "inactive", observedState: "inactive", routePresent: false,
+    attempt: 0, nextAttemptAt: 0, lastStatusCode: null, lastError: null, operationId: null
+  })}\n`;
+  await writeFile(statePath, contents, "utf8");
+  return { roots, statePath, contents };
 }
 const headers = {
   "X-DevSpace-Protocol-Version": "1",
@@ -54,6 +87,47 @@ test("serves health and source inspection through the executable Agent contracts
     }, body });
     expect(inspected.status).toBe(200);
     expect(agentApiV1EndpointByOperation["project.source.inspect"].successBodySchema.parse(inspected.body).data.defaultBranch).toBe("main");
+  } finally { await server.stop(); }
+});
+
+test("successful startup preview reconciliation leaves Agent health healthy", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-preview-startup-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  const fixture = await provisionDurableInactivePreview(socketPath);
+  let reconciliationCalls = 0;
+  const server = createAgentServer({ socketPath, managedRoots: fixture.roots, now: () => now, createId: () => id,
+    previewGateway: startupPreviewGateway(() => { reconciliationCalls += 1; return Promise.resolve(); }) });
+  await server.start();
+  try {
+    await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({ body: { data: { status: "ok" } } });
+    expect(reconciliationCalls).toBe(1);
+    await expect(readFile(fixture.statePath, "utf8")).resolves.toBe(fixture.contents);
+  } finally { await server.stop(); }
+});
+
+test("failed startup preview reconciliation degrades health, preserves state, and recovers on a later successful start", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-preview-startup-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  const fixture = await provisionDurableInactivePreview(socketPath);
+  let unavailable = true;
+  let reconciliationCalls = 0;
+  const server = createAgentServer({ socketPath, managedRoots: fixture.roots, now: () => now, createId: () => id,
+    previewGateway: startupPreviewGateway(() => {
+      reconciliationCalls += 1;
+      if (unavailable) return Promise.reject(new Error("gateway-unavailable"));
+      return Promise.resolve();
+    }) });
+  await server.start();
+  await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({ body: { data: { status: "degraded" } } });
+  await expect(readFile(fixture.statePath, "utf8")).resolves.toBe(fixture.contents);
+
+  unavailable = false;
+  await server.stop();
+  await server.start();
+  try {
+    await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({ body: { data: { status: "ok" } } });
+    expect(reconciliationCalls).toBe(2);
+    await expect(readFile(fixture.statePath, "utf8")).resolves.toBe(fixture.contents);
   } finally { await server.stop(); }
 });
 

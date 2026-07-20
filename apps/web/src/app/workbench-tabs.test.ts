@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, terminalTabId, type WorkbenchTab
+  activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab
 } from "./workbench-tabs.js";
 
 const terminal = (id: string): WorkbenchTab => ({ id: terminalTabId(id), kind: "terminal", terminalId: id, title: `Terminal ${id}` });
@@ -19,6 +19,15 @@ describe("Workbench tab state", () => {
     const state = openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, terminal("one")), terminal("one"));
     expect(state.tabs).toHaveLength(1);
     expect(state.activeTabId).toBe("terminal:one");
+  });
+
+  test("deduplicates preview tabs by preview identity and closes to the adjacent tab", () => {
+    const preview: WorkbenchTab = { id: previewTabId("preview-one"), kind: "preview", previewId: "preview-one" };
+    const state = openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, terminal("one")), preview);
+    const deduplicated = openWorkbenchTab(state, { ...preview });
+    expect(deduplicated.tabs.map((tab) => tab.id)).toEqual(["terminal:one", "preview:preview-one"]);
+    expect(deduplicated.activeTabId).toBe("preview:preview-one");
+    expect(closeWorkbenchTab(deduplicated, preview.id).activeTabId).toBe("terminal:one");
   });
 
   test("activates only known tabs", () => {

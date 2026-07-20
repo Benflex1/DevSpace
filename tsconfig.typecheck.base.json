@@ -10,6 +10,7 @@
       "@devspace/database": ["packages/database/src/index.ts"],
       "@devspace/project-options": ["packages/project-options/src/index.ts"],
       "@devspace/security": ["packages/security/src/index.ts"],
+      "@devspace/gateway-caddy": ["packages/gateway-caddy/src/index.ts"],
       "@devspace/testkit": ["packages/testkit/src/index.ts"]
     }
   }

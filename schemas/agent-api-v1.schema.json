@@ -3103,16 +3103,9 @@
                   "type": "boolean"
                 },
                 "hostname": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 253
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
                 }
               },
               "required": [
@@ -3784,16 +3777,9 @@
                         "type": "boolean"
                       },
                       "hostname": {
-                        "anyOf": [
-                          {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 253
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
                       }
                     },
                     "required": [
@@ -7619,16 +7605,9 @@
                       "type": "boolean"
                     },
                     "hostname": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 253
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253
                     }
                   },
                   "required": [
@@ -14361,6 +14340,18 @@
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
             },
+            "projectSlug": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "workspaceSlug": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
             "kind": {
               "type": "string",
               "enum": [
@@ -14432,6 +14423,8 @@
           "required": [
             "projectId",
             "workspaceId",
+            "projectSlug",
+            "workspaceSlug",
             "kind",
             "revision",
             "branchName",
@@ -26585,6 +26578,10 @@
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
             },
+            "revisionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
             "previewId": {
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -26594,13 +26591,34 @@
               "minLength": 1,
               "maxLength": 64,
               "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "hostname": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "projectSlug": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "workspaceSlug": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]{0,63}$"
             }
           },
           "required": [
             "projectId",
             "workspaceId",
+            "revisionId",
             "previewId",
-            "previewKey"
+            "previewKey",
+            "hostname",
+            "projectSlug",
+            "workspaceSlug"
           ],
           "additionalProperties": false
         }
@@ -27505,6 +27523,10 @@
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
             },
+            "revisionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
             "previewId": {
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -27513,6 +27535,7 @@
           "required": [
             "projectId",
             "workspaceId",
+            "revisionId",
             "previewId"
           ],
           "additionalProperties": false
@@ -28099,6 +28122,10 @@
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
             },
+            "revisionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
             "previewId": {
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -28107,6 +28134,7 @@
           "required": [
             "projectId",
             "workspaceId",
+            "revisionId",
             "previewId"
           ],
           "additionalProperties": false
@@ -28188,16 +28216,9 @@
               "type": "boolean"
             },
             "hostname": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 253
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
             }
           },
           "required": [
@@ -32978,16 +32999,9 @@
                             "type": "boolean"
                           },
                           "hostname": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 253
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253
                           }
                         },
                         "required": [

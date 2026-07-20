@@ -43,3 +43,30 @@ test("rejects malformed envelopes and unavailable sockets without exposing inter
   await expect(createAgentClient(path.join(tmpdir(), `missing-${id}.sock`), { timeoutMs: 50 }).health())
     .rejects.toBeInstanceOf(AgentUnavailableError);
 });
+
+test("sends the canonical typed preview activation fields and parses the mutation receipt", async () => {
+  let requestBody = "";
+  let operationHeader: string | undefined;
+  const service = await listen((request, response) => {
+    const header = request.headers["x-devspace-operation-id"];
+    operationHeader = Array.isArray(header) ? header[0] : header;
+    request.on("data", (chunk: Buffer) => { requestBody += chunk.toString("utf8"); });
+    request.on("end", () => {
+      response.statusCode = 202;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp }, data: { operationId: id } }));
+    });
+  });
+  try {
+    const client = createAgentClient(service.socketPath, { createId: () => id, now: () => new Date(timestamp) });
+    await expect(client.activatePreview(id, {
+      projectId: id, workspaceId: "018f0f00-0000-7000-8000-000000000002", revisionId: "018f0f00-0000-7000-8000-000000000003",
+      previewId: "018f0f00-0000-7000-8000-000000000004", previewKey: "web", hostname: "alpha-primary-web-018f0f00.preview.example.com",
+      projectSlug: "alpha", workspaceSlug: "primary"
+    })).resolves.toEqual({ operationId: id });
+    expect(operationHeader).toBe(id);
+    expect(requestBody).toContain('"hostname":"alpha-primary-web-018f0f00.preview.example.com"');
+    expect(requestBody).toContain('"projectSlug":"alpha"');
+    expect(requestBody).toContain('"workspaceSlug":"primary"');
+  } finally { await service.close(); }
+});

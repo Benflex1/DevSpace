@@ -14,7 +14,7 @@ const project = { projectId: id };
 const workspace = { projectId: id, workspaceId: id2 };
 const process = { ...workspace, processId: id };
 const terminal = { ...workspace, terminalId: id };
-const preview = { ...workspace, previewId: id };
+const preview = { ...workspace, revisionId: id, previewId: id };
 const aiSession = { ...workspace, aiSessionId: id };
 
 const requestData: Record<string, unknown> = {
@@ -31,7 +31,7 @@ const requestData: Record<string, unknown> = {
   "project.managed-store.create": { ...project, source: { kind: "remote", url: "https://example.com/repository.git" } },
   "project.fetch": project,
   "project.git.inspect": { ...project, workspaceId: null },
-  "workspace.create": { ...workspace, kind: "isolated", revision: { revisionId: id, revisionHash: hash }, branchName: "feature/f09", baseRef: { kind: "branch", branchName: "main" } },
+  "workspace.create": { ...workspace, projectSlug: "project", workspaceSlug: "workspace", kind: "isolated", revision: { revisionId: id, revisionHash: hash }, branchName: "feature/f09", baseRef: { kind: "branch", branchName: "main" } },
   "workspace.inspect": workspace,
   "workspace.start": workspace,
   "workspace.stop": workspace,
@@ -43,7 +43,8 @@ const requestData: Record<string, unknown> = {
   "process.inspect": process,
   "terminal.create": terminal,
   "terminal.close": terminal,
-  "preview.activate": { ...preview, previewKey: "app" },
+  "preview.activate": { ...preview, previewKey: "app", hostname: "project-workspace-app-a1b2.example.com",
+    projectSlug: "project", workspaceSlug: "workspace" },
   "preview.deactivate": preview,
   "preview.inspect": preview,
   "ai-session.start": aiSession,
@@ -61,7 +62,8 @@ const responseData: Record<string, unknown> = {
   "project.git.inspect": { ...project, workspaceId: null, branchName: "main", headCommit: "a".repeat(40), dirty: false, aheadCount: 0, behindCount: 0 },
   "workspace.inspect": { ...workspace, kind: "primary", revisionId: id, revisionHash: hash, desiredState: "running", observedState: "running", dirty: false, runtimeStack: { desiredState: "running", observedState: "running" } },
   "process.inspect": { ...process, kind: "task", desiredState: "running", observedState: "running", exitCode: null, startedAt: timestamp, finishedAt: null },
-  "preview.inspect": { ...preview, previewKey: "app", desiredState: "active", observedState: "healthy", routePresent: true, hostname: "app.example.com" }
+  "preview.inspect": { projectId: id, workspaceId: id2, previewId: id, previewKey: "app", desiredState: "active",
+    observedState: "healthy", routePresent: true, hostname: "app.example.com" }
 };
 
 describe("Agent API v1 executable endpoint inventory", () => {

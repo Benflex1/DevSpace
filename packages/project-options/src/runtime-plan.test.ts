@@ -22,6 +22,25 @@ describe("runtime-plan v1", () => {
     expect(hashRuntimePlanV1(plan)).toMatch(/^sha256-jcs-v1:[0-9a-f]{64}$/u);
   });
 
+  test("retains only declared workspace ports in the executable runtime plan", () => {
+    const plan = compileRuntimePlanV1({
+      ...simple(),
+      developmentEnvironment: {
+        ...simple().developmentEnvironment,
+        ports: [
+          { name: "web", containerPort: 3000 },
+          { name: "metrics", containerPort: 9090 }
+        ]
+      },
+      previews: [{
+        key: "web", displayName: "Web", target: { kind: "workspace" }, containerPort: 3000,
+        domainBaseId: "preview-main", hostnamePattern: "{project}-{preview}"
+      }]
+    });
+    expect(plan.developmentContainer.ports.map((port) => port.containerPort)).toEqual([9090, 3000]);
+    expect(plan.developmentContainer.ports).not.toContainEqual(expect.objectContaining({ containerPort: 8080 }));
+  });
+
   test.each([
     ["source-preset", { developmentEnvironment: { source: { kind: "preset", presetKey: "node", runtimeVersion: "24" } } }],
     ["source-dockerfile", { developmentEnvironment: { source: { kind: "dockerfile", dockerfilePath: "Dockerfile" } } }],

@@ -58,6 +58,32 @@ test("development auth is explicit and deterministic while Cloudflare mode requi
   })).rejects.toBeInstanceOf(AuthenticationError);
 });
 
+test("parses a closed preview-base registry and rejects malformed or duplicate entries", () => {
+  const valid = readWebRuntimeConfig({
+    ...base,
+    DEVSPACE_AUTH_MODE: "development",
+    NODE_ENV: "test",
+    DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost" }])
+  });
+  expect(valid.previewBaseRegistry).toBeDefined();
+  expect(() => readWebRuntimeConfig({
+    ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
+    DEVSPACE_PREVIEW_BASES: "not-json"
+  })).toThrow(/valid JSON/u);
+  expect(() => readWebRuntimeConfig({
+    ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
+    DEVSPACE_PREVIEW_BASES: JSON.stringify([
+      { id: "one", domain: "preview.example.com" }, { id: "one", domain: "other.example.com" }
+    ])
+  })).toThrow(/DUPLICATE/u);
+  expect(() => readWebRuntimeConfig({
+    ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
+    DEVSPACE_PREVIEW_BASES: JSON.stringify([
+      { id: "one", domain: "preview.example.com" }, { id: "two", domain: "preview.example.com" }
+    ])
+  })).toThrow(/duplicate domain/u);
+});
+
 test("performs real RS256/JWKS verification and rejects invalid signed Access tokens", async () => {
   const config = { mode: "cloudflare-access" as const, issuer, audience };
   const authenticate = async (token: string) => await authenticateHeaders(new Headers({ "cf-access-jwt-assertion": token }), config);

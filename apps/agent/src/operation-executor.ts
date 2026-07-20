@@ -6,10 +6,14 @@ import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
-  const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string };
+  const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
   if (typeof request.projectId !== "string") return null;
-  if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close"].includes(record.operationName)
+  if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close",
+    "preview.activate", "preview.deactivate"].includes(record.operationName)
     && typeof request.workspaceId === "string") {
+    if (["preview.activate", "preview.deactivate"].includes(record.operationName) && typeof request.previewId === "string") {
+      return { type: "preview", projectId: request.projectId, workspaceId: request.workspaceId, previewId: request.previewId };
+    }
     return { type: "workspace", projectId: request.projectId, workspaceId: request.workspaceId };
   }
   return { type: "project", projectId: request.projectId };
@@ -43,6 +47,11 @@ export class OperationExecutor {
   }
   snapshotResources(): AgentSnapshotResource[] { return [...this.resources, ...this.execution.snapshotResources()]; }
 
+  private async refreshAfterPreviewMutation(): Promise<void> {
+    try { this.resources = await this.managed.snapshotResources(); }
+    catch { this.observationHealthy = false; this.resources = []; }
+  }
+
   schedule(record: JournalRecord): void {
     if (record.state === "succeeded" || record.state === "failed" || this.inFlight.has(record.operationId)) return;
     const projectId = (record.request as { projectId: string }).projectId;
@@ -65,6 +74,7 @@ export class OperationExecutor {
     if (record === undefined || record.state === "succeeded" || record.state === "failed") return;
     const projectId = (record.request as { projectId: string }).projectId;
     const resource = resourceFor(record);
+    const previewMutation = record.operationName === "preview.activate" || record.operationName === "preview.deactivate";
     let taskStartCompleted = false;
     try {
       await this.managed.awaitProjectExecutionFence(projectId);
@@ -109,6 +119,12 @@ export class OperationExecutor {
           this.events.workspaceRuntimeConverged(operationId, request.projectId, request.workspaceId, previousRuntime, "stopped");
           break;
         }
+        case "preview.activate":
+          await this.managed.activatePreview(record.request as Parameters<ManagedWorkspaces["activatePreview"]>[0], operationId);
+          break;
+        case "preview.deactivate":
+          await this.managed.deactivatePreview(record.request as Parameters<ManagedWorkspaces["deactivatePreview"]>[0], operationId);
+          break;
         case "task.start":
           await this.execution.startTask(record.request as Parameters<ExecutionManager["startTask"]>[0], operationId);
           taskStartCompleted = true;
@@ -125,7 +141,9 @@ export class OperationExecutor {
           await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
           break;
       }
-      if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close"]
+      if (previewMutation) await this.refreshAfterPreviewMutation();
+      if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close",
+        "preview.activate", "preview.deactivate"]
         .includes(record.operationName)) {
         try { this.resources = await this.managed.snapshotResources(); }
         catch (error) { this.observationHealthy = false; throw error; }
@@ -147,6 +165,7 @@ export class OperationExecutor {
       await this.journal.succeed(operationId);
       this.events.succeeded(operationId, resource);
     } catch (error) {
+      if (previewMutation) await this.refreshAfterPreviewMutation();
       // Once private execution evidence says the start occurred, a later journal write outage
       // must leave this operation resumable; it must never rewrite successful start as failure.
       if (record.operationName === "task.start" && (taskStartCompleted || error instanceof TaskStartRecoveryRequiredError)) return;

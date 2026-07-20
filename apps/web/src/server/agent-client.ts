@@ -4,12 +4,15 @@ import {
   agentApiV1EndpointByOperation,
   f10AgentApiV1EndpointByOperation,
   type AgentSnapshotData,
+  type ActivatePreviewData,
   type ConfigurationRevisionData,
   type ConfigurationRuntimePlanData,
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
   type HealthData,
+  type MutationReceipt,
+  type PreviewInspectionData,
   type RuntimeStatusData,
   type SourceInspectionData,
   type ProcessInspectionData,
@@ -39,7 +42,7 @@ export function createAgentClient(socketPath: string, options: {
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
-    | "terminal.create" | "terminal.close" | "snapshot.get";
+    | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get";
 
   async function call(operation: SupportedOperation, data?: unknown, operationId?: string): Promise<unknown> {
     const endpoint = operation === "snapshot.get"
@@ -137,6 +140,14 @@ export function createAgentClient(socketPath: string, options: {
     closeTerminal: async (operationId: string, projectId: string, workspaceId: string, terminalId: string): Promise<void> => {
       await call("terminal.close", { projectId, workspaceId, terminalId }, operationId);
     },
+    activatePreview: async (operationId: string, data: ActivatePreviewData): Promise<MutationReceipt> => {
+      return await call("preview.activate", data, operationId) as MutationReceipt;
+    },
+    deactivatePreview: async (operationId: string, projectId: string, workspaceId: string, revisionId: string, previewId: string): Promise<MutationReceipt> => {
+      return await call("preview.deactivate", { projectId, workspaceId, revisionId, previewId }, operationId) as MutationReceipt;
+    },
+    inspectPreview: async (projectId: string, workspaceId: string, revisionId: string, previewId: string): Promise<PreviewInspectionData> =>
+      await call("preview.inspect", { projectId, workspaceId, revisionId, previewId }) as PreviewInspectionData,
     snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
   };
 }

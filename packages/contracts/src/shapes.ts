@@ -72,6 +72,9 @@ export const workspaceIdentityDataSchema = z.strictObject({
 export const createWorkspaceDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
+  /** Web-owned canonical identities retained by Agent private workspace ownership. */
+  projectSlug: configurationKeySchema,
+  workspaceSlug: configurationKeySchema,
   kind: z.enum(["primary", "isolated"]),
   revision: revisionIdentitySchema,
   branchName: gitBranchNameSchema,
@@ -114,12 +117,19 @@ export const terminalIdentityDataSchema = createTerminalDataSchema;
 export const activatePreviewDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
+  revisionId: uuidV7Schema,
   previewId: uuidV7Schema,
-  previewKey: configurationKeySchema
+  previewKey: configurationKeySchema,
+  /** Materialized and persisted by Web; never supplied by the browser. */
+  hostname: z.string().min(1).max(253),
+  /** Web-owned slug inputs used by Agent only to verify the persisted hostname. */
+  projectSlug: configurationKeySchema,
+  workspaceSlug: configurationKeySchema
 });
 export const previewIdentityDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
+  revisionId: uuidV7Schema,
   previewId: uuidV7Schema
 });
 export const startAiSessionDataSchema = z.strictObject({
@@ -233,6 +243,7 @@ const hostnameSchema = z.string().min(1).max(253).refine((hostname) => hostname.
   (label) => label.length >= 1 && label.length <= 63
     && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
 ));
+export const previewHostnameSchema = hostnameSchema;
 export const previewInspectionDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
@@ -241,11 +252,8 @@ export const previewInspectionDataSchema = z.strictObject({
   desiredState: previewDesiredStateSchema,
   observedState: previewObservedStateSchema,
   routePresent: z.boolean(),
-  hostname: hostnameSchema.nullable()
+  hostname: hostnameSchema
 }).superRefine((data, context) => {
-  if ((data.hostname !== null) !== data.routePresent) {
-    context.addIssue({ code: "custom", path: ["hostname"], message: "Hostname presence must match route presence" });
-  }
   if (data.routePresent && ["inactive", "failed", "lost"].includes(data.observedState)) {
     context.addIssue({ code: "custom", path: ["routePresent"], message: "This preview state cannot have a route" });
   }

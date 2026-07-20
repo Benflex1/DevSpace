@@ -7,7 +7,8 @@ import {
   type RuntimePlanV1
 } from "@devspace/project-options";
 import {
-  DockerEngineClient, DockerEngineError, effectiveRuntimeResources, type RuntimePolicy
+  DockerEngineClient, DockerEngineError, dockerPortBindingsEqual, effectiveRuntimeResources,
+  type DockerPortBindings, type RuntimePolicy
 } from "./docker-runtime.js";
 import { durableJsonWriter, readStrictJson, type AtomicJsonWriter } from "./private-state.js";
 
@@ -15,6 +16,21 @@ const dockerIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.:-]+$/u);
 const dockerNameSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/u);
 const labelsSchema = z.record(z.string(), z.string());
 const absolutePathSchema = z.string().refine((value) => path.isAbsolute(value), "Expected an absolute path");
+export const runtimePreviewBindingSchema = z.strictObject({
+  leaseId: uuidV7Schema,
+  previewKey: z.string().regex(/^[a-z][a-z0-9-]*$/u),
+  containerPort: z.number().int().min(1).max(65535),
+  hostIp: z.literal("127.0.0.1"),
+  hostPort: z.number().int().min(1).max(65535)
+});
+const runtimePreviewBindingsSchema = z.array(runtimePreviewBindingSchema).superRefine((bindings, context) => {
+  const keys = new Set<string>();
+  for (const [index, binding] of bindings.entries()) {
+    if (keys.has(binding.previewKey)) context.addIssue({ code: "custom", path: [index, "previewKey"], message: "Duplicate preview key" });
+    keys.add(binding.previewKey);
+  }
+});
+export type RuntimePreviewBinding = z.infer<typeof runtimePreviewBindingSchema>;
 
 export const runtimeOwnershipSchema = z.strictObject({
   version: z.literal(1),
@@ -26,6 +42,7 @@ export const runtimeOwnershipSchema = z.strictObject({
   generation: z.number().int().positive(),
   worktreePath: absolutePathSchema,
   resources: z.strictObject({ cpuMillicores: z.number().int().positive(), memoryBytes: z.number().int().positive(), pidLimit: z.number().int().positive() }),
+  previewBindings: runtimePreviewBindingsSchema.default([]),
   network: z.strictObject({ id: dockerIdSchema, name: dockerNameSchema, labels: labelsSchema }),
   developmentContainer: z.strictObject({ id: dockerIdSchema, name: dockerNameSchema, labels: labelsSchema })
 });
@@ -42,6 +59,7 @@ export const runtimeCreationSchema = z.strictObject({
   generation: z.number().int().positive(),
   worktreePath: absolutePathSchema,
   resources: z.strictObject({ cpuMillicores: z.number().int().positive(), memoryBytes: z.number().int().positive(), pidLimit: z.number().int().positive() }),
+  previewBindings: runtimePreviewBindingsSchema.default([]),
   networkName: dockerNameSchema,
   containerName: dockerNameSchema,
   networkId: dockerIdSchema.nullable(),
@@ -195,6 +213,14 @@ export class WorkspaceRuntimeManager {
     networkIdentity: "materialized" | "operation-owned-pre-activation" = "materialized"): void {
     const devices = container.HostConfig.Devices ?? [];
     const portBindings = container.HostConfig.PortBindings ?? {};
+    const expectedByPort = new Map<string, Array<{ HostIp: string; HostPort: string }>>();
+    for (const binding of record.previewBindings) {
+      const key = `${binding.containerPort}/tcp`;
+      const values = expectedByPort.get(key) ?? [];
+      values.push({ HostIp: binding.hostIp, HostPort: String(binding.hostPort) });
+      expectedByPort.set(key, values);
+    }
+    const expectedPortBindings: DockerPortBindings = Object.fromEntries(expectedByPort);
     const capAdd = [...(container.HostConfig.CapAdd ?? [])].sort();
     const capDrop = [...(container.HostConfig.CapDrop ?? [])].sort();
     const securityOptions = [...(container.HostConfig.SecurityOpt ?? [])]
@@ -215,9 +241,9 @@ export class WorkspaceRuntimeManager {
       || container.HostConfig.CgroupnsMode !== "private"
       || container.HostConfig.AutoRemove !== false || container.HostConfig.ReadonlyRootfs !== false
       || container.HostConfig.RestartPolicy.Name !== "no" || container.HostConfig.RestartPolicy.MaximumRetryCount !== 0
-      || container.HostConfig.NetworkMode !== record.network.name
+      || container.HostConfig.NetworkMode === "host" || container.HostConfig.NetworkMode !== record.network.name
       || networkNames.length !== 1 || networkNames[0] !== record.network.name || !networkIdentityMatches
-      || Object.keys(portBindings).length !== 0 || devices.length !== 0
+      || !dockerPortBindingsEqual(portBindings, expectedPortBindings) || devices.length !== 0
       || container.HostConfig.NanoCpus !== record.resources.cpuMillicores * 1_000_000
       || container.HostConfig.Memory !== record.resources.memoryBytes
       || container.HostConfig.PidsLimit !== record.resources.pidLimit
@@ -260,12 +286,14 @@ export class WorkspaceRuntimeManager {
   }
 
   private creationMatches(record: RuntimeCreation, association: RuntimeAssociation, worktreePath: string,
-    resources: RuntimeOwnership["resources"], names: ReturnType<typeof resourceNames>): boolean {
+    resources: RuntimeOwnership["resources"], names: ReturnType<typeof resourceNames>,
+    previewBindings: readonly RuntimePreviewBinding[] = record.previewBindings): boolean {
     return record.projectId === association.projectId && record.workspaceId === association.workspaceId
       && record.revisionId === association.revisionId && record.revisionHash === association.revisionHash
       && record.runtimePlanHash === association.runtimePlanHash && record.generation === association.generation
       && record.worktreePath === path.resolve(worktreePath) && JSON.stringify(record.resources) === JSON.stringify(resources)
-      && record.networkName === names.network && record.containerName === names.container;
+      && record.networkName === names.network && record.containerName === names.container
+      && JSON.stringify(record.previewBindings) === JSON.stringify(previewBindings);
   }
 
   private ownershipFromCreation(creation: RuntimeCreation): RuntimeOwnership {
@@ -276,6 +304,7 @@ export class WorkspaceRuntimeManager {
     return runtimeOwnershipSchema.parse({ version: 1, projectId: creation.projectId, workspaceId: creation.workspaceId,
       revisionId: creation.revisionId, revisionHash: creation.revisionHash, runtimePlanHash: creation.runtimePlanHash,
       generation: creation.generation, worktreePath: creation.worktreePath, resources: creation.resources,
+      previewBindings: creation.previewBindings,
       network: { id: creation.networkId, name: creation.networkName, labels: labels(association, "network", creation.operationId) },
       developmentContainer: { id: creation.containerId, name: creation.containerName,
         labels: labels(association, "development-container", creation.operationId) } });
@@ -405,9 +434,15 @@ export class WorkspaceRuntimeManager {
     }
   }
 
-  async start(association: RuntimeAssociation, planInput: unknown, worktreePath: string, operationId: string): Promise<RuntimeObservation> {
+  async start(association: RuntimeAssociation, planInput: unknown, worktreePath: string, operationId: string,
+    requestedPreviewBindings: readonly RuntimePreviewBinding[] = []): Promise<RuntimeObservation> {
     uuidV7Schema.parse(operationId);
     const plan = parseRuntimePlanV1(planInput);
+    const previewBindings = runtimePreviewBindingsSchema.parse(requestedPreviewBindings);
+    const declaredPorts = plan.developmentContainer.ports.map((port) => port.containerPort);
+    if (previewBindings.some((binding) => !declaredPorts.includes(binding.containerPort))) {
+      throw new WorkspaceRuntimeError("RUNTIME_POLICY_VIOLATION", "A preview port is not declared by the exact runtime plan.");
+    }
     if (hashRuntimePlanV1(plan) !== association.runtimePlanHash) {
       throw new WorkspaceRuntimeError("RUNTIME_POLICY_VIOLATION", "The registered runtime plan hash does not match the workspace.");
     }
@@ -421,13 +456,14 @@ export class WorkspaceRuntimeManager {
     let record = await this.load(association.workspaceId);
     if (record !== null) {
       if (!associationMatches(record, association) || record.worktreePath !== resolvedWorktree
-        || JSON.stringify(record.resources) !== JSON.stringify(resources)) {
+        || JSON.stringify(record.resources) !== JSON.stringify(resources)
+        || JSON.stringify(record.previewBindings) !== JSON.stringify(previewBindings)) {
         throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime belongs to another revision, plan, policy, worktree, or generation.");
       }
       const creation = await this.loadCreation(association.workspaceId);
       let recoveredCreation: RuntimeCreation | null = null;
       if (creation !== null) {
-        if (!this.creationMatches(creation, association, resolvedWorktree, resources, names)) {
+        if (!this.creationMatches(creation, association, resolvedWorktree, resources, names, previewBindings)) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime creation record does not match authoritative ownership.");
         }
         const recovered = await this.recoverCreationEvidence(creation);
@@ -448,10 +484,10 @@ export class WorkspaceRuntimeManager {
     let creation = await this.loadCreation(association.workspaceId);
     if (creation === null) {
       creation = runtimeCreationSchema.parse({ version: 1, operationId, ...association, worktreePath: resolvedWorktree,
-        resources, networkName: names.network, containerName: names.container,
+        resources, previewBindings, networkName: names.network, containerName: names.container,
         networkId: null, containerId: null, phase: "reserved" });
       await this.saveCreation(creation);
-    } else if (!this.creationMatches(creation, association, resolvedWorktree, resources, names)) {
+    } else if (!this.creationMatches(creation, association, resolvedWorktree, resources, names, previewBindings)) {
       throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "An incomplete runtime creation belongs to another operation identity.");
     }
     creation = await this.recoverCreationEvidence(creation);
@@ -483,7 +519,10 @@ export class WorkspaceRuntimeManager {
         containerId = await this.engine.createContainer(names.container, {
         imageReference: plan.developmentContainer.source.imageReference, worktreePath,
         user: plan.developmentContainer.containerUser, environment: plan.developmentContainer.environment,
-        networkName: names.network, labels: containerLabels, ...resources
+        networkName: names.network, labels: containerLabels, ...resources,
+        portBindings: Object.fromEntries(previewBindings.map((binding) => [
+          `${binding.containerPort}/tcp`, [{ HostIp: binding.hostIp, HostPort: String(binding.hostPort) }]
+        ])), declaredContainerPorts: declaredPorts
       });
       } catch {
         throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The development container could not be created safely.");

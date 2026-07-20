@@ -2,8 +2,10 @@ import {
   canonicalizeProjectOptionsV1, canonicalizeRuntimePlanV1, compileRuntimePlanV1,
   hashProjectOptionsV1, hashRuntimePlanV1, parseProjectOptionsV1, parseRuntimePlanV1
 } from "@devspace/project-options";
+import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { AgentResponseError, type WorkspaceAgentClient } from "./agent-client.js";
 import type { ProjectDatabase } from "./database.js";
+import { reconcileWorkspacePreviews, type PreviewOrchestrationAgent } from "./preview-orchestration.js";
 import { reconcilePrimaryWorkspaceRuntimeOperation } from "./runtime-operation-reconciliation.js";
 
 export class WorkspaceRuntimeExecutionError extends Error {
@@ -11,6 +13,24 @@ export class WorkspaceRuntimeExecutionError extends Error {
 }
 type WorkspaceRuntimeAgent = Pick<WorkspaceAgentClient,
   "snapshot" | "runtimeStatus" | "inspectWorkspace" | "registerRuntimePlan" | "startWorkspace" | "stopWorkspace">;
+
+async function reconcilePreviewsAfterRuntime(action: "start" | "stop", projectId: string, actor: string, dependencies: {
+  readonly database: ProjectDatabase;
+  readonly agent: WorkspaceRuntimeAgent & Partial<PreviewOrchestrationAgent>;
+  readonly previewBaseRegistry?: ApprovedPreviewBaseRegistry;
+}): Promise<void> {
+  if (typeof dependencies.agent.activatePreview !== "function"
+    || typeof dependencies.agent.deactivatePreview !== "function"
+    || typeof dependencies.agent.inspectPreview !== "function") return;
+  try {
+    const orchestration = { database: dependencies.database, agent: dependencies.agent as PreviewOrchestrationAgent };
+    await reconcileWorkspacePreviews(projectId, actor, action === "start" ? "running" : "stopped",
+      dependencies.previewBaseRegistry === undefined ? orchestration : { ...orchestration, previewBaseRegistry: dependencies.previewBaseRegistry });
+  } catch {
+    // Preview failures are retained in the preview row. They must not turn a
+    // proven runtime start/stop into an unproven runtime operation.
+  }
+}
 
 async function pollMutation(input: {
   database: ProjectDatabase; agent: WorkspaceRuntimeAgent; operationId: string;
@@ -31,7 +51,8 @@ async function pollMutation(input: {
 }
 
 export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", projectId: string, actor: string, dependencies: {
-  readonly database: ProjectDatabase; readonly agent: WorkspaceRuntimeAgent; readonly orchestrationTimeoutMs?: number;
+  readonly database: ProjectDatabase; readonly agent: WorkspaceRuntimeAgent & Partial<PreviewOrchestrationAgent>; readonly previewBaseRegistry?: ApprovedPreviewBaseRegistry;
+  readonly orchestrationTimeoutMs?: number;
   readonly nowMonotonic?: () => number; readonly sleep?: (milliseconds: number) => Promise<void>;
 }) {
   const context = dependencies.database.getRuntimeContext(projectId);
@@ -88,6 +109,7 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
   }
   if (reconciliation.reconciledTerminal?.state === "succeeded"
     && reconciliation.reconciledTerminal.action === action && reconciliation.inspection !== null) {
+    await reconcilePreviewsAfterRuntime(action, projectId, actor, dependencies);
     return reconciliation.inspection;
   }
   const authorized = action === "start" ? reconciliation.canStart : reconciliation.canStop;
@@ -105,7 +127,11 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
   }
   const operation = dependencies.database.prepareRuntimeMutation({ projectId, workspaceId: context.workspace.id, actor, action,
     runtimePlanHash: planHash, imageReference: plan.developmentContainer.source.imageReference });
-  if (operation.state === "succeeded") return await dependencies.agent.inspectWorkspace(projectId, context.workspace.id);
+  if (operation.state === "succeeded") {
+    const observed = await dependencies.agent.inspectWorkspace(projectId, context.workspace.id);
+    await reconcilePreviewsAfterRuntime(action, projectId, actor, dependencies);
+    return observed;
+  }
   try {
     await pollMutation({ database: dependencies.database, agent: dependencies.agent, operationId: operation.operationId,
       execute: async () => action === "start"
@@ -120,6 +146,7 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
     dependencies.database.finishRuntimeMutation({ operationId: operation.operationId, projectId, workspaceId: context.workspace.id,
       outcome: { state: "succeeded", workspaceObserved: observed.observedState,
         runtimeObserved: observed.runtimeStack.observedState } });
+    await reconcilePreviewsAfterRuntime(action, projectId, actor, dependencies);
     return observed;
   } catch (error) {
     const deliveryOutcomeUnknown = !(error instanceof WorkspaceRuntimeExecutionError)

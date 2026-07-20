@@ -63,12 +63,12 @@ describe("database schema metadata", () => {
             childTable: tableName
           }))
         );
-        expect(foreignKeys).toHaveLength(24);
+        expect(foreignKeys).toHaveLength(26);
         expect(new Set(foreignKeys.map(({ on_update }) => on_update))).toEqual(new Set(["NO ACTION"]));
         expect(Object.fromEntries(["CASCADE", "RESTRICT", "SET NULL"].map((action) => [
           action,
           foreignKeys.filter(({ on_delete }) => on_delete === action).length
-        ]))).toEqual({ CASCADE: 11, RESTRICT: 7, "SET NULL": 6 });
+        ]))).toEqual({ CASCADE: 11, RESTRICT: 8, "SET NULL": 7 });
         for (const foreignKey of foreignKeys.filter(({ on_delete }) => on_delete === "SET NULL")) {
           const column = rows<{ name: string; notnull: number }>(
             database,
@@ -137,6 +137,18 @@ describe("database schema metadata", () => {
         expect(taskRunsSql).toContain(
           "'queued', 'starting', 'running', 'passed', 'failed', 'cancelled', 'timed_out', 'lost'"
         );
+        const previewColumns = rows<{ name: string; notnull: number; dflt_value: string | null }>(
+          database,
+          "pragma table_info('previews')"
+        );
+        expect(previewColumns.find(({ name }) => name === "hostname")?.notnull).toBe(1);
+        expect(previewColumns.find(({ name }) => name === "route_present"))
+          .toMatchObject({ notnull: 1, dflt_value: "false" });
+        expect(previewColumns.map(({ name }) => name)).toEqual(expect.arrayContaining([
+          "config_revision_id", "display_name", "target_kind", "target_key", "domain_base_id",
+          "hostname_pattern", "health_statuses_json", "startup_timeout_seconds", "web_socket_forwarding",
+          "runtime_generation", "last_observation_json", "last_error_code", "last_error_message", "operation_id"
+        ]));
 
         const forbiddenTables = [
           "agent_journal",

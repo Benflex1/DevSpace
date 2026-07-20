@@ -25,6 +25,25 @@ async function engineSocket(securityOptions: string[]): Promise<string> {
   return socket;
 }
 
+async function recordingEngineSocket(): Promise<{ socket: string; bodies: unknown[] }> {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-create-")); directories.push(directory);
+  const socket = path.join(directory, "engine.sock");
+  const bodies: unknown[] = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      if (request.url?.startsWith("/containers/create") === true) bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      if (request.url?.startsWith("/containers/create") === true) {
+        response.writeHead(201, { "content-type": "application/json" }).end(JSON.stringify({ Id: "container-1" }));
+      } else response.writeHead(404).end();
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+  return { socket, bodies };
+}
+
 describe("dedicated rootless Docker boundary", () => {
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
@@ -53,5 +72,33 @@ describe("dedicated rootless Docker boundary", () => {
     expect(() => readRuntimePolicy({ DEVSPACE_RUNTIME_MAX_PIDS: "unbounded" })).toThrow();
     expect(() => readRuntimePolicy({ DEVSPACE_RUNTIME_STABILIZATION_INTERVAL_MS: "1000",
       DEVSPACE_RUNTIME_STABILIZATION_DURATION_MS: "500" })).toThrow("inconsistent");
+  });
+
+  test("publishes only declared ports on Docker loopback", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createContainer("devspace-preview", {
+      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
+      declaredContainerPorts: [3000], portBindings: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "40000" }] }
+    })).resolves.toBe("container-1");
+    expect(fixture.bodies[0]).toMatchObject({
+      ExposedPorts: { "3000/tcp": {} },
+      HostConfig: { PublishAllPorts: false, PortBindings: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "40000" }] } }
+    });
+    await expect(engine.createContainer("devspace-public", {
+      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
+      declaredContainerPorts: [3000], portBindings: { "3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "40001" }] }
+    })).rejects.toThrow();
+    await expect(engine.createContainer("devspace-undeclared", {
+      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
+      declaredContainerPorts: [3000], portBindings: { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: "40002" }] }
+    })).rejects.toThrow();
+    await expect(engine.createContainer("devspace-host", {
+      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      networkName: "container:other", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16
+    })).rejects.toThrow("preview-host-network-is-forbidden");
   });
 });

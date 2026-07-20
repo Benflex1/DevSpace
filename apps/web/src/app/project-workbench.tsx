@@ -5,17 +5,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
+import { isPreviewChanging, previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
+import { PreviewTab } from "./preview-tab.js";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, terminalTabId, type WorkbenchTab, type WorkbenchTabState
+  activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 
 type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
-type FutureNavItem = "Files" | "Git" | "Previews" | "AI";
-
 export function ProjectWorkbench({ projectId, workspaceId, projectName, branchName, runtimeState, runtimeRunning, runtimeAvailable,
-  agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, initialTasks, initialTaskRuns, initialTerminals,
-  repositoryUrl, actor }: {
+  agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, initialTasks, initialTaskRuns, initialTerminals, initialPreviews,
+  previewGateway, repositoryUrl, actor }: {
   projectId: string;
   workspaceId: string;
   projectName: string;
@@ -32,6 +32,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   initialTasks: readonly Task[];
   initialTaskRuns: readonly TaskRun[];
   initialTerminals: readonly TerminalView[];
+  initialPreviews: readonly PreviewLifecycleView[];
+  previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   repositoryUrl: string;
   actor: string;
 }) {
@@ -41,8 +43,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const currentTerminals = useRef(initialTerminals);
   const [tasks, setTasks] = useState<readonly Task[]>(initialTasks);
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
+  const [previews, setPreviews] = useState<readonly PreviewLifecycleView[]>(initialPreviews);
+  const currentPreviews = useRef(initialPreviews);
   const [message, setMessage] = useState("");
   currentTerminals.current = terminals;
+  currentPreviews.current = previews;
+  useEffect(() => {
+    setPreviews(initialPreviews);
+    currentPreviews.current = initialPreviews;
+  }, [initialPreviews]);
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
     const existing = terminalLabels.current.get(terminal.id);
     if (existing !== undefined) return existing;
@@ -60,15 +69,27 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     return title;
   }, []);
 
-  const refresh = useCallback(async (): Promise<{ terminals: TerminalView[] }> => {
-    const response = await fetch(`/api/projects/${projectId}/tasks`, { cache: "no-store" });
-    if (!response.ok) return { terminals: [] };
-    const data = await response.json() as { tasks: Task[]; taskRuns: TaskRun[]; terminals: TerminalView[] };
-    setTasks(data.tasks);
-    setRuns(data.taskRuns);
-    setTerminals(data.terminals);
-    for (const terminal of data.terminals) getTerminalTitle(terminal);
-    return data;
+  const refresh = useCallback(async (): Promise<{ terminals: TerminalView[]; previews: PreviewLifecycleView[] }> => {
+    const [executionResponse, previewResponse] = await Promise.all([
+      fetch(`/api/projects/${projectId}/tasks`, { cache: "no-store" }),
+      fetch(`/api/projects/${projectId}/previews`, { cache: "no-store" })
+    ]);
+    let terminals = [...currentTerminals.current];
+    if (executionResponse.ok) {
+      const data = await executionResponse.json() as { tasks: Task[]; taskRuns: TaskRun[]; terminals: TerminalView[] };
+      setTasks(data.tasks);
+      setRuns(data.taskRuns);
+      setTerminals(data.terminals);
+      terminals = data.terminals;
+      for (const terminal of data.terminals) getTerminalTitle(terminal);
+    }
+    let nextPreviews = [...currentPreviews.current];
+    if (previewResponse.ok) {
+      const data = await previewResponse.json() as { previews: PreviewLifecycleView[] };
+      nextPreviews = data.previews;
+      setPreviews(data.previews);
+    }
+    return { terminals, previews: nextPreviews };
   }, [getTerminalTitle, projectId]);
   const updateTerminalState = useCallback((terminalId: string, state: string) => {
     setTerminals((current) => updateTerminalCollectionState(current, terminalId, state));
@@ -103,8 +124,35 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     };
   }, [refresh, runs]);
 
+  useEffect(() => {
+    if (!previews.some(isPreviewChanging)) return;
+    let stopped = false;
+    let timer: number | null = null;
+    const schedule = () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        refresh().catch(() => undefined).finally(() => schedule());
+      }, 1_500);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+      } else schedule();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [previews, refresh]);
+
   const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) => isTerminalVisibleState(terminal.state))), [terminals]);
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);
+  const previewById = useMemo(() => new Map(previews.map((preview) => [preview.id, preview])), [previews]);
   useEffect(() => {
     const visibleIds = new Set(visibleTerminals.map((terminal) => terminal.id));
     setTabs((current) => {
@@ -115,6 +163,16 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       return next;
     });
   }, [visibleTerminals]);
+  useEffect(() => {
+    const visibleIds = new Set(previews.map((preview) => preview.id));
+    setTabs((current) => {
+      let next = current;
+      for (const tab of current.tabs) {
+        if (tab.kind === "preview" && !visibleIds.has(tab.previewId)) next = closeWorkbenchTab(next, tab.id);
+      }
+      return next;
+    });
+  }, [previews]);
   const actionsAvailable = runtimeRunning && runtimeAvailable && agentReachable && agentStatus === "connected";
   const openTerminalTab = useCallback((terminal: TerminalView) => {
     if (!actionsAvailable || !isTerminalAttachableState(terminal.state)) return;
@@ -122,6 +180,9 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       id: terminalTabId(terminal.id), kind: "terminal", terminalId: terminal.id, title: getTerminalTitle(terminal)
     }));
   }, [actionsAvailable, getTerminalTitle]);
+  const openPreviewTab = useCallback((preview: PreviewLifecycleView) => {
+    setTabs((current) => openWorkbenchTab(current, { id: previewTabId(preview.id), kind: "preview", previewId: preview.id }));
+  }, []);
   const createTerminal = async () => {
     if (!actionsAvailable) return;
     setMessage("Creating terminal…");
@@ -153,6 +214,14 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     setMessage(response.ok ? "Task started." : result.message ?? "Task action failed.");
     await refresh();
   };
+  const reloadPreview = async (previewId: string) => {
+    setMessage("Reconciling preview…");
+    const response = await fetch(`/api/projects/${projectId}/previews`, { method: "POST",
+      headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "reload", previewId }) });
+    const result = await response.json() as { message?: string; previews?: PreviewLifecycleView[] };
+    if (Array.isArray(result.previews)) setPreviews(result.previews);
+    setMessage(response.ok ? "Preview reconciliation requested." : result.message ?? "Preview reconciliation failed.");
+  };
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
     <WorkbenchTopBar projectName={projectName} branchName={branchName} repositoryUrl={repositoryUrl} projectId={projectId}
@@ -160,14 +229,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       retryStart={retryStart} />
     <div className="workbench-body">
       <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
+        previews={previews} onOpenPreview={openPreviewTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
         <WorkbenchTabStrip tabs={tabs} onActivate={(tabId) => setTabs((current) => activateWorkbenchTab(current, tabId))}
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
           canCreateTerminal={actionsAvailable} />
-        <WorkbenchSurface tabs={tabs} terminalById={terminalById} projectId={projectId} workspaceId={workspaceId}
-          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} />
+        <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId}
+          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway} />
         {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
       </section>
     </div>
@@ -191,8 +261,10 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, onOpenTerminal, onCreateTerminal, onRunTask }: {
+function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview,
+  onOpenTerminal, onCreateTerminal, onRunTask }: {
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
+  previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
   return <aside className="workbench-sidebar" aria-label="Project navigation">
@@ -200,10 +272,13 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable,
     <nav className="workbench-nav" aria-label="Workbench tools">
       <button type="button" className="workbench-nav-item active"><span aria-hidden="true">▸</span> Terminals <span className="nav-count">{terminals.length}</span></button>
       <button type="button" className="workbench-nav-item"><span aria-hidden="true">≡</span> Tasks <span className="nav-count">{tasks.length}</span></button>
-      {(["Files", "Git", "Previews", "AI"] as FutureNavItem[]).map((item) =>
+      {["Files", "Git", "AI"].map((item) =>
         <button type="button" className="workbench-nav-item future" disabled key={item} title={`${item} is planned for a later milestone`}>
           <span aria-hidden="true">·</span> {item}<span className="nav-future">Soon</span>
         </button>)}
+      <button type="button" className="workbench-nav-item" onClick={() => { const first = previews[0]; if (first !== undefined) onOpenPreview(first); }}>
+        <span aria-hidden="true">▾</span> Previews <span className="nav-count">{previews.length}</span>
+      </button>
     </nav>
     <div className="sidebar-section">
       <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!actionsAvailable}
@@ -216,6 +291,22 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable,
             <button type="button" disabled={!attachable} onClick={() => onOpenTerminal(terminal)} title={attachable ? "Open terminal tab" : "This terminal is no longer attachable"}>
               <span className={`sidebar-state ${terminal.state}`} aria-hidden="true" />
               <span><strong>{getTerminalTitle(terminal)}</strong><small>{terminal.state}</small></span>
+              {tab?.id === tabs.activeTabId && <span className="sidebar-active">●</span>}
+            </button>
+          </li>;
+        })}
+      </ul>}
+    </div>
+    <div className="sidebar-section previews-sidebar-section">
+      <div className="sidebar-section-heading"><h2>Previews</h2></div>
+      {previews.length === 0 ? <p className="sidebar-empty">No configured previews.</p> : <ul className="preview-list">
+        {previews.map((preview) => {
+          const tab = tabs.tabs.find((candidate) => candidate.kind === "preview" && candidate.previewId === preview.id);
+          const state = previewPresentationState(preview);
+          return <li key={preview.id} className={tab?.id === tabs.activeTabId ? "selected" : ""}>
+            <button type="button" onClick={() => onOpenPreview(preview)} title={`Open ${preview.displayName} preview`}>
+              <span className={`preview-sidebar-state ${state}`} aria-hidden="true">{previewPresentationSymbol(preview)}</span>
+              <span><strong>{preview.displayName}</strong><small>{previewPresentationLabel(preview)}</small></span>
               {tab?.id === tabs.activeTabId && <span className="sidebar-active">●</span>}
             </button>
           </li>;
@@ -248,15 +339,22 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, projectId, workspaceId, onRefresh, onTerminalStateChange }: {
-  tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; projectId: string; workspaceId: string;
-  onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway }: {
+  tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
+  projectId: string; workspaceId: string; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
+  onReloadPreview: (previewId: string) => Promise<void>;
+  previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a terminal to start working in this project.</p></div>}
     {tabs.tabs.map((tab) => tab.kind === "terminal" ? <TerminalTab key={tab.id} projectId={projectId} workspaceId={workspaceId}
       terminal={terminalById.get(tab.terminalId) ?? { id: tab.terminalId, processId: tab.terminalId, title: tab.title, state: "disconnected" }}
-      active={tab.id === tabs.activeTabId} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} /> : null)}
+      active={tab.id === tabs.activeTabId} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
+      : tab.kind === "preview" ? (() => {
+        const preview = previewById.get(tab.previewId);
+        return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
+          active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
+      })() : null)}
   </div>;
 }
 

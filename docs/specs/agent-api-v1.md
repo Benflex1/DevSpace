@@ -335,6 +335,8 @@ RevisionIdentity = {
 CreateWorkspaceData = {
   projectId: UuidV7,
   workspaceId: UuidV7,
+  projectSlug: ConfigurationKey,
+  workspaceSlug: ConfigurationKey,
   kind: "primary" | "isolated",
   revision: RevisionIdentity,
   branchName: GitBranchName,
@@ -359,6 +361,10 @@ RemoveWorkspaceData = {
   dirtyHandling: "reject" | "discard"
 }
 ```
+
+`projectSlug` and `workspaceSlug` are Web-owned canonical identities. The Agent retains them in
+its private workspace ownership record and uses them to validate later preview hostnames; they
+are never browser input.
 
 `branchName` is the validated branch shorthand to create or attach. `baseRef` is either one
 validated branch name or one exact Git object ID from which a new worktree is based. The Agent
@@ -416,13 +422,24 @@ container. Those values come from the registered revision and Agent policy. Web 
 ActivatePreviewData = {
   projectId: UuidV7,
   workspaceId: UuidV7,
+  revisionId: UuidV7,
   previewId: UuidV7,
-  previewKey: ConfigurationKey
+  previewKey: ConfigurationKey,
+  hostname: string,
+  projectSlug: ConfigurationKey,
+  workspaceSlug: ConfigurationKey
 }
+
+`hostname`, `projectSlug`, and `workspaceSlug` are an internal Web-to-Agent activation
+boundary. The browser never supplies them. Web reads the exact persisted hostname and
+slug identity from SQLite; Agent validates that hostname against the registered revision,
+approved preview-base registry, pattern, and exact preview/workspace identity before it
+stores or routes it.
 
 PreviewIdentityData = {
   projectId: UuidV7,
   workspaceId: UuidV7,
+  revisionId: UuidV7,
   previewId: UuidV7
 }
 ```
@@ -602,14 +619,15 @@ PreviewInspectionData = {
   desiredState: PreviewDesiredState,
   observedState: PreviewObservedState,
   routePresent: boolean,
-  hostname: string | null
+  hostname: string
 }
 ```
 
-When non-null, `hostname` is a lowercase ASCII DNS hostname of 1 through 253 characters: labels are
-1 through 63 characters, match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`, and are separated by literal
-dots. `hostname` is non-null exactly when `routePresent` is true. `routePresent` must be false when
-the observed state is `inactive`, `failed`, or `lost`.
+`hostname` is always the materialized lowercase ASCII DNS hostname of 1 through 253 characters,
+including while the preview is Waiting and no route is present. Labels are 1 through 63 characters,
+match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`, and are separated by literal dots. `routePresent` is an
+independent readiness signal and must be false when the observed state is `inactive`, `failed`, or
+`lost`.
 
 ## Stable error registry
 
@@ -638,7 +656,7 @@ document are not members of this registry, F09 runtime schemas, exports, or fixt
 | `PROCESS_IDENTITY_MISMATCH` | Retained process ownership and exact runtime evidence do not match the live process. | `409` | false | `{ processId: UuidV7 }` | route-specific |
 | `PREVIEW_NOT_DEFINED` | The registered revision does not define the requested preview key. | `422` | false | `{ revisionId: UuidV7, previewKey: ConfigurationKey }` | route-specific |
 | `AI_NOT_CONFIGURED` | The workspace's registered Project Options revision has `aiProfile: null`. | `422` | false | `{ workspaceId: UuidV7, revisionId: UuidV7 }` | route-specific |
-| `PREVIEW_DOMAIN_NOT_APPROVED` | The derived preview hostname is outside the approved domain registry. | `422` | false | `{ previewId: UuidV7 }` | route-specific |
+| `PREVIEW_DOMAIN_NOT_APPROVED` | The Web-materialized preview hostname is malformed, outside the approved domain registry, or inconsistent with the exact revision pattern and identity. | `422` | false | `{ previewId: UuidV7 }` | route-specific |
 | `GATEWAY_UPDATE_FAILED` | The narrow preview gateway adapter could not apply the derived route update. | `503` | true | `{ previewId: UuidV7 }` | route-specific |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | The dedicated rootless runtime required by the route is unavailable. | `503` | true | `{ component: "docker" }` | route-specific |
 | `AGENT_INTERNAL_ERROR` | An unexpected redacted Agent failure occurred. | `500` | true | `{ incidentId: UuidV7 }` | global |

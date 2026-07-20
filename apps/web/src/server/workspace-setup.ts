@@ -170,7 +170,7 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
     });
     await completeMutation(dependencies.database, dependencies.agent, createWorkspace, async () => {
       await dependencies.agent.createWorkspace(createWorkspace.operationId, {
-        projectId, workspaceId: setup.workspaceId, kind: "primary",
+        projectId, workspaceId: setup.workspaceId, projectSlug: setup.project.slug, workspaceSlug: setup.workspaceSlug, kind: "primary",
         revision: { revisionId: setup.revision.id, revisionHash: configurationHash },
         branchName,
         baseRef: { kind: "branch", branchName }

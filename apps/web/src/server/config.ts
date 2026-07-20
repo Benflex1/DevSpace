@@ -1,4 +1,9 @@
 import { AGENT_SOCKET_PATH } from "@devspace/contracts";
+import {
+  createApprovedPreviewBase,
+  createApprovedPreviewBaseRegistry,
+  type ApprovedPreviewBaseRegistry
+} from "@devspace/security";
 
 export type AuthConfig =
   | { readonly mode: "development"; readonly actor: string }
@@ -9,6 +14,9 @@ export interface WebRuntimeConfig {
   readonly agentSocketPath: string;
   readonly appOrigin: string;
   readonly auth: AuthConfig;
+  readonly previewBaseRegistry: ApprovedPreviewBaseRegistry;
+  readonly previewGatewayProtocol: "http:" | "https:";
+  readonly previewGatewayPort: number | null;
 }
 
 type RuntimeEnvironment = Readonly<Record<string, string | undefined>>;
@@ -19,6 +27,43 @@ function required(env: RuntimeEnvironment, name: string): string {
   return value;
 }
 
+function readPreviewBaseRegistry(env: RuntimeEnvironment): ApprovedPreviewBaseRegistry {
+  const raw = env.DEVSPACE_PREVIEW_BASES?.trim();
+  if (raw === undefined || raw === "") {
+    const empty = createApprovedPreviewBaseRegistry([]);
+    if (!empty.ok) throw new Error("The default preview-base registry is invalid.");
+    return empty.value;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("DEVSPACE_PREVIEW_BASES must be valid JSON.");
+  }
+  if (!Array.isArray(parsed)) throw new Error("DEVSPACE_PREVIEW_BASES must be a JSON array.");
+  const bases = parsed.map((candidate, index) => {
+    if (typeof candidate !== "object" || candidate === null
+      || typeof (candidate as { id?: unknown }).id !== "string"
+      || typeof (candidate as { domain?: unknown }).domain !== "string") {
+      throw new Error(`DEVSPACE_PREVIEW_BASES[${index}] must contain string id and domain fields.`);
+    }
+    const result = createApprovedPreviewBase(
+      (candidate as { id: string }).id,
+      (candidate as { domain: string }).domain
+    );
+    if (!result.ok) throw new Error(`DEVSPACE_PREVIEW_BASES[${index}] is invalid: ${result.error.code}.`);
+    return result.value;
+  });
+  const domains = new Set<string>();
+  for (const base of bases) {
+    if (domains.has(base.domain)) throw new Error(`DEVSPACE_PREVIEW_BASES contains duplicate domain: ${base.domain}.`);
+    domains.add(base.domain);
+  }
+  const registry = createApprovedPreviewBaseRegistry(bases);
+  if (!registry.ok) throw new Error(`DEVSPACE_PREVIEW_BASES is invalid: ${registry.error.code}.`);
+  return registry.value;
+}
+
 export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): WebRuntimeConfig {
   const databasePath = required(env, "DEVSPACE_DATABASE_PATH");
   const appOriginValue = required(env, "DEVSPACE_APP_ORIGIN");
@@ -27,6 +72,15 @@ export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): Web
     throw new Error("DEVSPACE_APP_ORIGIN must be an exact HTTP(S) origin without a path.");
   }
   const mode = required(env, "DEVSPACE_AUTH_MODE");
+  const previewGatewayProtocolValue = env.DEVSPACE_PREVIEW_GATEWAY_PROTOCOL?.trim() || "https:";
+  if (previewGatewayProtocolValue !== "http:" && previewGatewayProtocolValue !== "https:") {
+    throw new Error("DEVSPACE_PREVIEW_GATEWAY_PROTOCOL must be http: or https:.");
+  }
+  const previewGatewayPortValue = env.DEVSPACE_PREVIEW_GATEWAY_PORT?.trim();
+  const previewGatewayPort = previewGatewayPortValue === undefined || previewGatewayPortValue === "" ? null : Number(previewGatewayPortValue);
+  if (previewGatewayPort !== null && (!Number.isSafeInteger(previewGatewayPort) || previewGatewayPort < 1 || previewGatewayPort > 65535)) {
+    throw new Error("DEVSPACE_PREVIEW_GATEWAY_PORT must be a valid TCP port.");
+  }
   let auth: AuthConfig;
   if (mode === "development") {
     if (env.NODE_ENV === "production") throw new Error("Development authentication is forbidden in production.");
@@ -45,6 +99,7 @@ export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): Web
     databasePath,
     agentSocketPath: env.DEVSPACE_AGENT_SOCKET_PATH?.trim() || AGENT_SOCKET_PATH,
     appOrigin: appOrigin.origin,
-    auth
+    auth,
+    previewBaseRegistry: readPreviewBaseRegistry(env), previewGatewayProtocol: previewGatewayProtocolValue, previewGatewayPort
   };
 }

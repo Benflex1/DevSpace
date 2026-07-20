@@ -65,7 +65,7 @@ export interface DockerContainerInspection {
   State: { Running: boolean; Status: string };
   HostConfig: { Privileged: boolean; PublishAllPorts: boolean; PidMode: string;
     IpcMode: string; UTSMode: string; UsernsMode: string; CgroupnsMode: string;
-    NetworkMode: string; PortBindings: Record<string, unknown> | null;
+    NetworkMode: string; PortBindings: Record<string, Array<{ HostIp?: string | undefined; HostPort: string }> | null> | null;
     Devices: unknown[] | null; NanoCpus: number; Memory: number; PidsLimit: number | null;
     CapAdd: string[] | null; CapDrop: string[] | null; SecurityOpt: string[] | null;
     AutoRemove: boolean; ReadonlyRootfs: boolean; RestartPolicy: { Name: string; MaximumRetryCount: number } };
@@ -73,6 +73,65 @@ export interface DockerContainerInspection {
     Networks: Record<string, { NetworkID: string }> | null;
   };
   Mounts: Array<{ Type: string; Source: string; Destination: string; RW: boolean; Propagation: string }>;
+}
+export const DOCKER_LOOPBACK_HOST = "127.0.0.1" as const;
+export interface DockerPortBinding { readonly HostIp: string; readonly HostPort: string }
+export type DockerPortBindings = Readonly<Record<string, readonly DockerPortBinding[]>>;
+
+export interface DockerListedContainer {
+  readonly Id: string;
+  readonly Names: readonly string[];
+  readonly Labels: Record<string, string>;
+  readonly State: string;
+  readonly Status: string;
+}
+
+const portKeySchema = z.string().regex(/^[1-9][0-9]{0,4}\/tcp$/u);
+const hostPortSchema = z.string().regex(/^[1-9][0-9]{0,4}$/u).refine((value) => {
+  const port = Number(value);
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65535;
+}, "Host port is outside the valid range.");
+const dockerPortBindingSchema = z.strictObject({ HostIp: z.literal(DOCKER_LOOPBACK_HOST), HostPort: hostPortSchema });
+
+/**
+ * Validates the only host publication DevSpace permits. This is deliberately
+ * stricter than Docker's API: IPv6 loopback, wildcard addresses, host mode,
+ * and dynamic host-port allocation are not part of the preview policy.
+ */
+export function validateDockerPortBindings(
+  input: unknown,
+  declaredContainerPorts?: readonly number[]
+): DockerPortBindings {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("preview-port-bindings-must-be-an-object");
+  }
+  const declared = declaredContainerPorts === undefined ? null : new Set(declaredContainerPorts);
+  const result: Record<string, readonly DockerPortBinding[]> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!portKeySchema.safeParse(key).success) throw new Error("preview-port-key-invalid");
+    const containerPort = Number(key.slice(0, -4));
+    if (declared !== null && !declared.has(containerPort)) throw new Error("preview-port-not-declared");
+    if (!Array.isArray(value) || value.length < 1) throw new Error("preview-port-binding-count-invalid");
+    const bindings = value.map((candidate) => dockerPortBindingSchema.parse(candidate));
+    const hostPorts = new Set(bindings.map((binding) => binding.HostPort));
+    if (hostPorts.size !== bindings.length) throw new Error("preview-host-port-duplicate");
+    result[key] = bindings.map((binding) => ({ HostIp: binding.HostIp, HostPort: binding.HostPort }));
+  }
+  return result;
+}
+
+export function dockerPortBindingsEqual(left: unknown, right: DockerPortBindings): boolean {
+  try {
+    const normalizedLeft = validateDockerPortBindings(left);
+    const normalize = (bindings: DockerPortBindings) => Object.entries(bindings)
+      .map(([key, values]) => [key, [...values].sort((a, b) => a.HostPort.localeCompare(b.HostPort))] as const)
+      .sort(([a], [b]) => a.localeCompare(b));
+    const leftEntries = normalize(normalizedLeft);
+    const rightEntries = normalize(right);
+    return JSON.stringify(leftEntries) === JSON.stringify(rightEntries);
+  } catch {
+    return false;
+  }
 }
 export interface DockerNetworkInspection {
   readonly Id: string;
@@ -93,7 +152,7 @@ const dockerContainerInspectionSchema = z.object({
   HostConfig: z.object({
     Privileged: z.boolean(), PublishAllPorts: z.boolean(), PidMode: z.string(), IpcMode: z.string(), UTSMode: z.string(),
     UsernsMode: z.string(), CgroupnsMode: z.string(), NetworkMode: z.string(),
-    PortBindings: z.record(z.string(), z.unknown()).nullable(), Devices: z.array(z.unknown()).nullable(),
+    PortBindings: z.record(z.string(), z.array(z.strictObject({ HostIp: z.string().optional(), HostPort: z.string() })).nullable()).nullable(), Devices: z.array(z.unknown()).nullable(),
     NanoCpus: z.number().int(), Memory: z.number().int(), PidsLimit: z.number().int().nullable(),
     CapAdd: z.array(z.string()).nullable(), CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable(),
     AutoRemove: z.boolean(), ReadonlyRootfs: z.boolean(),
@@ -108,6 +167,10 @@ const dockerNetworkInspectionSchema = z.object({
 const dockerExecInspectionSchema = z.object({
   ID: z.string().min(1), Running: z.boolean(), ExitCode: z.number().int().nullable(),
   ContainerID: z.string().min(1)
+});
+const dockerListedContainerSchema = z.strictObject({
+  Id: z.string().min(1), Names: z.array(z.string()), Labels: z.record(z.string(), z.string()),
+  State: z.string(), Status: z.string()
 });
 
 export class DockerEngineClient {
@@ -182,21 +245,33 @@ export class DockerEngineClient {
     return dockerNetworkInspectionSchema.parse(await this.json("GET", `/networks/${encodeURIComponent(id)}`));
   }
 
+  async listContainers(): Promise<readonly DockerListedContainer[]> {
+    return z.array(dockerListedContainerSchema).parse(
+      await this.json("GET", "/containers/json?all=1")
+    );
+  }
+
   async createContainer(name: string, input: {
     imageReference: string; worktreePath: string; user: string | null; environment: Record<string, string>;
     networkName: string; labels: Record<string, string>; cpuMillicores: number; memoryBytes: number; pidLimit: number;
+    portBindings?: DockerPortBindings; declaredContainerPorts?: readonly number[];
   }): Promise<string> {
+    if (input.networkName === "host" || input.networkName === "none" || input.networkName === "container"
+      || input.networkName.startsWith("container:")) {
+      throw new Error("preview-host-network-is-forbidden");
+    }
+    const portBindings = validateDockerPortBindings(input.portBindings ?? {}, input.declaredContainerPorts);
     const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, {
       Image: input.imageReference,
       Cmd: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 2147483647 & wait $!; done"],
       WorkingDir: "/workspace", User: input.user ?? "",
       Env: Object.entries(input.environment).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
         .map(([key, value]) => `${key}=${value}`),
-      Labels: input.labels, ExposedPorts: {},
+      Labels: input.labels, ExposedPorts: Object.fromEntries(Object.keys(portBindings).map((key) => [key, {}])),
       HostConfig: {
         Binds: [], Mounts: [{ Type: "bind", Source: path.resolve(input.worktreePath), Target: "/workspace", ReadOnly: false,
           BindOptions: { Propagation: "rprivate" } }],
-        NetworkMode: input.networkName, PortBindings: {}, PublishAllPorts: false,
+        NetworkMode: input.networkName, PortBindings: portBindings, PublishAllPorts: false,
         Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
         AutoRemove: false, ReadonlyRootfs: false, RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
         CapAdd: [], CapDrop: [], Devices: [], SecurityOpt: ["no-new-privileges:true"],

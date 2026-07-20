@@ -100,12 +100,53 @@ Milestone 1 — in progress.
 - Permanent Playwright coverage drives the browser, Web orchestration, SQLite, Agent journal,
   loopback HTTPS Git fetch, real store/worktree creation, the production Docker Engine API adapter
   against a stateful Unix-socket fixture, start/stop, and Web+Agent restart without public internet.
+- M1 Slice 5 Preview Path is implemented for workspace-target previews. Web materializes the exact
+  canonical hostname from the immutable Project Options revision, approved preview-base registry,
+  and project/workspace slugs, persists it in SQLite, and sends only that persisted identity to the
+  Agent. Workspace creation records the Web-owned project/workspace slugs in Agent-private
+  ownership; activation requires an exact Agent-owned slug match as well as the project, workspace,
+  revision, preview, and generation identities.
+- Preview runtime exposure is loopback-only: Agent-derived Docker bindings use `127.0.0.1`, with no
+  public Docker publication, `PublishAllPorts`, host networking, Docker socket, or arbitrary host
+  mount. A retained stopped container keeps its exact lease reservation; route removal is separate
+  from lease release, and a lease becomes reusable only after exact ownership is released.
+- The dedicated private Caddy adapter owns the exact route set. Caddy receives no Docker socket or
+  public admin endpoint, accepts only Agent-owned approved hostnames and exact
+  project/workspace/preview/revision/generation/lease identity, and forwards HTTP/WebSocket traffic
+  only to the resolved loopback lease. Foreign, stale, missing-runtime, and stale-generation routes
+  are not adopted and are removed during reconciliation.
+- Health probing is namespace-safe. When Agent and gateway share a host namespace, the gateway-host
+  probe uses the host-local implementation. When Agent is containerized, `DEVSPACE_PREVIEW_PROBE_SOCKET`
+  is required alongside the private Caddy socket and approved-base registry; the Agent sends only an
+  opaque lease ID and bounded health policy over that private Unix socket and never falls back to
+  Agent-local loopback when the socket is configured but unavailable. Probe timeouts and retries are
+  bounded.
+- Preview lifecycle truth is represented by the materialized hostname plus independent route state:
+  `Waiting` means the configured preview is known but not route-ready (including before the app
+  listens), `Ready` means an accepted health response and exact route are present, `Inactive` means
+  the preview is intentionally stopped, and `Unavailable` means runtime, gateway, ownership, or
+  unsupported-policy failure. The Workbench provides a first-class Preview section, deduplicated
+  `preview:<previewId>` tabs, readiness-gated iframe, canonical-host Open Externally, bounded Reload,
+  and visibility-aware refresh while a preview changes. It does not rewrite application CSP or
+  `X-Frame-Options` headers.
+- Preview operations retain Web/Agent operation, revision, generation, and route identity fencing.
+  Agent restart reconciles only provable exact routes; gateway restart removes the managed route set
+  and Web/Agent reconciliation reconstructs a route only after exact runtime ownership and health
+  are proven. Runtime loss and failed route cleanup remain conservatively represented until removal
+  succeeds, so Web cannot claim a reachable route is gone. The permanent Playwright E2E proves the
+  browser → deterministic hostname → gateway → exact simulated container path for HTTP and
+  WebSocket/HMR, rejects unrelated container ownership, exercises Agent/gateway restart, and proves
+  stop removes route eligibility while retaining the loopback lease.
 
 ## Still absent
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
-editing, rebuild, previews, Caddy routing, and AI sessions remain intentionally unimplemented.
+editing, rebuild, and AI sessions remain intentionally unimplemented. Preview service-target
+execution, automatic long-running dev-task startup, multiple parallel workspaces, preview
+sharing/public controls, and the general logging overhaul remain deferred. Preview sharing and
+public controls are not implied by the canonical hostname; the current path is an authenticated
+owner workflow only.
 Individual task termination and exact descendant ownership, task Stop, forceful terminal Close,
 long-running task supervision, runtime timeout enforcement, `replace` concurrency, and configured
 interactive tasks are deferred execution-supervision work for M2. M1's `foreground one-shot`

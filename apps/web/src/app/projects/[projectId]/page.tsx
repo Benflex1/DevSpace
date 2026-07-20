@@ -30,7 +30,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       runtimeRunning={runtimeState === "running"} runtimeAvailable={runtimeAvailability === "available"} agentStatus={agentStatus}
       agentReachable={agentReachable} activeAction={activeAction} canStart={runtimeOperation?.canStart === true}
       canStop={runtimeOperation?.canStop === true} retryStart={runtimeOperation?.canRetryStart === true}
-      initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} actor={actor.identity} />;
+      initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} initialPreviews={project.previews}
+      previewGateway={{ protocol: config.previewGatewayProtocol, port: config.previewGatewayPort }} actor={actor.identity} />;
   }
 
   return <main className="project-page">

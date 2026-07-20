@@ -53,6 +53,9 @@ importers:
       '@devspace/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@devspace/gateway-caddy':
+        specifier: workspace:*
+        version: link:../../packages/gateway-caddy
       '@devspace/project-options':
         specifier: workspace:*
         version: link:../../packages/project-options
@@ -176,6 +179,19 @@ importers:
       '@devspace/testkit':
         specifier: workspace:*
         version: link:../testkit
+
+  packages/gateway-caddy:
+    dependencies:
+      '@devspace/security':
+        specifier: workspace:*
+        version: link:../security
+      zod:
+        specifier: ^4.3.6
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
 
   packages/project-options:
     dependencies:
