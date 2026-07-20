@@ -122,9 +122,10 @@ async function main() {
   let containerId;
   try {
     // The real deployment provisions this directory for the selected UID/GID.
-    // The ephemeral smoke directory is world-accessible only to avoid requiring
-    // the local test runner itself to be that administrator-selected identity.
-    await chmod(runtimeDirectory, 0o777);
+    // The setgid bit preserves the smoke runner's group on Caddy's configured
+    // 0660 socket, allowing the host-side smoke client to exercise that socket
+    // while Caddy still runs with the deployment's effective UID/GID.
+    await chmod(runtimeDirectory, 0o2777);
     const mountConfig = `type=bind,src=${caddyConfig},dst=/etc/caddy/caddy.json,readonly`;
     const mountRuntime = `type=bind,src=${runtimeDirectory},dst=/run/devspace/gateway`;
     const started = await runDocker([
