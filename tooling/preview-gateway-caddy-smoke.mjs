@@ -130,7 +130,7 @@ async function main() {
     const started = await runDocker([
       "run", "--detach", "--user", `${uid}:${gid}`, "--network", "none",
       "--mount", mountConfig, "--mount", mountRuntime, caddyImage,
-      "run", "--config", "/etc/caddy/caddy.json"
+      "caddy", "run", "--config", "/etc/caddy/caddy.json"
     ]);
     containerId = started.stdout.trim();
     assert.match(containerId, /^[0-9a-f]+$/u, "Docker did not return a Caddy container ID.");
