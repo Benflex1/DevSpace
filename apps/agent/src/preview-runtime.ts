@@ -340,8 +340,7 @@ export class PreviewLeaseAllocator {
     const parsedLeaseId = uuidV7Schema.safeParse(leaseId);
     if (!parsedLeaseId.success) return null;
     const record = (await this.all()).find((candidate) => candidate.leaseId === parsedLeaseId.data);
-    if (record === undefined || (record.state !== "owned" && record.state !== "reserved")
-      || (record.state === "owned" ? record.containerId === null : record.containerId !== null)) return null;
+    if (record === undefined || record.state !== "owned" || record.containerId === null) return null;
     return { leaseId: record.leaseId, hostIp: record.hostIp, hostPort: record.hostPort };
   }
   async bindContainer(association: RuntimeAssociation, containerId: string, bindings: readonly RuntimePreviewBinding[]): Promise<void> {

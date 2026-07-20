@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "vitest";
@@ -346,6 +346,39 @@ describe("typed private Caddy gateway adapter", () => {
       expect(JSON.parse(unknown.body)).toEqual({ kind: "infrastructure", message: "The opaque preview lease is unavailable." });
       expect(resolved).toEqual([ids.leaseId]);
     } finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("cleans the bound host-probe socket after a post-bind startup failure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    const socketPath = join(directory, "probe.sock");
+    const service = new GatewayHostProbeServer({ socketPath, resolveLease: () => Promise.resolve(null),
+      afterBind: () => Promise.reject(new Error("forced post-bind failure")) });
+    try {
+      await expect(service.start()).rejects.toThrow("forced post-bind failure");
+      await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(`${socketPath}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("serializes concurrent host-probe ownership attempts and supports repeated start/stop", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
+    const socketPath = join(directory, "probe.sock");
+    const first = new GatewayHostProbeServer({ socketPath, resolveLease: () => Promise.resolve(null) });
+    const second = new GatewayHostProbeServer({ socketPath, resolveLease: () => Promise.resolve(null) });
+    try {
+      const results = await Promise.allSettled([first.start(), second.start()]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      const winner = results[0].status === "fulfilled" ? first : second;
+      await winner.start();
+      await winner.stop();
+      await winner.stop();
+      await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await first.stop().catch(() => undefined);
+      await second.stop().catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("host probe service rejects non-loopback leases and probes only after trusted resolution", async () => {

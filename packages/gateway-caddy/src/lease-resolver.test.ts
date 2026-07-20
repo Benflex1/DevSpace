@@ -38,6 +38,11 @@ function respond(response: http.ServerResponse, body: unknown, status = 200): vo
 }
 
 describe("private preview lease resolver transport", () => {
+  test("rejects a malformed lease UUID before opening the private socket", async () => {
+    await expect(new PrivatePreviewLeaseResolverTransport({ socketPath: "/path/that-must-not-be-opened" }).resolveLease("not-a-lease-uuid"))
+      .resolves.toBeNull();
+  });
+
   test("sends only the lease ID and parses the exact three-field response", async () => {
     let body: unknown;
     const fixture = await socketServer((request, response) => {
@@ -63,11 +68,16 @@ describe("private preview lease resolver transport", () => {
     } finally { await closeServer(fixture.server); }
   });
 
-  test("fails closed for malformed, non-success, unavailable, and timed-out sockets", async () => {
+  test("fails closed for malformed, oversized, non-success, unavailable, and timed-out sockets", async () => {
     const malformed = await socketServer((_request, response) => response.writeHead(200).end("not-json"));
     try {
       await expect(new PrivatePreviewLeaseResolverTransport({ socketPath: malformed.path }).resolveLease(lease.leaseId)).resolves.toBeNull();
     } finally { await closeServer(malformed.server); }
+
+    const oversized = await socketServer((_request, response) => response.writeHead(200).end("x".repeat(4_097)));
+    try {
+      await expect(new PrivatePreviewLeaseResolverTransport({ socketPath: oversized.path }).resolveLease(lease.leaseId)).resolves.toBeNull();
+    } finally { await closeServer(oversized.server); }
 
     const rejected = await socketServer((_request, response) => respond(response, { error: "no" }, 503));
     try {

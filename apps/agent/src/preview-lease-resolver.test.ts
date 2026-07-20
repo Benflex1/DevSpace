@@ -71,9 +71,13 @@ describe("private Agent preview lease resolver", () => {
     await server.start();
     try {
       await expect(requestSocket(socketPath, { leaseId: "01900000-0000-7000-8000-000000000006" })).resolves.toMatchObject({ status: 404 });
+      await expect(requestSocket(socketPath, { leaseId: "not-a-lease-uuid" })).resolves.toMatchObject({ status: 400 });
       await expect(requestSocket(socketPath, "not-json")).resolves.toMatchObject({ status: 400 });
       await expect(requestSocket(socketPath, { leaseId: lease.leaseId, hostIp: "10.0.0.1", hostPort: 80 })).resolves.toMatchObject({ status: 400 });
       await expect(requestSocket(socketPath, { leaseId: lease.leaseId, unknown: true })).resolves.toMatchObject({ status: 400 });
+      await expect(requestSocket(socketPath, "x".repeat(4_097))).resolves.toEqual({
+        status: 400, body: { error: "invalid_request" }
+      });
       expect(resolveLease).toHaveBeenCalledTimes(1);
       expect(resolveLease).toHaveBeenCalledWith("01900000-0000-7000-8000-000000000006");
     } finally { await server.stop(); }
@@ -83,10 +87,53 @@ describe("private Agent preview lease resolver", () => {
     const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-lease-resolver-")); roots.push(root);
     const socketPath = path.join(root, "resolver.sock");
     const server = new PreviewLeaseResolverServer({ socketPath,
-      resolveLease: () => Promise.resolve({ ...lease, privateState: "must-not-cross" } as PreviewGatewayLease) });
+      resolveLease: () => Promise.reject(new Error("authority-failure")) });
     await server.start();
-    try { await expect(requestSocket(socketPath, { leaseId: lease.leaseId })).resolves.toMatchObject({ status: 503 }); }
+    try {
+      await expect(requestSocket(socketPath, { leaseId: lease.leaseId })).resolves.toEqual({
+        status: 404, body: { error: "preview_lease_unavailable" }
+      });
+    }
     finally { await server.stop(); }
+  });
+
+  test("returns one unavailable result for an invalid authority result and bounds oversized responses", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-lease-resolver-")); roots.push(root);
+    const socketPath = path.join(root, "resolver.sock");
+    const oversized = { ...lease, hostPort: 40_000, extra: "x".repeat(2_000) };
+    const server = new PreviewLeaseResolverServer({ socketPath,
+      resolveLease: () => Promise.resolve(oversized) });
+    await server.start();
+    try {
+      await expect(requestSocket(socketPath, { leaseId: lease.leaseId })).resolves.toEqual({
+        status: 404, body: { error: "preview_lease_unavailable" }
+      });
+    } finally { await server.stop(); }
+  });
+
+  test("cleans the bound resolver socket after a post-bind startup failure", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-lease-resolver-")); roots.push(root);
+    const socketPath = path.join(root, "resolver.sock");
+    const server = new PreviewLeaseResolverServer({ socketPath, resolveLease: () => Promise.resolve(null),
+      afterBind: () => Promise.reject(new Error("forced post-bind failure")) });
+    await expect(server.start()).rejects.toThrow("forced post-bind failure");
+    await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(`${socketPath}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("serializes concurrent resolver ownership attempts and supports repeated start/stop", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-lease-resolver-")); roots.push(root);
+    const socketPath = path.join(root, "resolver.sock");
+    const first = new PreviewLeaseResolverServer({ socketPath, resolveLease: () => Promise.resolve(null) });
+    const second = new PreviewLeaseResolverServer({ socketPath, resolveLease: () => Promise.resolve(null) });
+    const results = await Promise.allSettled([first.start(), second.start()]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const winner = results[0].status === "fulfilled" ? first : second;
+    await winner.start();
+    await winner.stop();
+    await winner.stop();
+    await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("completes the resolver-to-host-probe chain over temporary Unix sockets", async () => {

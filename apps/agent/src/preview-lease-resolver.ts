@@ -4,6 +4,8 @@ import net from "node:net";
 import {
   previewLeaseResolverRequestSchema,
   previewLeaseResolverResponseSchema,
+  acquirePrivateSocketLifecycleLock,
+  type PrivateSocketLifecycleLock,
   type OpaqueLeaseResolver,
   type PreviewGatewayLease
 } from "@devspace/gateway-caddy";
@@ -16,6 +18,8 @@ const STALE_SOCKET_PROBE_TIMEOUT_MS = 300;
 export interface PreviewLeaseResolverServerOptions {
   readonly socketPath: string;
   readonly resolveLease: OpaqueLeaseResolver;
+  /** Internal test seam for forcing a failure after the listener has bound. */
+  readonly afterBind?: () => Promise<void>;
 }
 
 type SocketIdentity = { readonly dev: bigint; readonly ino: bigint };
@@ -39,8 +43,12 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.end(encoded);
 }
 
-function sendError(response: ServerResponse, status: number): void {
-  sendJson(response, status, { error: status === 404 ? "preview_lease_unavailable" : "invalid_request" });
+function sendInvalidRequest(response: ServerResponse): void {
+  sendJson(response, 400, { error: "invalid_request" });
+}
+
+function sendUnavailable(response: ServerResponse): void {
+  sendJson(response, 404, { error: "preview_lease_unavailable" });
 }
 
 async function readBoundedBody(request: IncomingMessage): Promise<unknown> {
@@ -111,41 +119,38 @@ export class PreviewLeaseResolverServer {
     if (options.socketPath.trim() === "") throw new Error("A private preview lease resolver Unix socket is required.");
     this.server = http.createServer((request, response) => {
       void this.handle(request, response).catch(() => {
-        if (!response.headersSent) sendError(response, 400);
+        if (!response.headersSent) sendInvalidRequest(response);
       });
     });
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.method !== "POST" || request.url !== RESOLVER_PATH) {
-      sendError(response, 404);
+      sendUnavailable(response);
       return;
     }
     let parsedRequest;
     try {
       parsedRequest = previewLeaseResolverRequestSchema.parse(await readBoundedBody(request));
     } catch {
-      sendError(response, 400);
+      sendInvalidRequest(response);
       return;
     }
     let resolved: PreviewGatewayLease | null;
     try { resolved = await this.options.resolveLease(parsedRequest.leaseId); }
-    catch {
-      sendError(response, 503);
-      return;
-    }
+    catch { sendUnavailable(response); return; }
     if (resolved === null) {
-      sendError(response, 404);
+      sendUnavailable(response);
       return;
     }
     const lease = previewLeaseResolverResponseSchema.safeParse(resolved);
     if (!lease.success || lease.data.leaseId !== parsedRequest.leaseId) {
-      sendError(response, 503);
+      sendUnavailable(response);
       return;
     }
     const encoded = JSON.stringify({ leaseId: lease.data.leaseId, hostIp: lease.data.hostIp, hostPort: lease.data.hostPort });
     if (Buffer.byteLength(encoded) > MAX_RESPONSE_BODY_BYTES) {
-      sendError(response, 503);
+      sendUnavailable(response);
       return;
     }
     response.writeHead(200, {
@@ -158,17 +163,29 @@ export class PreviewLeaseResolverServer {
 
   async start(): Promise<void> {
     if (this.started) return;
-    await prepareSocketPath(this.options.socketPath);
+    const lifecycle = await acquirePrivateSocketLifecycleLock(this.options.socketPath, "preview lease resolver");
     try {
+      await prepareSocketPath(this.options.socketPath);
       await new Promise<void>((resolve, reject) => {
         this.server.once("error", reject);
         this.server.listen(this.options.socketPath, resolve);
       });
-      await chmod(this.options.socketPath, 0o660);
       this.ownedSocket = socketIdentity(await lstat(this.options.socketPath));
+      await this.options.afterBind?.();
+      await chmod(this.options.socketPath, 0o660);
+      const current = await lstat(this.options.socketPath);
+      if (!current.isSocket() || !sameSocket(this.ownedSocket, socketIdentity(current))) {
+        throw new Error("The preview lease resolver socket changed during startup.");
+      }
+      this.lifecycle = lifecycle;
       this.started = true;
     } catch (error) {
       await closeServer(this.server).catch(() => undefined);
+      if (this.ownedSocket !== undefined) {
+        await unlinkOwnedSocket(this.options.socketPath, this.ownedSocket).catch(() => undefined);
+      }
+      await lifecycle.release().catch(() => undefined);
+      this.ownedSocket = undefined;
       throw error;
     }
   }
@@ -176,16 +193,22 @@ export class PreviewLeaseResolverServer {
   async stop(): Promise<void> {
     if (!this.started) return;
     await closeServer(this.server);
-    try {
-      const current = await lstat(this.options.socketPath);
-      if (this.ownedSocket !== undefined && current.isSocket() && sameSocket(this.ownedSocket, socketIdentity(current))) {
-        await unlink(this.options.socketPath);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    if (this.ownedSocket !== undefined) await unlinkOwnedSocket(this.options.socketPath, this.ownedSocket);
+    if (this.lifecycle !== undefined) await this.lifecycle.release();
     this.started = false;
     this.ownedSocket = undefined;
+    this.lifecycle = undefined;
+  }
+
+  private lifecycle: PrivateSocketLifecycleLock | undefined;
+}
+
+async function unlinkOwnedSocket(socketPath: string, ownership: SocketIdentity): Promise<void> {
+  try {
+    const current = await lstat(socketPath);
+    if (current.isSocket() && sameSocket(ownership, socketIdentity(current))) await unlink(socketPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 

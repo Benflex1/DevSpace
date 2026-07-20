@@ -1,6 +1,7 @@
 import http from "node:http";
 import net from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
+import { acquirePrivateSocketLifecycleLock, type PrivateSocketLifecycleLock } from "./private-socket.js";
 import { validateGatewayRoute, validateRoute, fromCaddyRoutes, routeIdentityKey, routeResourceKey, routeMatches, toCaddyRoute, validateRouteSet } from "./routes.js";
 import {
   GatewayAdapterError, previewGatewayLeaseSchema, previewGatewayProbeRequestSchema, previewGatewayProbeResultSchema, previewGatewayRouteIdentitySchema,
@@ -326,9 +327,12 @@ export class GatewayHostProbeServer {
   private readonly server: http.Server;
   private started = false;
   private ownedSocket: PrivateSocketIdentity | undefined;
+  private lifecycle: PrivateSocketLifecycleLock | undefined;
   constructor(private readonly options: {
     readonly socketPath: string;
     readonly resolveLease: (leaseId: string) => Promise<PreviewGatewayLease | null>;
+    /** Internal test seam for forcing a failure after the listener has bound. */
+    readonly afterBind?: () => Promise<void>;
   }) {
     if (options.socketPath.trim() === "") throw new GatewayAdapterError("validation", "A private gateway probe Unix socket is required.");
     const hostProbe = new GatewayHostProbe(options.resolveLease);
@@ -361,14 +365,27 @@ export class GatewayHostProbeServer {
   }
   async start(): Promise<void> {
     if (this.started) return;
-    await preparePrivateSocketPath(this.options.socketPath);
+    const lifecycle = await acquirePrivateSocketLifecycleLock(this.options.socketPath, "private gateway probe");
     try {
+      await preparePrivateSocketPath(this.options.socketPath);
       await new Promise<void>((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.options.socketPath, resolve); });
+      const ownership = privateSocketIdentity(await lstat(this.options.socketPath));
+      this.ownedSocket = ownership;
+      await this.options.afterBind?.();
       await chmod(this.options.socketPath, 0o660);
-      this.ownedSocket = privateSocketIdentity(await lstat(this.options.socketPath));
+      const current = await lstat(this.options.socketPath);
+      if (!current.isSocket() || !samePrivateSocket(ownership, privateSocketIdentity(current))) {
+        throw new GatewayAdapterError("validation", "The private gateway socket changed during startup.");
+      }
       this.started = true;
+      this.lifecycle = lifecycle;
     } catch (error) {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
+      if (this.ownedSocket !== undefined) {
+        await unlinkOwnedPrivateSocket(this.options.socketPath, this.ownedSocket).catch(() => undefined);
+      }
+      await lifecycle.release().catch(() => undefined);
+      this.ownedSocket = undefined;
       throw error;
     }
   }
@@ -376,8 +393,10 @@ export class GatewayHostProbeServer {
     if (!this.started) return;
     await new Promise<void>((resolve, reject) => this.server.close((error) => error === undefined ? resolve() : reject(error)));
     await unlinkOwnedPrivateSocket(this.options.socketPath, this.ownedSocket);
+    if (this.lifecycle !== undefined) await this.lifecycle.release();
     this.started = false;
     this.ownedSocket = undefined;
+    this.lifecycle = undefined;
   }
 }
 
