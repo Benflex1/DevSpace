@@ -7,6 +7,12 @@ import {
   parseProjectOptionsV1
 } from "@devspace/project-options";
 import { gitBranchNameSchema } from "@devspace/contracts";
+import {
+  composePreviewHostname,
+  validateDnsLabel,
+  validatePreviewHostnamePattern,
+  type ApprovedPreviewBaseRegistry
+} from "@devspace/security";
 import type { WorkspaceAgentClient } from "./agent-client.js";
 import type { ManagedProjectView, ProjectDatabase } from "./database.js";
 
@@ -20,6 +26,7 @@ export class WorkspaceSetupExecutionError extends Error {
 export interface WorkspaceSetupInput {
   readonly imageReference: string;
   readonly tasks?: readonly { readonly key: string; readonly displayName: string; readonly executable: string; readonly args: readonly string[] }[];
+  readonly preview?: { readonly key: string; readonly displayName: string; readonly containerPort: number; readonly domainBaseId: string };
 }
 export type WorkspaceSetupAgent = Pick<WorkspaceAgentClient,
   "health" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" | "fetchProject" |
@@ -30,7 +37,7 @@ export function parseWorkspaceSetupInput(value: unknown): WorkspaceSetupInput {
     throw new WorkspaceSetupValidationError("Enter development environment details.");
   }
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => key !== "imageReference" && key !== "tasks")) {
+  if (Object.keys(record).some((key) => !["imageReference", "tasks", "preview"].includes(key))) {
     throw new WorkspaceSetupValidationError("The request contains unknown fields.");
   }
   const imageReference = typeof record.imageReference === "string" ? record.imageReference.trim() : "";
@@ -56,13 +63,55 @@ export function parseWorkspaceSetupInput(value: unknown): WorkspaceSetupInput {
     return { key: task.key, displayName: task.displayName.trim(), executable: task.executable.trim(), args: task.args as string[] };
   });
   if (new Set(tasks.map((task) => task.key)).size !== tasks.length) throw new WorkspaceSetupValidationError("Task keys must be unique.");
-  return { imageReference, tasks };
+  if (record.preview === undefined) return { imageReference, tasks };
+  if (record.preview === null || typeof record.preview !== "object" || Array.isArray(record.preview)) {
+    throw new WorkspaceSetupValidationError("Enter valid preview details.");
+  }
+  const preview = record.preview as Record<string, unknown>;
+  const containerPort = preview.containerPort;
+  if (Object.keys(preview).some((key) => !["key", "displayName", "containerPort", "domainBaseId"].includes(key))
+    || typeof preview.key !== "string" || !/^[a-z][a-z0-9-]*$/u.test(preview.key)
+    || typeof preview.displayName !== "string" || preview.displayName.trim().length < 1 || preview.displayName.length > 120
+    || typeof containerPort !== "number" || !Number.isSafeInteger(containerPort) || containerPort < 1 || containerPort > 65535
+    || typeof preview.domainBaseId !== "string" || !/^[a-z][a-z0-9-]*$/u.test(preview.domainBaseId)) {
+    throw new WorkspaceSetupValidationError("Enter a valid workspace preview key, display name, container port, and approved preview base.");
+  }
+  return { imageReference, tasks, preview: {
+    key: preview.key, displayName: preview.displayName.trim(), containerPort, domainBaseId: preview.domainBaseId
+  } };
+}
+
+const initialPreviewHostnamePattern = "{project}-{workspace}-{preview}-{shortId}";
+
+function assertApprovedPreviewBase(input: WorkspaceSetupInput, registry: ApprovedPreviewBaseRegistry | undefined): void {
+  if (input.preview === undefined) return;
+  if (registry === undefined) throw new WorkspaceSetupValidationError("Previews are unavailable because no approved preview base registry is configured.");
+  const pattern = validatePreviewHostnamePattern(initialPreviewHostnamePattern);
+  const project = validateDnsLabel("project");
+  const workspace = validateDnsLabel("workspace");
+  const preview = validateDnsLabel("preview");
+  const shortId = validateDnsLabel("shortid");
+  if (!pattern.ok || !project.ok || !workspace.ok || !preview.ok || !shortId.ok) {
+    throw new WorkspaceSetupValidationError("The default preview hostname pattern is invalid.");
+  }
+  const composed = composePreviewHostname(pattern.value, {
+    project: project.value, workspace: workspace.value, preview: preview.value, shortId: shortId.value
+  }, input.preview.domainBaseId, registry);
+  if (!composed.ok) throw new WorkspaceSetupValidationError("Select an approved preview base.");
 }
 
 function initialProjectOptions(input: WorkspaceSetupInput) {
   return parseProjectOptionsV1({
     schemaVersion: 1,
-    developmentEnvironment: { source: { kind: "image", imageReference: input.imageReference } },
+    developmentEnvironment: {
+      source: { kind: "image", imageReference: input.imageReference },
+      ...(input.preview === undefined ? {} : { ports: [{ name: input.preview.key, containerPort: input.preview.containerPort }] })
+    },
+    previews: input.preview === undefined ? [] : [{
+      key: input.preview.key, displayName: input.preview.displayName, target: { kind: "workspace" },
+      containerPort: input.preview.containerPort, domainBaseId: input.preview.domainBaseId,
+      hostnamePattern: initialPreviewHostnamePattern
+    }],
     tasks: (input.tasks ?? []).map((task) => ({ key: task.key, displayName: task.displayName,
       command: { executable: task.executable, args: task.args, workingDirectory: ".", environment: {} },
       interactive: false, longRunning: false, timeoutSeconds: null, concurrencyPolicy: "reject", successExitCodes: [0], logRetentionDays: null }))
@@ -104,6 +153,7 @@ async function completeMutation(
 
 export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectId: string, actor: string, dependencies: {
   readonly database: ProjectDatabase; readonly agent: WorkspaceSetupAgent;
+  readonly previewBaseRegistry?: ApprovedPreviewBaseRegistry;
   readonly orchestrationTimeoutMs?: number; readonly nowMonotonic?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }): Promise<{
@@ -111,6 +161,7 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
   readonly git: Awaited<ReturnType<WorkspaceAgentClient["inspectGit"]>>;
   readonly workspace: Awaited<ReturnType<WorkspaceAgentClient["inspectWorkspace"]>>;
 }> {
+  assertApprovedPreviewBase(input, dependencies.previewBaseRegistry);
   await dependencies.agent.health();
   const options = initialProjectOptions(input);
   const configurationJson = canonicalizeProjectOptionsV1(options);

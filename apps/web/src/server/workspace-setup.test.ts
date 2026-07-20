@@ -3,11 +3,52 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { gitInspectionDataSchema, workspaceInspectionDataSchema, type AgentOperationObservation } from "@devspace/contracts";
+import { createApprovedPreviewBase, createApprovedPreviewBaseRegistry } from "@devspace/security";
+import { parseProjectOptionsV1 } from "@devspace/project-options";
 import { openProjectDatabase } from "./database.js";
-import { setupPrimaryWorkspace, type WorkspaceSetupAgent } from "./workspace-setup.js";
+import { parseWorkspaceSetupInput, setupPrimaryWorkspace, type WorkspaceSetupAgent } from "./workspace-setup.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+
+function approvedPreviewRegistry() {
+  const base = createApprovedPreviewBase("preview-main", "preview.example.com");
+  if (!base.ok) throw new Error("The test preview base is invalid.");
+  const registry = createApprovedPreviewBaseRegistry([base.value]);
+  if (!registry.ok) throw new Error("The test preview registry is invalid.");
+  return registry.value;
+}
+
+function successfulSetupAgent(): WorkspaceSetupAgent {
+  const observations = new Map<string, AgentOperationObservation>();
+  let revisionId = "";
+  let revisionHash = "";
+  const succeeded = (operationId: string) => observations.set(operationId, {
+    operationId, state: "succeeded", updatedAt: "2026-07-17T12:00:00.000Z", failure: null
+  });
+  return {
+    health: () => Promise.resolve({ status: "ok" as const }),
+    inspectSource: () => Promise.reject(new Error("unused")),
+    registerRevision: (operationId, data) => { revisionId = data.revisionId; revisionHash = data.configuration.hash; succeeded(operationId); return Promise.resolve(); },
+    registerRuntimePlan: (operationId) => { succeeded(operationId); return Promise.resolve(); },
+    createManagedStore: (operationId) => { succeeded(operationId); return Promise.resolve(); },
+    fetchProject: (operationId) => { succeeded(operationId); return Promise.resolve(); },
+    createWorkspace: (operationId) => { succeeded(operationId); return Promise.resolve(); },
+    snapshot: () => Promise.resolve({
+      agentBootId: "018f0f00-0000-7000-8000-000000000099",
+      throughCursor: "v1.018f0f00-0000-7000-8000-000000000000.0" as const,
+      resources: [], operationObservations: [...observations.values()]
+    }),
+    inspectGit: (projectId, workspaceId) => Promise.resolve(gitInspectionDataSchema.parse({
+      projectId, workspaceId, branchName: "main", headCommit: "a".repeat(40), dirty: false, aheadCount: 0, behindCount: 0
+    })),
+    inspectWorkspace: (projectId, workspaceId) => Promise.resolve(workspaceInspectionDataSchema.parse({
+      projectId, workspaceId, kind: "primary", revisionId, revisionHash,
+      desiredState: "stopped", observedState: "stopped", dirty: false,
+      runtimeStack: { desiredState: "absent", observedState: "absent" }
+    }))
+  };
+}
 
 test("persists a ready primary workspace and recovers it without repeating Agent mutations", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-setup-test-")); directories.push(directory);
@@ -58,6 +99,67 @@ test("persists a ready primary workspace and recovers it without repeating Agent
   expect(recovered.project.primaryWorkspace?.id).toBe(workspaceId);
   expect(database.listManagedProjects()[0]).toMatchObject({ state: "ready", primaryWorkspace: { desiredState: "stopped" } });
   expect(mutations).toHaveBeenCalledTimes(5);
+  database.close();
+});
+
+test("initial setup stores a workspace preview and matching development port, then materializes it", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-setup-preview-")); directories.push(directory);
+  const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));
+  const project = database.createProject({
+    name: "Repository", slug: "repository", repositoryUrl: "https://example.com/repository.git",
+    defaultBranch: "main", actor: "developer@example.com"
+  });
+  const result = await setupPrimaryWorkspace({
+    imageReference: "node:24-bookworm",
+    tasks: [{ key: "check", displayName: "Check workspace", executable: "/usr/bin/printf", args: ["ok"] }],
+    preview: { key: "web", displayName: "Web", containerPort: 5173, domainBaseId: "preview-main" }
+  }, project.id, "developer@example.com", {
+    database, agent: successfulSetupAgent(), previewBaseRegistry: approvedPreviewRegistry()
+  });
+  const revision = database.listConfigRevisions()[0];
+  if (revision === undefined || result.project.primaryWorkspace === null || result.project.activeRevision === null) {
+    throw new Error("The setup test did not create its expected revision and workspace.");
+  }
+  const options = parseProjectOptionsV1(JSON.parse(revision.configurationJson));
+  expect(options.developmentEnvironment.ports).toEqual([{ name: "web", containerPort: 5173, protocol: "tcp" }]);
+  expect(options.previews).toEqual([expect.objectContaining({
+    key: "web", displayName: "Web", target: { kind: "workspace" }, containerPort: 5173,
+    domainBaseId: "preview-main", hostnamePattern: "{project}-{workspace}-{preview}-{shortId}",
+    protocol: "http", healthPath: "/", healthStatuses: [200], startupTimeoutSeconds: 60, webSocketForwarding: true
+  })]);
+  expect(options.tasks).toEqual([expect.objectContaining({ key: "check", displayName: "Check workspace" })]);
+
+  database.materializePreviews({ projectId: project.id, workspaceId: result.project.primaryWorkspace.id,
+    revisionId: result.project.activeRevision.id, previewBaseRegistry: approvedPreviewRegistry() });
+  const materialized = database.getManagedProject(project.id)?.previews;
+  expect(materialized).toHaveLength(1);
+  expect(materialized?.[0]).toMatchObject({ previewKey: "web", displayName: "Web", containerPort: 5173 });
+  expect(materialized?.[0]?.hostname).toMatch(/^repository-primary-web-[0-9a-f]{8}\.preview\.example\.com$/u);
+  database.close();
+});
+
+test("rejects invalid preview ports before setup mutations", () => {
+  for (const containerPort of [0, 65536, 5173.5, "5173"]) {
+    expect(() => parseWorkspaceSetupInput({ imageReference: "node:24-bookworm", preview: {
+      key: "web", displayName: "Web", containerPort, domainBaseId: "preview-main"
+    }})).toThrow(/valid workspace preview/u);
+  }
+});
+
+test("rejects a preview base that is not in the administrator registry", async () => {
+  const input = parseWorkspaceSetupInput({ imageReference: "node:24-bookworm", preview: {
+    key: "web", displayName: "Web", containerPort: 5173, domainBaseId: "attacker-base"
+  }});
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-setup-preview-invalid-base-")); directories.push(directory);
+  const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));
+  const project = database.createProject({
+    name: "Repository", slug: "repository", repositoryUrl: "https://example.com/repository.git",
+    defaultBranch: "main", actor: "developer@example.com"
+  });
+  await expect(setupPrimaryWorkspace(input, project.id, "developer@example.com", {
+    database, agent: {} as WorkspaceSetupAgent, previewBaseRegistry: approvedPreviewRegistry()
+  })).rejects.toThrow("Select an approved preview base.");
+  expect(database.listOperations()).toHaveLength(0);
   database.close();
 });
 

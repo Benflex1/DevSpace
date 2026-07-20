@@ -66,6 +66,7 @@ test("parses a closed preview-base registry and rejects malformed or duplicate e
     DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost" }])
   });
   expect(valid.previewBaseRegistry).toBeDefined();
+  expect(valid.previewBases).toEqual([{ id: "local", domain: "localhost" }]);
   expect(() => readWebRuntimeConfig({
     ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
     DEVSPACE_PREVIEW_BASES: "not-json"
