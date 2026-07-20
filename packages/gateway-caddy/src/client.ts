@@ -15,6 +15,23 @@ import {
 const routesPath = "/config/apps/http/servers/devspace-preview/routes";
 const maxAdminBodyBytes = 1_048_576;
 
+// All CaddyGatewayClient instances in this Agent process address the same
+// dedicated managed route set. Keep the read/modify/write transaction intact
+// across clients without serializing probes or route inspection.
+let managedRouteMutationTail: Promise<void> = Promise.resolve();
+
+async function withManagedRouteMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  const previous = managedRouteMutationTail;
+  let release!: () => void;
+  managedRouteMutationTail = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    await previous;
+    return await mutation();
+  } finally {
+    release();
+  }
+}
+
 function isFullRoute(input: PreviewGatewayRoute | PreviewGatewayRouteIdentity): input is PreviewGatewayRoute {
   return "leaseId" in input;
 }
@@ -101,21 +118,25 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
   }
   async ensureRoute(input: PreviewGatewayRoute): Promise<void> {
     const route = this.validate(input);
-    const observed = await this.readRoutes();
-    this.rejectForeignHostname(observed, route.hostname);
-    const current = this.currentManaged(observed);
-    const desired = current.filter((candidate) => candidate.hostname !== route.hostname && routeResourceKey(candidate) !== routeResourceKey(route));
-    this.leases.set(route.leaseId, route);
-    desired.push(route);
-    await this.replaceRoutes(desired);
+    await withManagedRouteMutation(async () => {
+      const observed = await this.readRoutes();
+      this.rejectForeignHostname(observed, route.hostname);
+      const current = this.currentManaged(observed);
+      const desired = current.filter((candidate) => candidate.hostname !== route.hostname && routeResourceKey(candidate) !== routeResourceKey(route));
+      this.leases.set(route.leaseId, route);
+      desired.push(route);
+      await this.replaceRoutes(desired);
+    });
   }
   async replaceRoute(input: PreviewGatewayRoute): Promise<void> { await this.ensureRoute(input); }
   async removeRoute(input: PreviewGatewayRoute | PreviewGatewayRouteIdentity): Promise<void> {
     const identity = isFullRoute(input) ? this.validate(input) : validateIdentity(input);
-    const current = this.currentManaged(await this.readRoutes());
-    const desired = current.filter((candidate) => candidate.hostname !== identity.hostname && routeResourceKey(candidate) !== routeResourceKey(identity));
-    if (isFullRoute(identity)) this.leases.delete(identity.leaseId);
-    await this.replaceRoutes(desired);
+    await withManagedRouteMutation(async () => {
+      const current = this.currentManaged(await this.readRoutes());
+      const desired = current.filter((candidate) => candidate.hostname !== identity.hostname && routeResourceKey(candidate) !== routeResourceKey(identity));
+      if (isFullRoute(identity)) this.leases.delete(identity.leaseId);
+      await this.replaceRoutes(desired);
+    });
   }
   async inspectRoute(input: PreviewGatewayRoute | PreviewGatewayRouteIdentity): Promise<GatewayRouteInspection> {
     const expected = isFullRoute(input) ? this.validate(input) : validateIdentity(input);
@@ -139,11 +160,13 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
   }
   async reconcileRoutes(inputs: readonly PreviewGatewayRoute[]): Promise<void> {
     const routes = validateRouteSet(inputs, this.options.policy ?? this.options.isApprovedHostname);
-    const observed = await this.readRoutes();
-    for (const route of routes) this.rejectForeignHostname(observed, route.hostname);
-    await this.replaceRoutes(routes);
-    this.leases.clear();
-    for (const route of routes) this.leases.set(route.leaseId, route);
+    await withManagedRouteMutation(async () => {
+      const observed = await this.readRoutes();
+      for (const route of routes) this.rejectForeignHostname(observed, route.hostname);
+      await this.replaceRoutes(routes);
+      this.leases.clear();
+      for (const route of routes) this.leases.set(route.leaseId, route);
+    });
   }
   async probe(input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
     const { signal: _signal, ...wireInput } = input;

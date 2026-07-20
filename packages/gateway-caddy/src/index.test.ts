@@ -41,10 +41,14 @@ class MemoryTransport implements CaddyAdminTransport {
   documents: readonly unknown[] = [];
   replaceCount = 0;
   failReads = false;
+  failNextReplace = false;
 
   request(method: "GET" | "PUT", _path: string, body?: readonly unknown[]) {
     if (this.failReads && method === "GET") return Promise.reject(new Error("http://127.0.0.1:2019 unavailable"));
-    if (method === "PUT") { this.documents = body ?? []; this.replaceCount += 1; return Promise.resolve({ statusCode: 204, body: null }); }
+    if (method === "PUT") {
+      if (this.failNextReplace) { this.failNextReplace = false; return Promise.reject(new Error("injected-replace-failure")); }
+      this.documents = body ?? []; this.replaceCount += 1; return Promise.resolve({ statusCode: 204, body: null });
+    }
     return Promise.resolve({ statusCode: 200, body: this.documents });
   }
 }
@@ -129,6 +133,45 @@ describe("typed private Caddy gateway adapter", () => {
     expect((await adapter.inspectRoute(route())).present).toBe(true);
     expect((await adapter.inspectRoute(oldRoute)).present).toBe(false);
     expect(transport.replaceCount).toBe(1);
+  });
+
+  test("serializes concurrent ensures across clients so neither route is lost", async () => {
+    const transport = new MemoryTransport();
+    const first = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    const second = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a.localhost", hostPort: 43124 });
+    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b.localhost", hostPort: 43125 });
+
+    await Promise.all([first.ensureRoute(routeA), second.ensureRoute(routeB)]);
+
+    expect(fromCaddyRoutes(transport.documents, approved)).toEqual([
+      { kind: "managed", route: routeA }, { kind: "managed", route: routeB }
+    ]);
+  });
+
+  test("serializes concurrent add/remove mutations into the correct final set", async () => {
+    const transport = new MemoryTransport();
+    const first = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    const second = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a.localhost", hostPort: 43124 });
+    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b.localhost", hostPort: 43125 });
+    transport.documents = [toCaddyRoute(routeB, approved)];
+
+    await Promise.all([first.ensureRoute(routeA), second.removeRoute(routeB)]);
+
+    expect(fromCaddyRoutes(transport.documents, approved)).toEqual([{ kind: "managed", route: routeA }]);
+  });
+
+  test("releases the mutation serialization after a failed write", async () => {
+    const transport = new MemoryTransport();
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a.localhost", hostPort: 43124 });
+    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b.localhost", hostPort: 43125 });
+    transport.failNextReplace = true;
+
+    await expect(adapter.ensureRoute(routeA)).rejects.toMatchObject({ code: "ADMIN_UNAVAILABLE" });
+    await expect(adapter.ensureRoute(routeB)).resolves.toBeUndefined();
+    expect(fromCaddyRoutes(transport.documents, approved)).toEqual([{ kind: "managed", route: routeB }]);
   });
 
   test("fails safely when a foreign route owns the approved hostname", async () => {

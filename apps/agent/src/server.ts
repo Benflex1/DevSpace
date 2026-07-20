@@ -208,6 +208,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const eventResponses = new Set<ServerResponse>();
   let started = false;
   let ownedSocket: SocketIdentity | undefined;
+  let startupPreviewReconciliationHealthy = true;
 
   // Node's request listener is intentionally promise-backed; all handler paths produce a response.
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -275,7 +276,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         return requestError(response, requestId, now, { location: "body", field: null, reason: "inconsistent" });
       }
       return sendJson(response, 200, healthEndpoint.successBodySchema.parse({
-        meta: meta(requestId, now), data: { status: managed.isHealthy && journal.isHealthy && executor.isHealthy ? "ok" : "degraded" }
+        meta: meta(requestId, now), data: { status: managed.isHealthy && journal.isHealthy && executor.isHealthy && startupPreviewReconciliationHealthy ? "ok" : "degraded" }
       }));
     }
 
@@ -550,6 +551,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     socketPath,
     async start() {
       if (started) return;
+      startupPreviewReconciliationHealthy = true;
       await managed.initialize();
       await journal.initialize();
       if (managed.isHealthy) await execution.initialize();
@@ -560,7 +562,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           catch { /* health remains degraded and recovery stays disabled */ }
         }
       }
-      if (managed.isHealthy && journal.isHealthy) await managed.reconcilePreviewRoutes().catch(() => undefined);
+      if (managed.isHealthy && journal.isHealthy) {
+        try { await managed.reconcilePreviewRoutes(); }
+        catch { startupPreviewReconciliationHealthy = false; }
+      }
       if (managed.isHealthy && journal.isHealthy) await executor.initialize();
       await prepareSocketPath(socketPath, now, createId);
       const bindingPath = options.privateSocketPath ?? path.join(path.dirname(socketPath), `.devspace-agent-${createId()}.sock`);
