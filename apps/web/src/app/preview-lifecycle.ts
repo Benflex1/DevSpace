@@ -20,8 +20,10 @@ export interface PreviewLifecycleView {
   readonly lastErrorMessage: string | null;
 }
 
-export function previewUrl(hostname: string): string {
-  return `https://${hostname}`;
+export function previewUrl(hostname: string, gateway: { readonly protocol?: "http:" | "https:"; readonly port?: number | null } = {}): string {
+  const protocol = gateway.protocol ?? "https:";
+  const port = gateway.port === undefined || gateway.port === null ? "" : `:${gateway.port}`;
+  return `${protocol}//${hostname}${port}`;
 }
 
 export function previewPresentationState(preview: PreviewLifecycleView): PreviewPresentationState {

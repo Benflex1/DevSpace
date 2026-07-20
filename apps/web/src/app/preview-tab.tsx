@@ -5,14 +5,15 @@ import {
   previewPresentationLabel, previewPresentationState, previewStateMessage, previewUrl, type PreviewLifecycleView
 } from "./preview-lifecycle.js";
 
-export function PreviewTab({ preview, active, onReload }: {
+export function PreviewTab({ preview, active, onReload, previewGateway }: {
   preview: PreviewLifecycleView;
   active: boolean;
   onReload: (previewId: string) => Promise<void>;
+  previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
 }) {
   const [reloading, setReloading] = useState(false);
   const state = previewPresentationState(preview);
-  const url = previewUrl(preview.hostname);
+  const url = previewUrl(preview.hostname, previewGateway);
   const reload = async () => {
     if (reloading) return;
     setReloading(true);

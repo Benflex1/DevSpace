@@ -94,9 +94,16 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
     return current.filter((candidate): candidate is Extract<GatewayObservedRoute, { kind: "managed" }> => candidate.kind === "managed")
       .map((candidate) => candidate.route);
   }
+  private rejectForeignHostname(current: readonly GatewayObservedRoute[], hostname: string): void {
+    if (current.some((candidate) => candidate.kind === "foreign" && candidate.hostnames.includes(hostname))) {
+      throw new GatewayAdapterError("reconcile", "An unmanaged route already owns the approved preview hostname.", "ADMIN_REJECTED");
+    }
+  }
   async ensureRoute(input: PreviewGatewayRoute): Promise<void> {
     const route = this.validate(input);
-    const current = this.currentManaged(await this.readRoutes());
+    const observed = await this.readRoutes();
+    this.rejectForeignHostname(observed, route.hostname);
+    const current = this.currentManaged(observed);
     const desired = current.filter((candidate) => candidate.hostname !== route.hostname && routeResourceKey(candidate) !== routeResourceKey(route));
     this.leases.set(route.leaseId, route);
     desired.push(route);
@@ -132,6 +139,8 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
   }
   async reconcileRoutes(inputs: readonly PreviewGatewayRoute[]): Promise<void> {
     const routes = validateRouteSet(inputs, this.options.policy ?? this.options.isApprovedHostname);
+    const observed = await this.readRoutes();
+    for (const route of routes) this.rejectForeignHostname(observed, route.hostname);
     await this.replaceRoutes(routes);
     this.leases.clear();
     for (const route of routes) this.leases.set(route.leaseId, route);

@@ -15,6 +15,8 @@ export interface WebRuntimeConfig {
   readonly appOrigin: string;
   readonly auth: AuthConfig;
   readonly previewBaseRegistry: ApprovedPreviewBaseRegistry;
+  readonly previewGatewayProtocol: "http:" | "https:";
+  readonly previewGatewayPort: number | null;
 }
 
 type RuntimeEnvironment = Readonly<Record<string, string | undefined>>;
@@ -70,6 +72,15 @@ export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): Web
     throw new Error("DEVSPACE_APP_ORIGIN must be an exact HTTP(S) origin without a path.");
   }
   const mode = required(env, "DEVSPACE_AUTH_MODE");
+  const previewGatewayProtocolValue = env.DEVSPACE_PREVIEW_GATEWAY_PROTOCOL?.trim() || "https:";
+  if (previewGatewayProtocolValue !== "http:" && previewGatewayProtocolValue !== "https:") {
+    throw new Error("DEVSPACE_PREVIEW_GATEWAY_PROTOCOL must be http: or https:.");
+  }
+  const previewGatewayPortValue = env.DEVSPACE_PREVIEW_GATEWAY_PORT?.trim();
+  const previewGatewayPort = previewGatewayPortValue === undefined || previewGatewayPortValue === "" ? null : Number(previewGatewayPortValue);
+  if (previewGatewayPort !== null && (!Number.isSafeInteger(previewGatewayPort) || previewGatewayPort < 1 || previewGatewayPort > 65535)) {
+    throw new Error("DEVSPACE_PREVIEW_GATEWAY_PORT must be a valid TCP port.");
+  }
   let auth: AuthConfig;
   if (mode === "development") {
     if (env.NODE_ENV === "production") throw new Error("Development authentication is forbidden in production.");
@@ -89,6 +100,6 @@ export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): Web
     agentSocketPath: env.DEVSPACE_AGENT_SOCKET_PATH?.trim() || AGENT_SOCKET_PATH,
     appOrigin: appOrigin.origin,
     auth,
-    previewBaseRegistry: readPreviewBaseRegistry(env)
+    previewBaseRegistry: readPreviewBaseRegistry(env), previewGatewayProtocol: previewGatewayProtocolValue, previewGatewayPort
   };
 }

@@ -10,7 +10,8 @@ import { compileRuntimePlanV1, hashRuntimePlanV1, parseProjectOptionsV1 } from "
 import {
   DockerEngineClient, DockerEngineError, type DockerContainerInspection, type DockerListedContainer, type DockerNetworkInspection
 } from "./docker-runtime.js";
-import { PreviewRuntimeManager, type PreviewGatewayProbe, type PreviewGatewayProbeRequest, type PreviewGatewayProbeResult } from "./preview-runtime.js";
+import { PreviewRuntimeManager, type PreviewGatewayAdapter, type PreviewGatewayProbe, type PreviewGatewayProbeRequest,
+  type PreviewGatewayProbeResult, type PreviewGatewayRoute } from "./preview-runtime.js";
 import { WorkspaceRuntimeManager, type RuntimeAssociation } from "./workspace-runtime.js";
 
 const ids = {
@@ -115,7 +116,29 @@ class Probe implements PreviewGatewayProbe {
   }
 }
 
-async function fixture(probe: PreviewGatewayProbe = new Probe([{ kind: "response", statusCode: 200 }])) {
+class Gateway implements PreviewGatewayAdapter {
+  readonly routes: PreviewGatewayRoute[] = [];
+  async probe(_input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
+    return { kind: "response", statusCode: 200 };
+  }
+  async ensureRoute(route: PreviewGatewayRoute): Promise<void> {
+    this.routes.splice(0, this.routes.length, ...this.routes.filter((candidate) => candidate.hostname !== route.hostname), route);
+  }
+  async replaceRoute(route: PreviewGatewayRoute): Promise<void> { await this.ensureRoute(route); }
+  async removeRoute(route: PreviewGatewayRoute): Promise<void> {
+    const retained = this.routes.filter((candidate) => candidate.hostname !== route.hostname);
+    this.routes.splice(0, this.routes.length, ...retained);
+  }
+  async inspectRoute(route: PreviewGatewayRoute): Promise<{ present: boolean; status: "present" | "absent"; route?: PreviewGatewayRoute }> {
+    const current = this.routes.find((candidate) => candidate.hostname === route.hostname);
+    return current === undefined ? { present: false, status: "absent" } : { present: true, status: "present", route: current };
+  }
+  async reconcileRoutes(routes: readonly PreviewGatewayRoute[]): Promise<void> {
+    this.routes.splice(0, this.routes.length, ...routes);
+  }
+}
+
+async function fixture(probe: PreviewGatewayProbe = new Probe([{ kind: "response", statusCode: 200 }]), gateway: Gateway | null = null) {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-runtime-"));
   const state = path.join(root, "state");
   await mkdir(path.join(state, "ownership", "runtimes"), { recursive: true });
@@ -129,7 +152,7 @@ async function fixture(probe: PreviewGatewayProbe = new Probe([{ kind: "response
   }, undefined, { now: () => runtimeTime, sleep: async (milliseconds) => { runtimeTime += milliseconds; } });
   const clock = { value: 0, now(): number { return this.value; } };
   const manager = new PreviewRuntimeManager(state, engine, runtime, approvedRegistry, undefined, probe, uuidv7, clock,
-    { firstPort: 40_000, lastPort: 40_001 });
+    { firstPort: 40_000, lastPort: 40_001 }, gateway);
   await manager.initialize();
   const bindings = await manager.reserveWorkspaceLeases(association, options, ids.operationId);
   await runtime.start(association, plan, worktree, ids.operationId, bindings);
@@ -150,6 +173,13 @@ describe("Agent preview runtime policy", () => {
     expect(inspection.observedState).toBe("unhealthy");
     expect(inspection.routePresent).toBe(false);
     expect(inspection.hostname).toBe(activation.hostname);
+  });
+
+  test("classifies an exact loopback target with no listener as Waiting, not infrastructure loss", async () => {
+    const probe = new Probe([{ kind: "infrastructure", message: "The loopback preview target is unavailable." }]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy", routePresent: false });
   });
 
   test("accepts configured status codes and preserves WebSocket probe metadata", async () => {
@@ -210,6 +240,38 @@ describe("Agent preview runtime policy", () => {
     expect(third[0]!.hostPort).toBe(firstPort);
   });
 
+  test("intentional runtime stop removes route eligibility without recording unexplained runtime loss", async () => {
+    const gateway = new Gateway();
+    const fixtureValue = await fixture(undefined, gateway); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    expect(gateway.routes).toHaveLength(1);
+    await fixtureValue.runtime.stop(association);
+    await fixtureValue.manager.workspaceStopped(association);
+    expect(gateway.routes).toEqual([]);
+    expect((await fixtureValue.manager.snapshotResources())[0]).toMatchObject({
+      type: "preview", observation: { desiredState: "active", observedState: "inactive", routePresent: false }
+    });
+  });
+
+  test("Agent restart reconstructs only the exact desired route and rejects a stale generation", async () => {
+    const gateway = new Gateway();
+    const fixtureValue = await fixture(undefined, gateway); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    const expected = gateway.routes[0];
+    expect(expected).toBeDefined();
+    gateway.routes.splice(0, gateway.routes.length, { ...expected!, hostPort: expected!.hostPort + 1 });
+    const restarted = new PreviewRuntimeManager(fixtureValue.state, fixtureValue.engine, fixtureValue.runtime, approvedRegistry,
+      undefined, new Probe([{ kind: "response", statusCode: 200 }]), uuidv7, fixtureValue.clock,
+      { firstPort: 40_000, lastPort: 40_001 }, gateway);
+    await restarted.initialize();
+    await restarted.reconcileRoutes();
+    expect(gateway.routes).toEqual([expected]);
+    const container = [...fixtureValue.engine.containers.values()][0]!;
+    container.Config.Labels["devspace.runtime-generation"] = "2";
+    await restarted.reconcileRoutes();
+    expect(gateway.routes).toEqual([]);
+  });
+
   test("loses route eligibility when the exact runtime generation drifts", async () => {
     const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
     await fixtureValue.manager.activate(activation, association, options, ids.operationId);
@@ -225,5 +287,11 @@ describe("Agent preview runtime policy", () => {
       .rejects.toMatchObject({ code: "PREVIEW_DOMAIN_NOT_APPROVED" });
     await expect(fixtureValue.manager.activate({ ...activation, projectSlug: "other" }, association, options, ids.operationId))
       .rejects.toMatchObject({ code: "PREVIEW_DOMAIN_NOT_APPROVED" });
+  });
+
+  test("rejects a stale preview revision before creating preview state", async () => {
+    const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
+    await expect(fixtureValue.manager.activate({ ...activation, revisionId: "018f1f34-7000-7000-8000-000000000006" }, association, options, ids.operationId))
+      .rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
   });
 });

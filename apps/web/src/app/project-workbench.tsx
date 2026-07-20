@@ -15,7 +15,7 @@ type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
 export function ProjectWorkbench({ projectId, workspaceId, projectName, branchName, runtimeState, runtimeRunning, runtimeAvailable,
   agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, initialTasks, initialTaskRuns, initialTerminals, initialPreviews,
-  repositoryUrl, actor }: {
+  previewGateway, repositoryUrl, actor }: {
   projectId: string;
   workspaceId: string;
   projectName: string;
@@ -33,6 +33,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   initialTaskRuns: readonly TaskRun[];
   initialTerminals: readonly TerminalView[];
   initialPreviews: readonly PreviewLifecycleView[];
+  previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   repositoryUrl: string;
   actor: string;
 }) {
@@ -47,6 +48,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [message, setMessage] = useState("");
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
+  useEffect(() => {
+    setPreviews(initialPreviews);
+    currentPreviews.current = initialPreviews;
+  }, [initialPreviews]);
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
     const existing = terminalLabels.current.get(terminal.id);
     if (existing !== undefined) return existing;
@@ -232,7 +237,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
           canCreateTerminal={actionsAvailable} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId}
-          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} />
+          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway} />
         {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
       </section>
     </div>
@@ -334,10 +339,11 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, onRefresh, onTerminalStateChange, onReloadPreview }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
   projectId: string; workspaceId: string; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   onReloadPreview: (previewId: string) => Promise<void>;
+  previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a terminal to start working in this project.</p></div>}
@@ -347,7 +353,7 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
       : tab.kind === "preview" ? (() => {
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
-          active={tab.id === tabs.activeTabId} onReload={onReloadPreview} />;
+          active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
       })() : null)}
   </div>;
 }

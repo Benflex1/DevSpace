@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { createPreviewGatewayFixture } from "../preview-gateway-fixture.mjs";
 
@@ -29,6 +32,23 @@ function request(port, host, path = "/") {
       response.on("end", () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
     });
     outgoing.once("error", reject);
+    outgoing.end();
+  });
+}
+
+function unixRequest(socketPath, method, requestPath, body) {
+  const encoded = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const outgoing = http.request({ socketPath, method, path: requestPath, headers: encoded === undefined ? {} : {
+      "content-type": "application/json", "content-length": String(encoded.length)
+    }}, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => resolve({ status: response.statusCode,
+        body: chunks.length === 0 ? null : JSON.parse(Buffer.concat(chunks).toString("utf8")) }));
+    });
+    outgoing.once("error", reject);
+    if (encoded !== undefined) outgoing.write(encoded);
     outgoing.end();
   });
 }
@@ -108,5 +128,58 @@ test("fixture route and opaque probe reject non-loopback or unapproved inputs", 
   } finally {
     await gateway.close();
     await new Promise((resolve, reject) => backend.close((error) => error === undefined ? resolve() : reject(error)));
+  }
+});
+
+test("private probe resolves an opaque lease on the gateway side", async () => {
+  const backend = http.createServer((_request, response) => response.writeHead(200).end("gateway-owned"));
+  const backendPort = await listen(backend);
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-gateway-test-"));
+  const resolved = [];
+  const gateway = await createPreviewGatewayFixture({
+    adminSocketPath: path.join(root, "admin.sock"), probeSocketPath: path.join(root, "probe.sock"),
+    resolveLease: async (leaseId) => {
+      resolved.push(leaseId);
+      return leaseId === "opaque-lease" ? { leaseId, hostIp: "127.0.0.1", hostPort: backendPort } : null;
+    }
+  });
+  try {
+    const result = await unixRequest(path.join(root, "probe.sock"), "POST", "/v1/preview/probe", {
+      leaseId: "opaque-lease", path: "/health", acceptedStatuses: [200], deadlineMs: 1_000, webSocketForwarding: true
+    });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, { kind: "response", statusCode: 200 });
+    assert.deepEqual(resolved, ["opaque-lease"]);
+    const foreign = await unixRequest(path.join(root, "probe.sock"), "POST", "/v1/preview/probe", {
+      leaseId: "foreign-lease", hostIp: "127.0.0.1", hostPort: backendPort, path: "/health",
+      acceptedStatuses: [200], deadlineMs: 1_000, webSocketForwarding: true
+    });
+    assert.deepEqual(foreign.body, { kind: "infrastructure", message: "The opaque preview lease is unavailable." });
+    assert.deepEqual(resolved, ["opaque-lease", "foreign-lease"]);
+    assert.deepEqual(gateway.probeEvents().map((event) => event.leaseId), ["opaque-lease", "foreign-lease"]);
+  } finally {
+    await gateway.close();
+    await new Promise((resolve, reject) => backend.close((error) => error === undefined ? resolve() : reject(error)));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("private admin transport models the exact Caddy route document", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-admin-test-"));
+  const gateway = await createPreviewGatewayFixture({ adminSocketPath: path.join(root, "admin.sock") });
+  const encode = (value) => Buffer.from(value, "utf8").toString("base64url");
+  const expected = route(43210);
+  const id = [expected.projectId, expected.workspaceId, expected.previewId, expected.revisionId, expected.approvedBaseId, expected.leaseId]
+    .map(encode).join(".");
+  try {
+    const response = await unixRequest(path.join(root, "admin.sock"), "PUT", "/config/apps/http/servers/devspace-preview/routes", [{
+      "@id": `devspace-preview-v1.${id}.g1.ws1`, match: [{ host: [expected.hostname] }],
+      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${expected.hostIp}:${expected.hostPort}` }], flush_interval: -1 }], terminal: true
+    }]);
+    assert.equal(response.status, 204);
+    assert.deepEqual(gateway.routes(), [expected]);
+  } finally {
+    await gateway.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

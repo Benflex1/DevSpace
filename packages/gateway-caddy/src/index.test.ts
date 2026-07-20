@@ -131,6 +131,14 @@ describe("typed private Caddy gateway adapter", () => {
     expect(transport.replaceCount).toBe(1);
   });
 
+  test("fails safely when a foreign route owns the approved hostname", async () => {
+    const transport = new MemoryTransport();
+    transport.documents = [{ "@id": "foreign-route", match: [{ host: ["web.localhost"] }], handle: [{ handler: "static_response" }] }];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    await expect(adapter.ensureRoute(route())).rejects.toMatchObject({ code: "ADMIN_REJECTED", stage: "reconcile" });
+    expect(transport.replaceCount).toBe(0);
+  });
+
   test("reports same-resource lease drift as stale", async () => {
     const transport = new MemoryTransport();
     const current = route({ hostPort: 43124 });

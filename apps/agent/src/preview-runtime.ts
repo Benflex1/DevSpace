@@ -526,14 +526,16 @@ export class PreviewRuntimeManager {
         attempt, nextAttemptAt, lastStatusCode: result.statusCode, lastError: null, containerId: ownership.developmentContainer.id };
       await this.save(next); return next;
     }
-    if (result.kind === "infrastructure") {
+    const targetNotListening = result.kind === "infrastructure" && result.message === "The loopback preview target is unavailable.";
+    if (result.kind === "infrastructure" && !targetNotListening) {
       const next = { ...record, observedState: "failed" as const, routePresent: false as const,
         attempt, nextAttemptAt, lastStatusCode: null, lastError: result.message.slice(0, 256), containerId: ownership.developmentContainer.id };
       await this.save(next); return next;
     }
     const next = { ...record, observedState: "unhealthy" as const, routePresent: false as const,
       attempt, nextAttemptAt, lastStatusCode: result.kind === "response" ? result.statusCode : null,
-      lastError: result.kind === "timeout" ? "health-attempt-timeout" : "health-status-not-accepted",
+      lastError: result.kind === "timeout" ? "health-attempt-timeout"
+        : targetNotListening ? "health-target-not-listening" : "health-status-not-accepted",
       containerId: ownership.developmentContainer.id };
     await this.save(next); return next;
   }
@@ -622,7 +624,7 @@ export class PreviewRuntimeManager {
     for (const record of await this.allStates()) {
       if (!sameAssociation(record, association) || record.desiredState !== "active") continue;
       await this.removeRoute(record).catch(() => undefined);
-      await this.save({ ...record, observedState: "lost", routePresent: false, containerId: record.containerId });
+      await this.save({ ...record, observedState: "inactive", routePresent: false, containerId: record.containerId });
     }
   }
   async workspaceStarted(association: RuntimeAssociation): Promise<void> {

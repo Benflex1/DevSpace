@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createDockerEngineFixture } from "./docker-engine-fixture.mjs";
+import { createPreviewGatewayFixture } from "./preview-gateway-fixture.mjs";
 
 const temporaryRoot = tmpdir();
 for (const entry of await readdir(temporaryRoot, { withFileTypes: true })) {
@@ -65,15 +66,31 @@ const controlToken = randomUUID();
 const managedRoot = path.join(runtimeDirectory, "managed");
 await Promise.all(["projects", "workspaces", "state/operations"]
   .map(async (relative) => await mkdir(path.join(managedRoot, relative), { recursive: true })));
+const gatewayAdminSocket = path.join(runtimeDirectory, "preview-gateway-admin.sock");
+const gatewayProbeSocket = path.join(runtimeDirectory, "preview-gateway-probe.sock");
+const previewGateway = await createPreviewGatewayFixture({ approvedPreviewBases: [{ id: "local", domain: "localhost" }],
+  adminSocketPath: gatewayAdminSocket, probeSocketPath: gatewayProbeSocket,
+  resolveLease: async (leaseId) => {
+    try {
+      const record = JSON.parse(await readFile(path.join(managedRoot, "state", "preview-leases", `${leaseId}.json`), "utf8"));
+      return record.state === "owned" && record.leaseId === leaseId && record.hostIp === "127.0.0.1"
+        && Number.isSafeInteger(record.hostPort) ? { leaseId, hostIp: "127.0.0.1", hostPort: record.hostPort } : null;
+    } catch { return null; }
+  }
+});
+const gatewayPort = previewGateway.address().port;
 const environment = {
   ...process.env, DEVSPACE_AUTH_MODE: "development", DEVSPACE_APP_ORIGIN: "http://127.0.0.1:3100",
   DEVSPACE_DEPS_PREPARED: "1",
   DEVSPACE_DATABASE_PATH: databasePath, DEVSPACE_AGENT_SOCKET_PATH: path.join(runtimeDirectory, "agent.sock"),
   DEVSPACE_MANAGED_ROOT: managedRoot, DEVSPACE_GIT_CA_FILE: certificate,
-  DEVSPACE_DOCKER_SOCKET_PATH: path.join(runtimeDirectory, "docker-engine.sock")
+  DEVSPACE_DOCKER_SOCKET_PATH: path.join(runtimeDirectory, "docker-engine.sock"),
+  DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost" }]),
+  DEVSPACE_PREVIEW_GATEWAY_PROTOCOL: "http:", DEVSPACE_PREVIEW_GATEWAY_PORT: String(gatewayPort),
+  DEVSPACE_CADDY_ADMIN_SOCKET: gatewayAdminSocket, DEVSPACE_PREVIEW_PROBE_SOCKET: gatewayProbeSocket
 };
 const dockerFixture = await createDockerEngineFixture(environment.DEVSPACE_DOCKER_SOCKET_PATH, path.join(managedRoot, "workspaces"));
-await writeFile(coordinationPath, `${JSON.stringify({ runtimeDirectory, databasePath, managedRoot, projectId, repositoryUrl, expectedHead, controlToken })}\n`, { mode: 0o600 });
+await writeFile(coordinationPath, `${JSON.stringify({ runtimeDirectory, databasePath, managedRoot, projectId, repositoryUrl, expectedHead, controlToken, gatewayPort })}\n`, { mode: 0o600 });
 
 let agentChild = null; let webChild = null; let stopping = false; let restarting = false;
 function watchChild(child) {
@@ -91,7 +108,21 @@ function startWeb() {
   });
   watchChild(webChild);
 }
-function startChildren() { startAgent(); startWeb(); }
+async function startChildren() {
+  startAgent();
+  await waitForAgent();
+  const configured = await new Promise((resolve, reject) => {
+    const child = spawn("pnpm", ["exec", "tsx", "tooling/seed-e2e-project.ts", databasePath, repositoryUrl, seedPath, "configure-preview"], {
+      env: { ...environment, DEVSPACE_SEED_AGENT_SOCKET: environment.DEVSPACE_AGENT_SOCKET_PATH }, stdio: ["ignore", "ignore", "pipe"]
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.once("error", reject);
+    child.once("close", (status) => resolve({ status, stderr }));
+  });
+  if (configured.status !== 0) throw new Error(`Unable to seed preview workspace: ${configured.stderr}`);
+  startWeb();
+}
 async function stopProcesses(current) {
   for (const child of current) if (child !== null && child.exitCode === null) process.kill(-child.pid, "SIGTERM");
   await Promise.all(current.map((child) => child.exitCode !== null ? Promise.resolve() : new Promise((resolve) => child.once("exit", resolve))));
@@ -121,7 +152,7 @@ async function waitForAgent() {
   }
   throw new Error("Agent did not restart in time.");
 }
-startChildren();
+await startChildren();
 
 const control = http.createServer(async (request, response) => {
   if (request.headers.authorization !== `Bearer ${controlToken}`) {
@@ -139,15 +170,25 @@ const control = http.createServer(async (request, response) => {
   }
   if (request.method === "GET" && request.url === "/docker-snapshot") {
     const snapshot = dockerFixture.snapshot();
-    const body = JSON.stringify({ networks: snapshot.networks.length, containers: snapshot.containers.length, execs: snapshot.execs });
+    const body = JSON.stringify({ networks: snapshot.networks.length, containers: snapshot.containers.length, execs: snapshot.execs,
+      containerDetails: snapshot.containers.map((container) => ({ id: container.Id, name: container.Name, state: container.State,
+        portBindings: container.HostConfig.PortBindings })), appListeners: snapshot.appListeners });
     response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body); return;
+  }
+  if (request.method === "GET" && request.url === "/gateway-snapshot") {
+    const body = JSON.stringify({ routes: previewGateway.routes(), probeEvents: previewGateway.probeEvents(),
+      appListeners: dockerFixture.snapshot().appListeners, address: previewGateway.address() });
+    response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body); return;
+  }
+  if (request.method === "POST" && request.url === "/restart-gateway") {
+    previewGateway.restart(); response.writeHead(204).end(); return;
   }
   if (request.method !== "POST" || !["/restart", "/restart-web", "/restart-agent"].includes(request.url ?? "")) {
     response.writeHead(404).end(); return;
   }
   restarting = true;
   try {
-    if (request.url === "/restart") { await stopChildren(); startChildren(); }
+    if (request.url === "/restart") { await stopChildren(); await startChildren(); }
     else if (request.url === "/restart-web") {
       const previous = webChild; webChild = null; if (previous !== null) await stopProcesses([previous]); startWeb();
     } else {
@@ -165,6 +206,7 @@ async function stop(code = 0) {
   await stopChildren();
   await new Promise((resolve) => control.close(resolve));
   await new Promise((resolve) => origin.close(resolve));
+  await previewGateway.close();
   await dockerFixture.close();
   await rm(coordinationPath, { force: true });
   await rm(runtimeDirectory, { recursive: true, force: true });
