@@ -256,12 +256,17 @@ export function openProjectDatabase(path: string, options: {
         )).get();
         if (preview === undefined) throw new ProjectSetupConflictError("The preview is not owned by the active workspace revision.");
         const operationName = `preview.${input.action}`;
-        const retained = db.select().from(operations).where(and(
+        const latestPreviewOperation = db.select().from(operations).where(and(
           eq(operations.projectId, input.projectId), eq(operations.workspaceId, input.workspaceId),
-          eq(operations.operationName, operationName), eq(operations.resourceType, "preview"),
-          eq(operations.resourceId, input.previewId)
+          or(eq(operations.operationName, "preview.activate"), eq(operations.operationName, "preview.deactivate")),
+          eq(operations.resourceType, "preview"), eq(operations.resourceId, input.previewId)
         )).orderBy(desc(operations.createdAt), desc(operations.operationId)).all()
           .find((candidate) => candidate.state === "accepted" || candidate.state === "running" || candidate.state === "succeeded");
+        if (latestPreviewOperation !== undefined && latestPreviewOperation.operationName !== operationName
+          && (latestPreviewOperation.state === "accepted" || latestPreviewOperation.state === "running")) {
+          throw new ProjectSetupConflictError("Another preview action is still in progress.");
+        }
+        const retained = latestPreviewOperation?.operationName === operationName ? latestPreviewOperation : undefined;
         const operation = retained ?? {
           operationId: createId(), projectId: input.projectId, workspaceId: input.workspaceId, actor: input.actor,
           operationName, resourceType: "preview", resourceId: input.previewId, state: "accepted" as const,
@@ -427,14 +432,16 @@ export function openProjectDatabase(path: string, options: {
     preparePrimaryWorkspace(input: {
       projectId: string; configurationJson: string; configurationHash: string;
       compiledRuntimePlanJson: string; runtimePlanHash: string; actor: string;
-    }): { project: Project; revision: ProjectConfigRevision; workspaceId: string } {
+    }): { project: Project; revision: ProjectConfigRevision; workspaceId: string; workspaceSlug: string } {
       return client.transaction(() => {
         const project = db.select().from(projects).where(eq(projects.id, input.projectId)).get();
         if (project === undefined) throw new ProjectSetupConflictError("The project no longer exists.");
         if (project.state === "ready" && project.activeConfigRevisionId !== null && project.primaryWorkspaceId !== null) {
           const revision = db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.id, project.activeConfigRevisionId)).get();
           if (revision === undefined) throw new ProjectSetupConflictError("The ready project is missing its active revision.");
-          return { project, revision, workspaceId: project.primaryWorkspaceId };
+          const workspace = db.select({ slug: workspaces.slug }).from(workspaces).where(eq(workspaces.id, project.primaryWorkspaceId)).get();
+          if (workspace === undefined) throw new ProjectSetupConflictError("The ready project is missing its primary workspace.");
+          return { project, revision, workspaceId: project.primaryWorkspaceId, workspaceSlug: workspace.slug };
         }
         if (project.state !== "registering") throw new ProjectSetupConflictError("This project cannot be set up from its current state.");
         let revision = db.select().from(projectConfigRevisions).where(and(
@@ -466,7 +473,7 @@ export function openProjectDatabase(path: string, options: {
           };
           db.insert(operations).values(workspaceOperation).run();
         }
-        return { project, revision, workspaceId: workspaceOperation.resourceId };
+        return { project, revision, workspaceId: workspaceOperation.resourceId, workspaceSlug: "primary" };
       }).immediate();
     },
     getOrCreateOperation(input: {

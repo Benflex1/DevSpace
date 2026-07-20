@@ -251,27 +251,31 @@ export class GatewayHostProbeServer {
   }) {
     if (options.socketPath.trim() === "") throw new GatewayAdapterError("validation", "A private gateway probe Unix socket is required.");
     const hostProbe = new GatewayHostProbe(options.resolveLease);
-    this.server = http.createServer(async (request, response) => {
-      if (request.method !== "POST" || request.url !== "/v1/preview/probe") { response.writeHead(404).end(); return; }
-      try {
-        const chunks: Buffer[] = []; let bytes = 0;
-        for await (const chunk of request) {
-          const buffer = Buffer.from(chunk); bytes += buffer.length;
-          if (bytes > 16_384) throw new Error("probe-body-too-large");
-          chunks.push(buffer);
-        }
-        const parsed = previewGatewayProbeRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), parsed.deadlineMs); timer.unref();
-        request.once("aborted", () => controller.abort());
+    this.server = http.createServer((request, response) => {
+      void (async () => {
+        if (request.method !== "POST" || request.url !== "/v1/preview/probe") { response.writeHead(404).end(); return; }
         try {
-          const result = await hostProbe.probe({ ...parsed, signal: controller.signal });
-          const encoded = JSON.stringify(result);
-          response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);
-        } finally { clearTimeout(timer); }
-      } catch {
+          const chunks: Buffer[] = []; let bytes = 0;
+          for await (const chunk of request) {
+            const buffer = Buffer.from(chunk as Uint8Array); bytes += buffer.length;
+            if (bytes > 16_384) throw new Error("probe-body-too-large");
+            chunks.push(buffer);
+          }
+          const parsed = previewGatewayProbeRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), parsed.deadlineMs); timer.unref();
+          request.once("aborted", () => controller.abort());
+          try {
+            const result = await hostProbe.probe({ ...parsed, signal: controller.signal });
+            const encoded = JSON.stringify(result);
+            response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);
+          } finally { clearTimeout(timer); }
+        } catch {
+          if (!response.headersSent) response.writeHead(400).end();
+        }
+      })().catch(() => {
         if (!response.headersSent) response.writeHead(400).end();
-      }
+      });
     });
   }
   async start(): Promise<void> {

@@ -100,19 +100,19 @@ async function inspectAndPersist(
     if (error instanceof AgentResponseError) {
       dependencies.database.finishOperation(operationId!, { state: "failed", code: error.code, message: error.message });
       const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
-      persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: false }, operationId,
+      persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: retained.routePresent }, operationId,
         error.code, error.message);
       return;
     }
     if (error instanceof AgentUnavailableError) {
       const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
-      persistObservation(dependencies.database, context, retained, { observedState: retained.observedState as PreviewInspectionData["observedState"], routePresent: false },
+      persistObservation(dependencies.database, context, retained, { observedState: retained.observedState as PreviewInspectionData["observedState"], routePresent: retained.routePresent },
         operationId, "AGENT_UNAVAILABLE", error.message);
       return;
     }
     dependencies.database.finishOperation(operationId!, { state: "failed", code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely." });
     const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
-    persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: false }, operationId,
+    persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: retained.routePresent }, operationId,
       "AGENT_INTERNAL_ERROR", "The preview could not be inspected safely.");
   }
 }
@@ -148,7 +148,7 @@ async function reconcileOne(
     } catch (error) {
       if (error instanceof AgentUnavailableError) {
         persistObservation(dependencies.database, context, intent.preview, {
-          observedState: intent.preview.observedState as PreviewInspectionData["observedState"], routePresent: false
+          observedState: intent.preview.observedState as PreviewInspectionData["observedState"], routePresent: intent.preview.routePresent
         }, operationId, "AGENT_UNAVAILABLE", error.message);
         return;
       }
@@ -156,7 +156,7 @@ async function reconcileOne(
         ? { code: error.code, message: error.message }
         : { code: "AGENT_INTERNAL_ERROR", message: "The preview action failed safely." };
       dependencies.database.finishOperation(operationId, { state: "failed", code: failure.code, message: failure.message });
-      persistObservation(dependencies.database, context, intent.preview, { observedState: "failed", routePresent: false }, operationId,
+      persistObservation(dependencies.database, context, intent.preview, { observedState: "failed", routePresent: intent.preview.routePresent }, operationId,
         failure.code, failure.message);
       return;
     }
@@ -165,7 +165,7 @@ async function reconcileOne(
     if (terminal === "failed") {
       const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? intent.preview;
       if (retained.lastErrorCode === null) {
-        persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: false }, operationId,
+        persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: retained.routePresent }, operationId,
           "AGENT_OPERATION_FAILED", "The Agent preview operation failed.");
       }
       return;

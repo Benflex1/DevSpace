@@ -103,7 +103,7 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
   expect((await page.request.get(previewUrl)).status()).toBe(404);
 
   await project.getByRole("button", { name: "Create terminal", exact: true }).click();
-  await expect(project.locator(".terminal-list li").filter({ hasText: "Terminal 1" })).toContainText("active", { timeout: 15_000 });
+  await expect(project.locator(".terminal-list li.selected")).toContainText("active", { timeout: 15_000 });
   const terminal = project.locator(".terminal-tab-surface.is-active");
   await terminal.locator(".xterm-helper-textarea").focus();
   await page.keyboard.type("pnpm dev");
@@ -139,14 +139,29 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
     previewId: preview.id, revisionId: preview.config_revision_id, hostname: preview.hostname, hostIp: "127.0.0.1", hostPort: listener?.hostPort })]);
   expect(gateway.probeEvents.some((event) => event.leaseId === gateway.routes[0]?.leaseId)).toBe(true);
 
+  expect((await control(fixture, "/restart-agent", "POST")).status).toBe(204);
+  await expect.poll(async () => (await page.request.get(previewUrl)).status(), { timeout: 20_000 }).toBe(200);
+  expect((await gatewaySnapshot(fixture)).routes).toEqual([expect.objectContaining({
+    projectId: fixture.projectId, workspaceId: workspace.id, previewId: preview.id, hostPort: listener?.hostPort
+  })]);
+
+  expect((await control(fixture, "/restart-gateway", "POST")).status).toBe(204);
+  expect((await gatewaySnapshot(fixture)).routes).toEqual([]);
+  await page.reload();
+  await expect.poll(async () => (await page.request.get(previewUrl)).status(), { timeout: 20_000 }).toBe(200);
+  await expect(previewItem).toContainText("Ready", { timeout: 20_000 });
+  await previewItem.getByRole("button").click();
+  await expect(page.getByRole("tab", { name: "Preview", exact: true })).toHaveCount(1);
+  const reloadedPreviewTab = project.locator(".preview-tab-surface.is-active");
+
   let reconcileRequests = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().endsWith(`/api/projects/${fixture.projectId}/previews`)) reconcileRequests += 1;
   });
-  await previewTab.getByRole("button", { name: "Reload" }).click();
+  await reloadedPreviewTab.getByRole("button", { name: "Reload" }).click();
   await expect(project.locator(".workbench-message")).toContainText("Preview reconciliation requested.");
   await expect.poll(() => reconcileRequests, { timeout: 10_000 }).toBe(1);
-  await expect(previewTab.locator(".preview-state")).toHaveText("Ready", { timeout: 15_000 });
+  await expect(reloadedPreviewTab.locator(".preview-state")).toHaveText("Ready", { timeout: 15_000 });
 
   await project.getByRole("button", { name: "Stop environment" }).click();
   await expect(project.locator(".runtime-chip.stopped")).toHaveText("Stopped", { timeout: 30_000 });

@@ -17,7 +17,7 @@ import {
 } from "./docker-runtime.js";
 import {
   runtimePreviewBindingSchema, type RuntimeAssociation, type RuntimeOwnership,
-  type RuntimePreviewBinding, WorkspaceRuntimeError, WorkspaceRuntimeManager
+  type RuntimePreviewBinding, WorkspaceRuntimeManager
 } from "./workspace-runtime.js";
 import {
   durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter
@@ -59,13 +59,19 @@ export interface PreviewGatewayRoute {
   readonly webSocketForwarding: boolean;
 }
 
+export interface PreviewWorkspaceIdentity {
+  readonly projectSlug: string;
+  readonly workspaceSlug: string;
+}
+export type PreviewWorkspaceIdentityResolver = (projectId: string, workspaceId: string) => Promise<PreviewWorkspaceIdentity | null>;
+
 /** The Agent-facing structural seam for the active private gateway adapter. */
-export interface PreviewGatewayAdapter extends PrivatePreviewGatewayAdapter {}
+export type PreviewGatewayAdapter = PrivatePreviewGatewayAdapter;
 
 /** Used until the Checkpoint 3 gateway adapter is installed. It is fail-closed. */
 export class UnavailablePreviewGatewayProbe implements PreviewGatewayProbe {
-  async probe(_input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
-    return { kind: "infrastructure", message: "The private gateway-host probe is unavailable." };
+  probe(_input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
+    return Promise.resolve({ kind: "infrastructure", message: "The private gateway-host probe is unavailable." });
   }
 }
 
@@ -220,7 +226,7 @@ export class PreviewLeaseAllocator {
   private async inspectContainers(): Promise<DockerContainerInspection[]> {
     let listed: readonly DockerListedContainer[];
     try { listed = await this.engine.listContainers(); }
-    catch (error) { throw new PreviewRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable."); }
+    catch { throw new PreviewRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable."); }
     const inspected: DockerContainerInspection[] = [];
     for (const entry of listed) {
       try { inspected.push(await this.engine.inspectContainer(entry.Id)); }
@@ -386,7 +392,8 @@ export class PreviewRuntimeManager {
     private readonly createId: () => string = uuidv7,
     private readonly clock: PreviewRuntimeClock = { now: () => Date.now() },
     leasePolicy: PreviewLeasePolicy = readPreviewLeasePolicy(),
-    private readonly gateway: PreviewGatewayAdapter | null = null
+    private readonly gateway: PreviewGatewayAdapter | null = null,
+    private readonly workspaceIdentity: PreviewWorkspaceIdentityResolver = () => Promise.resolve(null)
   ) {
     this.previewsRoot = path.join(path.resolve(stateRoot), "previews");
     this.leases = new PreviewLeaseAllocator(stateRoot, engine, leasePolicy, writer, createId);
@@ -424,8 +431,13 @@ export class PreviewRuntimeManager {
   }
   private async removeRoute(record: PreviewState): Promise<void> {
     if (this.gateway === null) return;
-    const lease = (await this.leases.leasesFor(this.association(record))).find((candidate) => candidate.leaseId === record.leaseId);
-    if (lease !== undefined) await this.gateway.removeRoute(this.route(record, lease));
+    // Route removal is fenced by the durable resource identity, not by the
+    // lease record. A missing/released lease must not prevent removal of a
+    // stale route that still points at the old host port.
+    await this.gateway.removeRoute({
+      projectId: record.projectId, workspaceId: record.workspaceId, previewId: record.previewId,
+      revisionId: record.revisionId, generation: record.generation, hostname: record.hostname
+    });
   }
   private config(options: ProjectOptionsV1, previewKey: string, revisionId?: string) {
     const preview = options.previews.find((candidate) => candidate.key === previewKey);
@@ -475,10 +487,15 @@ export class PreviewRuntimeManager {
       observedState: record.observedState, routePresent: record.routePresent, hostname: record.hostname });
   }
   private async markRuntimeLoss(record: PreviewState, error: unknown): Promise<PreviewState> {
-    await this.removeRoute(record).catch(() => undefined);
-    const next = { ...record, routePresent: false as const,
+    let routePresent = record.routePresent;
+    let routeError: string | null = null;
+    if (record.routePresent) {
+      try { await this.removeRoute(record); routePresent = false; }
+      catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; }
+    }
+    const next = { ...record, routePresent,
       observedState: "lost" as const, containerId: null,
-      lastError: error instanceof Error ? error.message.slice(0, 256) : "exact-runtime-unavailable" };
+      lastError: routeError ?? (error instanceof Error ? error.message.slice(0, 256) : "exact-runtime-unavailable") };
     await this.save(next);
     return next;
   }
@@ -515,9 +532,13 @@ export class PreviewRuntimeManager {
       if (this.gateway !== null) {
         try { await this.gateway.ensureRoute(this.route(record, lease)); }
         catch (error) {
-          const next = { ...record, observedState: "failed" as const, routePresent: false,
+          let routePresent = record.routePresent;
+          let routeError: string | null = null;
+          try { await this.removeRoute(record); routePresent = false; }
+          catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; routePresent = true; }
+          const next = { ...record, observedState: "failed" as const, routePresent,
             attempt, nextAttemptAt, lastStatusCode: result.statusCode,
-            lastError: error instanceof Error ? error.message.slice(0, 256) : "gateway-route-update-failed",
+            lastError: routeError ?? (error instanceof Error ? error.message.slice(0, 256) : "gateway-route-update-failed"),
             containerId: ownership.developmentContainer.id };
           await this.save(next); return next;
         }
@@ -526,18 +547,24 @@ export class PreviewRuntimeManager {
         attempt, nextAttemptAt, lastStatusCode: result.statusCode, lastError: null, containerId: ownership.developmentContainer.id };
       await this.save(next); return next;
     }
+    let routePresent = record.routePresent;
+    let routeError: string | null = null;
+    if (record.routePresent) {
+      try { await this.removeRoute(record); routePresent = false; }
+      catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; }
+    }
     const targetNotListening = result.kind === "infrastructure" && result.message === "The loopback preview target is unavailable.";
     if (result.kind === "infrastructure" && !targetNotListening) {
       const next = { ...record, observedState: "failed" as const, routePresent: false as const,
         attempt, nextAttemptAt, lastStatusCode: null, lastError: result.message.slice(0, 256), containerId: ownership.developmentContainer.id };
-      await this.save(next); return next;
+      await this.save({ ...next, routePresent, lastError: routeError ?? next.lastError }); return { ...next, routePresent, lastError: routeError ?? next.lastError };
     }
-    const next = { ...record, observedState: "unhealthy" as const, routePresent: false as const,
+    const next = { ...record, observedState: "unhealthy" as const, routePresent,
       attempt, nextAttemptAt, lastStatusCode: result.kind === "response" ? result.statusCode : null,
       lastError: result.kind === "timeout" ? "health-attempt-timeout"
         : targetNotListening ? "health-target-not-listening" : "health-status-not-accepted",
       containerId: ownership.developmentContainer.id };
-    await this.save(next); return next;
+    await this.save({ ...next, lastError: routeError ?? next.lastError }); return { ...next, lastError: routeError ?? next.lastError };
   }
   async reserveWorkspaceLeases(association: RuntimeAssociation, options: ProjectOptionsV1, operationId: string): Promise<RuntimePreviewBinding[]> {
     return await this.leases.reserveWorkspaceLeases(association, options, operationId);
@@ -561,6 +588,10 @@ export class PreviewRuntimeManager {
     }
     const preview = this.config(options, input.previewKey, association.revisionId);
     const hostname = this.validatePersistedHostname(input, input.previewId, preview);
+    const workspace = await this.workspaceIdentity(association.projectId, association.workspaceId);
+    if (workspace === null || workspace.projectSlug !== input.projectSlug || workspace.workspaceSlug !== input.workspaceSlug) {
+      throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview request does not match the Agent-owned workspace identity.");
+    }
     const existing = await this.load(input.previewId);
     if (existing !== null) {
       if (!sameAssociation(existing, association) || existing.previewKey !== input.previewKey || existing.containerPort !== preview.containerPort) {
@@ -591,11 +622,13 @@ export class PreviewRuntimeManager {
       throw new PreviewRuntimeError("RESOURCE_NOT_FOUND", "The preview is not owned by this workspace.");
     }
     if (state.operationId === operationId && state.desiredState === "inactive") return;
-    try { await this.removeRoute(state); }
-    catch (error) {
-      throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message : "The preview route could not be removed.", {
-        previewId: state.previewId
-      });
+    if (state.routePresent) {
+      try { await this.removeRoute(state); }
+      catch (error) {
+        throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message : "The preview route could not be removed.", {
+          previewId: state.previewId
+        });
+      }
     }
     await this.save({ ...state, desiredState: "inactive", observedState: "inactive", routePresent: false, operationId, nextAttemptAt: 0 });
   }
@@ -617,14 +650,19 @@ export class PreviewRuntimeManager {
     const next = state.desiredState === "active" ? await this.healthAttempt(state, {
       projectId: state.projectId, workspaceId: state.workspaceId, revisionId: state.revisionId,
       revisionHash: state.revisionHash, runtimePlanHash: state.runtimePlanHash, generation: state.generation
-    }, false) : state;
+    }, state.routePresent === false && loaded.routePresent) : state;
     return this.observation(next);
   }
   async workspaceStopped(association: RuntimeAssociation): Promise<void> {
     for (const record of await this.allStates()) {
       if (!sameAssociation(record, association) || record.desiredState !== "active") continue;
-      await this.removeRoute(record).catch(() => undefined);
-      await this.save({ ...record, observedState: "inactive", routePresent: false, containerId: record.containerId });
+      let routePresent = record.routePresent;
+      let lastError = record.lastError;
+      if (record.routePresent) {
+        try { await this.removeRoute(record); routePresent = false; }
+        catch (error) { lastError = error instanceof Error ? error.message.slice(0, 256) : "preview-route-removal-failed"; }
+      }
+      await this.save({ ...record, observedState: "inactive", routePresent, containerId: record.containerId, lastError });
     }
   }
   async workspaceStarted(association: RuntimeAssociation): Promise<void> {
@@ -639,7 +677,7 @@ export class PreviewRuntimeManager {
     for (const record of await this.allStates()) {
       if (record.desiredState !== "active") continue;
       const next = await this.healthAttempt(record, this.association(record), true);
-      if (!next.routePresent) continue;
+      if (next.observedState !== "healthy" || !next.routePresent) continue;
       const lease = (await this.leases.leasesFor(this.association(next))).find((candidate) => candidate.leaseId === next.leaseId);
       if (lease !== undefined) desired.push(this.route(next, lease));
     }

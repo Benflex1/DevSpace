@@ -1,5 +1,4 @@
 import {
-  previewGatewayRouteIdentitySchema,
   previewGatewayRouteSchema,
   LOOPBACK_HOST,
   GatewayAdapterError,

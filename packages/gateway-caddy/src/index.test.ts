@@ -42,10 +42,10 @@ class MemoryTransport implements CaddyAdminTransport {
   replaceCount = 0;
   failReads = false;
 
-  async request(method: "GET" | "PUT", _path: string, body?: readonly unknown[]) {
-    if (this.failReads && method === "GET") throw new Error("http://127.0.0.1:2019 unavailable");
-    if (method === "PUT") { this.documents = body ?? []; this.replaceCount += 1; return { statusCode: 204, body: null }; }
-    return { statusCode: 200, body: this.documents };
+  request(method: "GET" | "PUT", _path: string, body?: readonly unknown[]) {
+    if (this.failReads && method === "GET") return Promise.reject(new Error("http://127.0.0.1:2019 unavailable"));
+    if (method === "PUT") { this.documents = body ?? []; this.replaceCount += 1; return Promise.resolve({ statusCode: 204, body: null }); }
+    return Promise.resolve({ statusCode: 200, body: this.documents });
   }
 }
 
@@ -168,8 +168,8 @@ describe("typed private Caddy gateway adapter", () => {
     const server = http.createServer((_request, response) => { targetRequests += 1; response.writeHead(200).end("ready"); });
     const hostPort = await listen(server);
     try {
-      const resolveLease = async (leaseId: string) => leaseId === ids.leaseId
-        ? { leaseId, hostIp: LOOPBACK_HOST, hostPort } : null;
+      const resolveLease = (leaseId: string) => Promise.resolve(leaseId === ids.leaseId
+        ? { leaseId, hostIp: LOOPBACK_HOST, hostPort } : null);
       const adapter = new PreviewGatewayAdapter({ transport: new MemoryTransport(), policy, probe: new GatewayHostProbe(resolveLease) });
       const probeInput = {
         leaseId: ids.leaseId, path: "/health", acceptedStatuses: [200], deadlineMs: 1_000,
@@ -194,12 +194,12 @@ describe("typed private Caddy gateway adapter", () => {
     const server = http.createServer((_request, response) => { targetRequests += 1; response.writeHead(200).end("ready"); });
     const hostPort = await listen(server);
     try {
-      const resolveLease = async (leaseId: string) => leaseId === ids.leaseId
-        ? { leaseId, hostIp: LOOPBACK_HOST, hostPort } : null;
+      const resolveLease = (leaseId: string) => Promise.resolve(leaseId === ids.leaseId
+        ? { leaseId, hostIp: LOOPBACK_HOST, hostPort } : null);
       const hostProbe = new GatewayHostProbe(resolveLease);
       const boundaryCalls: string[] = [];
       const adapter = new PreviewGatewayAdapter({ transport: new MemoryTransport(), policy,
-        probe: { probe: async (input) => { boundaryCalls.push(input.leaseId); return { kind: "response", statusCode: 200 }; } } });
+        probe: { probe: (input) => { boundaryCalls.push(input.leaseId); return Promise.resolve({ kind: "response", statusCode: 200 }); } } });
       const input = { leaseId: ids.leaseId, path: "/health", acceptedStatuses: [200], deadlineMs: 1_000,
         signal: new AbortController().signal, webSocketForwarding: false } as const;
       expect(await adapter.probe(input)).toEqual({ kind: "response", statusCode: 200 });
@@ -292,7 +292,7 @@ describe("typed private Caddy gateway adapter", () => {
     const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
     const socketPath = join(directory, "probe.sock");
     const resolved: string[] = [];
-    const service = new GatewayHostProbeServer({ socketPath, resolveLease: async (leaseId) => { resolved.push(leaseId); return null; } });
+    const service = new GatewayHostProbeServer({ socketPath, resolveLease: (leaseId) => { resolved.push(leaseId); return Promise.resolve(null); } });
     await service.start();
     try {
       const invalid = await requestSocket(socketPath, { ...probeInput(), host: "127.0.0.1", port: 43123 });
@@ -316,10 +316,10 @@ describe("typed private Caddy gateway adapter", () => {
     const hostPort = await listen(target);
     const directory = await mkdtemp(join(tmpdir(), "devspace-gateway-probe-"));
     const socketPath = join(directory, "probe.sock");
-    const service = new GatewayHostProbeServer({ socketPath, resolveLease: async (leaseId) => {
+    const service = new GatewayHostProbeServer({ socketPath, resolveLease: (leaseId) => {
       resolved = true;
-      if (leaseId === "01900000-0000-7000-8000-000000000006") return { leaseId, hostIp: "10.0.0.1", hostPort } as never;
-      return { leaseId, hostIp: LOOPBACK_HOST, hostPort };
+      if (leaseId === "01900000-0000-7000-8000-000000000006") return Promise.resolve({ leaseId, hostIp: "10.0.0.1", hostPort } as never);
+      return Promise.resolve({ leaseId, hostIp: LOOPBACK_HOST, hostPort });
     } });
     await service.start();
     try {
@@ -343,14 +343,16 @@ describe("typed private Caddy gateway adapter", () => {
     const calls: Array<{ url: string; method: string; body: string | undefined }> = [];
     const transport = new CaddyAdminHttpTransport({
       adminUrl: "http://127.0.0.1:2019",
-      fetch: async (url, init) => {
-        calls.push({ url: String(url), method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
-        return init?.method === "PUT" ? new Response(null, { status: 204 }) : Response.json([document]);
+      fetch: (url, init) => {
+        const printableUrl = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+        calls.push({ url: printableUrl, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
+        return Promise.resolve(init?.method === "PUT" ? new Response(null, { status: 204 }) : Response.json([document]));
       }
     }, policy);
     expect((await transport.request("GET", "/config/apps/http/servers/devspace-preview/routes")).statusCode).toBe(200);
     await transport.request("PUT", "/config/apps/http/servers/devspace-preview/routes", [document]);
     expect(calls).toHaveLength(2);
-    expect(JSON.parse(calls[1]!.body!)[0].handle[0].upstreams).toEqual([{ dial: "127.0.0.1:43123" }]);
+    const routeDocument = JSON.parse(calls[1]!.body!) as { handle: Array<{ upstreams: unknown }> }[];
+    expect(routeDocument[0]?.handle[0]?.upstreams).toEqual([{ dial: "127.0.0.1:43123" }]);
   });
 });

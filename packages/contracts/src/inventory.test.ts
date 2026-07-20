@@ -31,7 +31,7 @@ const requestData: Record<string, unknown> = {
   "project.managed-store.create": { ...project, source: { kind: "remote", url: "https://example.com/repository.git" } },
   "project.fetch": project,
   "project.git.inspect": { ...project, workspaceId: null },
-  "workspace.create": { ...workspace, kind: "isolated", revision: { revisionId: id, revisionHash: hash }, branchName: "feature/f09", baseRef: { kind: "branch", branchName: "main" } },
+  "workspace.create": { ...workspace, projectSlug: "project", workspaceSlug: "workspace", kind: "isolated", revision: { revisionId: id, revisionHash: hash }, branchName: "feature/f09", baseRef: { kind: "branch", branchName: "main" } },
   "workspace.inspect": workspace,
   "workspace.start": workspace,
   "workspace.stop": workspace,

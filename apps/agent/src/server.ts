@@ -190,7 +190,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     workspaces: path.join(fallbackManagedRoot, "workspaces"),
     state: path.join(fallbackManagedRoot, "state")
   };
-  let managed!: ManagedWorkspaces;
+  // The gateway lease resolver closes over the managed instance, so initialization is intentionally
+  // split into declaration and assignment.
+  let managed!: ManagedWorkspaces; // eslint-disable-line prefer-const
   const previewGateway = options.previewGateway ?? options.previewGatewayFactory?.(async (leaseId) => await managed.resolvePreviewLease(leaseId));
   managed = options.managedWorkspaces ?? new ManagedWorkspaces(managedRoots, undefined, undefined, undefined, undefined,
     options.previewBaseRegistry, options.previewProbe, previewGateway);
@@ -558,6 +560,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           catch { /* health remains degraded and recovery stays disabled */ }
         }
       }
+      if (managed.isHealthy && journal.isHealthy) await managed.reconcilePreviewRoutes().catch(() => undefined);
       if (managed.isHealthy && journal.isHealthy) await executor.initialize();
       await prepareSocketPath(socketPath, now, createId);
       const bindingPath = options.privateSocketPath ?? path.join(path.dirname(socketPath), `.devspace-agent-${createId()}.sock`);

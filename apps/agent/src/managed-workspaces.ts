@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   configurationRevisionDataSchema,
   configurationRuntimePlanDataSchema,
+  configurationKeySchema,
   createManagedStoreDataSchema,
   createWorkspaceDataSchema,
   gitInspectionDataSchema,
@@ -64,6 +65,8 @@ const storeOwnershipSchema = z.strictObject({
 type StoreOwnership = z.infer<typeof storeOwnershipSchema>;
 const workspaceOwnershipSchema = z.strictObject({
   version: z.literal(1), projectId: uuidV7Schema, workspaceId: uuidV7Schema,
+  projectSlug: configurationKeySchema,
+  workspaceSlug: configurationKeySchema,
   kind: z.enum(["primary", "isolated"]), worktreePath: absolutePathSchema, identity: fileIdentitySchema,
   parentPath: absolutePathSchema, parentIdentity: fileIdentitySchema,
   store: z.strictObject({ repositoryPath: absolutePathSchema, identity: fileIdentitySchema }),
@@ -190,11 +193,21 @@ export class ManagedWorkspaces {
     const engine = new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
     this.runtime = runtime ?? new WorkspaceRuntimeManager(roots.state, engine, readRuntimePolicy(), writer);
     this.preview = previewRuntime ?? new PreviewRuntimeManager(roots.state, engine, this.runtime, previewBaseRegistry, writer, previewProbe,
-      uuidv7, { now: () => Date.now() }, undefined, previewGateway);
+      uuidv7, { now: () => Date.now() }, undefined, previewGateway,
+      async (projectId, workspaceId) => {
+        try {
+          const ownership = await this.loadWorkspaceOwnership(projectId, workspaceId);
+          return { projectSlug: ownership.projectSlug, workspaceSlug: ownership.workspaceSlug };
+        } catch { return null; }
+      });
   }
 
   async resolvePreviewLease(leaseId: string): Promise<{ readonly leaseId: string; readonly hostIp: "127.0.0.1"; readonly hostPort: number } | null> {
     return await this.preview.resolvePreviewLease(leaseId);
+  }
+
+  async reconcilePreviewRoutes(): Promise<void> {
+    await this.preview.reconcileRoutes();
   }
 
   get isHealthy(): boolean { return this.corruption === null && (this.executionFence?.isHealthy ?? true); }
@@ -750,6 +763,7 @@ export class ManagedWorkspaces {
     if (await lstatIdentity(this.workspaceOwnershipPath(data.workspaceId)) !== null) {
       const owned = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
       if (owned.kind !== data.kind || JSON.stringify(owned.revision) !== JSON.stringify(data.revision)
+        || owned.projectSlug !== data.projectSlug || owned.workspaceSlug !== data.workspaceSlug
         || owned.branchName !== data.branchName || JSON.stringify(owned.baseRef) !== JSON.stringify(data.baseRef)) throw workspaceConflict(data.workspaceId, "stopped");
       return;
     }
@@ -833,7 +847,8 @@ export class ManagedWorkspaces {
     const worktreeNow = await lstatIdentity(worktreePath);
     if (worktreeNow === null || creation.worktreeIdentity === null || !identitiesEqual(worktreeNow.identity, creation.worktreeIdentity)) throw workspaceConflict(data.workspaceId);
     const ownership = workspaceOwnershipSchema.parse({
-      version: 1, projectId: data.projectId, workspaceId: data.workspaceId, kind: data.kind,
+      version: 1, projectId: data.projectId, workspaceId: data.workspaceId,
+      projectSlug: data.projectSlug, workspaceSlug: data.workspaceSlug, kind: data.kind,
       worktreePath, identity: worktreeNow.identity, parentPath, parentIdentity: creation.parentIdentity,
       store: { repositoryPath: store.repositoryPath, identity: store.identity }, revision: data.revision,
       branchName: data.branchName, baseRef: data.baseRef, creationCommit: intendedCommit

@@ -1,5 +1,6 @@
 import type { PreviewInspectionData } from "@devspace/contracts";
 import { describe, expect, test } from "vitest";
+import { AgentResponseError } from "./agent-client.js";
 import type { PreviewView, ProjectDatabase } from "./database.js";
 import { reconcileWorkspacePreviews } from "./preview-orchestration.js";
 
@@ -89,5 +90,16 @@ describe("Web preview orchestration", () => {
     await reconcileWorkspacePreviews(projectId, "actor", "running", { database: fixture.database, agent: agent as never, observationTimeoutMs: 20 });
     expect(activated).toBe(false);
     expect(fixture.observations.at(-1)).toMatchObject({ observedState: "failed", routePresent: false });
+  });
+
+  test("does not claim a route is gone when Agent deactivation fails", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.reject(new AgentResponseError("GATEWAY_UPDATE_FAILED", "route removal failed")),
+      inspectPreview: () => Promise.resolve(inspection()), snapshot: () => Promise.resolve({ operationObservations: [] })
+    };
+    await reconcileWorkspacePreviews(projectId, "actor", "stopped", { database: fixture.database, agent: agent as never, observationTimeoutMs: 20 });
+    expect(fixture.observations.at(-1)).toMatchObject({ observedState: "failed", routePresent: true });
   });
 });

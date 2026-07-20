@@ -44,7 +44,7 @@ async function harness(writer: AtomicJsonWriter = durableJsonWriter, wrap?: (bas
   const options = parseProjectOptionsV1({ schemaVersion: 1, developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
   const hash = hashProjectOptionsV1(options);
   const workspace = createWorkspaceDataSchema.parse({
-    projectId, workspaceId, kind: "primary", revision: { revisionId, revisionHash: hash },
+    projectId, workspaceId, projectSlug: "project", workspaceSlug: "primary", kind: "primary", revision: { revisionId, revisionHash: hash },
     branchName: "main", baseRef: { kind: "branch", branchName: "main" }
   });
   const register = async () => await managed.registerRevision({ projectId, revisionId, configuration: {

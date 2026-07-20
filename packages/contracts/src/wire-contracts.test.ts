@@ -116,6 +116,8 @@ describe("request strictness and accepted configuration identity", () => {
     const valid = {
       projectId: id,
       workspaceId: id2,
+      projectSlug: "project",
+      workspaceSlug: "workspace",
       kind: "isolated",
       revision: { revisionId: id, revisionHash: hash },
       branchName: "feature/contracts",

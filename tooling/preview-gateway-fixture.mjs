@@ -178,7 +178,7 @@ export async function createPreviewGatewayFixture(options = {}) {
     request.pipe(upstream);
   });
 
-  let fixture;
+  const fixture = {};
   const adminServer = options.adminSocketPath === undefined ? null : http.createServer(async (request, response) => {
     try {
       if (request.url !== caddyRoutesPath || !["GET", "PUT"].includes(request.method ?? "")) { response.writeHead(404).end(); return; }
@@ -253,7 +253,7 @@ export async function createPreviewGatewayFixture(options = {}) {
   if (adminServer !== null) await listenUnix(adminServer, options.adminSocketPath);
   if (probeServer !== null) await listenUnix(probeServer, options.probeSocketPath);
 
-  fixture = {
+  Object.assign(fixture, {
     address: () => ({ host: address.address, port: address.port }),
     registerLease(leaseInput) {
       const candidate = object(leaseInput, "lease");
@@ -291,7 +291,6 @@ export async function createPreviewGatewayFixture(options = {}) {
       const previous = [...routes.values()];
       routes.clear();
       for (const route of desired) routes.set(route.hostname, route);
-      const previousKeys = new Set(previous.map(identityKey));
       const desiredKeys = new Set(desired.map(identityKey));
       leases.clear();
       for (const route of desired) leases.set(route.leaseId, { leaseId: route.leaseId, hostIp: LOOPBACK_HOST, hostPort: route.hostPort });
@@ -324,7 +323,7 @@ export async function createPreviewGatewayFixture(options = {}) {
           response.once("end", () => { clearTimeout(timer); const result = { kind: "response", statusCode: response.statusCode ?? 0 }; Object.assign(event, { result }); finish(result); });
         });
         const timer = setTimeout(() => { request.destroy(); finish({ kind: "timeout" }); }, input.deadlineMs);
-        request.once("error", (error) => {
+        request.once("error", (_error) => {
           clearTimeout(timer);
           if (input.signal?.aborted) finish({ kind: "timeout" });
           else { const result = { kind: "infrastructure", message: "The loopback preview target is unavailable." }; Object.assign(event, { result }); finish(result); }
@@ -343,6 +342,6 @@ export async function createPreviewGatewayFixture(options = {}) {
         await unlink(socketPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
       }
     }
-  };
+  });
   return fixture;
 }

@@ -86,7 +86,7 @@ async function configurePreviewWorkspace(databaseInput: ReturnType<typeof openPr
   const workspaceOperation = databaseInput.getOrCreateOperation({ projectId: projectIdInput, actor: "e2e@example.invalid",
     operationName: "workspace.create", resourceType: "workspace", resourceId: setup.workspaceId });
   await waitForOperation(databaseInput, agent, workspaceOperation, async () => await agent.createWorkspace(workspaceOperation.operationId, {
-    projectId: projectIdInput, workspaceId: setup.workspaceId, kind: "primary",
+    projectId: projectIdInput, workspaceId: setup.workspaceId, projectSlug: setup.project.slug, workspaceSlug: setup.workspaceSlug, kind: "primary",
     revision: { revisionId: setup.revision.id, revisionHash: configurationHash }, branchName: "main", baseRef: { kind: "branch", branchName: "main" }
   }));
   const [git, workspace] = await Promise.all([agent.inspectGit(projectIdInput, setup.workspaceId), agent.inspectWorkspace(projectIdInput, setup.workspaceId)]);

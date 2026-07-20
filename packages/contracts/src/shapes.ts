@@ -72,6 +72,9 @@ export const workspaceIdentityDataSchema = z.strictObject({
 export const createWorkspaceDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
+  /** Web-owned canonical identities retained by Agent private workspace ownership. */
+  projectSlug: configurationKeySchema,
+  workspaceSlug: configurationKeySchema,
   kind: z.enum(["primary", "isolated"]),
   revision: revisionIdentitySchema,
   branchName: gitBranchNameSchema,

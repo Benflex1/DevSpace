@@ -335,6 +335,8 @@ RevisionIdentity = {
 CreateWorkspaceData = {
   projectId: UuidV7,
   workspaceId: UuidV7,
+  projectSlug: ConfigurationKey,
+  workspaceSlug: ConfigurationKey,
   kind: "primary" | "isolated",
   revision: RevisionIdentity,
   branchName: GitBranchName,
@@ -359,6 +361,10 @@ RemoveWorkspaceData = {
   dirtyHandling: "reject" | "discard"
 }
 ```
+
+`projectSlug` and `workspaceSlug` are Web-owned canonical identities. The Agent retains them in
+its private workspace ownership record and uses them to validate later preview hostnames; they
+are never browser input.
 
 `branchName` is the validated branch shorthand to create or attach. `baseRef` is either one
 validated branch name or one exact Git object ID from which a new worktree is based. The Agent
