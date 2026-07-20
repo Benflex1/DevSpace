@@ -4,7 +4,7 @@ services:
     user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
     network_mode: host
     restart: unless-stopped
-    command: ["run", "--config", "/etc/caddy/caddy.json", "--adapter", "json"]
+    command: ["run", "--config", "/etc/caddy/caddy.json"]
     volumes:
       - type: bind
         source: ./caddy.json

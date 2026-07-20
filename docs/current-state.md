@@ -115,6 +115,11 @@ Milestone 1 — in progress.
   project/workspace/preview/revision/generation/lease identity, and forwards HTTP/WebSocket traffic
   only to the resolved loopback lease. Foreign, stale, missing-runtime, and stale-generation routes
   are not adopted and are removed during reconciliation.
+- The preview gateway deployment runs the pinned Caddy image with the checked-in native JSON
+  configuration, exposes only its private Admin Unix socket, and replaces the complete managed
+  route array with Caddy Admin PATCH while retaining the terminal fallback. A Docker-backed real
+  Caddy smoke command covers startup, socket availability, GET, PATCH replacement, and fallback
+  restoration in CI.
 - Health probing is namespace-safe. When Agent and gateway share a host namespace, the gateway-host
   probe uses the host-local implementation. When Agent is containerized, `DEVSPACE_PREVIEW_PROBE_SOCKET`
   is required alongside the private Caddy socket and approved-base registry; the Agent sends only an

@@ -186,7 +186,7 @@ export async function createPreviewGatewayFixture(options = {}) {
   const fixture = {};
   const adminServer = options.adminSocketPath === undefined ? null : http.createServer(async (request, response) => {
     try {
-      if (request.url !== caddyRoutesPath || !["GET", "PUT"].includes(request.method ?? "")) { response.writeHead(404).end(); return; }
+      if (request.url !== caddyRoutesPath || !["GET", "PATCH"].includes(request.method ?? "")) { response.writeHead(404).end(); return; }
       if (request.method === "GET") {
         const encoded = JSON.stringify([...routes.values()].map(caddyDocument));
         response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) }).end(encoded);

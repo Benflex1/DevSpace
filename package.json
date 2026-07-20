@@ -24,7 +24,8 @@
     "db:check": "pnpm --filter @devspace/database run db:check",
     "db:migrate:test": "pnpm --filter @devspace/database run db:migrate:test",
     "workspace:check": "node tooling/check-workspace-graph.mjs",
-    "preview-gateway:check": "node tooling/check-preview-gateway-deployment.mjs"
+    "preview-gateway:check": "node tooling/check-preview-gateway-deployment.mjs",
+    "preview-gateway:caddy-smoke": "node tooling/preview-gateway-caddy-smoke.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

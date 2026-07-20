@@ -46,9 +46,9 @@ class MemoryTransport implements CaddyAdminTransport {
   failReads = false;
   failNextReplace = false;
 
-  request(method: "GET" | "PUT", _path: string, body?: readonly unknown[]) {
+  request(method: "GET" | "PATCH", _path: string, body?: readonly unknown[]) {
     if (this.failReads && method === "GET") return Promise.reject(new Error("http://127.0.0.1:2019 unavailable"));
-    if (method === "PUT") {
+    if (method === "PATCH") {
       if (this.failNextReplace) { this.failNextReplace = false; return Promise.reject(new Error("injected-replace-failure")); }
       this.documents = body ?? []; this.replaceCount += 1; return Promise.resolve({ statusCode: 204, body: null });
     }
@@ -467,12 +467,14 @@ describe("typed private Caddy gateway adapter", () => {
       fetch: (url, init) => {
         const printableUrl = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
         calls.push({ url: printableUrl, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
-        return Promise.resolve(init?.method === "PUT" ? new Response(null, { status: 204 }) : Response.json([document]));
+        return Promise.resolve(init?.method === "PATCH" ? new Response(null, { status: 204 }) : Response.json([document]));
       }
     }, policy);
     expect((await transport.request("GET", "/config/apps/http/servers/devspace-preview/routes")).statusCode).toBe(200);
-    await transport.request("PUT", "/config/apps/http/servers/devspace-preview/routes", [document]);
+    await transport.replaceRoutes([route()]);
     expect(calls).toHaveLength(2);
+    expect(calls[1]?.method).toBe("PATCH");
+    expect(calls[1]?.method).not.toBe("PUT");
     const routeDocument = JSON.parse(calls[1]!.body!) as { handle: Array<{ upstreams: unknown }> }[];
     expect(routeDocument[0]?.handle[0]?.upstreams).toEqual([{ dial: "127.0.0.1:43123" }]);
   });

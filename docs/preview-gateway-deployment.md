@@ -42,6 +42,15 @@ The repository validation does not need Docker or a Caddy binary:
 pnpm preview-gateway:check
 ```
 
+The pinned real-Caddy Admin API path can be smoke-tested separately when
+Docker is available. The command uses the effective gateway UID/GID model,
+the checked-in native JSON configuration, and a temporary Unix-socket runtime
+directory; it publishes no ports:
+
+```bash
+pnpm preview-gateway:caddy-smoke
+```
+
 ## Add the mount to code-server
 
 Add the same host directory to the existing code-server deployment, using the

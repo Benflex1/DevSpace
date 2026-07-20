@@ -172,7 +172,7 @@ test("private admin transport models the exact Caddy route document", async () =
   const id = [expected.projectId, expected.workspaceId, expected.previewId, expected.revisionId, expected.approvedBaseId, expected.leaseId]
     .map(encode).join(".");
   try {
-    const response = await unixRequest(path.join(root, "admin.sock"), "PUT", "/config/apps/http/servers/devspace-preview/routes", [{
+    const response = await unixRequest(path.join(root, "admin.sock"), "PATCH", "/config/apps/http/servers/devspace-preview/routes", [{
       "@id": `devspace-preview-v1.${id}.g1.ws1`, match: [{ host: [expected.hostname] }],
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `${expected.hostIp}:${expected.hostPort}` }], flush_interval: -1 }], terminal: true
     }]);

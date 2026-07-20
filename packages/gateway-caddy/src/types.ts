@@ -81,7 +81,7 @@ export interface CaddyAdminResponse {
 
 /** Private transport only; callers never provide raw Caddy documents. */
 export interface CaddyAdminTransport {
-  request?(method: "GET" | "PUT", path: string, body?: readonly unknown[], timeoutMs?: number): Promise<CaddyAdminResponse>;
+  request?(method: "GET" | "PATCH", path: string, body?: readonly unknown[], timeoutMs?: number): Promise<CaddyAdminResponse>;
   listRoutes?(): Promise<readonly GatewayObservedRoute[]>;
   replaceRoutes?(routes: readonly PreviewGatewayRoute[]): Promise<void>;
 }

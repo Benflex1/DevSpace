@@ -49,7 +49,7 @@ export class PrivateCaddyAdminTransport implements CaddyAdminTransport {
   constructor(private readonly options: { readonly socketPath: string; readonly timeoutMs?: number }) {
     if (options.socketPath.trim() === "") throw new GatewayAdapterError("validation", "A private Caddy admin Unix socket is required.");
   }
-  async request(method: "GET" | "PUT", path: string, body?: readonly unknown[], timeoutMs = this.options.timeoutMs ?? 5_000): Promise<CaddyAdminResponse> {
+  async request(method: "GET" | "PATCH", path: string, body?: readonly unknown[], timeoutMs = this.options.timeoutMs ?? 5_000): Promise<CaddyAdminResponse> {
     const encoded = body === undefined ? undefined : JSON.stringify(body);
     return await new Promise((resolve, reject) => {
       const request = http.request({ socketPath: this.options.socketPath, path, method, headers: {
@@ -105,7 +105,7 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
     if (this.transport.request === undefined) throw new GatewayAdapterError("admin", "Caddy admin is unavailable.", "ADMIN_UNAVAILABLE", true);
     let response: CaddyAdminResponse;
     try {
-      response = await this.transport.request("PUT", routesPath,
+      response = await this.transport.request("PATCH", routesPath,
         toCaddyRouteSet(routes, this.options.policy ?? this.options.isApprovedHostname), this.options.timeoutMs);
     } catch (error) { if (error instanceof GatewayAdapterError) throw error; throw new GatewayAdapterError("admin", "Caddy admin is unavailable.", "ADMIN_UNAVAILABLE", true); }
     ensureStatus(response);
@@ -464,7 +464,7 @@ export class CaddyAdminHttpTransport implements CaddyAdminTransport {
     this.fetcher = options.fetch ?? fetch;
   }
   private readonly fetcher: typeof fetch;
-  async request(method: "GET" | "PUT", path: string, body?: readonly unknown[]): Promise<CaddyAdminResponse> {
+  async request(method: "GET" | "PATCH", path: string, body?: readonly unknown[]): Promise<CaddyAdminResponse> {
     const response = await this.fetcher(new URL(path, this.adminUrl), {
       method,
       ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
@@ -479,7 +479,7 @@ export class CaddyAdminHttpTransport implements CaddyAdminTransport {
     return fromCaddyRoutes(response.body, this.policy);
   }
   async replaceRoutes(routes: readonly PreviewGatewayRoute[]): Promise<void> {
-    const response = await this.request("PUT", routesPath, toCaddyRouteSet(routes, this.policy));
+    const response = await this.request("PATCH", routesPath, toCaddyRouteSet(routes, this.policy));
     if (![200, 204].includes(response.statusCode)) throw new GatewayAdapterError("admin", "Caddy admin rejected the route set.", "ADMIN_REJECTED");
   }
   private get optionsForPolicy(): (hostname: string) => boolean {
