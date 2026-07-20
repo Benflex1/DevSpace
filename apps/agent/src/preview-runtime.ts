@@ -12,7 +12,7 @@ import {
 } from "@devspace/security";
 import type { ProjectOptionsV1 } from "@devspace/project-options";
 import {
-  DOCKER_LOOPBACK_HOST, DockerEngineClient, DockerEngineError,
+  DOCKER_LOOPBACK_HOST, DockerEngineClient, DockerEngineError, DockerEngineTransportError,
   type DockerContainerInspection, type DockerListedContainer
 } from "./docker-runtime.js";
 import {
@@ -226,7 +226,12 @@ export class PreviewLeaseAllocator {
   private async inspectContainers(): Promise<DockerContainerInspection[]> {
     let listed: readonly DockerListedContainer[];
     try { listed = await this.engine.listContainers(); }
-    catch { throw new PreviewRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable."); }
+    catch (error) {
+      if (error instanceof DockerEngineError || error instanceof DockerEngineTransportError) {
+        throw new PreviewRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable.");
+      }
+      throw error;
+    }
     const inspected: DockerContainerInspection[] = [];
     for (const entry of listed) {
       try { inspected.push(await this.engine.inspectContainer(entry.Id)); }

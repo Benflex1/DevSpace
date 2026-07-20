@@ -991,7 +991,7 @@ export class ManagedWorkspaces {
         observedState: "lost", action
       }));
     }
-    return new AgentExecutionError(executionFailure("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable.", { component: "docker" }));
+    return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The workspace runtime operation failed safely.", { incidentId: uuidv7() }));
   }
 
   async startWorkspace(projectId: string, workspaceId: string, operationId: string): Promise<void> {

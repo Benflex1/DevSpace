@@ -5,8 +5,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
 import { createWorkspaceDataSchema } from "@devspace/contracts";
-import { canonicalizeProjectOptionsV1, hashProjectOptionsV1, parseProjectOptionsV1 } from "@devspace/project-options";
-import { ManagedWorkspaces, runGit, type GitRunner } from "./managed-workspaces.js";
+import {
+  canonicalizeProjectOptionsV1, canonicalizeRuntimePlanV1, compileRuntimePlanV1, hashProjectOptionsV1, hashRuntimePlanV1,
+  parseProjectOptionsV1
+} from "@devspace/project-options";
+import { AgentExecutionError, ManagedWorkspaces, runGit, type GitRunner } from "./managed-workspaces.js";
+import { DockerEngineClient } from "./docker-runtime.js";
+import { PreviewRuntimeManager } from "./preview-runtime.js";
+import { WorkspaceRuntimeManager } from "./workspace-runtime.js";
 import { durableJsonWriter, type AtomicJsonWriter } from "./private-state.js";
 
 const exec = promisify(execFile);
@@ -18,6 +24,21 @@ const workspaceOperation = "018f0f00-0000-7000-8000-000000000011";
 const sourceUrl = "https://example.com/repository.git";
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+
+class UnexpectedRuntimeStart extends WorkspaceRuntimeManager {
+  override start(..._args: Parameters<WorkspaceRuntimeManager["start"]>): Promise<never> {
+    return Promise.reject(new Error("unexpected-runtime-start"));
+  }
+}
+
+class NoopPreviewRuntime extends PreviewRuntimeManager {
+  override reserveWorkspaceLeases(..._args: Parameters<PreviewRuntimeManager["reserveWorkspaceLeases"]>): Promise<[]> {
+    return Promise.resolve([]);
+  }
+  override releaseOperationLeases(..._args: Parameters<PreviewRuntimeManager["releaseOperationLeases"]>): Promise<void> {
+    return Promise.resolve();
+  }
+}
 
 async function commit(source: string, content: string): Promise<string> {
   await writeFile(path.join(source, "README.md"), content, "utf8");
@@ -179,6 +200,38 @@ test("new workspaces resolve the latest fetched commit while owned dirty retries
   await h.managed.createWorkspace(h.workspace, "018f0f00-0000-7000-8000-000000000022");
   await expect(h.managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ headCommit: secondCommit, dirty: true });
   expect(await readFile(path.join(h.managed.worktreePath(workspaceId), "README.md"), "utf8")).toBe("user change\n");
+});
+
+test("reports an unexpected runtime-start exception as an Agent internal error", async () => {
+  const h = await harness(); await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const options = parseProjectOptionsV1({ schemaVersion: 1,
+    developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
+  const plan = compileRuntimePlanV1(options);
+  const revisionHash = hashProjectOptionsV1(options);
+  await h.managed.registerRuntimePlan({ projectId, revisionId, revisionHash,
+    runtimePlan: { format: plan.format, hash: hashRuntimePlanV1(plan), canonicalJson: canonicalizeRuntimePlanV1(plan) } });
+  const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
+  const policy = { cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
+    stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
+  const runtime = new UnexpectedRuntimeStart(h.roots.state, engine, policy);
+  const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
+  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, runtime, preview);
+  await managed.initialize();
+
+  let failure: AgentExecutionError | null = null;
+  try {
+    await managed.startWorkspace(projectId, workspaceId, "018f0f00-0000-7000-8000-000000000012");
+  } catch (error) {
+    if (error instanceof AgentExecutionError) failure = error;
+    else throw error;
+  }
+  expect(failure).not.toBeNull();
+  if (failure === null) throw new Error("runtime failure was not reported");
+  expect(failure.failure.code).toBe("AGENT_INTERNAL_ERROR");
+  const details = failure.failure.details;
+  if (!("incidentId" in details)) throw new Error("Agent internal error did not include an incident ID");
+  expect(typeof details.incidentId).toBe("string");
 });
 
 test.each(["directory", "worktree", "symlink"])("rejects an unowned existing workspace %s", async (kind) => {

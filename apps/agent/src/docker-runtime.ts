@@ -58,6 +58,13 @@ export class DockerEngineError extends Error {
   }
 }
 
+export class DockerEngineTransportError extends Error {
+  constructor(readonly cause: unknown) {
+    super("Docker Engine transport request failed.");
+    this.name = "DockerEngineTransportError";
+  }
+}
+
 export interface DockerContainerInspection {
   Id: string;
   Name: string;
@@ -168,7 +175,7 @@ const dockerExecInspectionSchema = z.object({
   ID: z.string().min(1), Running: z.boolean(), ExitCode: z.number().int().nullable(),
   ContainerID: z.string().min(1)
 });
-const dockerListedContainerSchema = z.strictObject({
+const dockerListedContainerSchema = z.object({
   Id: z.string().min(1), Names: z.array(z.string()), Labels: z.record(z.string(), z.string()),
   State: z.string(), Status: z.string()
 });
@@ -178,31 +185,36 @@ export class DockerEngineClient {
 
   private async request(method: string, requestPath: string, body?: unknown, accepted = [200, 201, 204]): Promise<Buffer> {
     const encoded = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-    return await new Promise((resolve, reject) => {
-      const request = http.request({
-        socketPath: this.socketPath, method, path: requestPath,
-        headers: encoded === undefined ? {} : {
-          "content-type": "application/json", "content-length": String(encoded.length)
-        }
-      }, (response) => {
-        const chunks: Buffer[] = [];
-        let bytes = 0;
-        response.on("data", (chunk: Buffer) => {
-          bytes += chunk.length;
-          if (bytes > MAX_JSON_BYTES) request.destroy(new Error("docker-engine-response-too-large"));
-          else chunks.push(Buffer.from(chunk));
+    try {
+      return await new Promise((resolve, reject) => {
+        const request = http.request({
+          socketPath: this.socketPath, method, path: requestPath,
+          headers: encoded === undefined ? {} : {
+            "content-type": "application/json", "content-length": String(encoded.length)
+          }
+        }, (response) => {
+          const chunks: Buffer[] = [];
+          let bytes = 0;
+          response.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > MAX_JSON_BYTES) request.destroy(new Error("docker-engine-response-too-large"));
+            else chunks.push(Buffer.from(chunk));
+          });
+          response.on("end", () => {
+            const result = Buffer.concat(chunks);
+            if (accepted.includes(response.statusCode ?? 0)) resolve(result);
+            else reject(new DockerEngineError(response.statusCode ?? 0, result.toString("utf8").slice(0, 512)));
+          });
         });
-        response.on("end", () => {
-          const result = Buffer.concat(chunks);
-          if (accepted.includes(response.statusCode ?? 0)) resolve(result);
-          else reject(new DockerEngineError(response.statusCode ?? 0, result.toString("utf8").slice(0, 512)));
-        });
+        request.setTimeout(REQUEST_TIMEOUT_MS, () => request.destroy(new Error("docker-engine-timeout")));
+        request.on("error", reject);
+        if (encoded !== undefined) request.write(encoded);
+        request.end();
       });
-      request.setTimeout(REQUEST_TIMEOUT_MS, () => request.destroy(new Error("docker-engine-timeout")));
-      request.on("error", reject);
-      if (encoded !== undefined) request.write(encoded);
-      request.end();
-    });
+    } catch (error) {
+      if (error instanceof DockerEngineError) throw error;
+      throw new DockerEngineTransportError(error);
+    }
   }
 
   private async json<T>(method: string, requestPath: string, body?: unknown, accepted?: number[]): Promise<T> {
