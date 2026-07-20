@@ -176,6 +176,15 @@ const cleanup: string[] = [];
 afterEach(async () => { await Promise.all(cleanup.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))); });
 
 describe("Agent preview runtime policy", () => {
+  test("resolves only the exact Agent-owned loopback lease shape", async () => {
+    const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
+    const binding = fixtureValue.bindings[0]!;
+    await expect(fixtureValue.manager.resolvePreviewLease(binding.leaseId)).resolves.toEqual({
+      leaseId: binding.leaseId, hostIp: "127.0.0.1", hostPort: binding.hostPort
+    });
+    await expect(fixtureValue.manager.resolvePreviewLease("01900000-0000-7000-8000-000000000099")).resolves.toBeNull();
+  });
+
   test("keeps a running workspace with no application listener in the health-waiting state", async () => {
     const probe = new Probe([{ kind: "response", statusCode: 503 }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);

@@ -13,6 +13,9 @@ export const expectedPackages = new Map([
     "@devspace/security",
     "@devspace/gateway-caddy"
   ] }],
+  ["apps/preview-gateway-host", { name: "@devspace/preview-gateway-host", kind: "application", dependencies: [
+    "@devspace/gateway-caddy"
+  ] }],
   ["packages/contracts", { name: "@devspace/contracts", kind: "library", dependencies: [
     "@devspace/domain"
   ] }],

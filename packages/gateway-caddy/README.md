@@ -60,3 +60,9 @@ gateway/rootless-Docker host namespace. Invalid, missing, or non-loopback leases
 fail closed with a bounded infrastructure result. The Caddy admin transport and
 probe transport are separate private interfaces; neither is public and neither
 exposes the Docker socket.
+
+`PrivatePreviewLeaseResolverTransport` is the host-side resolver client. It
+sends only `{ leaseId }` to the Agent-owned private resolver socket and accepts
+only the exact `{ leaseId, hostIp: "127.0.0.1", hostPort }` response. Socket,
+timeout, status, schema, lease-identity, and loopback failures all resolve to a
+fail-closed unavailable lease.

@@ -22,12 +22,16 @@ const configuredSocketPath = process.env.DEVSPACE_AGENT_SOCKET_PATH;
 const localRoot = process.env.DEVSPACE_MANAGED_ROOT;
 const caddyAdminSocket = process.env.DEVSPACE_CADDY_ADMIN_SOCKET;
 const previewProbeSocket = process.env.DEVSPACE_PREVIEW_PROBE_SOCKET;
+const previewLeaseResolverSocket = process.env.DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET;
 const gatewayPolicy = readGatewayPolicy(process.env);
 if (previewProbeSocket !== undefined && previewProbeSocket.trim() === "") {
   throw new Error("DEVSPACE_PREVIEW_PROBE_SOCKET must be a non-empty private Unix-socket path.");
 }
 if (previewProbeSocket !== undefined && (caddyAdminSocket === undefined || gatewayPolicy === null)) {
   throw new Error("DEVSPACE_PREVIEW_PROBE_SOCKET requires DEVSPACE_CADDY_ADMIN_SOCKET and DEVSPACE_PREVIEW_BASES.");
+}
+if (previewLeaseResolverSocket !== undefined && previewLeaseResolverSocket.trim() === "") {
+  throw new Error("DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET must be a non-empty private Unix-socket path.");
 }
 const server = createAgentServer({
   ...(configuredSocketPath === undefined ? {} : { socketPath: configuredSocketPath }),
@@ -38,6 +42,7 @@ const server = createAgentServer({
     operationJournalPath: `${localRoot}/state/operations`
   }),
   previewBaseRegistry: readPreviewBaseRegistry(),
+  ...(previewLeaseResolverSocket === undefined ? {} : { previewLeaseResolverSocketPath: previewLeaseResolverSocket }),
   ...(caddyAdminSocket !== undefined && gatewayPolicy !== null ? {
     previewGatewayFactory: (resolveLease: (leaseId: string) => Promise<{ readonly leaseId: string; readonly hostIp: "127.0.0.1"; readonly hostPort: number } | null>) =>
       new PreviewGatewayAdapter({

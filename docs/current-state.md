@@ -121,6 +121,11 @@ Milestone 1 — in progress.
   opaque lease ID and bounded health policy over that private Unix socket and never falls back to
   Agent-local loopback when the socket is configured but unavailable. Probe timeouts and retries are
   bounded.
+- Checkpoint 1 of the private deployment bridge adds the optional Agent-owned
+  `DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET` and the `@devspace/preview-gateway-host` runtime. The
+  resolver accepts only a closed lease-ID request and returns only the exact loopback lease shape;
+  the host runtime composes that transport with `GatewayHostProbeServer` over temporary/private Unix
+  sockets without Docker access or a public listener. The dedicated Caddy deployment remains deferred.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means

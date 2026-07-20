@@ -9,6 +9,7 @@
     { "path": "./packages/project-options/tsconfig.build.json" },
     { "path": "./packages/database/tsconfig.build.json" },
     { "path": "./apps/agent/tsconfig.build.json" },
+    { "path": "./apps/preview-gateway-host/tsconfig.build.json" },
     { "path": "./apps/web/tsconfig.build.json" }
   ]
 }

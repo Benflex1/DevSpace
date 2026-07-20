@@ -68,6 +68,16 @@ test("clean startup creates a socket and normal shutdown removes only its own so
   await expect(lstat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+test("optionally starts and stops the private preview lease resolver with the Agent", async () => {
+  const socketPath = await tempSocket();
+  const resolverPath = path.join(path.dirname(socketPath), "lease-resolver.sock");
+  const { server } = agent(socketPath, undefined, { previewLeaseResolverSocketPath: resolverPath });
+  await server.start();
+  expect((await lstat(resolverPath)).isSocket()).toBe(true);
+  await server.stop();
+  await expect(lstat(resolverPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test("a proven stale socket is removed before startup", async () => {
   const socketPath = await tempSocket();
   const helper = spawn(process.execPath, [path.resolve("apps/agent/test/fixtures/socket-listener.mjs"), socketPath], { stdio: ["ignore", "pipe", "inherit"] });

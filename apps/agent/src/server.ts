@@ -23,6 +23,7 @@ import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-ru
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import type { PreviewGatewayProbe } from "./preview-runtime.js";
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
+import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -46,6 +47,7 @@ export interface AgentServerOptions {
   readonly previewProbe?: PreviewGatewayProbe;
   readonly previewGateway?: PreviewGatewayAdapterContract;
   readonly previewGatewayFactory?: (resolveLease: OpaqueLeaseResolver) => PreviewGatewayAdapterContract;
+  readonly previewLeaseResolverSocketPath?: string;
   readonly operationJournal?: OperationJournal;
   readonly eventRetention?: number;
   readonly now?: () => Date;
@@ -196,6 +198,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const previewGateway = options.previewGateway ?? options.previewGatewayFactory?.(async (leaseId) => await managed.resolvePreviewLease(leaseId));
   managed = options.managedWorkspaces ?? new ManagedWorkspaces(managedRoots, undefined, undefined, undefined, undefined,
     options.previewBaseRegistry, options.previewProbe, previewGateway);
+  const previewLeaseResolver = options.previewLeaseResolverSocketPath === undefined ? null : new PreviewLeaseResolverServer({
+    socketPath: options.previewLeaseResolverSocketPath,
+    resolveLease: async (leaseId) => await managed.resolvePreviewLease(leaseId)
+  });
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
@@ -209,6 +215,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   let started = false;
   let ownedSocket: SocketIdentity | undefined;
   let startupPreviewReconciliationHealthy = true;
+  let resolverStarted = false;
 
   // Node's request listener is intentionally promise-backed; all handler paths produce a response.
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -571,6 +578,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       const bindingPath = options.privateSocketPath ?? path.join(path.dirname(socketPath), `.devspace-agent-${createId()}.sock`);
       let bindingIdentity: SocketIdentity | undefined;
       try {
+        if (previewLeaseResolver !== null) {
+          await previewLeaseResolver.start();
+          resolverStarted = true;
+        }
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);
           server.listen(bindingPath, () => { server.off("error", reject); resolve(); });
@@ -589,6 +600,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         started = true;
         if (managed.isHealthy && journal.isHealthy) executor.resumeAccepted();
       } catch (error) {
+        if (resolverStarted && previewLeaseResolver !== null) {
+          await previewLeaseResolver.stop().catch(() => undefined);
+          resolverStarted = false;
+        }
         if (bindingIdentity !== undefined) {
           // Remove the bound pathname before Node closes its UDS handle. This ensures the
           // runtime's own close cleanup sees an absent pathname, while our deletion remains
@@ -606,6 +621,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       execution.shutdownTransports();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await executor.drain();
+      if (resolverStarted && previewLeaseResolver !== null) {
+        await previewLeaseResolver.stop();
+        resolverStarted = false;
+      }
       try {
         const current = await lstat(socketPath);
         if (ownedSocket !== undefined && current.isSocket() && sameSocket(ownedSocket, socketIdentity(current))) await unlink(socketPath);
