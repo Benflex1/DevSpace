@@ -44,6 +44,27 @@ async function recordingEngineSocket(): Promise<{ socket: string; bodies: unknow
   return { socket, bodies };
 }
 
+async function listedEngineSocket(): Promise<string> {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-list-")); directories.push(directory);
+  const socket = path.join(directory, "engine.sock");
+  const server = http.createServer((request, response) => {
+    if (request.url === "/containers/json?all=1") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([{
+        Id: "container-1", Names: ["/devspace-retained"], Image: "node:24-bookworm", ImageID: "sha256:image",
+        ImageManifestDescriptor: { mediaType: "application/vnd.oci.image.manifest.v1+json", digest: "sha256:manifest", size: 123 },
+        Command: "sh -c 'while :; do sleep 2147483647; done'", Created: 1_753_000_000, Ports: [],
+        Labels: { "devspace.managed": "true" }, State: "exited", Status: "Exited (0) 1 second ago",
+        HostConfig: { NetworkMode: "devspace-network" }, Health: null, NetworkSettings: { Networks: {} }, Mounts: []
+      }]));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+  return socket;
+}
+
 describe("dedicated rootless Docker boundary", () => {
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
@@ -100,5 +121,13 @@ describe("dedicated rootless Docker boundary", () => {
       imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
       networkName: "container:other", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16
     })).rejects.toThrow("preview-host-network-is-forbidden");
+  });
+
+  test("accepts additional Docker container-list fields from newer engines", async () => {
+    const engine = new DockerEngineClient(await listedEngineSocket());
+    await expect(engine.listContainers()).resolves.toEqual([{
+      Id: "container-1", Names: ["/devspace-retained"], Labels: { "devspace.managed": "true" },
+      State: "exited", Status: "Exited (0) 1 second ago"
+    }]);
   });
 });

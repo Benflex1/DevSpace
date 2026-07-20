@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { v7 as uuidv7 } from "uuid";
+import * as z from "zod";
 import {
   createApprovedPreviewBase, createApprovedPreviewBaseRegistry
 } from "@devspace/security";
 import { compileRuntimePlanV1, hashRuntimePlanV1, parseProjectOptionsV1 } from "@devspace/project-options";
 import {
-  DockerEngineClient, DockerEngineError, type DockerContainerInspection, type DockerListedContainer, type DockerNetworkInspection
+  DockerEngineClient, DockerEngineError, DockerEngineTransportError, type DockerContainerInspection, type DockerListedContainer,
+  type DockerNetworkInspection
 } from "./docker-runtime.js";
 import { PreviewRuntimeManager, type PreviewGatewayAdapter, type PreviewGatewayProbe, type PreviewGatewayProbeRequest,
   type PreviewGatewayProbeResult, type PreviewGatewayRoute } from "./preview-runtime.js";
@@ -55,10 +57,12 @@ class FakeEngine extends DockerEngineClient {
   readonly containers = new Map<string, DockerContainerInspection>();
   private networkNumber = 0;
   private containerNumber = 0;
+  listError: Error | null = null;
   createCalls = 0;
   constructor() { super("/fixture/rootless.sock"); }
   override assertRootlessAvailable(): Promise<void> { return Promise.resolve(); }
   override listContainers(): Promise<readonly DockerListedContainer[]> {
+    if (this.listError !== null) return Promise.reject(this.listError);
     return Promise.resolve([...this.containers.values()].map((container) => ({ Id: container.Id, Names: [container.Name],
       Labels: container.Config.Labels, State: container.State.Status, Status: container.State.Status })));
   }
@@ -266,6 +270,21 @@ describe("Agent preview runtime policy", () => {
     const thirdAssociation = { ...association, workspaceId: "018f1f34-7000-7000-8000-000000000008" };
     const third = await fixtureValue.manager.reserveWorkspaceLeases(thirdAssociation, options, "018f1f34-7000-7000-8000-000000000009");
     expect(third[0]!.hostPort).toBe(firstPort);
+  });
+
+  test("classifies a Docker transport failure during container enumeration as unavailable", async () => {
+    const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
+    fixtureValue.engine.listError = new DockerEngineTransportError(new Error("socket-closed"));
+    await expect(fixtureValue.manager.reserveWorkspaceLeases({ ...association, workspaceId: "018f1f34-7000-7000-8000-000000000006" }, options,
+      "018f1f34-7000-7000-8000-000000000007")).rejects.toMatchObject({ code: "ROOTLESS_RUNTIME_UNAVAILABLE" });
+  });
+
+  test("does not classify container enumeration validation errors as Docker outages", async () => {
+    const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
+    const internalError = new z.ZodError([]);
+    fixtureValue.engine.listError = internalError;
+    await expect(fixtureValue.manager.reserveWorkspaceLeases({ ...association, workspaceId: "018f1f34-7000-7000-8000-000000000006" }, options,
+      "018f1f34-7000-7000-8000-000000000007")).rejects.toBe(internalError);
   });
 
   test("intentional runtime stop removes route eligibility without recording unexplained runtime loss", async () => {
