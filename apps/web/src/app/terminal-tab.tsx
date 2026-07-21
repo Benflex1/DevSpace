@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
-import { isTerminalAttachableState, reconcileTerminalState, terminalSocketCloseAction, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, reconcileTerminalState, terminalSocketCloseAction, terminalStateMessage, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
 export type TerminalView = { id: string; processId: string; title: string; state: string };
 
 export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh, onTerminalStateChange }: {
@@ -36,7 +36,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
     const reconciliation = reconcileTerminalState(terminal.state, stateRef.current);
     if (!reconciliation.closeAttachment) return;
     updateState(reconciliation.state);
-    setMessage(terminal.state === "creating" ? "Terminal is still being created." : "This terminal is no longer attachable.");
+    setMessage(terminalStateMessage(terminal.state));
     closeAttachment.current?.();
   }, [terminal.id, terminal.state]);
 
@@ -216,7 +216,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
     <div ref={terminalElement} className="terminal-canvas" />
     {message !== "" && <p className="message" role={active ? "status" : undefined}>{message}</p>}
     {active && ["creating", "closing", "closed", "failed", "lost"].includes(state) && <p className="terminal-help">
-      {state === "creating" ? "This terminal is still being created." : "This terminal is no longer attachable. Create a replacement from the sidebar."}
+      {terminalStateMessage(state)}
     </p>}
   </section>;
 }

@@ -2,7 +2,7 @@ export const terminalServerStates = ["creating", "active", "disconnected", "clos
 export type TerminalServerState = (typeof terminalServerStates)[number];
 export type TerminalUiState = "connecting" | "active" | TerminalServerState;
 
-const terminalVisibleStates = new Set(["creating", "active", "disconnected"]);
+const terminalVisibleStates = new Set(["creating", "active", "disconnected", "lost"]);
 const terminalDisplayNumberPattern = /^Terminal ([1-9][0-9]*)$/u;
 
 export function isTerminalVisibleState(state: string): boolean {
@@ -36,6 +36,14 @@ export function updateTerminalCollectionState<T extends { readonly id: string; r
 
 export function isTerminalAttachableState(state: string): state is "active" | "disconnected" {
   return state === "active" || state === "disconnected";
+}
+
+export function terminalStateMessage(state: string): string {
+  if (state === "lost") {
+    return "The Agent restart lost this terminal's PTY attachment. It cannot be reattached, and processes launched here may still be running inside the retained workspace runtime.";
+  }
+  if (state === "creating") return "This terminal is still being created.";
+  return "This terminal is no longer attachable. Create a replacement from the sidebar.";
 }
 
 export function terminalUiState(serverState: string): TerminalUiState {

@@ -3,15 +3,16 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-export function RuntimeControls({ projectId, runtimeAvailable, activeAction, canStart, canStop, retryStart }: {
+export function RuntimeControls({ projectId, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction }: {
   projectId: string; runtimeAvailable: boolean;
   activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
+  action?: "start" | "stop";
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  const action = canStop ? "stop" : "start";
-  const actionable = activeAction === null && runtimeAvailable && (canStart || canStop);
+  const action = requestedAction ?? (canStop ? "stop" : "start");
+  const actionable = activeAction === null && runtimeAvailable && (action === "stop" ? canStop : canStart);
   const mutate = async () => {
     setPending(true); setMessage(action === "start" ? "Starting environment…" : "Stopping environment…");
     try {

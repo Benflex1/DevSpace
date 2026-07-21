@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, terminalStateMessage, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { isPreviewChanging, previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
@@ -228,7 +228,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
       retryStart={retryStart} />
     <div className="workbench-body">
-      <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
+      <WorkbenchSidebar projectId={projectId} terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable}
+        runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
@@ -261,9 +262,11 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview,
+function WorkbenchSidebar({ projectId, terminals, getTerminalTitle, tabs, actionsAvailable, runtimeAvailable, activeAction, canStart, canStop, retryStart, tasks, runs, previews, onOpenPreview,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
+  projectId: string;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
+  runtimeAvailable: boolean; activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
   previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
@@ -287,12 +290,18 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable,
         {terminals.map((terminal) => {
           const tab = tabs.tabs.find((candidate) => candidate.kind === "terminal" && candidate.terminalId === terminal.id);
           const attachable = actionsAvailable && isTerminalAttachableState(terminal.state);
-          return <li key={terminal.id} className={tab?.id === tabs.activeTabId ? "selected" : ""}>
+          return <li key={terminal.id} className={`${tab?.id === tabs.activeTabId ? "selected " : ""}${terminal.state === "lost" ? "lost-terminal" : ""}`}>
             <button type="button" disabled={!attachable} onClick={() => onOpenTerminal(terminal)} title={attachable ? "Open terminal tab" : "This terminal is no longer attachable"}>
               <span className={`sidebar-state ${terminal.state}`} aria-hidden="true" />
               <span><strong>{getTerminalTitle(terminal)}</strong><small>{terminal.state}</small></span>
               {tab?.id === tabs.activeTabId && <span className="sidebar-active">●</span>}
             </button>
+            {terminal.state === "lost" && <div className="lost-terminal-notice">
+              <p>{terminalStateMessage(terminal.state)}</p>
+              <p>Stop the workspace runtime to reclaim all processes in this container.</p>
+              <RuntimeControls projectId={projectId} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
+                canStart={canStart} canStop={canStop} retryStart={retryStart} action="stop" />
+            </div>}
           </li>;
         })}
       </ul>}
