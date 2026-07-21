@@ -1,5 +1,9 @@
 # M1 Slice 5 — Preview Path Implementation Plan
 
+> Historical plan note: this document records the earlier exclusive wildcard/Cloudflare deployment
+> assumption. The shared-ingress reserved-namespace design implemented after this plan supersedes
+> those deployment-specific portions; see ADR 014 and the current deployment guides.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let an authenticated developer open a configured workspace preview through a deterministic DevSpace hostname after manually starting the application inside the running workspace.

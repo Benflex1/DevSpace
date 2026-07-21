@@ -21,7 +21,7 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 
 ## Trust boundaries
 
-1. Internet to Cloudflare Access.
+1. Internet to the administrator-selected DNS/TLS/access layer.
 2. Browser to DevSpace Web/API.
 3. Browser preview origin to control-plane origin.
 4. Web/API to agent Unix socket.
@@ -29,7 +29,7 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 6. Agent to managed repository and worktree roots.
 7. Workspace container to host kernel and mounted worktree.
 8. One workspace network/filesystem to another.
-9. Gateway administration to preview data plane.
+9. Outer ingress to the shared preview connector and Caddy data plane.
 10. AI CLI to remote provider.
 
 ## Filesystem risks
@@ -161,7 +161,9 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 
 ### Controls
 
-- preview hostname patterns must fit an administrator-approved wildcard base;
+- preview hostname stems must fit an administrator-approved base and exact reserved label suffix;
+- gateway ownership requires exactly one label above the configured base and rejects ordinary or
+  deeper application subdomains;
 - agent derives exact targets from validated workspace service definitions;
 - gateway routes only to DevSpace workspace networks/loopback targets;
 - no direct public preview port;
@@ -169,7 +171,11 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - stop/loss immediately removes the route;
 - periodic reconciliation removes stale routes;
 - control plane and previews use separate origins and cookies;
-- Tunnel is the only ingress and Cloudflare Access protects the wildcard.
+- one permanent outer-ingress rule forwards only the reserved namespace and preserves `Host`;
+- the connector is byte-transparent, isolated from host networking, and mounts only the ingress
+  socket directory; private control and Docker sockets are not reachable from it;
+- the current production Web authentication layer remains Cloudflare Access, while preview ingress
+  itself is provider-neutral.
 
 ## AI-session risks
 

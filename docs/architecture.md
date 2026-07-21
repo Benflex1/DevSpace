@@ -28,7 +28,10 @@ One stack exists per workspace. It has a development container, optional support
 
 ### Preview gateway
 
-Caddy receives wildcard preview traffic and routes exact active hosts to workspace services. The agent is the only admin client.
+Caddy receives traffic for the administrator-reserved preview namespace and routes exact active
+hosts to workspace services. A provider-neutral byte-transparent connector exposes only Caddy's
+private HTTP data plane to an administrator-selected outer ingress. The agent is the only Caddy
+admin client; Coolify, Traefik, Cloudflare, and DNS APIs are outside DevSpace core runtime.
 
 ### SQLite
 
@@ -75,7 +78,12 @@ Predefined tasks use structured executable and argument arrays. Project Options 
 - development service ports are not publicly published;
 - preview targets are exposed only to the gateway through private networking or loopback bindings;
 - agent and gateway admin endpoints are never public;
-- Cloudflare Tunnel is the only public ingress.
+- the outer ingress is administrator-selected and may be Traefik, Caddy, Nginx, Cloudflare Tunnel,
+  or another compatible reverse proxy;
+- only the reserved preview suffix namespace is forwarded to the connector, with the original
+  `Host` preserved;
+- the connector can see only `/run/devspace/gateway/ingress/preview-http.sock`, never Caddy Admin,
+  probe, lease-resolver, Agent, or Docker sockets.
 
 ## Configuration ownership
 
