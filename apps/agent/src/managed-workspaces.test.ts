@@ -12,8 +12,8 @@ import {
 import { AgentExecutionError, ManagedWorkspaces, runGit, type GitRunner } from "./managed-workspaces.js";
 import { DockerEngineClient } from "./docker-runtime.js";
 import { PreviewRuntimeManager } from "./preview-runtime.js";
-import { WorkspaceRuntimeManager } from "./workspace-runtime.js";
-import { durableJsonWriter, type AtomicJsonWriter } from "./private-state.js";
+import { WorkspaceRuntimeError, WorkspaceRuntimeManager } from "./workspace-runtime.js";
+import { durableJsonWriter, identityOf, type AtomicJsonWriter } from "./private-state.js";
 
 const exec = promisify(execFile);
 const projectId = "018f0f00-0000-7000-8000-000000000001";
@@ -37,6 +37,25 @@ class NoopPreviewRuntime extends PreviewRuntimeManager {
   }
   override releaseOperationLeases(..._args: Parameters<PreviewRuntimeManager["releaseOperationLeases"]>): Promise<void> {
     return Promise.resolve();
+  }
+}
+
+class RunningRuntime extends WorkspaceRuntimeManager {
+  override inspect(..._args: Parameters<WorkspaceRuntimeManager["inspect"]>): Promise<{
+    observedState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
+    serviceState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
+    errorCode: string | null;
+    containerIdentity: string | null;
+  }> {
+    return Promise.resolve({ observedState: "running", serviceState: "running", errorCode: null, containerIdentity: "fixture" });
+  }
+}
+
+class RejectingStopRuntime extends WorkspaceRuntimeManager {
+  stopCalled = false;
+  override stop(..._args: Parameters<WorkspaceRuntimeManager["stop"]>): Promise<never> {
+    this.stopCalled = true;
+    return Promise.reject(new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "fixture Docker ownership mismatch"));
   }
 }
 
@@ -75,6 +94,24 @@ async function harness(writer: AtomicJsonWriter = durableJsonWriter, wrap?: (bas
   return { root, source, roots, managed, git, workspace, firstCommit, register, createStore };
 }
 
+function differentDevice(device: string): string { return device === "44" ? "45" : "44"; }
+
+type JsonRecord = Record<string, unknown>;
+type IdentityRecord = { device: string; inode: string };
+type StoreOwnershipTestRecord = JsonRecord & { identity: IdentityRecord; repositoryPath: string };
+type WorkspaceOwnershipTestRecord = JsonRecord & {
+  identity: IdentityRecord; parentIdentity: IdentityRecord; branchName: string;
+  store: { identity: IdentityRecord };
+};
+
+async function readJson<T extends JsonRecord>(file: string): Promise<T> {
+  return JSON.parse(await readFile(file, "utf8")) as T;
+}
+
+async function writeJson(file: string, value: JsonRecord): Promise<void> {
+  await writeFile(file, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
 test("creates, owns, revalidates, and reloads a real store and worktree", async () => {
   const h = await harness();
   await h.register(); await h.createStore(); await h.managed.fetch(projectId);
@@ -88,6 +125,125 @@ test("creates, owns, revalidates, and reloads a real store and worktree", async 
   await restarted.initialize();
   await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ workspaceId: null });
   await expect(restarted.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "main", headCommit: h.firstCommit, dirty: false });
+});
+
+test("rebinds finalized store ownership after a device-only change and persists the live identity", async () => {
+  const h = await harness(); await h.createStore();
+  const repository = h.managed.repositoryPath(projectId);
+  const current = identityOf(await lstat(repository, { bigint: true }));
+  const recordPath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const record = await readJson<StoreOwnershipTestRecord>(recordPath);
+  const previousDevice = differentDevice(current.device);
+  record.identity = { device: previousDevice, inode: current.inode };
+  await writeJson(recordPath, record);
+
+  const restarted = new ManagedWorkspaces(h.roots, h.git); await restarted.initialize();
+  await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ projectId, workspaceId: null });
+  await expect(readJson(recordPath)).resolves.toMatchObject({ identity: current });
+});
+
+test("rebinds finalized workspace ownership and workspace inspection after a coherent device-only change", async () => {
+  const h = await harness(); await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const repository = h.managed.repositoryPath(projectId);
+  const worktree = h.managed.worktreePath(workspaceId);
+  const parent = path.dirname(worktree);
+  const storeIdentity = identityOf(await lstat(repository, { bigint: true }));
+  const parentIdentity = identityOf(await lstat(parent, { bigint: true }));
+  const worktreeIdentity = identityOf(await lstat(worktree, { bigint: true }));
+  const previousDevice = differentDevice(storeIdentity.device);
+  const storePath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const workspacePath = path.join(h.roots.state, "ownership/workspaces", `${workspaceId}.json`);
+  const storeRecord = await readJson<StoreOwnershipTestRecord>(storePath);
+  const workspaceRecord = await readJson<WorkspaceOwnershipTestRecord>(workspacePath);
+  storeRecord.identity = { device: previousDevice, inode: storeIdentity.inode };
+  workspaceRecord.identity = { device: previousDevice, inode: worktreeIdentity.inode };
+  workspaceRecord.parentIdentity = { device: previousDevice, inode: parentIdentity.inode };
+  workspaceRecord.store.identity = { device: previousDevice, inode: storeIdentity.inode };
+  await writeJson(storePath, storeRecord); await writeJson(workspacePath, workspaceRecord);
+
+  const options = parseProjectOptionsV1({ schemaVersion: 1,
+    developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
+  const plan = compileRuntimePlanV1(options);
+  await h.managed.registerRuntimePlan({ projectId, revisionId, revisionHash: hashProjectOptionsV1(options),
+    runtimePlan: { format: plan.format, hash: hashRuntimePlanV1(plan), canonicalJson: canonicalizeRuntimePlanV1(plan) } });
+  const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
+  const policy = { cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
+    stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
+  const runtime = new RunningRuntime(h.roots.state, engine, policy);
+  const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
+  const restarted = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, runtime, preview); await restarted.initialize();
+  await expect(restarted.inspectWorkspace(projectId, workspaceId)).resolves.toMatchObject({ observedState: "running" });
+  await expect(readJson(storePath)).resolves.toMatchObject({ identity: storeIdentity });
+  await expect(readJson(workspacePath)).resolves.toMatchObject({
+    identity: worktreeIdentity, parentIdentity, store: { identity: storeIdentity }
+  });
+
+  const rejectingRuntime = new RejectingStopRuntime(h.roots.state, engine, policy);
+  const rejectingPreview = new NoopPreviewRuntime(h.roots.state, engine, rejectingRuntime);
+  const stopManaged = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, rejectingRuntime, rejectingPreview);
+  await stopManaged.initialize();
+  await expect(stopManaged.stopWorkspace(projectId, workspaceId)).rejects.toMatchObject({
+    failure: { code: "WORKSPACE_STATE_CONFLICT" }
+  });
+  expect(rejectingRuntime.stopCalled).toBe(true);
+});
+
+test("finalized store ownership remains fail-closed for inode, path, and symlink changes", async () => {
+  const h = await harness(); await h.createStore();
+  const repository = h.managed.repositoryPath(projectId);
+  const recordPath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const saved = await readJson<StoreOwnershipTestRecord>(recordPath);
+  const current = identityOf(await lstat(repository, { bigint: true }));
+
+  const inodeChanged = { ...saved, identity: { device: differentDevice(current.device), inode: `${BigInt(current.inode) + 1n}` } };
+  await writeJson(recordPath, inodeChanged);
+  const inodeRestart = new ManagedWorkspaces(h.roots, h.git); await inodeRestart.initialize();
+  await expect(inodeRestart.inspectGit(projectId, null)).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+
+  await writeJson(recordPath, { ...saved, repositoryPath: `${repository}.other` });
+  const pathRestart = new ManagedWorkspaces(h.roots, h.git); await pathRestart.initialize();
+  await expect(pathRestart.inspectGit(projectId, null)).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+
+  await writeJson(recordPath, saved);
+  const moved = `${repository}.owned-old`; await rename(repository, moved); await symlink(h.source, repository);
+  const symlinkRestart = new ManagedWorkspaces(h.roots, h.git); await symlinkRestart.initialize();
+  await expect(symlinkRestart.inspectGit(projectId, null)).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+});
+
+test("finalized workspace ownership remains fail-closed for Git, branch, and store-binding changes", async () => {
+  const h = await harness(); await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const workspacePath = path.join(h.roots.state, "ownership/workspaces", `${workspaceId}.json`);
+  const saved = await readJson<WorkspaceOwnershipTestRecord>(workspacePath);
+
+  await writeJson(workspacePath, { ...saved, branchName: "other" });
+  const branchRestart = new ManagedWorkspaces(h.roots, h.git); await branchRestart.initialize();
+  await expect(branchRestart.inspectGit(projectId, workspaceId)).rejects.toMatchObject({ failure: { code: "WORKSPACE_STATE_CONFLICT" } });
+
+  await writeJson(workspacePath, saved);
+  await writeFile(path.join(h.managed.worktreePath(workspaceId), ".git"), "gitdir: /tmp/unrelated-gitdir\n", "utf8");
+  const gitRestart = new ManagedWorkspaces(h.roots, h.git); await gitRestart.initialize();
+  await expect(gitRestart.inspectGit(projectId, workspaceId)).rejects.toMatchObject({ failure: { code: "WORKSPACE_STATE_CONFLICT" } });
+
+  await writeJson(workspacePath, { ...saved, store: { ...saved.store, identity: { ...saved.store.identity, inode: `${BigInt(saved.store.identity.inode) + 1n}` } } });
+  const storeRestart = new ManagedWorkspaces(h.roots, h.git); await storeRestart.initialize();
+  await expect(storeRestart.inspectGit(projectId, workspaceId)).rejects.toMatchObject({ failure: { code: "WORKSPACE_STATE_CONFLICT" } });
+});
+
+test("live quarantine continues to reject a device-only identity change", async () => {
+  const h = await harness();
+  const source = path.join(h.roots.projects, "live-cleanup");
+  const quarantine = path.join(h.roots.projects, ".cleanup", "live-cleanup-quarantine");
+  await mkdir(source);
+  const observed = await lstat(source, { bigint: true });
+  const expected = { device: differentDevice(observed.dev.toString()), inode: observed.ino.toString() };
+  const privateManaged = h.managed as unknown as {
+    quarantineAndRemove(source: string, identity: typeof expected, quarantine: string): Promise<void>;
+  };
+  await expect(privateManaged.quarantineAndRemove(source, expected, quarantine)).rejects.toThrow(/cleanup identity changed/u);
+  await expect(lstat(source)).resolves.toBeTruthy();
+  await expect(lstat(quarantine)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test.each(["file", "directory", "bare", "non-bare", "symlink", "fifo"])("rejects an unowned existing %s at the managed-store path", async (kind) => {
