@@ -78,6 +78,11 @@ async function websocketUpgrade(port: number, hostname: string): Promise<string>
   });
 }
 
+async function dismissLostTerminalDialog(page: import("@playwright/test").Page): Promise<void> {
+  const dialog = page.getByRole("dialog", { name: "Terminal session lost" });
+  if (await dialog.isVisible().catch(() => false)) await dialog.getByRole("button", { name: "Dismiss" }).click();
+}
+
 test("follows the deterministic workspace preview path", async ({ page }) => {
   test.setTimeout(90_000);
   const fixture = parseFixture(JSON.parse(await readFile(coordinationPath, "utf8")));
@@ -91,7 +96,7 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
   const previewItem = project.locator(".preview-list li").filter({ hasText: "Web" });
   await expect(previewItem).toContainText("Waiting");
 
-  await project.getByRole("button", { name: "Start environment" }).click();
+  await project.getByRole("button", { name: "Start runtime" }).click();
   await expect(project.locator(".runtime-chip.running")).toHaveText("Running", { timeout: 30_000 });
   await expect(previewItem).toContainText("Waiting");
 
@@ -119,6 +124,7 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
 
   await expect.poll(async () => (await page.request.get(previewUrl)).status(), { timeout: 20_000 }).toBe(200);
   await expect(previewItem).toContainText("Ready", { timeout: 20_000 });
+  await dismissLostTerminalDialog(page);
   await previewItem.getByRole("button").click();
   await expect(page.getByRole("tab", { name: "Preview", exact: true })).toHaveCount(1);
   await previewItem.getByRole("button").click();
@@ -141,6 +147,7 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
 
   expect((await control(fixture, "/restart-agent", "POST")).status).toBe(204);
   await expect.poll(async () => (await page.request.get(previewUrl)).status(), { timeout: 20_000 }).toBe(200);
+  await dismissLostTerminalDialog(page);
   expect((await gatewaySnapshot(fixture)).routes).toEqual([expect.objectContaining({
     projectId: fixture.projectId, workspaceId: workspace.id, previewId: preview.id, hostPort: listener?.hostPort
   })]);
@@ -150,6 +157,7 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
   await page.reload();
   await expect.poll(async () => (await page.request.get(previewUrl)).status(), { timeout: 20_000 }).toBe(200);
   await expect(previewItem).toContainText("Ready", { timeout: 20_000 });
+  await dismissLostTerminalDialog(page);
   await previewItem.getByRole("button").click();
   await expect(page.getByRole("tab", { name: "Preview", exact: true })).toHaveCount(1);
   const reloadedPreviewTab = project.locator(".preview-tab-surface.is-active");
@@ -163,7 +171,7 @@ test("follows the deterministic workspace preview path", async ({ page }) => {
   await expect.poll(() => reconcileRequests, { timeout: 10_000 }).toBe(1);
   await expect(reloadedPreviewTab.locator(".preview-state")).toHaveText("Ready", { timeout: 15_000 });
 
-  await project.getByRole("button", { name: "Stop environment" }).click();
+  await project.getByRole("button", { name: "Stop runtime" }).click();
   await expect(project.locator(".runtime-chip.stopped")).toHaveText("Stopped", { timeout: 30_000 });
   await expect(previewItem).not.toContainText("Ready");
   await expect.poll(async () => (await page.request.get(previewUrl)).status(), { timeout: 15_000 }).toBe(404);

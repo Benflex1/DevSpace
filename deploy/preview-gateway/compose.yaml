@@ -31,3 +31,24 @@ services:
         target: /run/devspace/gateway
         bind:
           create_host_path: false
+
+  preview-ingress-connector:
+    build:
+      context: ../..
+      dockerfile: deploy/preview-gateway/Dockerfile
+    user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
+    restart: unless-stopped
+    command: ["node", "dist/connector-index.js"]
+    expose:
+      - "${DEVSPACE_PREVIEW_INGRESS_PORT:-8080}"
+    environment:
+      NODE_ENV: production
+      DEVSPACE_PREVIEW_INGRESS_PORT: "${DEVSPACE_PREVIEW_INGRESS_PORT:-8080}"
+      DEVSPACE_PREVIEW_HTTP_SOCKET: /run/devspace/gateway/ingress/preview-http.sock
+    volumes:
+      - type: bind
+        source: /srv/devspace/gateway/ingress
+        target: /run/devspace/gateway/ingress
+        read_only: true
+        bind:
+          create_host_path: false

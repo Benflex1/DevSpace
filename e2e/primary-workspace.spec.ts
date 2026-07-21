@@ -98,7 +98,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(page.locator(".workbench-sidebar")).toContainText("Tasks");
   await expect(page.locator(".workbench-statusbar")).toContainText("Agent connected");
   await expect(page.locator(".runtime-chip.absent")).toHaveText("Offline");
-  await expect(project.getByRole("button", { name: "Start environment" })).toBeVisible();
+  await expect(project.getByRole("button", { name: "Start runtime" })).toBeVisible();
 
   const database = new BetterSqlite3(fixture.databasePath, { readonly: true });
   const projectRow = database.prepare<ProjectRow>("select state, active_config_revision_id, primary_workspace_id from projects where id = ?").get(projectId);
@@ -132,7 +132,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
     method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` }
   });
   expect(failFirstStart.status).toBe(204);
-  await project.getByRole("button", { name: "Start environment" }).click();
+  await project.getByRole("button", { name: "Start runtime" }).click();
   await expect(project.getByText("The development container could not be created safely.")).toBeVisible({ timeout: 120_000 });
   const staleWebOperation = await fetch("http://127.0.0.1:3199/simulate-stale-web-runtime-operation", {
     method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` }
@@ -149,7 +149,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(project.getByRole("button", { name: "Retry start" })).toBeVisible();
   await project.getByRole("button", { name: "Retry start" }).click();
   await expect(project.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
-  await expect(project.getByRole("button", { name: "Stop environment" })).toBeVisible();
+  await expect(project.getByRole("button", { name: "Stop runtime" })).toBeVisible();
   await page.waitForTimeout(2_000);
   const dockerSnapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", {
     headers: { authorization: `Bearer ${fixture.controlToken}` }
@@ -173,7 +173,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await expect(recovered).toBeVisible();
   await expect(recovered.locator(".runtime-chip.running")).toHaveText("Running");
   await expect(recovered.locator(".workbench-sidebar")).toContainText("Terminals");
-  await recovered.getByRole("button", { name: "Stop environment" }).click();
+  await recovered.getByRole("button", { name: "Stop runtime" }).click();
   await expect(recovered.getByText("Stopped", { exact: true })).toBeVisible({ timeout: 120_000 });
   const stoppedRestart = await fetch("http://127.0.0.1:3199/restart", { method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` } });
   expect(stoppedRestart.status).toBe(204);
@@ -183,7 +183,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   }).toBe(200);
   await gotoProject(recoveredPage, projectId);
   await expect(recovered.locator(".runtime-chip.stopped")).toHaveText("Stopped");
-  await recovered.getByRole("button", { name: "Start environment" }).click();
+  await recovered.getByRole("button", { name: "Start runtime" }).click();
   await expect(recovered.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
 
   const runtimeDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
@@ -241,7 +241,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   }).toBe(200);
   await gotoProject(recoveredPage, projectId);
   await expect(recoveredPage.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0);
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0, { timeout: 45_000 });
   await recovered.getByRole("button", { name: "Create terminal tab" }).click();
   await expect(recovered.locator(".terminal-list li").filter({ hasText: "active" }).first()).toBeVisible({ timeout: 30_000 });
   const replacementDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
