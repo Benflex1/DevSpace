@@ -41,6 +41,44 @@ test("preview gateway deployment requires the caddy executable in the Compose co
   }
 });
 
+test("preview gateway deployment requires a self-contained Caddy image", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-deployment-test-"));
+  try {
+    await cp(path.resolve("deploy/preview-gateway"), path.join(root, "deploy/preview-gateway"), { recursive: true });
+    const composePath = path.join(root, "deploy/preview-gateway/compose.yaml");
+    const compose = await readFile(composePath, "utf8");
+    await writeFile(composePath, compose.replace(
+      "dockerfile: deploy/preview-gateway/Caddy.Dockerfile",
+      "image: caddy:2.11.3"
+    ));
+    await assert.rejects(() => validatePreviewGatewayDeployment(root), /self-contained deployment image/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preview gateway deployment rejects a repository-relative Caddy config bind", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-deployment-test-"));
+  try {
+    await cp(path.resolve("deploy/preview-gateway"), path.join(root, "deploy/preview-gateway"), { recursive: true });
+    const composePath = path.join(root, "deploy/preview-gateway/compose.yaml");
+    const compose = await readFile(composePath, "utf8");
+    const configBind = [
+      "      - type: bind",
+      "        source: ./caddy.json",
+      "        target: /etc/caddy/caddy.json",
+      "        read_only: true",
+      "        bind:",
+      "          create_host_path: false",
+      ""
+    ].join("\n");
+    await writeFile(composePath, compose.replace("    volumes:\n", `    volumes:\n${configBind}`));
+    await assert.rejects(() => validatePreviewGatewayDeployment(root), /repository-relative caddy.json bind/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("preview gateway deployment requires legacy pnpm deploy mode", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-deployment-test-"));
   try {

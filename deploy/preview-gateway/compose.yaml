@@ -1,17 +1,13 @@
 services:
   caddy:
-    image: caddy:2.11.3
+    build:
+      context: ../..
+      dockerfile: deploy/preview-gateway/Caddy.Dockerfile
     user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
     network_mode: host
     restart: unless-stopped
     command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
     volumes:
-      - type: bind
-        source: ./caddy.json
-        target: /etc/caddy/caddy.json
-        read_only: true
-        bind:
-          create_host_path: false
       - type: bind
         source: /srv/devspace/gateway
         target: /run/devspace/gateway
