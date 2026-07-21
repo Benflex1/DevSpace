@@ -16,11 +16,10 @@ start Caddy.
 
 ## Deploy the stack
 
-The artifacts are in `deploy/preview-gateway/`. Set an absolute host directory
-before deploying through Coolify:
+The artifacts are in `deploy/preview-gateway/`. Provision the documented host
+directory before deploying through Coolify:
 
 ```text
-DEVSPACE_GATEWAY_RUNTIME_DIR=/srv/devspace/gateway
 DEVSPACE_GATEWAY_UID=1000
 DEVSPACE_GATEWAY_GID=1000
 ```
@@ -57,7 +56,7 @@ Add the same host directory to the existing code-server deployment, using the
 exact container path:
 
 ```text
-${DEVSPACE_GATEWAY_RUNTIME_DIR}:/run/devspace/gateway
+/srv/devspace/gateway:/run/devspace/gateway
 ```
 
 Add these variables to the DevSpace startup environment and retain the
@@ -128,7 +127,7 @@ After this change is merged:
    matching gateway UID/GID.
 2. Deploy `deploy/preview-gateway/compose.yaml` through Coolify.
 3. Mount the same directory into code-server at
-   `${DEVSPACE_GATEWAY_RUNTIME_DIR}:/run/devspace/gateway`.
+   `/srv/devspace/gateway:/run/devspace/gateway`.
 4. Restart code-server if the new bind mount is not applied to the running
    container.
 5. Start DevSpace with all preview socket variables above and the existing
@@ -161,7 +160,7 @@ Check only the three expected private sockets:
 
 ```bash
 for socket in caddy-admin.sock preview-probe.sock lease-resolver.sock; do
-  path="${DEVSPACE_GATEWAY_RUNTIME_DIR:-/run/devspace/gateway}/$socket"
+  path="/srv/devspace/gateway/$socket"
   if test -S "$path"; then stat -c '%F %a %U:%G %n' "$path"; else printf 'missing %s\n' "$path"; fi
 done
 ```

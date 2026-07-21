@@ -13,7 +13,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: "${DEVSPACE_GATEWAY_RUNTIME_DIR:?DEVSPACE_GATEWAY_RUNTIME_DIR must be an administrator-provisioned absolute directory}"
+        source: /srv/devspace/gateway
         target: /run/devspace/gateway
         bind:
           create_host_path: false
@@ -31,7 +31,7 @@ services:
       DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: /run/devspace/gateway/lease-resolver.sock
     volumes:
       - type: bind
-        source: "${DEVSPACE_GATEWAY_RUNTIME_DIR:?DEVSPACE_GATEWAY_RUNTIME_DIR must be an administrator-provisioned absolute directory}"
+        source: /srv/devspace/gateway
         target: /run/devspace/gateway
         bind:
           create_host_path: false
