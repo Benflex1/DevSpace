@@ -1069,6 +1069,22 @@ export class ManagedWorkspaces {
     return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The preview operation failed safely.", { incidentId: uuidv7() }));
   }
 
+  private previewInspectionFailure(error: unknown, workspaceId: string, previewId: string): AgentExecutionError {
+    const mapped = error instanceof AgentExecutionError
+      ? error
+      : this.previewFailure(error, workspaceId, "activate", previewId, null);
+    switch (mapped.failure.code) {
+      case "PROJECT_NOT_FOUND":
+      case "RESOURCE_NOT_FOUND":
+      case "ROOTLESS_RUNTIME_UNAVAILABLE":
+        return mapped;
+      default:
+        return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The preview could not be inspected safely.", {
+          incidentId: uuidv7()
+        }));
+    }
+  }
+
   private async previewContext(projectId: string, workspaceId: string) {
     const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
@@ -1105,12 +1121,13 @@ export class ManagedWorkspaces {
   async inspectPreview(input: import("@devspace/contracts").PreviewIdentityData): Promise<import("@devspace/contracts").PreviewInspectionData> {
     let context;
     try { context = await this.previewContext(input.projectId, input.workspaceId); }
-    catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, null); }
+    catch (error) { throw this.previewInspectionFailure(error, input.workspaceId, input.previewId); }
     if (input.revisionId !== context.association.revisionId) {
-      throw this.previewFailure(new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview request has a stale configuration revision."), input.workspaceId, "activate", input.previewId, null, context.association.revisionId);
+      throw this.previewInspectionFailure(new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview request has a stale configuration revision."),
+        input.workspaceId, input.previewId);
     }
     try { return await this.preview.inspect(input); }
-    catch (error) { throw this.previewFailure(error, input.workspaceId, "activate", input.previewId, null); }
+    catch (error) { throw this.previewInspectionFailure(error, input.workspaceId, input.previewId); }
   }
 
   async snapshotResources(): Promise<AgentSnapshotResource[]> {

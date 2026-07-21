@@ -74,6 +74,82 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.end(encoded);
 }
 
+interface EndpointErrorResponse {
+  readonly operation: string;
+  readonly errorSchema: {
+    safeParse(input: unknown):
+      | { readonly success: true; readonly data: unknown }
+      | { readonly success: false; readonly error: { readonly issues: readonly { readonly path: readonly PropertyKey[] }[] } };
+  };
+}
+
+function safeFailureLog(error: unknown): Record<string, unknown> {
+  if (error instanceof AgentExecutionError) {
+    const rawFailure = error.failure as unknown;
+    if (rawFailure === null || typeof rawFailure !== "object" || Array.isArray(rawFailure)) {
+      return { type: error.name, failureType: typeof rawFailure };
+    }
+    const failure = rawFailure as { readonly code?: unknown; readonly details?: unknown };
+    const details = failure.details;
+    return {
+      type: error.name,
+      code: typeof failure.code === "string" ? failure.code : "invalid",
+      detailKeys: details !== null && typeof details === "object" && !Array.isArray(details)
+        ? Object.keys(details).slice(0, 32)
+        : []
+    };
+  }
+  if (error instanceof Error) return { type: error.name };
+  return { type: typeof error };
+}
+
+function sendEndpointErrorResponse(
+  endpoint: EndpointErrorResponse,
+  response: ServerResponse,
+  status: number,
+  requestId: string,
+  now: () => Date,
+  failure: unknown,
+  source: unknown,
+  createId: () => string
+): void {
+  const intended = endpoint.errorSchema.safeParse({ meta: meta(requestId, now), error: failure });
+  if (intended.success) {
+    sendJson(response, status, intended.data);
+    return;
+  }
+
+  const incidentId = createId();
+  console.error(JSON.stringify({
+    event: "agent.error_response_schema_mismatch",
+    operation: endpoint.operation,
+    incidentId,
+    failure: safeFailureLog(source),
+    schemaIssuePaths: intended.error.issues.map((issue) => issue.path)
+  }));
+
+  const fallback = endpoint.errorSchema.safeParse({ meta: meta(requestId, now), error: {
+    code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
+    details: { incidentId }
+  } });
+  if (fallback.success) {
+    sendJson(response, 500, fallback.data);
+    return;
+  }
+
+  // Every executable endpoint includes AGENT_INTERNAL_ERROR in its error union.
+  // Keep the request alive even if that contract invariant is ever violated.
+  console.error(JSON.stringify({
+    event: "agent.error_response_fallback_schema_mismatch",
+    operation: endpoint.operation,
+    incidentId
+  }));
+  sendJson(response, 500, { meta: meta(requestId, now), error: {
+    code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
+    details: { incidentId }
+  } });
+}
+
 function requestError(response: ServerResponse, requestId: string, now: () => Date, input: {
   location: "headers" | "path" | "query" | "body";
   field: string | null;
@@ -397,12 +473,14 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         if (error instanceof AgentExecutionError) {
           const status = error.failure.code === "RESOURCE_NOT_FOUND" ? 404
             : error.failure.code === "ROOTLESS_RUNTIME_UNAVAILABLE" ? 503 : 500;
-          return sendJson(response, status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
+          sendEndpointErrorResponse(endpoint, response, status, requestId, now, error.failure, error, createId);
+          return;
         }
-        return sendJson(response, 500, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+        sendEndpointErrorResponse(endpoint, response, 500, requestId, now, {
           code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely.", retryable: true,
           details: { incidentId: createId() }
-        } }));
+        }, error, createId);
+        return;
       }
     }
 

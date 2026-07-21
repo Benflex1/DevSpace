@@ -2,9 +2,10 @@ import http from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
-import { agentApiV1EndpointByOperation, sourceInspectionDataSchema } from "@devspace/contracts";
+import { afterEach, expect, test, vi } from "vitest";
+import { agentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
+import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { createAgentServer } from "./server.js";
 import { parseLsRemoteOutput } from "./git-inspector.js";
 
@@ -69,6 +70,29 @@ const headers = {
   "content-type": "application/json; charset=utf-8"
 };
 
+class ThrowingPreviewManagedWorkspaces extends ManagedWorkspaces {
+  constructor(roots: ConstructorParameters<typeof ManagedWorkspaces>[0], private readonly failure: AgentExecutionFailure) {
+    super(roots);
+  }
+
+  override inspectPreview(..._args: Parameters<ManagedWorkspaces["inspectPreview"]>): Promise<never> {
+    return Promise.reject(new AgentExecutionError(this.failure));
+  }
+}
+
+const previewInspectBody = JSON.stringify({ data: {
+  projectId: "018f0f00-0000-7000-8000-000000000005",
+  workspaceId: "018f0f00-0000-7000-8000-000000000009",
+  revisionId: "018f0f00-0000-7000-8000-000000000006",
+  previewId: "018f0f00-0000-7000-8000-000000000010"
+} });
+
+async function previewInspectRequest(socketPath: string) {
+  return await request(socketPath, { method: "POST", path: "/v1/previews/inspect", headers: {
+    ...headers, "content-length": String(Buffer.byteLength(previewInspectBody))
+  }, body: previewInspectBody });
+}
+
 test("serves health and source inspection through the executable Agent contracts", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-test-")); temporaryDirectories.push(directory);
   const socketPath = path.join(directory, "agent.sock");
@@ -88,6 +112,62 @@ test("serves health and source inspection through the executable Agent contracts
     expect(inspected.status).toBe(200);
     expect(agentApiV1EndpointByOperation["project.source.inspect"].successBodySchema.parse(inspected.body).data.defaultBranch).toBe("main");
   } finally { await server.stop(); }
+});
+
+test("contains leaked preview inspection failures and keeps the Agent healthy", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-preview-errors-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const roots = { projects: path.join(directory, ".devspace-managed/projects"),
+    workspaces: path.join(directory, ".devspace-managed/workspaces"), state: path.join(directory, ".devspace-managed/state") };
+  const projectId = "018f0f00-0000-7000-8000-000000000005";
+  const server = createAgentServer({ socketPath, managedRoots: roots,
+    managedWorkspaces: new ThrowingPreviewManagedWorkspaces(roots, {
+      code: "RESOURCE_STATE_CONFLICT", message: "The managed store path is not provably owned by DevSpace.", retryable: false,
+      details: { resource: { type: "project", id: projectId }, action: "create" }
+    }), now: () => now, createId: () => id });
+  await server.start();
+  try {
+    const inspected = await previewInspectRequest(socketPath);
+    const endpoint = agentApiV1EndpointByOperation["preview.inspect"];
+    expect(inspected.status).toBe(500);
+    expect(endpoint.errorSchema.parse(inspected.body)).toMatchObject({ error: {
+      code: "AGENT_INTERNAL_ERROR", details: { incidentId: id }
+    } });
+    await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({
+      status: 200, body: { data: { status: "ok" } }
+    });
+  } finally { await server.stop(); }
+});
+
+test("logs invalid preview error shapes safely and returns the route fallback", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-preview-error-log-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const roots = { projects: path.join(directory, ".devspace-managed/projects"),
+    workspaces: path.join(directory, ".devspace-managed/workspaces"), state: path.join(directory, ".devspace-managed/state") };
+  const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const server = createAgentServer({ socketPath, managedRoots: roots,
+    managedWorkspaces: new ThrowingPreviewManagedWorkspaces(roots, {
+      code: "RESOURCE_NOT_FOUND", message: "internal-secret-must-not-be-logged", retryable: false,
+      details: { resource: { type: "project", id: "not-a-uuid" } }
+    } as unknown as AgentExecutionFailure), now: () => now, createId: () => id });
+  await server.start();
+  try {
+    const inspected = await previewInspectRequest(socketPath);
+    const endpoint = agentApiV1EndpointByOperation["preview.inspect"];
+    expect(endpoint.errorSchema.parse(inspected.body)).toMatchObject({ error: {
+      code: "AGENT_INTERNAL_ERROR", details: { incidentId: id }
+    } });
+    const output = logged.mock.calls.map(([value]) => String(value)).join("\n");
+    expect(output).toContain("agent.error_response_schema_mismatch");
+    expect(output).toContain("RESOURCE_NOT_FOUND");
+    expect(output).toContain("detailKeys");
+    expect(output).not.toContain("internal-secret-must-not-be-logged");
+  } finally {
+    logged.mockRestore();
+    await server.stop();
+  }
 });
 
 test("successful startup preview reconciliation leaves Agent health healthy", async () => {

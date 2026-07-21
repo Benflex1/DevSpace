@@ -1,6 +1,6 @@
 import type { PreviewInspectionData } from "@devspace/contracts";
 import { describe, expect, test } from "vitest";
-import { AgentResponseError } from "./agent-client.js";
+import { AgentResponseError, AgentUnavailableError } from "./agent-client.js";
 import type { PreviewView, ProjectDatabase } from "./database.js";
 import { reconcileWorkspacePreviews } from "./preview-orchestration.js";
 
@@ -131,5 +131,29 @@ describe("Web preview orchestration", () => {
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({ observedState: "failed", routePresent: true });
     await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({ observedState: "inactive", routePresent: false });
+  });
+
+  test("does not retain Ready when Agent observation is unavailable and restores it later", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
+    let available = false;
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      inspectPreview: () => available
+        ? Promise.resolve(inspection())
+        : Promise.reject(new AgentUnavailableError()),
+      snapshot: () => Promise.resolve({ operationObservations: [] })
+    };
+
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
+    expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
+      observedState: "lost", routePresent: false, lastErrorCode: "AGENT_UNAVAILABLE"
+    });
+
+    available = true;
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
+    expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
+      observedState: "healthy", routePresent: true, lastErrorCode: null
+    });
   });
 });
