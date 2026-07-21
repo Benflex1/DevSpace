@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const caddyConfigPath = "deploy/preview-gateway/caddy.json";
 const composePath = "deploy/preview-gateway/compose.yaml";
+const sharedRuntimeSource = "/srv/devspace/gateway";
 const sharedRuntimeTarget = "/run/devspace/gateway";
 const adminSocket = "unix//run/devspace/gateway/caddy-admin.sock|0660";
 
@@ -21,8 +22,8 @@ function requireHostServiceBasics(block, serviceName) {
   requireCondition(/\n? {4}network_mode: host\n/u.test(block), `${serviceName} must use host networking.`);
   requireCondition(!/\n? {4}ports:/u.test(block), `${serviceName} must not publish Docker ports.`);
   requireCondition(!block.includes("docker.sock"), `${serviceName} must not mount a Docker socket.`);
+  requireCondition(block.includes(`source: ${sharedRuntimeSource}`), `${serviceName} must mount ${sharedRuntimeSource}.`);
   requireCondition(block.includes(`target: ${sharedRuntimeTarget}`), `${serviceName} must mount ${sharedRuntimeTarget}.`);
-  requireCondition(block.includes("DEVSPACE_GATEWAY_RUNTIME_DIR"), `${serviceName} must use DEVSPACE_GATEWAY_RUNTIME_DIR.`);
 }
 
 export async function validatePreviewGatewayDeployment(repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
