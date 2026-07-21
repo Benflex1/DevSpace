@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 
 test("composition defensively revalidates the internally selected approved-base domain", () => {
-  const approvedBase = createApprovedPreviewBase("primary", "preview.example.com");
+  const approvedBase = createApprovedPreviewBase("primary", "preview.example.com", "-preview");
   expect(approvedBase.ok).toBe(true);
   if (!approvedBase.ok) return;
 

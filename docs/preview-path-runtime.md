@@ -7,7 +7,7 @@ Cloudflare tunnel, or a workspace container.
 The Agent uses these administrator-owned settings:
 
 - `DEVSPACE_PREVIEW_BASES`: the closed JSON registry shared by Web and Agent,
-  for example `[ {"id":"local","domain":"localhost"} ]`.
+  for example `[ {"id":"local","domain":"localhost","labelSuffix":"-preview"} ]`.
 - `DEVSPACE_CADDY_ADMIN_SOCKET`: the private Unix socket for the dedicated
   Caddy Admin API.
 - `DEVSPACE_PREVIEW_PROBE_SOCKET`: private Unix socket for the gateway-host
@@ -51,11 +51,15 @@ host, IP, port, URL, or upstream. If the private probe socket is unavailable,
 the preview is reported as infrastructure `Unavailable`; the Agent must not
 fall back to its own container loopback.
 
-The deployable host-namespace stack, code-server mount, static Cloudflare
-origin, and manual validation runbook are documented in
+The deployable host-namespace stack, shared-ingress connector, and manual
+validation runbook are documented in
 [`preview-gateway-deployment.md`](./preview-gateway-deployment.md). The stack
 uses the fixed Caddy listener `127.0.0.1:18080` and the Caddy Admin socket
 `/run/devspace/gateway/caddy-admin.sock`.
+
+The connector's internal TCP port is configured with `DEVSPACE_PREVIEW_INGRESS_PORT` and forwards
+bytes to `/run/devspace/gateway/ingress/preview-http.sock`. It has no host-published port and no
+access to the parent runtime directory or private control sockets.
 
 ## Runtime and route lifecycle
 

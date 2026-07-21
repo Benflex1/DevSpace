@@ -2,6 +2,10 @@
 
 - Status: Accepted
 
+> Superseded in part by ADR 014: preview/control-plane origin separation remains required, while
+> preview ingress is no longer required to be Cloudflare-only or an exclusively DevSpace-owned
+> wildcard.
+
 
 ## Context
 Preview applications run project-controlled JavaScript and must not share control-plane authentication cookies.

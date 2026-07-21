@@ -68,7 +68,7 @@ await Promise.all(["projects", "workspaces", "state/operations"]
   .map(async (relative) => await mkdir(path.join(managedRoot, relative), { recursive: true })));
 const gatewayAdminSocket = path.join(runtimeDirectory, "preview-gateway-admin.sock");
 const gatewayProbeSocket = path.join(runtimeDirectory, "preview-gateway-probe.sock");
-const previewGateway = await createPreviewGatewayFixture({ approvedPreviewBases: [{ id: "local", domain: "localhost" }],
+const previewGateway = await createPreviewGatewayFixture({ approvedPreviewBases: [{ id: "local", domain: "localhost", labelSuffix: "-preview" }],
   adminSocketPath: gatewayAdminSocket, probeSocketPath: gatewayProbeSocket,
   resolveLease: async (leaseId) => {
     try {
@@ -85,7 +85,7 @@ const environment = {
   DEVSPACE_DATABASE_PATH: databasePath, DEVSPACE_AGENT_SOCKET_PATH: path.join(runtimeDirectory, "agent.sock"),
   DEVSPACE_MANAGED_ROOT: managedRoot, DEVSPACE_GIT_CA_FILE: certificate,
   DEVSPACE_DOCKER_SOCKET_PATH: path.join(runtimeDirectory, "docker-engine.sock"),
-  DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost" }]),
+  DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost", labelSuffix: "-preview" }]),
   DEVSPACE_PREVIEW_GATEWAY_PROTOCOL: "http:", DEVSPACE_PREVIEW_GATEWAY_PORT: String(gatewayPort),
   DEVSPACE_CADDY_ADMIN_SOCKET: gatewayAdminSocket, DEVSPACE_PREVIEW_PROBE_SOCKET: gatewayProbeSocket
 };

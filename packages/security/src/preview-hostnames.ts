@@ -35,6 +35,7 @@ export type PreviewHostname = string & { readonly [previewHostnameBrand]: true }
 export type ApprovedPreviewBase = Readonly<{
   readonly id: string;
   readonly domain: string;
+  readonly labelSuffix: string;
   readonly [approvedPreviewBaseBrand]: true;
 }>;
 
@@ -47,6 +48,7 @@ export type PreviewPlaceholderValues = Readonly<Partial<Record<PreviewPlaceholde
 interface ApprovedPreviewBaseRecord {
   readonly id: string;
   readonly domain: string;
+  readonly labelSuffix: string;
 }
 
 const approvedPreviewBaseRecords = new WeakMap<object, ApprovedPreviewBaseRecord>();
@@ -62,6 +64,23 @@ function dnsLabelFailure(
   details: Readonly<Record<string, string | number>> = {}
 ): ValidationResult<never> {
   return validationFailure("dns-label", code, input, field, "lowercase-ascii-dns-label", details);
+}
+
+function validatePreviewLabelSuffix(labelSuffix: string): ValidationResult<string> {
+  if (labelSuffix.length === 0) {
+    return validationFailure("approved-preview-base", "APPROVED_BASE_LABEL_SUFFIX_EMPTY", labelSuffix, "labelSuffix", "administrator-approved-preview-base");
+  }
+  if (!labelSuffix.startsWith("-") || labelSuffix.includes(".") || labelSuffix.includes("*") || labelSuffix.includes("?")
+    || !/^[a-z0-9-]+$/u.test(labelSuffix) || !/[a-z0-9]$/u.test(labelSuffix)) {
+    return validationFailure("approved-preview-base", "APPROVED_BASE_LABEL_SUFFIX_INVALID", labelSuffix, "labelSuffix", "administrator-approved-preview-base");
+  }
+  if (labelSuffix.length > maximumDnsLabelLength) {
+    return validationFailure("approved-preview-base", "APPROVED_BASE_LABEL_SUFFIX_INVALID", labelSuffix, "labelSuffix", "administrator-approved-preview-base", {
+      actualLength: labelSuffix.length,
+      maximumLength: maximumDnsLabelLength
+    });
+  }
+  return validationSuccess(labelSuffix);
 }
 
 export function validateDnsLabel(input: string, field = "label"): ValidationResult<DnsLabel> {
@@ -88,7 +107,8 @@ export function validateDnsLabel(input: string, field = "label"): ValidationResu
 
 export function createApprovedPreviewBase(
   id: string,
-  domain: string
+  domain: string,
+  labelSuffix: string
 ): ValidationResult<ApprovedPreviewBase> {
   const fail = (
     code: ApprovedPreviewBaseValidationErrorCode,
@@ -112,10 +132,14 @@ export function createApprovedPreviewBase(
     return domainResult;
   }
 
-  const record = Object.freeze({ id, domain: domainResult.value });
+  const suffixResult = validatePreviewLabelSuffix(labelSuffix);
+  if (!suffixResult.ok) return suffixResult;
+
+  const record = Object.freeze({ id, domain: domainResult.value, labelSuffix });
   const approvedBase = Object.freeze({
     id: record.id,
     domain: record.domain,
+    labelSuffix: record.labelSuffix,
     [approvedPreviewBaseBrand]: true as const
   });
   approvedPreviewBaseRecords.set(approvedBase, record);
@@ -138,6 +162,7 @@ export function createApprovedPreviewBaseRegistry(
 
   const records: ApprovedPreviewBaseRecord[] = [];
   const firstIndexById = new Map<string, number>();
+  const firstIndexByDomain = new Map<string, number>();
 
   for (let baseIndex = 0; baseIndex < sourceValues.length; baseIndex += 1) {
     const approvedBase: unknown = sourceValues[baseIndex];
@@ -167,6 +192,9 @@ export function createApprovedPreviewBaseRegistry(
       );
     }
 
+    const suffixResult = validatePreviewLabelSuffix(sourceRecord.labelSuffix);
+    if (!suffixResult.ok) return suffixResult;
+
     const firstIndex = firstIndexById.get(sourceRecord.id);
     if (firstIndex !== undefined) {
       return validationFailure(
@@ -180,12 +208,95 @@ export function createApprovedPreviewBaseRegistry(
     }
 
     firstIndexById.set(sourceRecord.id, baseIndex);
-    records.push(Object.freeze({ id: sourceRecord.id, domain: domainResult.value }));
+    const firstDomainIndex = firstIndexByDomain.get(domainResult.value);
+    if (firstDomainIndex !== undefined) {
+      return validationFailure(
+        "approved-preview-base",
+        "APPROVED_BASE_DUPLICATE_DOMAIN",
+        domainResult.value,
+        `approvedBases[${baseIndex}].domain`,
+        "opaque-approved-preview-base-registry",
+        { domain: domainResult.value, duplicateIndex: baseIndex, firstIndex: firstDomainIndex }
+      );
+    }
+    firstIndexByDomain.set(domainResult.value, baseIndex);
+    records.push(Object.freeze({ id: sourceRecord.id, domain: domainResult.value, labelSuffix: suffixResult.value }));
   }
 
   const registry = Object.freeze({ [approvedPreviewBaseRegistryBrand]: true as const });
   approvedPreviewBaseRegistryRecords.set(registry, Object.freeze(records));
   return validationSuccess(registry);
+}
+
+function invalidRegistryEntry(input: string, field: string, code: ApprovedPreviewBaseValidationErrorCode, details: Readonly<Record<string, string | number>> = {}) {
+  return validationFailure("approved-preview-base", code, input, field, "administrator-approved-preview-base-registry", details);
+}
+
+/** Parse the closed administrator-owned DEVSPACE_PREVIEW_BASES JSON value. */
+export function parseApprovedPreviewBaseRegistry(input: unknown): ValidationResult<ApprovedPreviewBaseRegistry> {
+  if (!Array.isArray(input)) return invalidRegistryEntry("[non-array]", "approvedBases", "APPROVED_BASE_REGISTRY_INVALID_SOURCE");
+  const entries: ApprovedPreviewBase[] = [];
+  for (const [index, candidate] of input.entries()) {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+      return invalidRegistryEntry(`[entry ${index}]`, `approvedBases[${index}]`, "APPROVED_BASE_REGISTRY_INVALID_BASE");
+    }
+    const record = candidate as Record<string, unknown>;
+    const allowed = new Set(["id", "domain", "labelSuffix"]);
+    const unknown = Object.keys(record).find((key) => !allowed.has(key));
+    if (unknown !== undefined) {
+      const unknownValue = record[unknown];
+      return invalidRegistryEntry(typeof unknownValue === "string" ? unknownValue : "[unknown field]",
+        `approvedBases[${index}].${unknown}`, "APPROVED_BASE_REGISTRY_UNKNOWN_FIELD", { fieldName: unknown });
+    }
+    if (typeof record.id !== "string" || typeof record.domain !== "string") {
+      return invalidRegistryEntry(`[entry ${index}]`, `approvedBases[${index}]`, "APPROVED_BASE_REGISTRY_INVALID_BASE");
+    }
+    if (!("labelSuffix" in record)) {
+      return invalidRegistryEntry(record.id, `approvedBases[${index}].labelSuffix`, "APPROVED_BASE_LABEL_SUFFIX_MISSING");
+    }
+    if (typeof record.labelSuffix !== "string") {
+      return invalidRegistryEntry(String(record.labelSuffix), `approvedBases[${index}].labelSuffix`, "APPROVED_BASE_LABEL_SUFFIX_INVALID");
+    }
+    const result = createApprovedPreviewBase(record.id, record.domain, record.labelSuffix);
+    if (!result.ok) return result;
+    entries.push(result.value);
+  }
+  return createApprovedPreviewBaseRegistry(entries);
+}
+
+export function parseApprovedPreviewBaseRegistryJson(raw: string): ValidationResult<ApprovedPreviewBaseRegistry> {
+  try { return parseApprovedPreviewBaseRegistry(JSON.parse(raw)); }
+  catch { return invalidRegistryEntry("[invalid JSON]", "DEVSPACE_PREVIEW_BASES", "APPROVED_BASE_REGISTRY_INVALID_SOURCE"); }
+}
+
+export function getApprovedPreviewBases(registry: ApprovedPreviewBaseRegistry): readonly ApprovedPreviewBase[] {
+  const records = approvedPreviewBaseRegistryRecords.get(registry);
+  if (records === undefined) return [];
+  return Object.freeze(records.map((record) => {
+    const base = Object.freeze({
+      id: record.id,
+      domain: record.domain,
+      labelSuffix: record.labelSuffix,
+      [approvedPreviewBaseBrand]: true as const
+    });
+    approvedPreviewBaseRecords.set(base, record);
+    return base;
+  }));
+}
+
+export function isApprovedPreviewHostname(hostname: string, base: Readonly<{ domain: string; labelSuffix: string }>): boolean {
+  if (hostname.length === 0 || hostname !== hostname.toLowerCase() || hostname.endsWith(".")) return false;
+  const hostnameLabels = hostname.split(".");
+  const baseLabels = base.domain.split(".");
+  if (hostnameLabels.length !== baseLabels.length + 1 || hostnameLabels.slice(1).join(".") !== base.domain) return false;
+  const leftmost = hostnameLabels[0] ?? "";
+  if (!leftmost.endsWith(base.labelSuffix)) return false;
+  const stem = leftmost.slice(0, -base.labelSuffix.length);
+  return stem.length > 0 && validateDnsLabel(leftmost).ok;
+}
+
+export function isHostnameInApprovedPreviewRegistry(hostname: string, registry: ApprovedPreviewBaseRegistry): boolean {
+  return getApprovedPreviewBases(registry).some((base) => isApprovedPreviewHostname(hostname, base));
 }
 
 function parsePreviewPattern(
@@ -329,6 +440,7 @@ export function composePreviewHostname(
   const generatedLabel = pattern.replace(/\{(project|workspace|preview|shortId)\}/g, (_, name: string) => (
     values[name as PreviewPlaceholderName] ?? ""
   ));
+  if (generatedLabel.length === 0) return fail("PREVIEW_GENERATED_STEM_EMPTY", generatedLabel, "generatedPreviewStem");
   const labelResult = validateDnsLabel(generatedLabel, "generatedPreviewLabel");
   if (!labelResult.ok) {
     return fail("PREVIEW_GENERATED_LABEL_INVALID", generatedLabel, "generatedPreviewLabel", {
@@ -336,7 +448,16 @@ export function composePreviewHostname(
     });
   }
 
-  const hostname = `${labelResult.value}.${domainResult.value}`;
+  const composedLabel = `${labelResult.value}${base.labelSuffix}`;
+  if (composedLabel.length > maximumDnsLabelLength) {
+    return fail("PREVIEW_COMPOSED_LABEL_TOO_LONG", composedLabel, "previewHostnameLabel", {
+      actualLength: composedLabel.length,
+      maximumLength: maximumDnsLabelLength
+    });
+  }
+  const composedLabelResult = validateDnsLabel(composedLabel, "previewHostnameLabel");
+  if (!composedLabelResult.ok) return fail("PREVIEW_GENERATED_LABEL_INVALID", composedLabel, "previewHostnameLabel");
+  const hostname = `${composedLabelResult.value}.${domainResult.value}`;
   if (hostname.length > maximumDnsNameLength) {
     return fail("PREVIEW_HOSTNAME_TOO_LONG", hostname, "previewHostname", {
       actualLength: hostname.length,

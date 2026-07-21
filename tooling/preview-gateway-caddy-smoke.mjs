@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const caddyImage = "caddy:2.11.3";
 const caddyConfig = path.join(repositoryRoot, "deploy/preview-gateway/caddy.json");
 const adminSocketName = "caddy-admin.sock";
+const previewHttpSocketName = "preview-http.sock";
 const routesPath = "/config/apps/http/servers/devspace-preview/routes";
 const fallbackId = "devspace-preview-fallback-v1";
 const maxResponseBytes = 1_048_576;
@@ -119,6 +120,8 @@ async function main() {
   const gid = configuredId("DEVSPACE_GATEWAY_GID", "1000");
   const runtimeDirectory = await mkdtemp(path.join(os.tmpdir(), "devspace-caddy-smoke-"));
   const adminSocket = path.join(runtimeDirectory, adminSocketName);
+  const ingressDirectory = path.join(runtimeDirectory, "ingress");
+  const previewHttpSocket = path.join(ingressDirectory, previewHttpSocketName);
   let containerId;
   try {
     // The real deployment provisions this directory for the selected UID/GID.
@@ -126,6 +129,8 @@ async function main() {
     // 0660 socket, allowing the host-side smoke client to exercise that socket
     // while Caddy still runs with the deployment's effective UID/GID.
     await chmod(runtimeDirectory, 0o2777);
+    await mkdir(ingressDirectory, { mode: 0o2777 });
+    await chmod(ingressDirectory, 0o2777);
     const mountConfig = `type=bind,src=${caddyConfig},dst=/etc/caddy/caddy.json,readonly`;
     const mountRuntime = `type=bind,src=${runtimeDirectory},dst=/run/devspace/gateway`;
     const started = await runDocker([
@@ -140,6 +145,15 @@ async function main() {
     const initial = await adminRequest(adminSocket, "GET");
     assert.equal(initial.status, 200, "initial route inspection must succeed");
     assertFallback(initial.body, "initial route inspection");
+    const dataPlane = await new Promise((resolve, reject) => {
+      const request = http.request({ socketPath: previewHttpSocket, path: "/", headers: { host: "ordinary-application.example" } }, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode ?? 0));
+      });
+      request.once("error", reject);
+      request.end();
+    });
+    assert.equal(dataPlane, 404, "private HTTP data-plane must retain the terminal fallback");
 
     const replacement = {
       "@id": "devspace-preview-caddy-smoke-v1",

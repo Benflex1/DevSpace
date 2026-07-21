@@ -93,6 +93,21 @@ describe("Web preview orchestration", () => {
     expect(fixture.observations.at(-1)).toMatchObject({ observedState: "failed", routePresent: false });
   });
 
+  test("keeps a newly configured preview Waiting until its first runtime activation", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "inactive", routePresent: false }));
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      inspectPreview: () => Promise.reject(new AgentResponseError("RESOURCE_NOT_FOUND", "preview state missing")),
+      snapshot: () => Promise.reject(new Error("must not snapshot"))
+    };
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent });
+    expect(fixture.observations).toHaveLength(0);
+    expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
+      observedState: "inactive", routePresent: false, lastErrorCode: null
+    });
+  });
+
   test("does not claim a route is gone when Agent deactivation fails", async () => {
     const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
     const agent = {

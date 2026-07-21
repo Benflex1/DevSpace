@@ -7,21 +7,14 @@ import {
   type OpaqueLeaseResolver,
   type PreviewGatewayAdapterContract
 } from "@devspace/gateway-caddy";
+import { getApprovedPreviewBases, parseApprovedPreviewBaseRegistryJson } from "@devspace/security";
 
 function readGatewayPolicy(environment: NodeJS.ProcessEnv): GatewayPolicy | null {
   const raw = environment.DEVSPACE_PREVIEW_BASES?.trim();
   if (raw === undefined || raw === "") return null;
-  const parsed: unknown = JSON.parse(raw);
-  if (!Array.isArray(parsed)) throw new Error("DEVSPACE_PREVIEW_BASES must be a JSON array.");
-  const approvedPreviewBases = parsed.map((candidate) => {
-    if (typeof candidate !== "object" || candidate === null
-      || typeof (candidate as { id?: unknown }).id !== "string"
-      || typeof (candidate as { domain?: unknown }).domain !== "string") {
-      throw new Error("DEVSPACE_PREVIEW_BASES must contain string id and domain fields.");
-    }
-    return { id: (candidate as { id: string }).id, domain: (candidate as { domain: string }).domain };
-  });
-  return { approvedPreviewBases };
+  const registry = parseApprovedPreviewBaseRegistryJson(raw);
+  if (!registry.ok) throw new Error(`DEVSPACE_PREVIEW_BASES is invalid: ${registry.error.code}.`);
+  return { approvedPreviewBases: getApprovedPreviewBases(registry.value) };
 }
 
 export interface PreviewGatewayConfiguration {

@@ -12,7 +12,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 function approvedPreviewRegistry() {
-  const base = createApprovedPreviewBase("preview-main", "preview.example.com");
+  const base = createApprovedPreviewBase("preview-main", "preview.example.com", "-preview");
   if (!base.ok) throw new Error("The test preview base is invalid.");
   const registry = createApprovedPreviewBaseRegistry([base.value]);
   if (!registry.ok) throw new Error("The test preview registry is invalid.");
@@ -134,7 +134,7 @@ test("initial setup stores a workspace preview and matching development port, th
   const materialized = database.getManagedProject(project.id)?.previews;
   expect(materialized).toHaveLength(1);
   expect(materialized?.[0]).toMatchObject({ previewKey: "web", displayName: "Web", containerPort: 5173 });
-  expect(materialized?.[0]?.hostname).toMatch(/^repository-primary-web-[0-9a-f]{8}\.preview\.example\.com$/u);
+  expect(materialized?.[0]?.hostname).toMatch(/^repository-primary-web-[0-9a-f]{8}-preview\.preview\.example\.com$/u);
   database.close();
 });
 
