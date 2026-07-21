@@ -29,11 +29,11 @@ UID/GID to create and access private Unix sockets. Keep it outside project
 worktrees and the production directory. The Compose stack mounts it at the
 fixed container path `/run/devspace/gateway`.
 
-The Caddy service loads the read-only `caddy.json` and owns the private Admin
-socket. Its only HTTP listener is `127.0.0.1:18080`; the initial route set is a
-gateway-owned terminal HTTP 404 fallback. Agent route reconciliation writes
-exact preview routes before that fallback and always writes the fallback back
-as the last route.
+The Caddy service uses a small deployment image with `caddy.json` baked in and
+owns the private Admin socket. Its only HTTP listener is `127.0.0.1:18080`; the
+initial route set is a gateway-owned terminal HTTP 404 fallback. Agent route
+reconciliation writes exact preview routes before that fallback and always
+writes the fallback back as the last route.
 
 The repository validation does not need Docker or a Caddy binary:
 

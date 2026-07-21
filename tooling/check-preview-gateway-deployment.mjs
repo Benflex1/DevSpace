@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const caddyConfigPath = "deploy/preview-gateway/caddy.json";
+const caddyDockerfilePath = "deploy/preview-gateway/Caddy.Dockerfile";
 const composePath = "deploy/preview-gateway/compose.yaml";
 const dockerfilePath = "deploy/preview-gateway/Dockerfile";
 const sharedRuntimeSource = "/srv/devspace/gateway";
@@ -28,8 +29,9 @@ function requireHostServiceBasics(block, serviceName) {
 }
 
 export async function validatePreviewGatewayDeployment(repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
-  const [caddyText, compose, dockerfile] = await Promise.all([
+  const [caddyText, caddyDockerfile, compose, dockerfile] = await Promise.all([
     readFile(path.join(repositoryRoot, caddyConfigPath), "utf8"),
+    readFile(path.join(repositoryRoot, caddyDockerfilePath), "utf8"),
     readFile(path.join(repositoryRoot, composePath), "utf8"),
     readFile(path.join(repositoryRoot, dockerfilePath), "utf8")
   ]);
@@ -53,10 +55,12 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
 
   const caddyService = serviceBlock(compose, "caddy");
   const hostService = serviceBlock(compose, "preview-gateway-host");
-  requireCondition(/\n? {4}image: caddy:2\.11\.3\n/u.test(caddyService), "Caddy image must be pinned to caddy:2.11.3.");
+  requireCondition(caddyService.includes("build:\n      context: ../..\n      dockerfile: deploy/preview-gateway/Caddy.Dockerfile"), "Caddy must use the self-contained deployment image build.");
+  requireCondition(caddyDockerfile.includes("FROM caddy:2.11.3"), "Caddy deployment image must be based on caddy:2.11.3.");
+  requireCondition(caddyDockerfile.includes("COPY deploy/preview-gateway/caddy.json /etc/caddy/caddy.json"), "Caddy deployment image must bake in caddy.json.");
   requireHostServiceBasics(caddyService, "caddy");
   requireHostServiceBasics(hostService, "preview-gateway-host");
-  requireCondition(caddyService.includes("target: /etc/caddy/caddy.json") && caddyService.includes("read_only: true"), "Caddy JSON must be mounted read-only.");
+  requireCondition(!caddyService.includes("source: ./caddy.json") && !caddyService.includes("target: /etc/caddy/caddy.json"), "Caddy must not use a repository-relative caddy.json bind mount.");
   requireCondition(!caddyService.includes("--adapter"), "Native Caddy JSON configuration must not use the json adapter.");
   requireCondition(caddyService.includes("command: [\"caddy\", \"run\", \"--config\", \"/etc/caddy/caddy.json\"]"), "Caddy must invoke the native JSON configuration through the caddy executable without an adapter.");
   requireCondition(caddyService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1] === hostService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1], "Both services must support the same configured UID/GID.");
