@@ -124,6 +124,35 @@ test("missing ownership, source mismatch, and replaced store identities fail clo
   await expect(h.managed.fetch(projectId)).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
 });
 
+test("preview inspection contains context ownership conflicts and preserves public missing-preview failures", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const options = parseProjectOptionsV1({ schemaVersion: 1,
+    developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
+  const plan = compileRuntimePlanV1(options);
+  const revisionHash = hashProjectOptionsV1(options);
+  await h.managed.registerRuntimePlan({ projectId, revisionId, revisionHash,
+    runtimePlan: { format: plan.format, hash: hashRuntimePlanV1(plan), canonicalJson: canonicalizeRuntimePlanV1(plan) } });
+
+  const storeOwnership = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const savedStoreOwnership = await readFile(storeOwnership, "utf8");
+  await unlink(storeOwnership);
+  const contained = await h.managed.inspectPreview({ projectId, workspaceId, revisionId,
+    previewId: "018f0f00-0000-7000-8000-000000000004" }).catch((error: unknown) => error);
+  expect(contained).toBeInstanceOf(AgentExecutionError);
+  if (!(contained instanceof AgentExecutionError)) throw new Error("preview inspection did not fail");
+  expect(contained.failure.code).toBe("AGENT_INTERNAL_ERROR");
+  const details = contained.failure.details as { readonly incidentId?: unknown };
+  expect(typeof details.incidentId).toBe("string");
+
+  await writeFile(storeOwnership, savedStoreOwnership, { mode: 0o600 });
+  await expect(h.managed.inspectPreview({ projectId, workspaceId, revisionId,
+    previewId: "018f0f00-0000-7000-8000-000000000004" })).rejects.toMatchObject({
+      failure: { code: "RESOURCE_NOT_FOUND", details: { resource: { type: "preview" } } }
+    });
+});
+
 test("runtime private-state corruption degrades the manager and opaque IDs cannot escape roots", async () => {
   const h = await harness(); await h.createStore();
   await writeFile(path.join(h.roots.state, "ownership/projects", `${projectId}.json`), "{}\n", "utf8");
