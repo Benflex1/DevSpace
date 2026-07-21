@@ -32,6 +32,7 @@ import { ExternalExecutionFence, type ExternalExecutionRole } from "./external-e
 import {
   PrivateStateCorruptionError,
   assertContained,
+  comparePersistedIdentity,
   durableJsonWriter,
   establishPinnedDirectory,
   fileIdentitySchema,
@@ -130,6 +131,11 @@ function workspaceConflict(workspaceId: string, observedState: "lost" | "provisi
   return new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", "The workspace path is not provably owned by DevSpace.", {
     workspaceId, desiredState: "stopped", observedState, action: "create"
   }));
+}
+
+function logOwnershipDeviceRebind(resourceType: "project" | "workspace", resourceId: string,
+  previousDevice: string | Record<string, string>, currentDevice: string | Record<string, string>): void {
+  console.info(JSON.stringify({ event: "managed-ownership-device-rebind", resourceType, resourceId, previousDevice, currentDevice }));
 }
 
 export type GitRunner = (args: readonly string[]) => Promise<{ stdout: string; stderr: string }>;
@@ -530,13 +536,22 @@ export class ManagedWorkspaces {
     }
     if (record.projectId !== projectId || record.repositoryPath !== this.repositoryPath(projectId)) throw storeConflict(projectId);
     const current = await lstatIdentity(record.repositoryPath);
-    if (current === null || !current.stats.isDirectory() || current.stats.isSymbolicLink() || !identitiesEqual(current.identity, record.identity)) throw storeConflict(projectId);
+    if (current === null || !current.stats.isDirectory() || current.stats.isSymbolicLink()) throw storeConflict(projectId);
+    const identityComparison = comparePersistedIdentity(record.identity, current.identity);
+    if (identityComparison === "mismatch") throw storeConflict(projectId);
     const resolved = await realpath(record.repositoryPath);
     if (resolved !== record.repositoryPath || record.git.commonDirectoryPath !== record.repositoryPath) throw storeConflict(projectId);
     try {
       if ((await this.git(["--git-dir", record.repositoryPath, "rev-parse", "--is-bare-repository"])).stdout.trim() !== "true") throw new Error("not-bare");
       if ((await this.git(["--git-dir", record.repositoryPath, "config", "--get", "remote.origin.url"])).stdout.trim() !== record.git.originUrl) throw new Error("origin-mismatch");
     } catch { throw storeConflict(projectId); }
+    if (identityComparison === "device-only-rebind") {
+      await this.assertManagedDirectories();
+      const rebound = storeOwnershipSchema.parse({ ...record, identity: current.identity });
+      await this.writer.write(this.storeOwnershipPath(projectId), rebound);
+      logOwnershipDeviceRebind("project", projectId, record.identity.device, current.identity.device);
+      return rebound;
+    }
     return record;
   }
 
@@ -707,16 +722,44 @@ export class ManagedWorkspaces {
     if (record.projectId !== projectId || record.workspaceId !== workspaceId || record.worktreePath !== this.worktreePath(workspaceId)
       || record.parentPath !== this.workspaceParent(workspaceId)) throw workspaceConflict(workspaceId);
     const store = await this.loadStoreOwnership(projectId);
-    if (!identitiesEqual(store.identity, record.store.identity) || store.repositoryPath !== record.store.repositoryPath) throw workspaceConflict(workspaceId);
+    if (store.repositoryPath !== record.store.repositoryPath
+      || comparePersistedIdentity(record.store.identity, store.identity) === "mismatch") throw workspaceConflict(workspaceId);
     const [parentNow, worktreeNow] = await Promise.all([lstatIdentity(record.parentPath), lstatIdentity(record.worktreePath)]);
-    if (parentNow === null || !parentNow.stats.isDirectory() || parentNow.stats.isSymbolicLink() || !identitiesEqual(parentNow.identity, record.parentIdentity)
-      || worktreeNow === null || !worktreeNow.stats.isDirectory() || worktreeNow.stats.isSymbolicLink() || !identitiesEqual(worktreeNow.identity, record.identity)) throw workspaceConflict(workspaceId);
+    if (parentNow === null || !parentNow.stats.isDirectory() || parentNow.stats.isSymbolicLink()
+      || worktreeNow === null || !worktreeNow.stats.isDirectory() || worktreeNow.stats.isSymbolicLink()) throw workspaceConflict(workspaceId);
+    const storeIdentityComparison = comparePersistedIdentity(record.store.identity, store.identity);
+    const parentIdentityComparison = comparePersistedIdentity(record.parentIdentity, parentNow.identity);
+    const worktreeIdentityComparison = comparePersistedIdentity(record.identity, worktreeNow.identity);
+    if (storeIdentityComparison === "mismatch" || parentIdentityComparison === "mismatch" || worktreeIdentityComparison === "mismatch") {
+      throw workspaceConflict(workspaceId);
+    }
+    const revision = await this.loadRevisionRecord(projectId, record.revision.revisionId).catch(() => null);
+    if (revision === null || revision.data.configuration.hash !== record.revision.revisionHash) throw workspaceConflict(workspaceId);
     try {
       const commonText = (await this.git(["-C", record.worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
       if (await realpath(commonText) !== store.repositoryPath) throw new Error("common-dir-mismatch");
       const branch = (await this.git(["-C", record.worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
       if (branch !== record.branchName) throw new Error("branch-mismatch");
+      const registrations = await this.registeredWorktrees(store.repositoryPath);
+      if (!registrations.some((entry) => entry.path === record.worktreePath && entry.branch === `refs/heads/${record.branchName}`)) {
+        throw new Error("worktree-registration-mismatch");
+      }
+      await this.git(["-C", record.worktreePath, "cat-file", "-e", `${record.creationCommit}^{commit}`]);
     } catch { throw workspaceConflict(workspaceId); }
+    if (storeIdentityComparison === "device-only-rebind" || parentIdentityComparison === "device-only-rebind"
+      || worktreeIdentityComparison === "device-only-rebind") {
+      await this.assertManagedDirectories();
+      const rebound = workspaceOwnershipSchema.parse({ ...record,
+        identity: worktreeNow.identity,
+        parentIdentity: parentNow.identity,
+        store: { ...record.store, identity: store.identity }
+      });
+      await this.writer.write(this.workspaceOwnershipPath(workspaceId), rebound);
+      const previousDevice = { worktree: record.identity.device, parent: record.parentIdentity.device, store: record.store.identity.device };
+      const currentDevice = { worktree: worktreeNow.identity.device, parent: parentNow.identity.device, store: store.identity.device };
+      logOwnershipDeviceRebind("workspace", workspaceId, previousDevice, currentDevice);
+      return rebound;
+    }
     return record;
   }
 

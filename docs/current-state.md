@@ -28,8 +28,10 @@ Milestone 1 — in progress.
   A crash after durable launch commitment but before process identity confirmation fails closed
   for administrator reconciliation instead of relaunching ambiguously.
 - Agent-private, runtime-validated ownership records bind managed stores and worktrees to their
-  derived paths, device/inode identities, project/workspace identities, source/Git identity, and
-  configuration revision. Configured roots must be administrator-provisioned real directories;
+  derived paths, live device/inode identities, project/workspace identities, source/Git identity,
+  and configuration revision. Finalized ownership can narrowly rebind a device-only remount
+  change only after the complete path, inode, and Git ownership proof succeeds; live mutation
+  checks remain strict. Configured roots must be administrator-provisioned real directories;
   they are accepted without following symlinks and identity-pinned before internal child creation.
   Recovery records are semantically bound to exact operation-derived paths. Existing unowned paths
   are rejected rather than adopted, and Git worktree administration is removed only with an exact

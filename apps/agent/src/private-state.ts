@@ -9,6 +9,8 @@ export const fileIdentitySchema = z.strictObject({
 });
 export type FileIdentity = z.infer<typeof fileIdentitySchema>;
 
+export type IdentityComparison = "exact" | "device-only-rebind" | "mismatch";
+
 export class PrivateStateCorruptionError extends Error {
   constructor(readonly statePath: string, readonly reason: string) {
     super(`Agent-private state is corrupt: ${reason}`);
@@ -22,6 +24,18 @@ export function identityOf(stats: BigIntStats): FileIdentity {
 
 export function identitiesEqual(left: FileIdentity, right: FileIdentity): boolean {
   return left.device === right.device && left.inode === right.inode;
+}
+
+/** Classifies a persisted identity against a freshly observed live identity.
+ *
+ * The device-only case is intentionally a classification for finalized
+ * ownership recovery only. Callers performing live validation and mutation
+ * must continue to use identitiesEqual().
+ */
+export function comparePersistedIdentity(persisted: FileIdentity, current: FileIdentity): IdentityComparison {
+  if (identitiesEqual(persisted, current)) return "exact";
+  if (persisted.inode === current.inode && persisted.device !== current.device) return "device-only-rebind";
+  return "mismatch";
 }
 
 export async function lstatIdentity(target: string): Promise<{ stats: BigIntStats; identity: FileIdentity } | null> {
