@@ -40,3 +40,16 @@ test("preview gateway deployment requires the caddy executable in the Compose co
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("preview gateway deployment requires legacy pnpm deploy mode", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-deployment-test-"));
+  try {
+    await cp(path.resolve("deploy/preview-gateway"), path.join(root, "deploy/preview-gateway"), { recursive: true });
+    const dockerfilePath = path.join(root, "deploy/preview-gateway/Dockerfile");
+    const dockerfile = await readFile(dockerfilePath, "utf8");
+    await writeFile(dockerfilePath, dockerfile.replace("--prod --legacy /runtime", "--prod /runtime"));
+    await assert.rejects(() => validatePreviewGatewayDeployment(root), /legacy deploy mode/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
