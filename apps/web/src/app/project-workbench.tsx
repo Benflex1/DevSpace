@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, terminalStateMessage, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
@@ -47,8 +48,18 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [previews, setPreviews] = useState<readonly PreviewLifecycleView[]>(initialPreviews);
   const currentPreviews = useRef(initialPreviews);
   const [message, setMessage] = useState("");
+  const [lostDialogIds, setLostDialogIds] = useState<readonly string[]>([]);
+  const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
+  useEffect(() => {
+    const ids = terminals.filter((terminal) => terminal.state === "lost").map((terminal) => terminal.id);
+    if (lostDialogSession.current === null) {
+      lostDialogSession.current = new LostTerminalDialogSession(window.sessionStorage.getItem(LOST_TERMINAL_DISMISSED_SESSION_KEY));
+    }
+    const next = lostDialogSession.current.observe(ids);
+    if (ids.length === 0 || next.length > 0) setLostDialogIds(next);
+  }, [terminals]);
   useEffect(() => {
     setPreviews(initialPreviews);
     currentPreviews.current = initialPreviews;
@@ -230,8 +241,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
       retryStart={retryStart} />
     <div className="workbench-body">
-      <WorkbenchSidebar projectId={projectId} terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable}
-        runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart} tasks={tasks} runs={runs}
+      <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
@@ -244,6 +254,14 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
       </section>
     </div>
+    {lostDialogIds.length > 0 && <LostTerminalDialog count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}
+      runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
+      onDismiss={() => {
+        const key = lostTerminalSetKey(lostDialogIds);
+        lostDialogSession.current?.dismiss(lostDialogIds);
+        window.sessionStorage.setItem(LOST_TERMINAL_DISMISSED_SESSION_KEY, key);
+        setLostDialogIds([]);
+      }} />}
     <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
@@ -264,11 +282,9 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ projectId, terminals, getTerminalTitle, tabs, actionsAvailable, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, tasks, runs, previews, onOpenPreview,
+function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
-  projectId: string;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
-  runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
   previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
@@ -292,18 +308,12 @@ function WorkbenchSidebar({ projectId, terminals, getTerminalTitle, tabs, action
         {terminals.map((terminal) => {
           const tab = tabs.tabs.find((candidate) => candidate.kind === "terminal" && candidate.terminalId === terminal.id);
           const attachable = actionsAvailable && isTerminalAttachableState(terminal.state);
-          return <li key={terminal.id} className={`${tab?.id === tabs.activeTabId ? "selected " : ""}${terminal.state === "lost" ? "lost-terminal" : ""}`}>
+          return <li key={terminal.id} className={tab?.id === tabs.activeTabId ? "selected" : ""}>
             <button type="button" disabled={!attachable} onClick={() => onOpenTerminal(terminal)} title={attachable ? "Open terminal tab" : "This terminal is no longer attachable"}>
               <span className={`sidebar-state ${terminal.state}`} aria-hidden="true" />
               <span><strong>{getTerminalTitle(terminal)}</strong><small>{terminal.state}</small></span>
               {tab?.id === tabs.activeTabId && <span className="sidebar-active">●</span>}
             </button>
-            {terminal.state === "lost" && <div className="lost-terminal-notice">
-              <p>{terminalStateMessage(terminal.state)}</p>
-              <p>Stop the workspace runtime to reclaim all processes in this container.</p>
-              <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
-                canStart={canStart} canStop={canStop} retryStart={retryStart} action="stop" />
-            </div>}
           </li>;
         })}
       </ul>}
@@ -366,6 +376,23 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
       })() : null)}
+  </div>;
+}
+
+function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onDismiss }: {
+  count: number; projectId: string; runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null;
+  canStart: boolean; canStop: boolean; retryStart: boolean; onDismiss: () => void;
+}) {
+  return <div className="lost-terminal-dialog-backdrop">
+    <section className="lost-terminal-dialog" role="dialog" aria-modal="true" aria-labelledby="lost-terminal-dialog-title">
+      <h2 id="lost-terminal-dialog-title">Terminal session lost</h2>
+      <p>{lostTerminalDialogBody(count)}</p>
+      <div className="lost-terminal-dialog-actions">
+        <button type="button" className="lost-terminal-dismiss" onClick={onDismiss}>Dismiss</button>
+        <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
+          canStart={canStart} canStop={canStop} retryStart={retryStart} action="stop" stopLabel="Stop workspace" />
+      </div>
+    </section>
   </div>;
 }
 

@@ -36,14 +36,18 @@ describe("terminal lifecycle reconciliation", () => {
     expect(terminalStateMessage("lost")).toContain("processes launched here may still be running");
   });
 
-  test("renders lost-terminal guidance with the existing stop control", async () => {
+  test("renders lost terminals compactly and delegates recovery to one dialog", async () => {
     const workbench = await readFile(new URL("./project-workbench.tsx", import.meta.url), "utf8");
     const runtimeControls = await readFile(new URL("./runtime-controls.tsx", import.meta.url), "utf8");
     expect(workbench).toContain('terminal.state === "lost"');
-    expect(workbench).toContain("<RuntimeControls");
-    expect(workbench).toContain('action="stop"');
+    expect(workbench).toContain("<LostTerminalDialog");
+    expect(workbench).toContain('role="dialog"');
+    expect(workbench).not.toContain("lost-terminal-notice");
+    expect(workbench).toContain('stopLabel="Stop workspace"');
+    expect(workbench).toContain("runtimeState={runtimeState}");
     expect(runtimeControls).toContain("/api/projects/${projectId}/runtime");
     expect(runtimeControls).toContain('body: JSON.stringify({ action })');
+    expect(runtimeControls).toContain("runtimeControlState");
   });
 
   test("keeps one persistent runtime control with state-aware actions", async () => {
