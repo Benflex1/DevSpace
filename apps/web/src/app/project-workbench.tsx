@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, terminalStateMessage, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
-import { isPreviewChanging, previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
+import { createPreviewLivenessPoller } from "./preview-liveness.js";
+import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import {
   activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
@@ -87,10 +88,19 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     if (previewResponse.ok) {
       const data = await previewResponse.json() as { previews: PreviewLifecycleView[] };
       nextPreviews = data.previews;
+      currentPreviews.current = data.previews;
       setPreviews(data.previews);
     }
     return { terminals, previews: nextPreviews };
   }, [getTerminalTitle, projectId]);
+  const refreshPreviews = useCallback(async (): Promise<readonly PreviewLifecycleView[] | null> => {
+    const response = await fetch(`/api/projects/${projectId}/previews`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const data = await response.json() as { previews: PreviewLifecycleView[] };
+    currentPreviews.current = data.previews;
+    setPreviews(data.previews);
+    return data.previews;
+  }, [projectId]);
   const updateTerminalState = useCallback((terminalId: string, state: string) => {
     setTerminals((current) => updateTerminalCollectionState(current, terminalId, state));
   }, []);
@@ -125,30 +135,22 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, [refresh, runs]);
 
   useEffect(() => {
-    if (!previews.some(isPreviewChanging)) return;
-    let stopped = false;
-    let timer: number | null = null;
-    const schedule = () => {
-      if (stopped || document.visibilityState !== "visible") return;
-      timer = window.setTimeout(() => {
-        timer = null;
-        refresh().catch(() => undefined).finally(() => schedule());
-      }, 1_500);
-    };
-    const handleVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        if (timer !== null) window.clearTimeout(timer);
-        timer = null;
-      } else schedule();
-    };
+    // TODO: move active preview reconciliation into background server orchestration rather than relying on an open Workbench.
+    const poller = createPreviewLivenessPoller({
+      readPreviews: () => currentPreviews.current,
+      readVisibility: () => document.visibilityState,
+      refreshPreviews,
+      setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+      clearTimeout: (timer) => window.clearTimeout(timer)
+    });
+    const handleVisibility = () => poller.visibilityChanged();
     document.addEventListener("visibilitychange", handleVisibility);
-    schedule();
+    poller.start();
     return () => {
-      stopped = true;
-      if (timer !== null) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", handleVisibility);
+      poller.stop();
     };
-  }, [previews, refresh]);
+  }, [refreshPreviews]);
 
   const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) => isTerminalVisibleState(terminal.state))), [terminals]);
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);

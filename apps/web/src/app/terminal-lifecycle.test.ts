@@ -46,6 +46,18 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain('body: JSON.stringify({ action })');
   });
 
+  test("keeps one persistent runtime control with state-aware actions", async () => {
+    const workbench = await readFile(new URL("./project-workbench.tsx", import.meta.url), "utf8");
+    const runtimeControls = await readFile(new URL("./runtime-controls.tsx", import.meta.url), "utf8");
+    expect(workbench.match(/<RuntimeControls/g)).toHaveLength(2);
+    expect(runtimeControls.match(/export function RuntimeControls/g)).toHaveLength(1);
+    expect(runtimeControls).toContain('"Start runtime"');
+    expect(runtimeControls).toContain('"Stop runtime"');
+    expect(runtimeControls).toContain("activeAction === null");
+    expect(runtimeControls).toContain("disabled={pending}");
+    expect(runtimeControls).toContain("router.refresh()");
+  });
+
   test("keeps creating visible but never attachable", () => {
     expect(isTerminalVisibleState("creating")).toBe(true);
     expect(isTerminalAttachableState("creating")).toBe(false);
