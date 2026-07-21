@@ -106,7 +106,7 @@ test("initial setup stores a workspace preview and matching development port, th
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-setup-preview-")); directories.push(directory);
   const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));
   const project = database.createProject({
-    name: "Repository", slug: "repository", repositoryUrl: "https://example.com/repository.git",
+    name: "Repository", slug: "vite-react-tailwind-starter3", repositoryUrl: "https://example.com/repository.git",
     defaultBranch: "main", actor: "developer@example.com"
   });
   const result = await setupPrimaryWorkspace({
@@ -124,7 +124,7 @@ test("initial setup stores a workspace preview and matching development port, th
   expect(options.developmentEnvironment.ports).toEqual([{ name: "web", containerPort: 5173, protocol: "tcp" }]);
   expect(options.previews).toEqual([expect.objectContaining({
     key: "web", displayName: "Web", target: { kind: "workspace" }, containerPort: 5173,
-    domainBaseId: "preview-main", hostnamePattern: "{project}-{workspace}-{preview}-{shortId}",
+    domainBaseId: "preview-main", hostnamePattern: "{project}-{shortId}",
     protocol: "http", healthPath: "/", healthStatuses: [200], startupTimeoutSeconds: 60, webSocketForwarding: true
   })]);
   expect(options.tasks).toEqual([expect.objectContaining({ key: "check", displayName: "Check workspace" })]);
@@ -134,7 +134,28 @@ test("initial setup stores a workspace preview and matching development port, th
   const materialized = database.getManagedProject(project.id)?.previews;
   expect(materialized).toHaveLength(1);
   expect(materialized?.[0]).toMatchObject({ previewKey: "web", displayName: "Web", containerPort: 5173 });
-  expect(materialized?.[0]?.hostname).toMatch(/^repository-primary-web-[0-9a-f]{8}-preview\.preview\.example\.com$/u);
+  expect(materialized?.[0]?.hostname).toMatch(/^vite-react-tailwind-starter3-[0-9a-f]{8}-preview\.preview\.example\.com$/u);
+  expect(materialized?.[0]?.hostname.split(".")[0]?.length).toBeLessThanOrEqual(63);
+  database.close();
+});
+
+test("validates the actual project slug before persisting an overlong default preview configuration", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-setup-preview-length-")); directories.push(directory);
+  const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));
+  const project = database.createProject({
+    name: "Long project", slug: "a".repeat(54), repositoryUrl: "https://example.com/repository.git",
+    defaultBranch: "main", actor: "developer@example.com"
+  });
+  const input = {
+    imageReference: "node:24-bookworm",
+    preview: { key: "web", displayName: "Web", containerPort: 3000, domainBaseId: "preview-main" }
+  };
+  await expect(setupPrimaryWorkspace(input, project.id, "developer@example.com", {
+    database, agent: {} as WorkspaceSetupAgent, previewBaseRegistry: approvedPreviewRegistry()
+  })).rejects.toThrow("PREVIEW_COMPOSED_LABEL_TOO_LONG");
+  expect(database.listOperations()).toHaveLength(0);
+  expect(database.listConfigRevisions()).toHaveLength(0);
+  expect(database.listManagedProjects()[0]).toMatchObject({ state: "registering", activeRevision: null, primaryWorkspace: null });
   database.close();
 });
 

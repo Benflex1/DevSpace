@@ -87,7 +87,7 @@ export function WorkspaceSetupForm({ projectId, agentReachable, previewBases }: 
               onChange={(event) => setPreviewBaseId(event.target.value)}>
               {previewBases.map((base) => <option key={base.id} value={base.id}>{base.domain}</option>)}
             </select></label>
-            <small>Preview hostnames use {"{project}-{workspace}-{preview}-{shortId}"}. The workspace target uses HTTP, health path /, status 200, a 60-second startup timeout, and WebSocket forwarding.</small>
+            <small>Preview hostnames use {"{project}-{shortId}"} by default. The workspace target uses HTTP, health path /, status 200, a 60-second startup timeout, and WebSocket forwarding.</small>
           </div>}
         </>}
     </fieldset>

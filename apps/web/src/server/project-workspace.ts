@@ -2,6 +2,7 @@ import type { GitInspectionData, WorkspaceInspectionData } from "@devspace/contr
 import { createAgentClient } from "./agent-client.js";
 import { readWebRuntimeConfig } from "./config.js";
 import { getProjectDatabase, type ManagedProjectView } from "./database.js";
+import { PreviewMaterializationError } from "./preview-persistence.js";
 import { reconcileWorkspacePreviews } from "./preview-orchestration.js";
 import { reconcilePrimaryWorkspaceRuntimeOperation, type RuntimeOperationReconciliation } from "./runtime-operation-reconciliation.js";
 
@@ -25,6 +26,7 @@ export interface ProjectWorkspaceData {
     readonly workspace: WorkspaceInspectionData;
   };
   readonly runtimeOperation: RuntimeOperationReconciliation | null;
+  readonly previewMaterializationError: string | null;
 }
 
 async function readAgentStatus(agent: ReturnType<typeof createAgentClient>): Promise<{
@@ -55,14 +57,18 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
   const database = getProjectDatabase(config.databasePath);
   let project = database.getManagedProject(projectId);
   if (project === undefined) return null;
+  let previewMaterializationError: string | null = null;
   if (project.state === "ready" && project.primaryWorkspace !== null && project.activeRevision !== null) {
     try {
       database.materializePreviews({ projectId: project.id, workspaceId: project.primaryWorkspace.id,
         revisionId: project.activeRevision.id, previewBaseRegistry: config.previewBaseRegistry });
       project = database.getManagedProject(projectId) ?? project;
-    } catch {
+    } catch (error) {
       // An invalid deployment registry or stale revision is retained as a safe
       // unavailable preview condition rather than blocking the project page.
+      previewMaterializationError = error instanceof PreviewMaterializationError
+        ? `Preview configuration unavailable: ${error.message.slice(0, 256)}`
+        : "Preview configuration could not be materialized safely. Review the active Project Options and preview base configuration.";
     }
   }
   const agent = createAgentClient(config.agentSocketPath);
@@ -96,7 +102,7 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
   const reconciledProject = database.getManagedProject(projectId);
   if (reconciledProject === undefined) return null;
   return { project: reconciledProject, agentStatus: agentState.status, agentReachable: agentState.reachable,
-    runtimeAvailability: agentState.runtimeAvailability, live, runtimeOperation };
+    runtimeAvailability: agentState.runtimeAvailability, live, runtimeOperation, previewMaterializationError };
 }
 
 function actorForPreviewReconciliation(): string {

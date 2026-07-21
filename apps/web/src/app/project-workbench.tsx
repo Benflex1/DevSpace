@@ -17,7 +17,7 @@ type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
 export function ProjectWorkbench({ projectId, workspaceId, projectName, branchName, runtimeState, runtimeRunning, runtimeAvailable,
   agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, initialTasks, initialTaskRuns, initialTerminals, initialPreviews,
-  previewGateway, repositoryUrl, actor }: {
+  previewGateway, repositoryUrl, actor, initialMessage }: {
   projectId: string;
   workspaceId: string;
   projectName: string;
@@ -38,6 +38,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   repositoryUrl: string;
   actor: string;
+  initialMessage?: string | null;
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
@@ -48,7 +49,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
   const [previews, setPreviews] = useState<readonly PreviewLifecycleView[]>(initialPreviews);
   const currentPreviews = useRef(initialPreviews);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(initialMessage ?? "");
   const [lostDialogIds, setLostDialogIds] = useState<readonly string[]>([]);
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;

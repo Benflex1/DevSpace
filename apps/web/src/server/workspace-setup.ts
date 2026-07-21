@@ -81,23 +81,27 @@ export function parseWorkspaceSetupInput(value: unknown): WorkspaceSetupInput {
   } };
 }
 
-const initialPreviewHostnamePattern = "{project}-{workspace}-{preview}-{shortId}";
+const initialPreviewHostnamePattern = "{project}-{shortId}";
 
-function assertApprovedPreviewBase(input: WorkspaceSetupInput, registry: ApprovedPreviewBaseRegistry | undefined): void {
+function assertApprovedPreviewBase(input: WorkspaceSetupInput, projectSlug: string, registry: ApprovedPreviewBaseRegistry | undefined): void {
   if (input.preview === undefined) return;
   if (registry === undefined) throw new WorkspaceSetupValidationError("Previews are unavailable because no approved preview base registry is configured.");
   const pattern = validatePreviewHostnamePattern(initialPreviewHostnamePattern);
-  const project = validateDnsLabel("project");
-  const workspace = validateDnsLabel("workspace");
-  const preview = validateDnsLabel("preview");
-  const shortId = validateDnsLabel("shortid");
+  const project = validateDnsLabel(projectSlug, "projectSlug");
+  const workspace = validateDnsLabel("primary", "workspaceSlug");
+  const preview = validateDnsLabel(input.preview.key, "previewKey");
+  // Preview IDs are UUIDv7 values; only their fixed eight-character prefix affects this check.
+  const shortId = validateDnsLabel("00000000", "previewShortId");
   if (!pattern.ok || !project.ok || !workspace.ok || !preview.ok || !shortId.ok) {
     throw new WorkspaceSetupValidationError("The default preview hostname pattern is invalid.");
   }
   const composed = composePreviewHostname(pattern.value, {
-    project: project.value, workspace: workspace.value, preview: preview.value, shortId: shortId.value
+    project: project.value, shortId: shortId.value
   }, input.preview.domainBaseId, registry);
-  if (!composed.ok) throw new WorkspaceSetupValidationError("Select an approved preview base.");
+  if (!composed.ok) {
+    if (composed.error.code === "PREVIEW_BASE_UNKNOWN") throw new WorkspaceSetupValidationError("Select an approved preview base.");
+    throw new WorkspaceSetupValidationError(`The preview hostname cannot be composed safely: ${composed.error.code}.`);
+  }
 }
 
 function initialProjectOptions(input: WorkspaceSetupInput) {
@@ -161,7 +165,9 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
   readonly git: Awaited<ReturnType<WorkspaceAgentClient["inspectGit"]>>;
   readonly workspace: Awaited<ReturnType<WorkspaceAgentClient["inspectWorkspace"]>>;
 }> {
-  assertApprovedPreviewBase(input, dependencies.previewBaseRegistry);
+  const registeredProject = dependencies.database.getManagedProject(projectId);
+  if (registeredProject === undefined) throw new WorkspaceSetupValidationError("The project no longer exists.");
+  assertApprovedPreviewBase(input, registeredProject.slug, dependencies.previewBaseRegistry);
   await dependencies.agent.health();
   const options = initialProjectOptions(input);
   const configurationJson = canonicalizeProjectOptionsV1(options);
