@@ -2,17 +2,19 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { runtimeControlState, type RuntimeControlAction } from "./runtime-control-state.js";
 
-export function RuntimeControls({ projectId, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction }: {
+export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction }: {
   projectId: string; runtimeAvailable: boolean;
-  activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
-  action?: "start" | "stop";
+  runtimeState: string; activeAction: RuntimeControlAction | null; canStart: boolean; canStop: boolean; retryStart: boolean;
+  action?: RuntimeControlAction;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  const action = requestedAction ?? (canStop ? "stop" : "start");
-  const actionable = activeAction === null && runtimeAvailable && (action === "stop" ? canStop : canStart);
+  const state = runtimeControlState({ runtimeState, runtimeAvailable, activeAction, canStart, canStop,
+    ...(requestedAction === undefined ? {} : { requestedAction }) });
+  const { action } = state;
   const mutate = async () => {
     setPending(true); setMessage(action === "start" ? "Starting runtime…" : "Stopping runtime…");
     try {
@@ -29,10 +31,11 @@ export function RuntimeControls({ projectId, runtimeAvailable, activeAction, can
     } catch (error) { setMessage(error instanceof Error ? error.message : "The runtime action failed."); setPending(false); }
   };
   return <div className="runtime-controls">
-    {activeAction !== null && <button type="button" disabled>
+    {activeAction !== null && <button type="button" disabled title="Another runtime action is already in progress.">
       {activeAction === "start" ? "Starting…" : "Stopping…"}
     </button>}
-    {actionable && <button type="button" disabled={pending} onClick={() => { mutate().catch(() => setPending(false)); }}>
+    {activeAction === null && <button type="button" disabled={state.disabled || pending} title={state.reason ?? undefined}
+      onClick={() => { mutate().catch(() => setPending(false)); }}>
       {pending ? (action === "start" ? "Starting…" : "Stopping…")
         : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : "Stop runtime"}
     </button>}

@@ -178,6 +178,11 @@ function sameAssociation(left: PreviewLease | PreviewState, right: RuntimeAssoci
     && left.revisionId === right.revisionId && left.revisionHash === right.revisionHash
     && left.runtimePlanHash === right.runtimePlanHash && left.generation === right.generation;
 }
+function isTargetNotListening(result: PreviewGatewayProbeResult): boolean {
+  if (result.kind !== "infrastructure") return false;
+  return result.message === "The loopback preview target is unavailable."
+    || (/\bECONNREFUSED\b/u.test(result.message) && /loopback|preview target|127\.0\.0\.1|localhost/iu.test(result.message));
+}
 function safeLabel(value: string, field: string): DnsLabel {
   const result = validateDnsLabel(value, field);
   if (!result.ok) throw new PreviewRuntimeError("PREVIEW_DOMAIN_NOT_APPROVED", `The preview ${field} is not a valid DNS label.`);
@@ -558,7 +563,7 @@ export class PreviewRuntimeManager {
       try { await this.removeRoute(record); routePresent = false; }
       catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; }
     }
-    const targetNotListening = result.kind === "infrastructure" && result.message === "The loopback preview target is unavailable.";
+    const targetNotListening = isTargetNotListening(result);
     if (result.kind === "infrastructure" && !targetNotListening) {
       const next = { ...record, observedState: "failed" as const, routePresent: false as const,
         attempt, nextAttemptAt, lastStatusCode: null, lastError: result.message.slice(0, 256), containerId: ownership.developmentContainer.id };

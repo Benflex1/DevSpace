@@ -231,7 +231,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       retryStart={retryStart} />
     <div className="workbench-body">
       <WorkbenchSidebar projectId={projectId} terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable}
-        runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart} tasks={tasks} runs={runs}
+        runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
@@ -258,17 +258,17 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
     <div className="workbench-context"><span className="context-item"><span className="context-label">branch</span><code>{branchName}</code></span>
       <span className={`runtime-chip ${runtimeState}`}>{runtimeLabel(runtimeState)}</span>
       <a className="topbar-action" href={repositoryUrl} target="_blank" rel="noreferrer">Repository</a>
-      <RuntimeControls projectId={projectId} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart}
+      <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart}
         canStop={canStop} retryStart={retryStart} />
     </div>
   </header>;
 }
 
-function WorkbenchSidebar({ projectId, terminals, getTerminalTitle, tabs, actionsAvailable, runtimeAvailable, activeAction, canStart, canStop, retryStart, tasks, runs, previews, onOpenPreview,
+function WorkbenchSidebar({ projectId, terminals, getTerminalTitle, tabs, actionsAvailable, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, tasks, runs, previews, onOpenPreview,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
   projectId: string;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
-  runtimeAvailable: boolean; activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
+  runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
   previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
@@ -301,7 +301,7 @@ function WorkbenchSidebar({ projectId, terminals, getTerminalTitle, tabs, action
             {terminal.state === "lost" && <div className="lost-terminal-notice">
               <p>{terminalStateMessage(terminal.state)}</p>
               <p>Stop the workspace runtime to reclaim all processes in this container.</p>
-              <RuntimeControls projectId={projectId} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
+              <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
                 canStart={canStart} canStop={canStop} retryStart={retryStart} action="stop" />
             </div>}
           </li>;
