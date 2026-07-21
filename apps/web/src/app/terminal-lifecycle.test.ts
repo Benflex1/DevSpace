@@ -54,7 +54,9 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain('"Start runtime"');
     expect(runtimeControls).toContain('"Stop runtime"');
     expect(runtimeControls).toContain("activeAction === null");
-    expect(runtimeControls).toContain("disabled={pending}");
+    expect(runtimeControls).toContain("disabled={state.disabled || pending}");
+    expect(runtimeControls).toContain("{activeAction === null && <button");
+    expect(workbench).toContain("runtimeState={runtimeState}");
     expect(runtimeControls).toContain("router.refresh()");
   });
 

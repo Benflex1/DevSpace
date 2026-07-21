@@ -226,6 +226,20 @@ describe("Agent preview runtime policy", () => {
     await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy", routePresent: false });
   });
 
+  test("classifies the local loopback connection-refused result as Waiting", async () => {
+    const probe = new Probe([{ kind: "infrastructure", message: "connect ECONNREFUSED 127.0.0.1:40000" }]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy", routePresent: false });
+  });
+
+  test("keeps a private gateway probe failure as infrastructure loss", async () => {
+    const probe = new Probe([{ kind: "infrastructure", message: "The private gateway probe is unavailable." }]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "failed", routePresent: false });
+  });
+
   test("accepts configured status codes and preserves WebSocket probe metadata", async () => {
     const probe = new Probe([{ kind: "response", statusCode: 200 }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
