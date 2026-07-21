@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { restartRuntime } from "./runtime-restart.js";
+import { restartRuntime, type RuntimeRestartAuthorization } from "./runtime-restart.js";
 import { runtimeControlState, runtimeRestartControlState, type RuntimeControlAction } from "./runtime-control-state.js";
 
 export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction, stopLabel, restart = false, onSuccess }: {
@@ -43,9 +43,15 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
       if (isRestart) {
         const mode = restartState?.mode;
         if (mode === null || mode === undefined) return;
+        const readAuthorization = async (): Promise<RuntimeRestartAuthorization> => {
+          const response = await fetch(`/api/projects/${projectId}/runtime`, { cache: "no-store" });
+          const body = await response.json() as RuntimeRestartAuthorization & { message?: string };
+          if (!response.ok) throw new Error(body.message ?? "Fresh runtime authorization could not be obtained.");
+          return body;
+        };
         await restartRuntime(mode, async (requested) => {
           await request(requested, true);
-        });
+        }, mode === "running" ? readAuthorization : undefined);
         setMessage("Workspace restarted.");
         router.refresh();
         onSuccess?.();

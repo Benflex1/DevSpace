@@ -38,11 +38,11 @@ describe("runtime control state", () => {
     });
   });
 
-  test("requires both authorized lifecycle actions to restart a running runtime", () => {
-    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStop: true, canStart: true })).toMatchObject({
+  test("requires only authorized stop to restart a running runtime", () => {
+    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStop: true })).toMatchObject({
       mode: "running", disabled: false, reason: null
     });
-    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStop: true })).toMatchObject({
+    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStart: true })).toMatchObject({
       mode: "running", disabled: true
     });
   });

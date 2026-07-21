@@ -1,94 +1,435 @@
-# Roadmap
+# DevSpace Roadmap
 
-The roadmap switches to vertical product delivery after the completed foundation. A slice may
-touch Web, DB, Agent, runtime, and UI together when that is required to produce visible value.
+> Updated July 2026.
+>
+> DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
+
+## Status legend
+
+- ✅ Complete
+- 🟢 Working / validated
+- 🟡 In progress
+- ⏳ Planned
+- 🧊 Deferred
+- ❌ Not started
+
+---
+
+# Current overall status
 
 ## Milestone 0 — Foundation
 
-Status: complete.
+**Status: ✅ Complete**
 
-Contains:
+Completed:
 
-- architecture and security boundaries;
-- executable contracts;
-- Project Options foundation;
-- lifecycle and security primitives;
-- database schema and migrations;
-- clean-clone CI contract.
+- ✅ Architecture and package boundaries
+- ✅ Threat model and security boundaries
+- ✅ Browser → Web → Agent Unix-socket trust boundary
+- ✅ Web as sole SQLite writer
+- ✅ Dedicated rootless Docker runtime boundary
+- ✅ No host/Coolify Docker socket exposure to DevSpace workspaces
+- ✅ Project Options v1 validation and runtime-plan foundation
+- ✅ Database schema and migrations
+- ✅ Agent operation journal and lifecycle primitives
+- ✅ Managed repository/workspace ownership model
+- ✅ Contract validation and clean-clone CI
+- ✅ Node 24 / pnpm monorepo foundation
 
-## Milestone 1 — Usable Primary Workspace
+---
 
-### Definition of done
+# Milestone 1 — Usable Primary Workspace
 
-A user can open DevSpace in the browser, register or import a trusted repository, create its
-primary managed workspace, start a real isolated development container, use a browser terminal,
-run at least one configured task, and open a working preview URL.
+**Status: 🟡 Final stretch — roughly 90–95% complete**
 
-This milestone is implemented as vertical slices:
+## Definition of done
 
-### 1. Project onboarding path
+A user can:
 
-Crosses the Web UI/API, SQLite, Agent Unix-socket health and inspection, and repository
-registration.
+1. open DevSpace in the browser;
+2. register/import a trusted repository;
+3. create its primary managed workspace;
+4. start a real isolated development container;
+5. use a browser terminal;
+6. run configured project commands/tasks;
+7. open the running project through a working preview URL;
+8. stop/restart the workspace through the normal ownership-checked lifecycle;
+9. recover cleanly enough from normal Agent/Web restarts for daily use.
 
-Visible result: a project can be added and appears in DevSpace with real persisted status.
+The full core path now works locally. Remaining work is mostly final lifecycle/UI polish, hardening, and production deployment.
 
-### 2. Managed primary workspace
+## Slice 1 — Project onboarding
 
-Crosses Web orchestration, the Agent, the managed repository store, the primary Git worktree, and
-persisted workspace/runtime state.
+**Status: ✅ Complete**
 
-Visible result: a real repository has a managed primary workspace.
+- ✅ Trusted repositories can be registered/imported
+- ✅ Projects persist in SQLite
+- ✅ Web/API onboarding flow works
+- ✅ Agent health/inspection integration works
+- ✅ Project appears in DevSpace with persisted state
 
-### 3. Real workspace runtime
+## Slice 2 — Managed primary workspace
 
-Crosses Project Options runtime-plan compilation, Agent policy validation, dedicated rootless
-Docker, start/stop lifecycle, and persisted desired/observed state.
+**Status: ✅ Complete**
 
-Visible result: the user can start and stop the real isolated development environment.
+- ✅ Managed bare repository store
+- ✅ Primary Git worktree
+- ✅ Agent-private ownership records
+- ✅ Persisted workspace state
+- ✅ Exact project/workspace ownership validation
+- ✅ Restart-safe managed workspace recovery foundations
 
-### 4. Terminal and task path
+## Slice 3 — Real workspace runtime
 
-Crosses the WebSocket/browser terminal, Agent PTY, workspace container, and process/task tracking.
+**Status: ✅ Complete**
 
-Visible result: the user can interact with the running workspace and execute useful project
-commands.
+- ✅ Project Options compile into a runtime plan
+- ✅ Agent validates runtime policy
+- ✅ Dedicated rootless Docker daemon is used
+- ✅ Workspace runtime can start and stop
+- ✅ Desired/observed runtime state persists
+- ✅ Exact Agent-private runtime ownership is checked before mutation
+- ✅ Docker ownership/labels remain independently fail-closed
 
-### 5. Preview path
+Important lifecycle fixes completed:
 
-Crosses a configured preview target, the Agent, the Caddy gateway, a wildcard domain, and Web
-status.
+- ✅ Docker 29 response compatibility fix
+- ✅ Rootless runtime error classification fix
+- ✅ Runtime Stop authorization no longer depends unnecessarily on the general Agent snapshot
+- ✅ Finalized filesystem ownership can recover safely when `st_dev` changes across reboot/remount while paths/inodes and independent ownership proofs remain valid
+- ✅ Strict live `{device, inode}` checks remain unchanged for TOCTOU-sensitive mutations
 
-Visible result: the user can open the running project through its DevSpace preview URL.
+Deferred hardening:
 
-### 6. Dogfood and hardening
+- 🧊 Incomplete creation-record recovery across device renumbering remains fail-closed and should be handled later
 
-Use DevSpace to work on at least one real project and fix only concrete blockers exposed by real
-use. The Milestone 1 definition of done remains the complete usable path above.
+## Slice 4 — Terminal and task path
 
-These are not mandatory isolated subsystem phases. Each slice ends in observable user value.
+**Status: ✅ Core complete / 🟡 UX follow-up remains**
 
-## Milestone 2 — Better Daily Development
+- ✅ Browser terminal works
+- ✅ Agent PTY connection works
+- ✅ Terminal runs inside the workspace container
+- ✅ Project commands can be executed
+- ✅ Task/process tracking foundation exists
+- ✅ Lost terminal sessions are detected after Agent restart
+- ✅ Lost-terminal recovery dialog exists
 
-Likely goals include better Project Options editing and detection, supporting services, logs and
-process UX, rebuild/restart flows, stronger recovery and reconciliation, and better Git status.
+Current limitation:
 
-## Milestone 3 — Parallel Workspaces
+- 🧊 True terminal reattachment is not possible with the current Docker exec/PTTY model
 
-Add optional isolated workspaces, branches and worktrees, independent stacks and previews, and
-archive/remove lifecycle.
+Planned follow-up:
 
-## Milestone 4 — AI Development Sessions
+- ⏳ Persistent terminal/session ownership layer
+- ⏳ Attach/detach semantics
+- ⏳ Better long-lived terminal recovery for shells, Vite, Codex, and other processes
 
-Add approved AI CLI profiles, start/resume/interrupt/stop controls, terminal-backed AI sessions,
-workspace-scoped credentials, and session metadata and UX.
+Current UI polish in progress:
 
-## Milestone 5 — Git Review and Publishing
+- 🟡 Lost terminal rows should automatically disappear from the sidebar after a short grace period
+- 🟡 Lost-terminal recovery action should become **Restart workspace**
+- 🟡 Lost-terminal dialog button hierarchy should make Dismiss smaller/secondary and Restart workspace prominent
 
-Add diff/status UI, staging, checks, commits, push, and optional draft pull request creation.
-Never auto-merge.
+## Slice 5 — Preview path
 
-## Milestone 6 — Reliability and Polish
+**Status: 🟢 Core implementation complete / 🟡 final polish and deployment pending**
 
-Add deeper reconciliation, stale cleanup, resource reporting, backup/restore validation,
-notifications, and UX polish.
+Working locally:
+
+- ✅ Configured preview targets
+- ✅ Preview activation
+- ✅ Readiness detection
+- ✅ `Waiting`, `Ready`, and `Unavailable` states
+- ✅ Stable preview hostname
+- ✅ Dedicated Caddy preview gateway
+- ✅ Rootless-Docker loopback lease routing
+- ✅ HTTP preview traffic
+- ✅ WebSocket/HMR support
+- ✅ Preview route removed when runtime stops
+- ✅ Same hostname restored when runtime restarts
+- ✅ Preview survives normal Web/Agent restart reconciliation
+- ✅ Active preview liveness polling
+- ✅ `ECONNREFUSED` correctly maps to `Waiting`
+- ✅ Stale `Ready` state is cleared when authoritative inspection fails
+- ✅ Preview setup fields are integrated into project setup
+
+Preview topology:
+
+```text
+Browser
+→ Cloudflare Access
+→ Cloudflare
+→ Cloudflare Tunnel
+→ dedicated Caddy preview gateway
+→ Agent-managed loopback lease
+→ exact workspace container port
+```
+
+Security and deployment support completed:
+
+- ✅ No Docker socket in Caddy
+- ✅ No arbitrary upstream routing
+- ✅ Exact running workspace/runtime required
+- ✅ Declared ports only
+- ✅ Agent owns route validation and reconciliation
+- ✅ Web remains sole database writer
+- ✅ Dedicated preview-gateway Compose stack
+- ✅ Caddy static configuration
+- ✅ Preview gateway host service
+- ✅ Private lease resolver
+- ✅ Private gateway probe
+- ✅ Deployment documentation
+- ✅ Real Caddy CI smoke test
+
+Remaining before Slice 5 is fully closed:
+
+- 🟡 Finish current Workbench UI polish
+- 🟡 Re-run final local lifecycle checklist
+- ⏳ Deploy the preview gateway stack on the home server
+- ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
+- ⏳ Configure the production preview environment
+- ⏳ Configure static wildcard Cloudflare routing to the dedicated preview gateway
+- ⏳ Verify real production preview traffic and HMR through Cloudflare
+
+Final local checklist:
+
+- 🟢 Vite running → Preview `Ready`
+- 🟢 Stop Vite → Preview `Waiting`
+- 🟢 Restart Vite → Preview `Ready`
+- 🟢 Stop runtime becomes available after restart/remount recovery
+- 🟢 Runtime Stop uses the normal ownership-checked path
+- 🟢 Agent restart detects lost terminals
+- 🟡 Lost-terminal UI polish still being finalized
+- ⏳ Final production server validation
+
+## Slice 6 — M1 hardening and diagnostics
+
+**Status: ⏳ Planned**
+
+### Diagnostics and logging
+
+- ⏳ Structured Web and Agent logs
+- ⏳ Request/operation/resource correlation IDs
+- ⏳ Lifecycle stage and timing information
+- ⏳ Stable failure categories with safe underlying cause details
+- ⏳ Better health breakdown instead of only `Agent degraded`
+- ⏳ Explicit reconciliation decision logging
+- ⏳ Safe secret/path redaction policy
+- ⏳ Incident/error IDs that connect UI errors to service logs
+
+Later operational UX:
+
+- ⏳ Persistent rotated service logs
+- ⏳ Search/filter diagnostics UI
+- ⏳ Per-operation timelines
+- ⏳ Health subsystem details
+- ⏳ Log export and retention controls
+- ⏳ Dedicated Diagnostics view
+
+### Lifecycle hardening
+
+- ⏳ Creation-record recovery across reboot/remount/device renumbering
+- ⏳ Better stale-state cleanup
+- ⏳ More explicit degraded-subsystem reporting
+- ⏳ Additional restart/reconciliation regression coverage
+- ⏳ Local development launcher should use a short Unix socket path automatically
+- ⏳ Eliminate the current manual `/run/user/.../devspace` socket workaround
+
+### Toolchain maintenance
+
+- ⏳ Evaluate and adopt TypeScript 7 for faster typechecking where compatible
+- ⏳ Keep a compatibility TypeScript toolchain only where ecosystem tools still require the legacy compiler API
+- ⏳ Benchmark DevSpace typecheck/CI before and after migration
+- ⏳ Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, and the monorepo tsconfig hierarchy
+
+---
+
+# Immediate next steps
+
+1. 🟡 Finish the current Workbench lost-terminal/status UI polish PR
+2. ⏳ Merge and manually verify the polish
+3. ⏳ Run the final local Slice 5 lifecycle checklist
+4. ⏳ Deploy the preview gateway stack to the home server
+5. ⏳ Configure production wildcard preview routing
+6. ⏳ Validate production previews/HMR
+7. ⏳ Complete focused M1 Slice 6 hardening
+8. ⏳ Evaluate/adopt TypeScript 7 without breaking tooling compatibility
+9. ✅ Close Milestone 1
+
+---
+
+# Post-M1 product roadmap
+
+## Near-term product gaps after M1
+
+### Create a project from scratch
+
+**Status: ❌ Not started**
+
+- ❌ Create a brand-new DevSpace project without requiring an existing GitHub repository
+- ❌ Initialize repository/workspace safely
+- ❌ Optionally publish/connect it to GitHub later
+
+### Persistent terminals
+
+**Status: ❌ Not started**
+
+Goal:
+
+```text
+Browser
+→ Agent
+→ attach/detach
+→ persistent terminal session
+→ shell / task / Vite / Codex / AI tools
+```
+
+This replaces the current Docker-exec PTY limitation where an Agent restart loses the browser attachment.
+
+---
+
+# Milestone 2 — Real Development Workbench
+
+**Status: ❌ Not started as a milestone**
+
+Goal: make DevSpace the main place where normal development work happens without turning it into a VS Code clone with permanent multi-pane chrome.
+
+## Files and editor
+
+- ❌ File tree
+- ❌ File viewing/editing
+- ❌ Create/rename/delete files
+- ❌ Search/navigation
+- ❌ Editor tabs
+
+## Git experience
+
+- ❌ Better status view
+- ❌ Diff UI
+- ❌ Staging
+- ❌ Commit workflow
+- ❌ Push workflow
+- ❌ Branch awareness
+
+## AI sessions
+
+- ❌ AI session tabs
+- ❌ Approved AI CLI profiles
+- ❌ Start/resume/interrupt/stop controls
+- ❌ Workspace-scoped credentials
+- ❌ Persistent AI session metadata
+- ❌ Better integration with project context
+
+## Tasks and processes
+
+- 🟡 Basic task/process foundation exists from M1
+- ❌ Better task output UX
+- ❌ Process lifecycle controls
+- ❌ Persistent task history
+- ❌ Better long-running process handling
+
+## Project Options
+
+- 🟡 Project setup already exposes the preview configuration needed for M1
+- ❌ Full Project Options editor
+- ❌ Better validation UX
+- ❌ Runtime/service configuration UX
+- ❌ Preview configuration management after project creation
+
+## Workbench lifecycle and visual design
+
+- 🟡 Functional tabbed Workbench exists
+- ❌ Full visual redesign/polish
+- ❌ Better tab lifecycle
+- ❌ First-class Terminal / Editor / Preview / AI / Git / Task tabs
+- ❌ Retained Preview tabs that show `Stopped` or `Failed` after activation
+- ❌ Persistent terminal tabs
+- ❌ Better responsive behavior
+
+## Additional vertical slices
+
+- ❌ Create project from scratch
+- ❌ Persistent terminals
+
+---
+
+# Milestone 3 — AI-first Development Workflows
+
+**Status: ❌ Not started**
+
+- ❌ Project-aware AI sessions
+- ❌ Persistent agent session state
+- ❌ Multi-step implementation/review workflows
+- ❌ Task/check integration
+- ❌ Git-aware AI review flows
+- ❌ Better orchestration between user, workspace, tools, and AI agents
+- ❌ Safe explicit publishing actions
+- ❌ No automatic merge or production deployment
+
+---
+
+# Milestone 4 — Multiple Isolated Workspaces
+
+**Status: ❌ Not started**
+
+- ❌ Isolated workspaces
+- ❌ Branch/worktree creation
+- ❌ Independent runtime stacks
+- ❌ Independent previews
+- ❌ Archive/remove lifecycle
+- ❌ Workspace switching
+- ❌ Resource controls for multiple simultaneous environments
+
+The primary workspace remains the default simple path.
+
+---
+
+# Milestone 5 — Product Hardening and Operations
+
+**Status: ❌ Not started**
+
+- ❌ Deeper reconciliation
+- ❌ Automated stale-resource cleanup
+- ❌ Resource reporting
+- ❌ Backup/restore validation
+- ❌ Notification system
+- ❌ Persistent diagnostics/logging UX
+- ❌ Recovery tooling
+- ❌ Security hardening from real deployment evidence
+- ❌ Performance profiling and optimization
+- ❌ Broader UX accessibility/responsiveness polish
+
+---
+
+# Future mobile companion app
+
+**Status: 🧊 Planned for later, likely after the Web control plane and Workbench mature**
+
+The mobile app should connect to the same DevSpace server and the same project/workspace state rather than creating a separate project universe.
+
+Likely focus:
+
+- ❌ Project/workspace status
+- ❌ Start/stop/restart actions
+- ❌ AI interaction
+- ❌ Git/review workflows
+- ❌ Task/process monitoring
+- ❌ Notifications
+- ❌ Lightweight file editing
+
+Full desktop Workbench parity is not required for the first mobile version.
+
+---
+
+# Explicitly deferred / not current scope
+
+- 🧊 Hostile-code multi-tenant sandboxing
+- 🧊 Automatic merge
+- 🧊 Automatic production deployment
+- 🧊 Production access to the host Docker socket
+- 🧊 Per-preview Cloudflare DNS/API changes
+- 🧊 Permanent VS Code-style multi-pane UI
+- 🧊 Separate backup server requirement
+
+DevSpace remains a trusted-owner, self-hosted development control plane with strong boundaries between projects, the host, and production infrastructure.

@@ -41,13 +41,13 @@ export function runtimeRestartMode(runtimeState: string): RuntimeRestartMode | n
 
 export function runtimeRestartControlState(input: RuntimeRestartControlStateInput): RuntimeRestartControlState {
   const mode = runtimeRestartMode(input.runtimeState);
-  const authorized = mode === "running" ? input.canStop && input.canStart : mode === "start" ? input.canStart : false;
+  const authorized = mode === "running" ? input.canStop : mode === "start" ? input.canStart : false;
   const reason = input.pending ? "Workspace restart is already in progress."
     : input.activeAction !== null ? "Another runtime action is already in progress."
       : !input.runtimeAvailable ? "The dedicated rootless runtime is unavailable."
         : mode === null ? "The runtime state does not currently support restart recovery."
           : !authorized ? mode === "running"
-            ? "The live Agent state does not currently authorize restarting this runtime."
+            ? "The live Agent state does not currently authorize stopping this runtime."
             : "The live Agent state does not currently authorize starting this runtime."
             : null;
   return { mode, disabled: input.pending === true || input.activeAction !== null || !input.runtimeAvailable || mode === null || !authorized, reason };

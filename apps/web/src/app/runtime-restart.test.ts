@@ -3,9 +3,12 @@ import { restartRuntime } from "./runtime-restart.js";
 
 describe("workspace runtime restart", () => {
   test("stops a running runtime before starting it", async () => {
-    const actions: string[] = [];
-    await restartRuntime("running", (action) => { actions.push(action); return Promise.resolve(); });
-    expect(actions).toEqual(["stop", "start"]);
+    const events: string[] = [];
+    await restartRuntime("running", (action) => { events.push(action); return Promise.resolve(); }, () => {
+      events.push("fresh-authorization");
+      return Promise.resolve({ runtimeState: "stopped", canStart: true });
+    });
+    expect(events).toEqual(["stop", "fresh-authorization", "start"]);
   });
 
   test("does not start when stop fails", async () => {
@@ -23,8 +26,29 @@ describe("workspace runtime restart", () => {
       actions.push(action);
       if (action === "start") return Promise.reject(new Error("Start was rejected."));
       return Promise.resolve();
-    })).rejects.toThrow("Start was rejected.");
+    }, () => Promise.resolve({ runtimeState: "stopped", canStart: true }))).rejects.toThrow("Start was rejected.");
     expect(actions).toEqual(["stop", "start"]);
+  });
+
+  test("does not start when fresh post-stop authorization denies it", async () => {
+    const events: string[] = [];
+    await expect(restartRuntime("running", (action) => {
+      events.push(action);
+      return Promise.resolve();
+    }, () => {
+      events.push("fresh-authorization");
+      return Promise.resolve({ runtimeState: "stopped", canStart: false });
+    })).rejects.toThrow("fresh runtime reconciliation does not authorize starting it");
+    expect(events).toEqual(["stop", "fresh-authorization"]);
+  });
+
+  test("does not start when fresh state is not startable", async () => {
+    const actions: string[] = [];
+    await expect(restartRuntime("running", (action) => {
+      actions.push(action);
+      return Promise.resolve();
+    }, () => Promise.resolve({ runtimeState: "running", canStart: true }))).rejects.toThrow("fresh runtime reconciliation does not authorize starting it");
+    expect(actions).toEqual(["stop"]);
   });
 
   test("starts a stopped or absent runtime without stopping first", async () => {

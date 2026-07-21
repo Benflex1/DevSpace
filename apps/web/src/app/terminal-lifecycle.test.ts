@@ -64,6 +64,7 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain("runtimeControlState");
     expect(runtimeControls).toContain('"Restart workspace"');
     expect(runtimeControls).toContain("restartRuntime");
+    expect(runtimeControls).toContain("if (pendingRef.current) return;");
   });
 
   test("keeps one persistent runtime control with state-aware actions", async () => {

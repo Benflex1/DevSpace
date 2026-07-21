@@ -3,11 +3,31 @@ import { createAgentClient } from "../../../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../../../server/config.js";
 import { ProjectSetupConflictError, getProjectDatabase } from "../../../../../server/database.js";
+import { loadProjectWorkspaceData } from "../../../../../server/project-workspace.js";
 import { RequestBodyMalformedError, RequestBodyTooLargeError, readBoundedJsonBody } from "../../../../../server/request-body.js";
 import { WorkspaceRuntimeExecutionError, mutatePrimaryWorkspaceRuntime } from "../../../../../server/workspace-runtime.js";
 
 export const dynamic = "force-dynamic";
 const json = (body: unknown, status: number) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
+
+export async function GET(request: Request, context: { params: Promise<{ projectId: string }> }) {
+  try {
+    const config = readWebRuntimeConfig();
+    await authenticateHeaders(request.headers, config.auth);
+    const { projectId } = await context.params;
+    const data = await loadProjectWorkspaceData(projectId);
+    if (data === null) return json({ message: "Project workspace was not found." }, 404);
+    const activeAction = data.runtimeOperation?.activeAction ?? null;
+    const inspection = data.runtimeOperation?.inspection ?? data.live?.workspace ?? null;
+    const runtimeState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping"
+      : inspection?.runtimeStack.observedState ?? data.project.runtime?.observedState ?? "absent";
+    return json({ runtimeState, runtimeAvailable: data.runtimeAvailability === "available", activeAction,
+      canStart: data.runtimeOperation?.canStart === true, canStop: data.runtimeOperation?.canStop === true }, 200);
+  } catch (error) {
+    if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
+    return json({ message: "Fresh runtime authorization could not be obtained." }, 503);
+  }
+}
 
 export async function POST(request: Request, context: { params: Promise<{ projectId: string }> }) {
   try {
