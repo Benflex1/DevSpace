@@ -91,12 +91,14 @@ export async function reconcilePrimaryWorkspaceRuntimeOperation(projectId: strin
 
   inspection ??= await dependencies.agent.inspectWorkspace(projectId, context.workspace.id).catch(() => null);
   const base = { inspection: inspection ?? null, reconciledTerminal };
-  if (snapshot === null) return inactive({ ...base, canStart: false, canStop: false, canRetryStart: false,
-    retryOperationId: null, blockingReason: "agent-snapshot-unavailable" });
   if (!runtimeAvailable) return inactive({ ...base, canStart: false, canStop: false, canRetryStart: false,
     retryOperationId: null, blockingReason: "runtime-unavailable" });
   if (inspection === null) return inactive({ ...base, canStart: false, canStop: false, canRetryStart: false,
     retryOperationId: null, blockingReason: "inspection-unavailable" });
+
+  const canStop = inspection.observedState === "running" && inspection.runtimeStack.observedState === "running";
+  if (snapshot === null) return inactive({ ...base, canStart: false, canStop, canRetryStart: false,
+    retryOperationId: null, blockingReason: canStop ? null : "agent-snapshot-unavailable" });
 
   const latest = operations[0];
   const latestIsFailedStart = latest?.operationName === "workspace.start" && latest.state === "failed";
@@ -105,7 +107,6 @@ export async function reconcilePrimaryWorkspaceRuntimeOperation(projectId: strin
   const matchingFailure = latestIsFailedStart ? exactObservation(snapshot, latest.operationId) : undefined;
   const canRetryStart = latestIsFailedStart && matchingFailure?.state === "failed" && startableInspection;
   const canStart = latestIsFailedStart ? canRetryStart : startableInspection;
-  const canStop = inspection.observedState === "running" && inspection.runtimeStack.observedState === "running";
   const blockingReason = canStart || canStop ? null
     : latestIsFailedStart ? "failed-start-unproven" : "runtime-state-not-actionable";
   return inactive({ ...base, canStart, canStop, canRetryStart,

@@ -20,6 +20,7 @@ async function runtimeFixture() {
   const project = database.createProject({ name: "Runtime", slug: "runtime-reconcile",
     repositoryUrl: "https://example.com/runtime.git", defaultBranch: "main", actor: "actor" });
   const observations = new Map<string, AgentOperationObservation>();
+  let snapshotFailures = 0;
   let revisionId = ""; let revisionHash = "";
   const succeed = (operationId: string) => observations.set(operationId, {
     operationId, state: "succeeded", updatedAt: "2026-07-18T12:00:00.000Z", failure: null
@@ -31,9 +32,15 @@ async function runtimeFixture() {
     createManagedStore: (operationId) => { succeed(operationId); return Promise.resolve(); },
     fetchProject: (operationId) => { succeed(operationId); return Promise.resolve(); },
     createWorkspace: (operationId) => { succeed(operationId); return Promise.resolve(); },
-    snapshot: () => Promise.resolve({ agentBootId: "018f0f00-0000-7000-8000-000000000099",
-      throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1" as const,
-      resources: [], operationObservations: [...observations.values()] }),
+    snapshot: () => {
+      if (snapshotFailures > 0) {
+        snapshotFailures -= 1;
+        return Promise.reject(new Error("snapshot unavailable"));
+      }
+      return Promise.resolve({ agentBootId: "018f0f00-0000-7000-8000-000000000099",
+        throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1" as const,
+        resources: [], operationObservations: [...observations.values()] });
+    },
     inspectGit: (projectId, workspaceId) => Promise.resolve(gitInspectionDataSchema.parse({ projectId, workspaceId,
       branchName: "main", headCommit: "a".repeat(40), dirty: false, aheadCount: 0, behindCount: 0 })),
     inspectWorkspace: (projectId, workspaceId) => Promise.resolve(workspaceInspectionDataSchema.parse({ projectId, workspaceId,
@@ -44,6 +51,8 @@ async function runtimeFixture() {
   observations.clear();
   let runtimeState: "absent" | "stopped" | "running" | "lost" = "absent";
   let startCalls = 0;
+  let stopCalls = 0;
+  let stopConverges = false;
   const runtimeAgent = {
     ...setupAgent,
     runtimeStatus: () => Promise.resolve({ rootlessRuntime: "available" as const, operationJournal: "available" as const,
@@ -54,7 +63,13 @@ async function runtimeFixture() {
       return Promise.resolve();
     },
     stopWorkspace: (operationId) => {
-      observations.set(operationId, { operationId, state: "accepted", updatedAt: "2026-07-18T12:00:00.000Z", failure: null });
+      stopCalls += 1;
+      if (stopConverges) {
+        runtimeState = "stopped";
+        succeed(operationId);
+      } else {
+        observations.set(operationId, { operationId, state: "accepted", updatedAt: "2026-07-18T12:00:00.000Z", failure: null });
+      }
       return Promise.resolve();
     },
     inspectWorkspace: (projectId, workspaceId) => Promise.resolve(workspaceInspectionDataSchema.parse({ projectId, workspaceId,
@@ -65,7 +80,9 @@ async function runtimeFixture() {
   } satisfies WorkspaceAgentClient;
   const context = database.getRuntimeContext(project.id);
   return { database, project, runtimeAgent, observations, context,
-    startCalls: () => startCalls, setRuntimeState: (state: typeof runtimeState) => { runtimeState = state; } };
+    startCalls: () => startCalls, setRuntimeState: (state: typeof runtimeState) => { runtimeState = state; },
+    failNextSnapshots: (count: number) => { snapshotFailures = count; },
+    setStopConverges: (converges: boolean) => { stopConverges = converges; }, stopCalls: () => stopCalls };
 }
 
 function fail(observations: Map<string, AgentOperationObservation>, operationId: string): void {
@@ -73,6 +90,114 @@ function fail(observations: Map<string, AgentOperationObservation>, operationId:
     failure: { code: "AGENT_INTERNAL_ERROR", message: "Container creation failed safely.", retryable: true,
       details: { incidentId: "018f0f00-0000-7000-8000-000000000098" } } });
 }
+
+test("snapshot outage does not block stopping an exact running runtime", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("running");
+  const start = fixture.database.prepareRuntimeMutation({ projectId: fixture.project.id, workspaceId: fixture.context.workspace.id,
+    actor: "actor", action: "start", runtimePlanHash: fixture.context.revision.runtimePlanHash!, imageReference: "node:24-bookworm" });
+  fixture.database.finishRuntimeMutation({ operationId: start.operationId, projectId: fixture.project.id,
+    workspaceId: fixture.context.workspace.id, outcome: { state: "succeeded", workspaceObserved: "running", runtimeObserved: "running" } });
+  fixture.failNextSnapshots(1);
+  fixture.setStopConverges(true);
+
+  await expect(mutatePrimaryWorkspaceRuntime("stop", fixture.project.id, "actor", {
+    database: fixture.database, agent: fixture.runtimeAgent
+  })).resolves.toMatchObject({ observedState: "stopped", runtimeStack: { observedState: "stopped" } });
+
+  expect(fixture.stopCalls()).toBe(1);
+  expect(fixture.database.listRuntimeOperations(fixture.project.id, fixture.context.workspace.id)[0]).toMatchObject({
+    operationName: "workspace.stop", state: "succeeded"
+  });
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation permits only an exact running stop", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("running");
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: fixture.runtimeAgent, snapshot: null, runtimeAvailable: true
+  })).resolves.toMatchObject({ canStop: true, canStart: false, blockingReason: null });
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation denies a non-running runtime", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("stopped");
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: fixture.runtimeAgent, snapshot: null, runtimeAvailable: true
+  })).resolves.toMatchObject({ canStop: false, canStart: false });
+  fixture.database.close();
+});
+
+test.each(["accepted", "running"] as const)("snapshot-unavailable reconciliation keeps an unresolved %s operation blocking", async (state) => {
+  const fixture = await runtimeFixture();
+  const operation = fixture.database.prepareRuntimeMutation({ projectId: fixture.project.id, workspaceId: fixture.context.workspace.id,
+    actor: "actor", action: "start", runtimePlanHash: fixture.context.revision.runtimePlanHash!, imageReference: "node:24-bookworm" });
+  fixture.observations.set(operation.operationId, { operationId: operation.operationId, state,
+    updatedAt: "2026-07-18T12:00:01.000Z", failure: null });
+
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: fixture.runtimeAgent, snapshot: null, runtimeAvailable: true
+  })).resolves.toMatchObject({ activeAction: "start", canStop: false, canStart: false,
+    blockingReason: "active-runtime-operation" });
+  await expect(mutatePrimaryWorkspaceRuntime("stop", fixture.project.id, "actor", {
+    database: fixture.database, agent: fixture.runtimeAgent
+  })).rejects.toMatchObject({ code: "RUNTIME_ACTION_IN_PROGRESS" });
+  expect(fixture.stopCalls()).toBe(0);
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation remains fail-closed when the runtime is unavailable", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("running");
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: fixture.runtimeAgent, snapshot: null, runtimeAvailable: false
+  })).resolves.toMatchObject({ canStop: false, canStart: false, blockingReason: "runtime-unavailable" });
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation remains fail-closed when the operation journal is unavailable", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("running");
+  const journalUnavailableAgent = { ...fixture.runtimeAgent,
+    runtimeStatus: () => Promise.resolve({ rootlessRuntime: "available" as const, operationJournal: "unavailable" as const,
+      checkedAt: "2026-07-18T12:00:00.000Z" }) };
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: journalUnavailableAgent, snapshot: null
+  })).resolves.toMatchObject({ canStop: false, canStart: false, blockingReason: "runtime-unavailable" });
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation remains fail-closed when rootless Docker is unavailable", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("running");
+  const runtimeUnavailableAgent = { ...fixture.runtimeAgent,
+    runtimeStatus: () => Promise.resolve({ rootlessRuntime: "unavailable" as const, operationJournal: "available" as const,
+      checkedAt: "2026-07-18T12:00:00.000Z" }) };
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: runtimeUnavailableAgent, snapshot: null
+  })).resolves.toMatchObject({ canStop: false, canStart: false, blockingReason: "runtime-unavailable" });
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation remains fail-closed when inspection cannot prove ownership", async () => {
+  const fixture = await runtimeFixture();
+  const failedInspectionAgent = { ...fixture.runtimeAgent, inspectWorkspace: () => Promise.reject(new Error("inspection unavailable")) };
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: failedInspectionAgent, snapshot: null, runtimeAvailable: true
+  })).resolves.toMatchObject({ canStop: false, canStart: false, blockingReason: "inspection-unavailable" });
+  fixture.database.close();
+});
+
+test("snapshot-unavailable reconciliation remains fail-closed when the runtime is lost", async () => {
+  const fixture = await runtimeFixture();
+  fixture.setRuntimeState("lost");
+  await expect(reconcilePrimaryWorkspaceRuntimeOperation(fixture.project.id, {
+    database: fixture.database, agent: fixture.runtimeAgent, snapshot: null, runtimeAvailable: true
+  })).resolves.toMatchObject({ canStop: false, canStart: false });
+  fixture.database.close();
+});
 
 test("poll timeout remains nonterminal, blocks a parallel start, and later reconciles Agent success", async () => {
   const fixture = await runtimeFixture();
