@@ -79,3 +79,31 @@ test("normal project loading materializes a preview from the active setup revisi
   expect(loaded?.project.previews).toEqual([expect.objectContaining({ previewKey: "web", containerPort: 5173 })]);
   getProjectDatabase(databasePath).close();
 });
+
+test("keeps the project page usable while surfacing a preview materialization diagnostic", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-project-loading-preview-diagnostic-")); directories.push(directory);
+  const databasePath = path.join(directory, "devspace.sqlite");
+  const database = openProjectDatabase(databasePath);
+  const project = database.createProject({
+    name: "Repository", slug: "repository", repositoryUrl: "https://example.com/repository.git",
+    defaultBranch: "main", actor: "developer@example.com"
+  });
+  const registry = previewRegistry();
+  const setup = await setupPrimaryWorkspace({
+    imageReference: "node:24-bookworm",
+    preview: { key: "web", displayName: "Web", containerPort: 5173, domainBaseId: "preview-main" }
+  }, project.id, "developer@example.com", { database, agent: setupAgent(), previewBaseRegistry: registry });
+  database.materializePreviews({ projectId: project.id, workspaceId: setup.project.primaryWorkspace!.id,
+    revisionId: setup.project.activeRevision!.id, previewBaseRegistry: registry });
+  database.close();
+
+  vi.stubEnv("DEVSPACE_DATABASE_PATH", databasePath);
+  vi.stubEnv("DEVSPACE_APP_ORIGIN", "http://localhost:3000");
+  vi.stubEnv("DEVSPACE_AUTH_MODE", "development");
+  vi.stubEnv("NODE_ENV", "test");
+  vi.stubEnv("DEVSPACE_PREVIEW_BASES", JSON.stringify([{ id: "preview-main", domain: "other.example.com", labelSuffix: "-preview" }]));
+  const loaded = await loadProjectWorkspaceData(project.id);
+  expect(loaded?.project.id).toBe(project.id);
+  expect(loaded?.previewMaterializationError).toBe("Preview configuration could not be materialized safely. Review the active Project Options and preview base configuration.");
+  getProjectDatabase(databasePath).close();
+});

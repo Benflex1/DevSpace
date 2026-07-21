@@ -37,4 +37,28 @@ describe("Web preview persistence", () => {
     expect(row.serviceId).toBeNull();
     expect(row.containerPort).toBe(3000);
   });
+
+  test("keeps custom overlong patterns fail-closed", () => {
+    const options = parseProjectOptionsV1({
+      schemaVersion: 1,
+      developmentEnvironment: {
+        source: { kind: "image", imageReference: "node:24" },
+        ports: [{ name: "web", containerPort: 3000 }]
+      },
+      previews: [{
+        key: "web", displayName: "Web", target: { kind: "workspace" }, containerPort: 3000,
+        domainBaseId: "preview-main", hostnamePattern: "{project}-{workspace}-{preview}-{shortId}"
+      }]
+    });
+    expect(() => materializePreview({
+      id: "0190a000-0000-7000-8000-000000000001",
+      projectId: "0190a000-0000-7000-8000-000000000002",
+      projectSlug: "a".repeat(35),
+      workspaceId: "0190a000-0000-7000-8000-000000000003",
+      workspaceSlug: "primary",
+      configRevisionId: "0190a000-0000-7000-8000-000000000004",
+      preview: options.previews[0]!, previewBaseRegistry: registry.value,
+      now: "2026-07-16T12:00:00.000Z"
+    })).toThrow("PREVIEW_COMPOSED_LABEL_TOO_LONG");
+  });
 });
