@@ -4,10 +4,11 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { runtimeControlState, type RuntimeControlAction } from "./runtime-control-state.js";
 
-export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction }: {
+export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction, stopLabel }: {
   projectId: string; runtimeAvailable: boolean;
   runtimeState: string; activeAction: RuntimeControlAction | null; canStart: boolean; canStop: boolean; retryStart: boolean;
   action?: RuntimeControlAction;
+  stopLabel?: string;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
@@ -37,7 +38,7 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
     {activeAction === null && <button type="button" disabled={state.disabled || pending} title={state.reason ?? undefined}
       onClick={() => { mutate().catch(() => setPending(false)); }}>
       {pending ? (action === "start" ? "Starting…" : "Stopping…")
-        : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : "Stop runtime"}
+        : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : (stopLabel ?? "Stop runtime")}
     </button>}
     {!runtimeAvailable && <p className="message error">The dedicated rootless runtime is unavailable.</p>}
     {message !== "" && <p className={`message ${message.includes("running") || message.includes("stopped") ? "success" : ""}`} role="status">{message}</p>}
