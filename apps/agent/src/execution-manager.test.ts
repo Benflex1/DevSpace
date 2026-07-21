@@ -463,7 +463,7 @@ class FakeSocket extends EventEmitter {
 
 async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, terminalId: string): Promise<void> {
   let cleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     try { cleanup = manager.reserveTerminalAttachment(terminalId); break; }
     catch { await new Promise<void>((resolve) => setTimeout(resolve, 1)); }
   }

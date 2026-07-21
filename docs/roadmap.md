@@ -125,11 +125,12 @@ Planned follow-up:
 - ⏳ Attach/detach semantics
 - ⏳ Better long-lived terminal recovery for shells, Vite, Codex, and other processes
 
-Current UI polish in progress:
+Completed Workbench polish in PR #22:
 
-- 🟡 Lost terminal rows should automatically disappear from the sidebar after a short grace period
-- 🟡 Lost-terminal recovery action should become **Restart workspace**
-- 🟡 Lost-terminal dialog button hierarchy should make Dismiss smaller/secondary and Restart workspace prominent
+- ✅ Lost terminal rows automatically disappear from the sidebar after a short grace period
+- ✅ Lost-terminal recovery action is **Restart workspace**
+- ✅ Lost-terminal dialog button hierarchy makes Dismiss smaller/secondary and Restart workspace prominent
+- ✅ Workbench metadata order is branch, repository, runtime state, and runtime control
 
 ## Slice 5 — Preview path
 
@@ -184,7 +185,6 @@ Security and deployment support completed:
 
 Remaining before Slice 5 is fully closed:
 
-- 🟡 Finish current Workbench UI polish
 - 🟡 Re-run final local lifecycle checklist
 - ⏳ Deploy the preview gateway stack on the home server
 - ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
@@ -247,15 +247,13 @@ Later operational UX:
 
 # Immediate next steps
 
-1. 🟡 Finish the current Workbench lost-terminal/status UI polish PR
-2. ⏳ Merge and manually verify the polish
-3. ⏳ Run the final local Slice 5 lifecycle checklist
-4. ⏳ Deploy the preview gateway stack to the home server
-5. ⏳ Configure production wildcard preview routing
-6. ⏳ Validate production previews/HMR
-7. ⏳ Complete focused M1 Slice 6 hardening
-8. ⏳ Evaluate/adopt TypeScript 7 without breaking tooling compatibility
-9. ✅ Close Milestone 1
+1. ⏳ Run the final local Slice 5 lifecycle checklist
+2. ⏳ Deploy the preview gateway stack to the home server
+3. ⏳ Configure production wildcard preview routing
+4. ⏳ Validate production previews/HMR
+5. ⏳ Complete focused M1 Slice 6 hardening
+6. ⏳ Evaluate/adopt TypeScript 7 without breaking tooling compatibility
+7. ✅ Close Milestone 1
 
 ---
 
