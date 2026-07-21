@@ -7,7 +7,7 @@ import {
   previews, workspaceServices, workspaces,
   type Operation, type Preview, type Project, type ProjectConfigRevision
 } from "@devspace/database";
-import { and, desc, eq, isNull, or } from "drizzle-orm";
+import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
 import { parseProjectOptionsV1 } from "@devspace/project-options";
@@ -81,6 +81,7 @@ export class ProjectSetupConflictError extends Error {
 
 const terminalNamespaceStates = new Set(["creating", "active", "disconnected"]);
 const terminalDisplayNumberPattern = /^Terminal ([1-9][0-9]*)$/u;
+const terminalRetirementGracePeriodMs = 30_000;
 
 type TerminalNamespaceRow = { readonly id: string; readonly title: string; readonly state: string };
 
@@ -165,7 +166,21 @@ export function openProjectDatabase(path: string, options: {
   const db = drizzle({ client });
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? uuidv7;
+  const pruneExpiredLostTerminalSessions = (): void => {
+    const retirementCutoff = new Date(now().valueOf() - terminalRetirementGracePeriodMs).toISOString();
+    const expired = db.select({ id: terminalSessions.id, processId: terminalSessions.processId })
+      .from(terminalSessions)
+      .where(and(eq(terminalSessions.state, "lost"), lte(terminalSessions.closedAt, retirementCutoff)))
+      .all();
+    for (const terminal of expired) {
+      db.delete(terminalSessions).where(and(
+        eq(terminalSessions.id, terminal.id), eq(terminalSessions.state, "lost"), lte(terminalSessions.closedAt, retirementCutoff)
+      )).run();
+      db.delete(processes).where(and(eq(processes.id, terminal.processId), eq(processes.kind, "terminal"))).run();
+    }
+  };
   const readManagedProject = (project: Project): ManagedProjectView => {
+    pruneExpiredLostTerminalSessions();
     const revision = project.activeConfigRevisionId === null ? undefined
       : db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.id, project.activeConfigRevisionId)).get();
     const workspace = project.primaryWorkspaceId === null ? undefined
@@ -613,6 +628,7 @@ export function openProjectDatabase(path: string, options: {
     },
     prepareTerminalCreate(projectId: string, actor: string): { operation: Operation; workspaceId: string; terminalId: string } {
       return client.transaction(() => {
+        pruneExpiredLostTerminalSessions();
         const context = this.getRuntimeContext(projectId);
         if (context.workspace.observedState !== "running") throw new ProjectSetupConflictError("The workspace runtime must be running.");
         const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, context.workspace.id)).get();
@@ -734,6 +750,7 @@ export function openProjectDatabase(path: string, options: {
     },
     applyExecutionSnapshot(snapshot: AgentSnapshotData): void {
       client.transaction(() => {
+        pruneExpiredLostTerminalSessions();
         const timestamp = now().toISOString();
         const currentPreviewForOperation = (operation: Operation): Preview | undefined => {
           if (operation.workspaceId === null) return undefined;
@@ -796,9 +813,15 @@ export function openProjectDatabase(path: string, options: {
               exitCode: observed.exitCode, startedAt: observed.startedAt, finishedAt: observed.finishedAt, lastObservedAt: timestamp })
               .where(and(eq(processes.id, observed.processId), eq(processes.workspaceId, observed.workspaceId))).run();
           } else if (resource.type === "terminal") {
+            const terminal = db.select().from(terminalSessions).where(and(
+              eq(terminalSessions.id, resource.identity.terminalId), eq(terminalSessions.workspaceId, resource.identity.workspaceId)
+            )).get();
+            if (terminal === undefined || (["closed", "failed", "lost"].includes(terminal.state) && terminal.state !== resource.state)) continue;
             db.update(terminalSessions).set({ state: resource.state, lastActivityAt: timestamp,
-              closedAt: ["closed", "failed", "lost"].includes(resource.state) ? timestamp : null })
-              .where(and(eq(terminalSessions.id, resource.identity.terminalId), eq(terminalSessions.workspaceId, resource.identity.workspaceId))).run();
+              closedAt: resource.state === "lost"
+                ? terminal.closedAt ?? timestamp
+                : ["closed", "failed"].includes(resource.state) ? timestamp : null })
+              .where(and(eq(terminalSessions.id, terminal.id), eq(terminalSessions.workspaceId, terminal.workspaceId))).run();
           } else if (resource.type === "preview") {
             const observed = resource.observation;
             const project = db.select().from(projects).where(and(
@@ -841,6 +864,7 @@ export function openProjectDatabase(path: string, options: {
           db.update(taskRuns).set({ state, exitCode: process.exitCode, startedAt: process.startedAt,
             finishedAt: process.finishedAt }).where(eq(taskRuns.id, run.id)).run();
         }
+        pruneExpiredLostTerminalSessions();
       }).immediate();
     },
     authorizeTerminal(projectId: string, workspaceId: string, terminalId: string): boolean {

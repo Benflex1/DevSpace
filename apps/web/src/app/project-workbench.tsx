@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller } from "./preview-liveness.js";
@@ -41,7 +41,6 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
-  const terminalLabels = useRef(new Map(initialTerminals.map((terminal) => [terminal.id, terminal.title])));
   const lostTerminalObservedAt = useRef(new Map<string, number>());
   const [sidebarNow, setSidebarNow] = useState(() => Date.now());
   const currentTerminals = useRef(initialTerminals);
@@ -90,20 +89,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     currentPreviews.current = initialPreviews;
   }, [initialPreviews]);
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
-    const existing = terminalLabels.current.get(terminal.id);
-    if (existing !== undefined) return existing;
-    const used = new Set<number>();
-    for (const current of currentTerminals.current) {
-      if (!isTerminalVisibleState(current.state)) continue;
-      const title = terminalLabels.current.get(current.id) ?? current.title;
-      const match = /^Terminal ([1-9][0-9]*)$/u.exec(title);
-      if (match !== null) used.add(Number(match[1]));
-    }
-    let nextNumber = 1;
-    while (used.has(nextNumber)) nextNumber += 1;
-    const title = `Terminal ${nextNumber}`;
-    terminalLabels.current.set(terminal.id, title);
-    return title;
+    return terminal.title;
   }, []);
 
   const refresh = useCallback(async (): Promise<{ terminals: TerminalView[]; previews: PreviewLifecycleView[] }> => {
@@ -118,7 +104,6 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       setRuns(data.taskRuns);
       setTerminals(data.terminals);
       terminals = data.terminals;
-      for (const terminal of data.terminals) getTerminalTitle(terminal);
     }
     let nextPreviews = [...currentPreviews.current];
     if (previewResponse.ok) {

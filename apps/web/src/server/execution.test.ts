@@ -14,11 +14,11 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map(async (directory) => await rm(directory, { recursive: true, force: true })));
 });
 
-async function createReadyProject() {
+async function createReadyProject(options: { now?: () => Date } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-terminal-policy-"));
   directories.push(directory);
   const databasePath = path.join(directory, "devspace.sqlite");
-  const database = openProjectDatabase(databasePath);
+  const database = openProjectDatabase(databasePath, options);
   databases.push(database);
   const project = database.createProject({ name: "Workbench", slug: `workbench-${directories.length}`, repositoryUrl: "https://example.com/workbench.git", defaultBranch: "main", actor: "actor" });
   const revisionId = "018f0f00-0000-7000-8000-000000000002";
@@ -49,6 +49,24 @@ async function createReadyProject() {
     .run(revisionId, workspaceId, project.id);
   raw.close();
   return { database, project, databasePath, workspaceId };
+}
+
+function terminalSnapshot(input: {
+  projectId: string;
+  workspaceId: string;
+  terminalId: string;
+  state: "active" | "disconnected" | "lost";
+  agentBootId?: string;
+}) {
+  const agentBootId = input.agentBootId ?? "018f0f00-0000-7000-8000-000000000099";
+  return {
+    agentBootId,
+    throughCursor: `v1.${agentBootId}.3` as const,
+    resources: [{ type: "terminal" as const, identity: {
+      projectId: input.projectId, workspaceId: input.workspaceId, terminalId: input.terminalId
+    }, state: input.state }],
+    operationObservations: []
+  };
 }
 
 function insertWorkspacePreview(databasePath: string, input: { previewId: string; workspaceId: string; revisionId: string; hostname: string; observedState?: "healthy" | "lost"; routePresent?: boolean }) {
@@ -166,6 +184,117 @@ test("allocates stable lowest available terminal numbers and reuses dead-termina
   expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
     expect.objectContaining({ id: reset.terminalId, title: "Terminal 1" })
   ]));
+});
+
+test("retains a newly lost terminal, then retires its session and process once without refreshing closed_at", async () => {
+  let currentTime = new Date("2026-07-19T00:00:00.000Z");
+  const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const intent = database.prepareTerminalCreate(project.id, "actor");
+
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: intent.terminalId, state: "lost" }));
+  const raw = new BetterSqlite3(databasePath);
+  expect(raw.prepare("select state, closed_at from terminal_sessions where id = ?").get(intent.terminalId)).toEqual({
+    state: "lost", closed_at: currentTime.toISOString()
+  });
+  expect(raw.prepare("select id from processes where id = ?").get(intent.terminalId)).toEqual({ id: intent.terminalId });
+  raw.close();
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([
+    expect.objectContaining({ id: intent.terminalId, state: "lost" })
+  ]);
+
+  currentTime = new Date("2026-07-19T00:00:10.000Z");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: intent.terminalId, state: "lost" }));
+  const repeated = new BetterSqlite3(databasePath);
+  expect(repeated.prepare("select closed_at from terminal_sessions where id = ?").get(intent.terminalId)).toEqual({
+    closed_at: "2026-07-19T00:00:00.000Z"
+  });
+  repeated.close();
+
+  currentTime = new Date("2026-07-19T00:00:30.000Z");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([]);
+  const retired = new BetterSqlite3(databasePath);
+  expect(retired.prepare("select id from terminal_sessions where id = ?").get(intent.terminalId)).toBeUndefined();
+  expect(retired.prepare("select id from processes where id = ?").get(intent.terminalId)).toBeUndefined();
+  retired.close();
+  expect(database.listOperations()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ operationName: "terminal.create", resourceId: intent.terminalId })
+  ]));
+});
+
+test("does not prune active or disconnected terminals after the grace period", async () => {
+  let currentTime = new Date("2026-07-19T00:00:00.000Z");
+  const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const intent = database.prepareTerminalCreate(project.id, "actor");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: intent.terminalId, state: "active" }));
+
+  currentTime = new Date("2026-07-19T00:01:00.000Z");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: intent.terminalId, state: "disconnected" }));
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([
+    expect.objectContaining({ id: intent.terminalId, state: "disconnected" })
+  ]);
+  const raw = new BetterSqlite3(databasePath);
+  expect(raw.prepare("select id from processes where id = ?").get(intent.terminalId)).toEqual({ id: intent.terminalId });
+  raw.close();
+});
+
+test("an already-retired lost terminal is ignored by later Agent snapshots and does not reappear", async () => {
+  let currentTime = new Date("2026-07-19T00:00:00.000Z");
+  const { database, project, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const old = database.prepareTerminalCreate(project.id, "actor");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: old.terminalId, state: "lost" }));
+
+  currentTime = new Date("2026-07-19T00:00:31.000Z");
+  database.applyExecutionSnapshot(terminalSnapshot({
+    projectId: project.id, workspaceId, terminalId: old.terminalId, state: "lost", agentBootId: "018f0f00-0000-7000-8000-000000000100"
+  }));
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([]);
+
+  const replacement = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([
+    expect.objectContaining({ id: replacement.terminalId, title: "Terminal 1" })
+  ]);
+  currentTime = new Date("2026-07-19T00:00:32.000Z");
+  const laterRestartSnapshot = terminalSnapshot({
+    projectId: project.id, workspaceId, terminalId: replacement.terminalId, state: "lost", agentBootId: "018f0f00-0000-7000-8000-000000000101"
+  });
+  laterRestartSnapshot.resources.push({ type: "terminal", identity: {
+    projectId: project.id, workspaceId, terminalId: old.terminalId
+  }, state: "lost" });
+  database.applyExecutionSnapshot(laterRestartSnapshot);
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([
+    expect.objectContaining({ id: replacement.terminalId, state: "lost" })
+  ]);
+});
+
+test("expired lost terminals do not reserve display numbers while preserving live labels", async () => {
+  let currentTime = new Date("2026-07-19T00:00:00.000Z");
+  const { database, project, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const first = database.prepareTerminalCreate(project.id, "actor");
+  const second = database.prepareTerminalCreate(project.id, "actor");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: first.terminalId, state: "active" }));
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: second.terminalId, state: "lost" }));
+
+  currentTime = new Date("2026-07-19T00:00:30.000Z");
+  const replacement = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: first.terminalId, title: "Terminal 1", state: "active" }),
+    expect.objectContaining({ id: replacement.terminalId, title: "Terminal 2" })
+  ]));
+});
+
+test("the first terminal number is reused after Terminal 1 and Terminal 2 are retired", async () => {
+  let currentTime = new Date("2026-07-19T00:00:00.000Z");
+  const { database, project, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const first = database.prepareTerminalCreate(project.id, "actor");
+  const second = database.prepareTerminalCreate(project.id, "actor");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: first.terminalId, state: "lost" }));
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: second.terminalId, state: "lost" }));
+
+  currentTime = new Date("2026-07-19T00:00:30.000Z");
+  const replacement = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([
+    expect.objectContaining({ id: replacement.terminalId, title: "Terminal 1" })
+  ]);
 });
 
 test("allocates concurrent terminal creation intents without duplicate live labels", async () => {

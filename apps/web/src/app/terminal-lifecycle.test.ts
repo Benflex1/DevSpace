@@ -58,6 +58,8 @@ describe("terminal lifecycle reconciliation", () => {
     expect(workbench).toContain("restart onSuccess={onDismiss}");
     expect(workbench).toContain("isTerminalSidebarVisible");
     expect(workbench).toContain('const ids = terminals.filter((terminal) => terminal.state === "lost")');
+    expect(workbench).toContain("return terminal.title;");
+    expect(workbench).not.toContain("terminalLabels");
     expect(workbench).toContain("runtimeState={runtimeState}");
     expect(runtimeControls).toContain("/api/projects/${projectId}/runtime");
     expect(runtimeControls).toContain('body: JSON.stringify({ action })');
