@@ -23,8 +23,8 @@ import {
   type PreviewGatewayRoute
 } from "./index.js";
 
-const policy = { approvedPreviewBases: [{ id: "local", domain: "localhost", labelSuffix: "-preview" }] } as const;
-const approved = (hostname: string) => hostname.endsWith("-preview.localhost");
+const policy = { approvedPreviewBases: [{ id: "local", domain: "localhost" }] } as const;
+const approved = (hostname: string) => hostname.endsWith(".localhost");
 const ids = {
   projectId: "01900000-0000-7000-8000-000000000001",
   workspaceId: "01900000-0000-7000-8000-000000000002",
@@ -35,7 +35,7 @@ const ids = {
 
 function route(overrides: Partial<PreviewGatewayRoute> = {}): PreviewGatewayRoute {
   return {
-    ...ids, generation: 1, hostname: "web-preview.localhost", approvedBaseId: "local",
+    ...ids, generation: 1, hostname: "web.localhost", approvedBaseId: "local",
     hostIp: LOOPBACK_HOST, hostPort: 43123, webSocketForwarding: true, ...overrides
   };
 }
@@ -150,7 +150,7 @@ describe("typed private Caddy gateway adapter", () => {
 
   test("generates an exact host route with only a loopback upstream and streaming/upgrade support", () => {
     const document = toCaddyRoute(route(), policy);
-    expect(document.match).toEqual([{ host: ["web-preview.localhost"] }]);
+    expect(document.match).toEqual([{ host: ["web.localhost"] }]);
     expect(document.handle[0]).toEqual({
       handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:43123" }], flush_interval: -1
     });
@@ -171,7 +171,7 @@ describe("typed private Caddy gateway adapter", () => {
   test("reconciles exact route identity and removes foreign/stale routes", async () => {
     const transport = new MemoryTransport();
     const oldRoute = route({ leaseId: "01900000-0000-7000-8000-000000000006", hostPort: 43124 });
-    transport.documents = [{ "@id": "foreign-route", match: [{ host: ["stale-preview.localhost"] }] }, toCaddyRoute(oldRoute, approved)];
+    transport.documents = [{ "@id": "foreign-route", match: [{ host: ["stale.localhost"] }] }, toCaddyRoute(oldRoute, approved)];
     const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
     await adapter.reconcileRoutes([route()]);
     expect(fromCaddyRoutes(transport.documents, approved)).toEqual([{ kind: "managed", route: route() }]);
@@ -184,8 +184,8 @@ describe("typed private Caddy gateway adapter", () => {
     const transport = new MemoryTransport();
     const first = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
     const second = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
-    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a-preview.localhost", hostPort: 43124 });
-    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b-preview.localhost", hostPort: 43125 });
+    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a.localhost", hostPort: 43124 });
+    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b.localhost", hostPort: 43125 });
 
     await Promise.all([first.ensureRoute(routeA), second.ensureRoute(routeB)]);
 
@@ -198,8 +198,8 @@ describe("typed private Caddy gateway adapter", () => {
     const transport = new MemoryTransport();
     const first = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
     const second = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
-    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a-preview.localhost", hostPort: 43124 });
-    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b-preview.localhost", hostPort: 43125 });
+    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a.localhost", hostPort: 43124 });
+    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b.localhost", hostPort: 43125 });
     transport.documents = [toCaddyRoute(routeB, approved)];
 
     await Promise.all([first.ensureRoute(routeA), second.removeRoute(routeB)]);
@@ -210,8 +210,8 @@ describe("typed private Caddy gateway adapter", () => {
   test("releases the mutation serialization after a failed write", async () => {
     const transport = new MemoryTransport();
     const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
-    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a-preview.localhost", hostPort: 43124 });
-    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b-preview.localhost", hostPort: 43125 });
+    const routeA = route({ previewId: "01900000-0000-7000-8000-000000000006", leaseId: "01900000-0000-7000-8000-000000000007", hostname: "a.localhost", hostPort: 43124 });
+    const routeB = route({ previewId: "01900000-0000-7000-8000-000000000008", leaseId: "01900000-0000-7000-8000-000000000009", hostname: "b.localhost", hostPort: 43125 });
     transport.failNextReplace = true;
 
     await expect(adapter.ensureRoute(routeA)).rejects.toMatchObject({ code: "ADMIN_UNAVAILABLE" });
@@ -221,7 +221,7 @@ describe("typed private Caddy gateway adapter", () => {
 
   test("fails safely when a foreign route owns the approved hostname", async () => {
     const transport = new MemoryTransport();
-    transport.documents = [{ "@id": "foreign-route", match: [{ host: ["web-preview.localhost"] }], handle: [{ handler: "static_response" }] }];
+    transport.documents = [{ "@id": "foreign-route", match: [{ host: ["web.localhost"] }], handle: [{ handler: "static_response" }] }];
     const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
     await expect(adapter.ensureRoute(route())).rejects.toMatchObject({ code: "ADMIN_REJECTED", stage: "reconcile" });
     expect(transport.replaceCount).toBe(0);

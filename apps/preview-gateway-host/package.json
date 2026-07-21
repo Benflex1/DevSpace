@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "pnpm --dir ../.. exec tsx apps/preview-gateway-host/src/index.ts",
     "start": "node dist/index.js",
-    "start:connector": "node dist/connector-index.js",
     "test": "pnpm --dir ../.. exec vitest run --project @devspace/preview-gateway-host",
     "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
     "build": "tsc --build tsconfig.build.json --force --pretty false"

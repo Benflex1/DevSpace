@@ -137,7 +137,7 @@ Each preview requires a unique stable `key`, `displayName`, `target`, `container
 - `startupTimeoutSeconds`, default `60`;
 - `webSocketForwarding`, default `true`.
 
-The hostname pattern is one preview-specific stem label and may use only `{project}`, `{workspace}`, `{preview}`, and `{shortId}`. The administrator-owned preview base registry appends its required `labelSuffix` (for example `-preview`) after the rendered stem; the suffix is never Project Options configuration. The domain base is referenced by ID; the approved domain and suffix are not embedded in Project Options. A workspace-targeted preview's `containerPort` must match a declared `developmentEnvironment.ports` entry. A service-targeted preview's `containerPort` must match a declared port on the referenced service.
+The hostname pattern is one label and may use only `{project}`, `{workspace}`, `{preview}`, and `{shortId}`. The domain base is referenced by ID; the approved domain value is not embedded in Project Options. A workspace-targeted preview's `containerPort` must match a declared `developmentEnvironment.ports` entry. A service-targeted preview's `containerPort` must match a declared port on the referenced service.
 
 ### Environment variables and secret references
 

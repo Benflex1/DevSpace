@@ -6,7 +6,6 @@ import {
   type GatewayPolicy, type PreviewGatewayRoute,
   type PreviewGatewayRouteIdentity
 } from "./types.js";
-import { isApprovedPreviewHostname } from "@devspace/security";
 
 export const CADDY_ROUTE_ID_PREFIX = "devspace-preview-v1.";
 export const CADDY_FALLBACK_ROUTE_ID = "devspace-preview-fallback-v1";
@@ -75,13 +74,13 @@ export function validateGatewayRoute(input: unknown, isApprovedHostname?: (hostn
 function validator(policyOrValidator?: GatewayPolicy | ((hostname: string) => boolean)): ((hostname: string) => boolean) | undefined {
   if (typeof policyOrValidator === "function") return policyOrValidator;
   if (policyOrValidator === undefined) return undefined;
-  return (hostname) => policyOrValidator.approvedPreviewBases.some((base) => isApprovedPreviewHostname(hostname, base));
+  return (hostname) => policyOrValidator.approvedPreviewBases.some((base) => hostname === base.domain || hostname.endsWith(`.${base.domain}`));
 }
 
 export function validateRoute(input: unknown, policy: GatewayPolicy): PreviewGatewayRoute {
   const parsed = validateGatewayRoute(input, validator(policy));
   const base = policy.approvedPreviewBases.find((candidate) => candidate.id === parsed.approvedBaseId);
-  if (base === undefined || !isApprovedPreviewHostname(parsed.hostname, base)) reject("The gateway hostname is outside the approved preview registry.");
+  if (base === undefined || !(parsed.hostname === base.domain || parsed.hostname.endsWith(`.${base.domain}`))) reject("The gateway hostname is outside the approved preview registry.");
   return parsed;
 }
 

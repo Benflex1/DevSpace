@@ -3,7 +3,7 @@ import net from "node:net";
 import { chmod, unlink } from "node:fs/promises";
 
 const LOOPBACK_HOST = "127.0.0.1";
-const defaultBases = [{ id: "local", domain: "localhost", labelSuffix: "-preview" }];
+const defaultBases = [{ id: "local", domain: "localhost" }];
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const dnsLabelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const caddyRouteIdPrefix = "devspace-preview-v1.";
@@ -33,25 +33,14 @@ function normalizeBases(input) {
   if (!Array.isArray(input) || input.length === 0) fail("preview-base-registry-invalid");
   const bases = input.map((candidate) => {
     const entry = object(candidate, "preview-base");
-    if (Object.keys(entry).some((key) => !["id", "domain", "labelSuffix"].includes(key))) fail("preview-base-unknown-field");
     const id = identity(entry.id, "preview-base-id");
     const domain = entry.domain;
     if (typeof domain !== "string" || domain.length === 0 || domain !== domain.toLowerCase() || domain.endsWith(".")
       || domain.split(".").some((label) => !dnsLabelPattern.test(label))) fail("preview-base-domain-invalid");
-    if (typeof entry.labelSuffix !== "string" || !/^-([a-z0-9-]*[a-z0-9])$/u.test(entry.labelSuffix)) fail("preview-base-suffix-invalid");
-    return { id, domain, labelSuffix: entry.labelSuffix };
+    return { id, domain };
   });
   if (new Set(bases.map((base) => base.id)).size !== bases.length) fail("preview-base-id-duplicate");
-  if (new Set(bases.map((base) => base.domain)).size !== bases.length) fail("preview-base-domain-duplicate");
   return bases;
-}
-
-function ownsHostname(hostname, base) {
-  const labels = hostname.split(".");
-  const baseLabels = base.domain.split(".");
-  if (labels.length !== baseLabels.length + 1 || labels.slice(1).join(".") !== base.domain) return false;
-  const leftmost = labels[0] ?? "";
-  return leftmost.endsWith(base.labelSuffix) && leftmost.slice(0, -base.labelSuffix.length).length > 0;
 }
 
 function normalizeRoute(input, bases) {
@@ -72,7 +61,7 @@ function normalizeRoute(input, bases) {
   if (typeof route.hostname !== "string" || route.hostname.length > 253 || route.hostname !== route.hostname.toLowerCase()
     || route.hostname.endsWith(".") || route.hostname.split(".").some((label) => !dnsLabelPattern.test(label))) fail("hostname-invalid");
   const base = bases.find((candidateBase) => candidateBase.id === route.approvedBaseId);
-  if (base === undefined || !ownsHostname(route.hostname, base)) fail("hostname-not-approved");
+  if (base === undefined || (route.hostname !== base.domain && !route.hostname.endsWith(`.${base.domain}`))) fail("hostname-not-approved");
   if (route.hostIp !== LOOPBACK_HOST) fail("lease-not-loopback");
   const lease = { leaseId: route.leaseId, hostIp: LOOPBACK_HOST, hostPort: port(route.hostPort, "lease-port") };
   if (typeof route.webSocketForwarding !== "boolean") fail("websocket-policy-invalid");

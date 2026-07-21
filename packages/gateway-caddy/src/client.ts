@@ -3,7 +3,6 @@ import net from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { acquirePrivateSocketLifecycleLock, type PrivateSocketLifecycleLock } from "./private-socket.js";
 import { validateGatewayRoute, validateRoute, fromCaddyRoutes, routeIdentityKey, routeResourceKey, routeMatches, toCaddyRoute, toCaddyRouteSet, validateRouteSet } from "./routes.js";
-import { isApprovedPreviewHostname } from "@devspace/security";
 import {
   GatewayAdapterError, previewGatewayLeaseSchema, previewGatewayProbeRequestSchema, previewGatewayProbeResultSchema, previewGatewayRouteIdentitySchema,
   previewLeaseResolverRequestSchema, previewLeaseResolverResponseSchema,
@@ -85,7 +84,7 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
   private readonly options: CaddyGatewayClientOptions;
   constructor(private readonly transport: CaddyAdminTransport, options: CaddyGatewayClientOptions | GatewayPolicy = {}) {
     this.options = "approvedPreviewBases" in options
-      ? { policy: options, isApprovedHostname: (hostname) => options.approvedPreviewBases.some((base) => isApprovedPreviewHostname(hostname, base)) }
+      ? { policy: options, isApprovedHostname: (hostname) => options.approvedPreviewBases.some((base) => hostname === base.domain || hostname.endsWith(`.${base.domain}`)) }
       : options;
   }
 
@@ -184,7 +183,7 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
 /** Stable concrete Agent integration API. */
 export class PreviewGatewayAdapter extends CaddyGatewayClient {
   constructor(options: { readonly transport: CaddyAdminTransport; readonly policy: GatewayPolicy; readonly probe: GatewayHostProbeContract }) {
-    super(options.transport, { policy: options.policy, isApprovedHostname: (hostname) => options.policy.approvedPreviewBases.some((base) => isApprovedPreviewHostname(hostname, base)),
+    super(options.transport, { policy: options.policy, isApprovedHostname: (hostname) => options.policy.approvedPreviewBases.some((base) => hostname === base.domain || hostname.endsWith(`.${base.domain}`)),
       probe: options.probe });
   }
 }
@@ -484,7 +483,7 @@ export class CaddyAdminHttpTransport implements CaddyAdminTransport {
     if (![200, 204].includes(response.statusCode)) throw new GatewayAdapterError("admin", "Caddy admin rejected the route set.", "ADMIN_REJECTED");
   }
   private get optionsForPolicy(): (hostname: string) => boolean {
-    return (hostname) => this.policy.approvedPreviewBases.some((base) => isApprovedPreviewHostname(hostname, base));
+    return (hostname) => this.policy.approvedPreviewBases.some((base) => hostname === base.domain || hostname.endsWith(`.${base.domain}`));
   }
 }
 

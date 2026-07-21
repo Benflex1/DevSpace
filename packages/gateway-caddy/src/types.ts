@@ -1,5 +1,4 @@
 import * as z from "zod";
-import type { ApprovedPreviewBase } from "@devspace/security";
 
 const uuidSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
 const hostnameSchema = z.string().min(1).max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u);
@@ -22,7 +21,7 @@ export type PreviewRoute = PreviewGatewayRoute;
 export type PreviewRouteInput = PreviewGatewayRoute;
 
 export const LOOPBACK_HOST = "127.0.0.1" as const;
-export interface GatewayPolicy { readonly approvedPreviewBases: readonly Pick<ApprovedPreviewBase, "id" | "domain" | "labelSuffix">[]; }
+export interface GatewayPolicy { readonly approvedPreviewBases: readonly { readonly id: string; readonly domain: string }[]; }
 
 /** Exact resource identity; lease and generation fencing are validated on full routes. */
 export const previewGatewayRouteIdentitySchema = z.strictObject({

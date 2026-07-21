@@ -9,7 +9,7 @@ import { createPreviewGatewayFixture } from "../preview-gateway-fixture.mjs";
 
 const route = (hostPort, overrides = {}) => ({
   projectId: "project-1", workspaceId: "workspace-1", previewId: "preview-1", revisionId: "revision-1",
-  generation: 1, hostname: "web-preview.localhost", approvedBaseId: "local", leaseId: "lease-1",
+  generation: 1, hostname: "web.localhost", approvedBaseId: "local", leaseId: "lease-1",
   hostIp: "127.0.0.1", hostPort, webSocketForwarding: true, ...overrides
 });
 
@@ -64,10 +64,10 @@ test("deterministic fixture forwards exact-host HTTP streams and rejects other h
   try {
     gateway.registerLease({ leaseId: "lease-1", hostPort: backendPort });
     gateway.ensureRoute(route(backendPort));
-    assert.deepEqual(await request(gateway.address().port, "web-preview.localhost", "/stream"), { status: 200, body: "first-second" });
-    assert.equal((await request(gateway.address().port, "other-preview.localhost", "/stream")).status, 404);
+    assert.deepEqual(await request(gateway.address().port, "web.localhost", "/stream"), { status: 200, body: "first-second" });
+    assert.equal((await request(gateway.address().port, "other.localhost", "/stream")).status, 404);
     gateway.removeRoute(route(backendPort));
-    assert.equal((await request(gateway.address().port, "web-preview.localhost", "/stream")).status, 404);
+    assert.equal((await request(gateway.address().port, "web.localhost", "/stream")).status, 404);
   } finally {
     await gateway.close();
     await new Promise((resolve, reject) => backend.close((error) => error === undefined ? resolve() : reject(error)));
@@ -98,7 +98,7 @@ test("deterministic fixture forwards WebSocket/HMR upgrades only through the exa
         if (data.includes("pong")) { socket.destroy(); resolve(data); }
       });
       socket.once("connect", () => socket.write(
-        "GET /hmr HTTP/1.1\r\nHost: web-preview.localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ZGV2c3BhY2U=\r\n\r\n"
+        "GET /hmr HTTP/1.1\r\nHost: web.localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ZGV2c3BhY2U=\r\n\r\n"
       ));
     });
     assert.match(response, /101 Switching Protocols/u);

@@ -9,7 +9,7 @@
     "sourceMap": true,
     "tsBuildInfoFile": "../../.cache/tsbuild/apps-preview-gateway-host.build.tsbuildinfo"
   },
-  "include": ["src/runtime.ts", "src/index.ts", "src/connector.ts", "src/connector-index.ts"],
+  "include": ["src/runtime.ts", "src/index.ts"],
   "references": [
     { "path": "../../packages/gateway-caddy/tsconfig.build.json" }
   ]

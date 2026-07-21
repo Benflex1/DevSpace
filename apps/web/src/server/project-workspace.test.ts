@@ -16,7 +16,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 function previewRegistry() {
-  const base = createApprovedPreviewBase("preview-main", "preview.example.com", "-preview");
+  const base = createApprovedPreviewBase("preview-main", "preview.example.com");
   if (!base.ok) throw new Error("The test preview base is invalid.");
   const registry = createApprovedPreviewBaseRegistry([base.value]);
   if (!registry.ok) throw new Error("The test preview registry is invalid.");
@@ -74,7 +74,7 @@ test("normal project loading materializes a preview from the active setup revisi
   vi.stubEnv("DEVSPACE_APP_ORIGIN", "http://localhost:3000");
   vi.stubEnv("DEVSPACE_AUTH_MODE", "development");
   vi.stubEnv("NODE_ENV", "test");
-  vi.stubEnv("DEVSPACE_PREVIEW_BASES", JSON.stringify([{ id: "preview-main", domain: "preview.example.com", labelSuffix: "-preview" }]));
+  vi.stubEnv("DEVSPACE_PREVIEW_BASES", JSON.stringify([{ id: "preview-main", domain: "preview.example.com" }]));
   const loaded = await loadProjectWorkspaceData(project.id);
   expect(loaded?.project.previews).toEqual([expect.objectContaining({ previewKey: "web", containerPort: 5173 })]);
   getProjectDatabase(databasePath).close();

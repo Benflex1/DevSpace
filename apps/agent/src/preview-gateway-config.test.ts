@@ -6,7 +6,7 @@ const leaseId = "01900000-0000-7000-8000-000000000005";
 const servers: http.Server[] = [];
 const baseEnvironment = {
   DEVSPACE_CADDY_ADMIN_SOCKET: "/run/devspace/gateway/caddy-admin.sock",
-  DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "preview.example.com", labelSuffix: "-preview" }])
+  DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "preview.example.com" }])
 };
 
 afterEach(async () => {

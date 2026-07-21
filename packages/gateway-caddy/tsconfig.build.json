@@ -10,8 +10,5 @@
     "rootDir": "src",
     "tsBuildInfoFile": "../../.cache/packages-gateway-caddy.build.tsbuildinfo"
   },
-  "include": ["src/index.ts", "src/types.ts", "src/routes.ts", "src/client.ts", "src/private-socket.ts"],
-  "references": [
-    { "path": "../../packages/security/tsconfig.build.json" }
-  ]
+  "include": ["src/index.ts", "src/types.ts", "src/routes.ts", "src/client.ts", "src/private-socket.ts"]
 }

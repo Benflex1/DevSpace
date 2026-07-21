@@ -23,7 +23,7 @@ const ids = {
   previewId: "018f1f34-7000-7000-8000-000000000004",
   operationId: "018f1f34-7000-7000-8000-000000000005"
 } as const;
-const base = createApprovedPreviewBase("local", "preview.example.com", "-preview");
+const base = createApprovedPreviewBase("local", "preview.example.com");
 if (!base.ok) throw new Error("preview base fixture is invalid");
 const registry = createApprovedPreviewBaseRegistry([base.value]);
 const approvedRegistry = registry.ok ? registry.value : (() => { throw new Error("preview registry fixture is invalid"); })();
@@ -47,7 +47,7 @@ const activation = {
   ...ids,
   revisionId: ids.revisionId,
   previewKey: "web",
-  hostname: "project-workspace-web-018f1f34-preview.preview.example.com",
+  hostname: "project-workspace-web-018f1f34.preview.example.com",
   projectSlug: "project",
   workspaceSlug: "workspace"
 } as const;
@@ -383,7 +383,7 @@ describe("Agent preview runtime policy", () => {
     await expect(fixtureValue.manager.activate({ ...activation, projectSlug: "other" }, association, options, ids.operationId))
       .rejects.toMatchObject({ code: "PREVIEW_DOMAIN_NOT_APPROVED" });
     await expect(fixtureValue.manager.activate({ ...activation, projectSlug: "other",
-      hostname: "other-workspace-web-018f1f34-preview.preview.example.com" }, association, options, ids.operationId))
+      hostname: "other-workspace-web-018f1f34.preview.example.com" }, association, options, ids.operationId))
       .rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
   });
 

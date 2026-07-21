@@ -159,10 +159,9 @@ Preview topology:
 
 ```text
 Browser
-→ administrator-selected DNS/TLS/access layer
-→ administrator-selected outer ingress
-→ reserved preview namespace rule
-→ preview-ingress-connector
+→ Cloudflare Access
+→ Cloudflare
+→ Cloudflare Tunnel
 → dedicated Caddy preview gateway
 → Agent-managed loopback lease
 → exact workspace container port
@@ -183,7 +182,6 @@ Security and deployment support completed:
 - ✅ Private gateway probe
 - ✅ Deployment documentation
 - ✅ Real Caddy CI smoke test
-- ✅ Shared-ingress connector with reserved preview hostname namespace
 
 Remaining before Slice 5 is fully closed:
 
@@ -191,9 +189,8 @@ Remaining before Slice 5 is fully closed:
 - ⏳ Deploy the preview gateway stack on the home server
 - ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
 - ⏳ Configure the production preview environment
-- ⏳ Configure one permanent reserved-namespace rule in the selected outer ingress
-- ⏳ Verify real production preview traffic and HMR through the selected ingress
-- ⏳ Add provider-neutral production authentication (OIDC or another standards-based mode)
+- ⏳ Configure static wildcard Cloudflare routing to the dedicated preview gateway
+- ⏳ Verify real production preview traffic and HMR through Cloudflare
 
 Final local checklist:
 

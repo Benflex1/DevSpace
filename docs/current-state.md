@@ -118,7 +118,7 @@ Milestone 1 — in progress.
   only to the resolved loopback lease. Foreign, stale, missing-runtime, and stale-generation routes
   are not adopted and are removed during reconciliation.
 - The preview gateway deployment runs the pinned Caddy image with the checked-in native JSON
-  configuration, exposes only its private Admin and HTTP data-plane Unix sockets, and replaces the complete managed
+  configuration, exposes only its private Admin Unix socket, and replaces the complete managed
   route array with Caddy Admin PATCH while retaining the terminal fallback. A Docker-backed real
   Caddy smoke command covers startup, socket availability, GET, PATCH replacement, and fallback
   restoration in CI.
@@ -134,11 +134,11 @@ Milestone 1 — in progress.
   the host runtime composes that transport with `GatewayHostProbeServer` over temporary/private Unix
   sockets without Docker access or a public listener.
 - Checkpoint 2 completes the repository-side deployment path. The dedicated Caddy JSON configuration
-  listens on `127.0.0.1:18080` plus the private HTTP data-plane socket, exposes Admin only through
-  the private Unix socket, and keeps a gateway-owned terminal HTTP 404 fallback after exact
-  Agent-managed routes. The generic Compose stack runs pinned Caddy, the host probe, and an isolated
-  byte-transparent connector with no Docker socket or public Docker ports. Coolify/Traefik setup is
-  optional and documented in `docs/integrations/coolify-traefik-preview-ingress.md`.
+  listens only on `127.0.0.1:18080`, exposes Admin only through the private Unix socket, and keeps a
+  gateway-owned terminal HTTP 404 fallback after exact Agent-managed routes. A Coolify-supervised
+  Compose stack runs pinned Caddy and `@devspace/preview-gateway-host` sibling services with host
+  networking, shared runtime-directory sockets, no Docker socket, and no public Docker ports. The
+  code-server and static Cloudflare requirements are documented in `docs/preview-gateway-deployment.md`.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means
@@ -155,10 +155,6 @@ Milestone 1 — in progress.
   browser → deterministic hostname → gateway → exact simulated container path for HTTP and
   WebSocket/HMR, rejects unrelated container ownership, exercises Agent/gateway restart, and proves
   stop removes route eligibility while retaining the loopback lease.
-- Shared preview ingress is implemented with an administrator-owned `labelSuffix` registry entry,
-  exact one-label namespace ownership, Caddy's loopback listener plus private
-  `ingress/preview-http.sock`, and a byte-transparent isolated connector. Coolify/Traefik and other
-  outer-ingress APIs remain optional deployment concerns documented outside core runtime.
 
 ## Still absent
 

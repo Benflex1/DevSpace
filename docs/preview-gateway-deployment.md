@@ -1,37 +1,18 @@
 # Preview Gateway Deployment
 
-This is the generic repository-side deployment for the M1 workspace preview path. It is one
-provider-neutral Compose stack with three services:
+This is the repository-side deployment for the real code-server-hosted M1
+workspace preview path. It is one Coolify-supervised Compose stack with two
+sibling services:
 
 ```text
 dedicated Caddy (host network, 127.0.0.1:18080)
 preview-gateway-host (host network, private probe socket)
-preview-ingress-connector (isolated network, internal TCP port only)
 ```
 
-The services use the administrator-selected UID/GID. Caddy and the host probe use the
-administrator-provisioned private runtime directory; the connector receives only its ingress
-subdirectory. The stack does not mount a Docker socket, publish Docker ports, discover containers,
-or let the Node process start Caddy.
-
-## Shared-ingress contract
-
-The administrator reserves a namespace in `DEVSPACE_PREVIEW_BASES`:
-
-```bash
-DEVSPACE_PREVIEW_BASES='[{"id":"main","domain":"benflex.dev","labelSuffix":"-preview"}]'
-```
-
-The generated hostname is `<rendered-pattern-stem>-preview.benflex.dev`. DNS/TLS/access and the
-outer-ingress rule are administrator-owned. The outer ingress forwards only that namespace to the
-connector, preserves the incoming `Host`, supports WebSocket upgrades, and applies the desired
-authentication/access policy. DevSpace does not call Coolify, Traefik, Cloudflare, or DNS APIs.
-
-The connector listens on its normal isolated Compose network at `DEVSPACE_PREVIEW_INGRESS_PORT`
-(default `8080`) and forwards bytes to
-`/run/devspace/gateway/ingress/preview-http.sock`. It publishes no host port and mounts only the
-ingress directory. Caddy's `127.0.0.1:18080` listener remains available for host-local ingress and
-diagnostics.
+Both services use the administrator-selected UID/GID and share one
+administrator-provisioned runtime directory. The stack does not mount a Docker
+socket, publish Docker ports, discover containers, or let the Node process
+start Caddy.
 
 ## Deploy the stack
 
@@ -49,8 +30,7 @@ worktrees and the production directory. The Compose stack mounts it at the
 fixed container path `/run/devspace/gateway`.
 
 The Caddy service uses a small deployment image with `caddy.json` baked in and
-owns the private Admin socket and HTTP data-plane socket. Its listeners are
-`127.0.0.1:18080` and `/run/devspace/gateway/ingress/preview-http.sock`; the
+owns the private Admin socket. Its only HTTP listener is `127.0.0.1:18080`; the
 initial route set is a gateway-owned terminal HTTP 404 fallback. Agent route
 reconciliation writes exact preview routes before that fallback and always
 writes the fallback back as the last route.
@@ -83,7 +63,7 @@ Add these variables to the DevSpace startup environment and retain the
 existing `DEVSPACE_APP_ORIGIN` configuration:
 
 ```bash
-DEVSPACE_PREVIEW_BASES='[{"id":"main","domain":"benflex.dev","labelSuffix":"-preview"}]'
+DEVSPACE_PREVIEW_BASES='[{"id":"main","domain":"benflex.dev"}]'
 
 DEVSPACE_CADDY_ADMIN_SOCKET=/run/devspace/gateway/caddy-admin.sock
 DEVSPACE_PREVIEW_PROBE_SOCKET=/run/devspace/gateway/preview-probe.sock
@@ -112,29 +92,27 @@ If either service or socket is temporarily unavailable, the Agent reports the
 preview as not ready and normal startup/reconciliation can recover it. No
 loopback or public fallback bypasses the private socket boundaries.
 
-## Historical Cloudflare-only configuration (superseded)
-
-The older fixed Cloudflare-only topology below is retained for historical context. It is not the
-generic contract and must not be read as requiring Cloudflare or exclusive wildcard ownership.
+## Static Cloudflare configuration
 
 Configure the existing host-networked `cloudflared` service once with this
 fixed origin:
 
 ```text
-*-preview.benflex.dev
+*.benflex.dev
 → Cloudflare Tunnel
 → http://127.0.0.1:18080
 ```
 
 Static external setup consists of:
 
-- DNS/TLS/access coverage for the reserved preview namespace;
-- one permanent outer-ingress rule for the reserved namespace;
+- wildcard Cloudflare DNS and tunnel hostname;
+- wildcard tunnel ingress/public hostname;
+- Cloudflare Access policy covering the preview subdomains;
 - tunnel origin fixed to `http://127.0.0.1:18080`.
 
 DevSpace supplies only dynamic state:
 
-- exact generated `*-preview.benflex.dev` hostname;
+- exact generated `*.benflex.dev` hostname;
 - health state;
 - exact Caddy host route;
 - leased loopback upstream.
@@ -169,8 +147,8 @@ After this change is merged:
    → Ready
    ```
 
-10. After the selected outer-ingress rule is configured, verify that the generated
-    `*-preview.benflex.dev` hostname reaches the Vite application.
+10. After Cloudflare wildcard routing is configured, verify that the generated
+    `*.benflex.dev` hostname reaches the Vite application.
 
 ### Diagnostics
 
@@ -181,7 +159,7 @@ credentials or environment values.
 Check only the three expected private sockets:
 
 ```bash
-for socket in caddy-admin.sock preview-probe.sock lease-resolver.sock ingress/preview-http.sock; do
+for socket in caddy-admin.sock preview-probe.sock lease-resolver.sock; do
   path="/srv/devspace/gateway/$socket"
   if test -S "$path"; then stat -c '%F %a %U:%G %n' "$path"; else printf 'missing %s\n' "$path"; fi
 done

@@ -7,8 +7,7 @@
       "servers": {
         "devspace-preview": {
           "listen": [
-            "127.0.0.1:18080",
-            "unix//run/devspace/gateway/ingress/preview-http.sock|0660"
+            "127.0.0.1:18080"
           ],
           "automatic_https": {
             "disable": true

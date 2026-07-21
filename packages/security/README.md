@@ -13,7 +13,7 @@ string input, the affected field, the selected policy, and structured details wh
 Validation does not throw for ordinary rejected input and does not rewrite input before
 returning a branded value.
 
-The public error codes are grouped by these prefixes:
+The 62 public error codes are grouped by these prefixes:
 
 - `RELATIVE_PATH_*`: empty/NUL input, POSIX absolute, Windows drive/rooted/UNC/device forms,
   backslashes, traversal/current/empty segments, trailing separators, and file-required rules;
@@ -82,14 +82,14 @@ and internal hyphens. It rejects dots, wildcards, underscores, whitespace, Unico
 braces, and hyphen boundaries without lowercasing or IDN conversion.
 
 `createApprovedPreviewBase` is the only supported constructor for an approved base. It creates an
-immutable opaque ID/domain/labelSuffix namespace with private type and runtime identity. Base domains have
+immutable opaque ID/domain pair with private type and runtime identity. Base domains have
 non-empty lower-case ASCII labels and a maximum textual length of 253 characters. Schemes,
 credentials, ports, paths, queries, fragments, wildcards, trailing dots, and empty labels are
 invalid. This constructor validates syntax; it does not claim that DNS ownership or external
 configuration has been verified.
 
-`createApprovedPreviewBaseRegistry` accepts only constructor-created bases, rejects duplicate IDs
-and domains, and snapshots their immutable namespace associations into package-private state. The returned
+`createApprovedPreviewBaseRegistry` accepts only constructor-created bases, rejects duplicate IDs,
+and snapshots their immutable ID/domain associations into package-private state. The returned
 registry is opaque and immutable: it exposes no map, array, lookup callback, selected domain, or
 mutable validator. Exact base-ID matching is case-sensitive. Mutating the caller's source array
 after construction cannot affect registry resolution.
@@ -101,19 +101,11 @@ may contain only lower-case ASCII label literals outside placeholders. Repeating
 is rejected. Dots, wildcard/URL syntax, literal braces, unknown or malformed placeholders,
 uppercase, and Unicode are rejected.
 
-`parseApprovedPreviewBaseRegistryJson` is the shared closed parser for `DEVSPACE_PREVIEW_BASES`.
-Each entry must contain exactly `id`, `domain`, and lowercase `labelSuffix`; the suffix begins with
-`-`, ends alphanumerically, contains no dots or wildcard syntax, and is part of one DNS label.
-Web, Agent, and gateway configuration consume this parser rather than independently parsing
-registry entries. `isApprovedPreviewHostname` accepts exactly one label above the base whose
-nonempty stem ends in the configured suffix.
-
 `composePreviewHostname` accepts only a package-created opaque registry. Project Options supplies
 only the approved base ID; callers cannot provide or replace the selected domain. Composition
-looks up the exact ID internally, defensively revalidates its associated domain and suffix, requires
-exactly the validated values declared by the pattern, substitutes and validates the generated stem,
-appends exactly that suffix label, and enforces both the 63-character leftmost-label and 253-character
-hostname limits. It does not
+looks up the exact ID internally, defensively revalidates its associated domain, requires exactly
+the validated values declared by the pattern, substitutes and validates the generated label,
+appends exactly that one label, and enforces the 253-character final hostname limit. It does not
 prove DNS ownership, TLS, wildcard DNS, Cloudflare Access, Tunnel, Caddy, or route configuration
 and performs none of those operations.
 

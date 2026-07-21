@@ -63,26 +63,26 @@ test("parses a closed preview-base registry and rejects malformed or duplicate e
     ...base,
     DEVSPACE_AUTH_MODE: "development",
     NODE_ENV: "test",
-    DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost", labelSuffix: "-preview" }])
+    DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost" }])
   });
   expect(valid.previewBaseRegistry).toBeDefined();
-  expect(valid.previewBases).toEqual([{ id: "local", domain: "localhost", labelSuffix: "-preview" }]);
+  expect(valid.previewBases).toEqual([{ id: "local", domain: "localhost" }]);
   expect(() => readWebRuntimeConfig({
     ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
     DEVSPACE_PREVIEW_BASES: "not-json"
-  })).toThrow(/INVALID_SOURCE/u);
+  })).toThrow(/valid JSON/u);
   expect(() => readWebRuntimeConfig({
     ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
     DEVSPACE_PREVIEW_BASES: JSON.stringify([
-      { id: "one", domain: "preview.example.com", labelSuffix: "-preview" }, { id: "one", domain: "other.example.com", labelSuffix: "-preview" }
+      { id: "one", domain: "preview.example.com" }, { id: "one", domain: "other.example.com" }
     ])
   })).toThrow(/DUPLICATE/u);
   expect(() => readWebRuntimeConfig({
     ...base, DEVSPACE_AUTH_MODE: "development", NODE_ENV: "test",
     DEVSPACE_PREVIEW_BASES: JSON.stringify([
-      { id: "one", domain: "preview.example.com", labelSuffix: "-preview" }, { id: "two", domain: "preview.example.com", labelSuffix: "-preview" }
+      { id: "one", domain: "preview.example.com" }, { id: "two", domain: "preview.example.com" }
     ])
-  })).toThrow(/DUPLICATE_DOMAIN/u);
+  })).toThrow(/duplicate domain/u);
 });
 
 test("performs real RS256/JWKS verification and rejects invalid signed Access tokens", async () => {
