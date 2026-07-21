@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
   isTerminalAttachableState, isTerminalVisibleState, reconcileTerminalState, sortTerminalViewsByTitle, terminalSocketCloseAction,
-  terminalUiState, updateTerminalCollectionState
+  terminalStateMessage, terminalUiState, updateTerminalCollectionState
 } from "./terminal-lifecycle.js";
 
 describe("terminal lifecycle reconciliation", () => {
@@ -21,8 +21,29 @@ describe("terminal lifecycle reconciliation", () => {
     expect(terminalUiState("active")).toBe("disconnected");
   });
 
-  test.each(["closed", "failed", "lost"])("does not keep %s in the normal terminal list", (state) => {
+  test.each(["closed", "failed"])("does not keep %s in the normal terminal list", (state) => {
     expect(isTerminalVisibleState(state)).toBe(false);
+  });
+
+  test("keeps a lost terminal visible but never attachable", () => {
+    expect(isTerminalVisibleState("lost")).toBe(true);
+    expect(isTerminalAttachableState("lost")).toBe(false);
+  });
+
+  test("explains lost-terminal control boundaries", () => {
+    expect(terminalStateMessage("lost")).toContain("Agent restart lost this terminal's PTY attachment");
+    expect(terminalStateMessage("lost")).toContain("cannot be reattached");
+    expect(terminalStateMessage("lost")).toContain("processes launched here may still be running");
+  });
+
+  test("renders lost-terminal guidance with the existing stop control", async () => {
+    const workbench = await readFile(new URL("./project-workbench.tsx", import.meta.url), "utf8");
+    const runtimeControls = await readFile(new URL("./runtime-controls.tsx", import.meta.url), "utf8");
+    expect(workbench).toContain('terminal.state === "lost"');
+    expect(workbench).toContain("<RuntimeControls");
+    expect(workbench).toContain('action="stop"');
+    expect(runtimeControls).toContain("/api/projects/${projectId}/runtime");
+    expect(runtimeControls).toContain('body: JSON.stringify({ action })');
   });
 
   test("keeps creating visible but never attachable", () => {
