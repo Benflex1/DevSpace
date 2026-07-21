@@ -7,7 +7,7 @@ RUN corepack enable \
   && pnpm install --frozen-lockfile \
   && pnpm --filter @devspace/gateway-caddy run build \
   && pnpm --filter @devspace/preview-gateway-host run build \
-  && pnpm deploy --filter @devspace/preview-gateway-host --prod /runtime
+  && pnpm deploy --filter @devspace/preview-gateway-host --prod --legacy /runtime
 
 FROM node:24.18.0-bookworm-slim
 

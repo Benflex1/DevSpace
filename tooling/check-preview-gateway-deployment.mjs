@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const caddyConfigPath = "deploy/preview-gateway/caddy.json";
 const composePath = "deploy/preview-gateway/compose.yaml";
+const dockerfilePath = "deploy/preview-gateway/Dockerfile";
 const sharedRuntimeSource = "/srv/devspace/gateway";
 const sharedRuntimeTarget = "/run/devspace/gateway";
 const adminSocket = "unix//run/devspace/gateway/caddy-admin.sock|0660";
@@ -27,9 +28,10 @@ function requireHostServiceBasics(block, serviceName) {
 }
 
 export async function validatePreviewGatewayDeployment(repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
-  const [caddyText, compose] = await Promise.all([
+  const [caddyText, compose, dockerfile] = await Promise.all([
     readFile(path.join(repositoryRoot, caddyConfigPath), "utf8"),
-    readFile(path.join(repositoryRoot, composePath), "utf8")
+    readFile(path.join(repositoryRoot, composePath), "utf8"),
+    readFile(path.join(repositoryRoot, dockerfilePath), "utf8")
   ]);
   let caddy;
   try { caddy = JSON.parse(caddyText); }
@@ -60,6 +62,7 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
   requireCondition(caddyService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1] === hostService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1], "Both services must support the same configured UID/GID.");
   requireCondition(hostService.includes("DEVSPACE_PREVIEW_PROBE_SOCKET: /run/devspace/gateway/preview-probe.sock"), "Host service probe socket is missing.");
   requireCondition(hostService.includes("DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: /run/devspace/gateway/lease-resolver.sock"), "Host service lease resolver socket is missing.");
+  requireCondition(dockerfile.includes("pnpm deploy --filter @devspace/preview-gateway-host --prod --legacy /runtime"), "Preview gateway Dockerfile must use pnpm's legacy deploy mode.");
 
   return true;
 }
