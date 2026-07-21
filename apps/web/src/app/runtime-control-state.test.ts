@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { runtimeControlState } from "./runtime-control-state.js";
+import { runtimeControlState, runtimeRestartControlState } from "./runtime-control-state.js";
 
 const base = {
   runtimeAvailable: true,
@@ -35,6 +35,30 @@ describe("runtime control state", () => {
     expect(runtimeControlState({ ...base, runtimeState: "running", canStop: true, activeAction: "stop" })).toMatchObject({
       action: "stop", visible: true, disabled: true,
       reason: "Another runtime action is already in progress."
+    });
+  });
+
+  test("requires only authorized stop to restart a running runtime", () => {
+    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStop: true })).toMatchObject({
+      mode: "running", disabled: false, reason: null
+    });
+    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStart: true })).toMatchObject({
+      mode: "running", disabled: true
+    });
+  });
+
+  test("uses only authorized start for a stopped or absent runtime", () => {
+    expect(runtimeRestartControlState({ ...base, runtimeState: "stopped", canStart: true })).toMatchObject({
+      mode: "start", disabled: false, reason: null
+    });
+    expect(runtimeRestartControlState({ ...base, runtimeState: "absent" })).toMatchObject({
+      mode: "start", disabled: true
+    });
+  });
+
+  test("disables restart while its sequence is pending", () => {
+    expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStart: true, canStop: true, pending: true })).toMatchObject({
+      mode: "running", disabled: true, reason: "Workspace restart is already in progress."
     });
   });
 });

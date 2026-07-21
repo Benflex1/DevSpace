@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalVisibleState, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller } from "./preview-liveness.js";
@@ -42,6 +42,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
   const terminalLabels = useRef(new Map(initialTerminals.map((terminal) => [terminal.id, terminal.title])));
+  const lostTerminalObservedAt = useRef(new Map<string, number>());
+  const [sidebarNow, setSidebarNow] = useState(() => Date.now());
   const currentTerminals = useRef(initialTerminals);
   const [tasks, setTasks] = useState<readonly Task[]>(initialTasks);
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
@@ -59,6 +61,29 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     }
     const next = lostDialogSession.current.observe(ids);
     if (ids.length === 0 || next.length > 0) setLostDialogIds(next);
+  }, [terminals]);
+  useEffect(() => {
+    const now = Date.now();
+    const lostIds = new Set<string>();
+    for (const terminal of terminals) {
+      if (terminal.state === "lost") {
+        lostIds.add(terminal.id);
+        if (!lostTerminalObservedAt.current.has(terminal.id)) lostTerminalObservedAt.current.set(terminal.id, now);
+      } else {
+        lostTerminalObservedAt.current.delete(terminal.id);
+      }
+    }
+    for (const terminalId of lostTerminalObservedAt.current.keys()) {
+      if (!lostIds.has(terminalId)) lostTerminalObservedAt.current.delete(terminalId);
+    }
+    setSidebarNow(now);
+    const expiry = [...lostTerminalObservedAt.current.values()].reduce<number | undefined>((earliest, lostAt) => {
+      const candidate = lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS;
+      return earliest === undefined || candidate < earliest ? candidate : earliest;
+    }, undefined);
+    if (expiry === undefined) return;
+    const timer = window.setTimeout(() => setSidebarNow(Date.now()), Math.max(0, expiry - now));
+    return () => window.clearTimeout(timer);
   }, [terminals]);
   useEffect(() => {
     setPreviews(initialPreviews);
@@ -163,7 +188,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     };
   }, [refreshPreviews]);
 
-  const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) => isTerminalVisibleState(terminal.state))), [terminals]);
+  const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) =>
+    isTerminalSidebarVisible(terminal.state, lostTerminalObservedAt.current.get(terminal.id), sidebarNow))), [sidebarNow, terminals]);
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);
   const previewById = useMemo(() => new Map(previews.map((preview) => [preview.id, preview])), [previews]);
   useEffect(() => {
@@ -274,8 +300,8 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   return <header className="workbench-topbar">
     <div className="workbench-breadcrumb"><Link href="/" aria-label="Back to Projects">Projects</Link><span aria-hidden="true">/</span><strong>{projectName}</strong></div>
     <div className="workbench-context"><span className="context-item"><span className="context-label">branch</span><code>{branchName}</code></span>
-      <span className={`runtime-chip ${runtimeState}`}>{runtimeLabel(runtimeState)}</span>
       <a className="topbar-action" href={repositoryUrl} target="_blank" rel="noreferrer">Repository</a>
+      <span className={`runtime-chip ${runtimeState}`}>{runtimeLabel(runtimeState)}</span>
       <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart}
         canStop={canStop} retryStart={retryStart} />
     </div>
@@ -390,7 +416,7 @@ function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, 
       <div className="lost-terminal-dialog-actions">
         <button type="button" className="lost-terminal-dismiss" onClick={onDismiss}>Dismiss</button>
         <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
-          canStart={canStart} canStop={canStop} retryStart={retryStart} action="stop" stopLabel="Stop workspace" />
+          canStart={canStart} canStop={canStop} retryStart={retryStart} restart onSuccess={onDismiss} />
       </div>
     </section>
   </div>;

@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
-  isTerminalAttachableState, isTerminalVisibleState, reconcileTerminalState, sortTerminalViewsByTitle, terminalSocketCloseAction,
-  terminalStateMessage, terminalUiState, updateTerminalCollectionState
+  isTerminalAttachableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, reconcileTerminalState,
+  sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
 } from "./terminal-lifecycle.js";
 
 describe("terminal lifecycle reconciliation", () => {
@@ -30,6 +30,18 @@ describe("terminal lifecycle reconciliation", () => {
     expect(isTerminalAttachableState("lost")).toBe(false);
   });
 
+  test("keeps a newly lost terminal visible until the sidebar expiry", () => {
+    const lostAt = 10_000;
+    expect(isTerminalSidebarVisible("lost", lostAt, lostAt)).toBe(true);
+    expect(isTerminalSidebarVisible("lost", lostAt, lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS - 1)).toBe(true);
+    expect(isTerminalSidebarVisible("lost", lostAt, lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS)).toBe(false);
+  });
+
+  test("never expires active terminals", () => {
+    expect(isTerminalSidebarVisible("active", 0, Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(isTerminalSidebarVisible("disconnected", undefined, Number.MAX_SAFE_INTEGER)).toBe(true);
+  });
+
   test("explains lost-terminal control boundaries", () => {
     expect(terminalStateMessage("lost")).toContain("Agent restart lost this terminal's PTY attachment");
     expect(terminalStateMessage("lost")).toContain("cannot be reattached");
@@ -43,11 +55,16 @@ describe("terminal lifecycle reconciliation", () => {
     expect(workbench).toContain("<LostTerminalDialog");
     expect(workbench).toContain('role="dialog"');
     expect(workbench).not.toContain("lost-terminal-notice");
-    expect(workbench).toContain('stopLabel="Stop workspace"');
+    expect(workbench).toContain("restart onSuccess={onDismiss}");
+    expect(workbench).toContain("isTerminalSidebarVisible");
+    expect(workbench).toContain('const ids = terminals.filter((terminal) => terminal.state === "lost")');
     expect(workbench).toContain("runtimeState={runtimeState}");
     expect(runtimeControls).toContain("/api/projects/${projectId}/runtime");
     expect(runtimeControls).toContain('body: JSON.stringify({ action })');
     expect(runtimeControls).toContain("runtimeControlState");
+    expect(runtimeControls).toContain('"Restart workspace"');
+    expect(runtimeControls).toContain("restartRuntime");
+    expect(runtimeControls).toContain("if (pendingRef.current) return;");
   });
 
   test("keeps one persistent runtime control with state-aware actions", async () => {
@@ -59,9 +76,15 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain('"Stop runtime"');
     expect(runtimeControls).toContain("activeAction === null");
     expect(runtimeControls).toContain("disabled={state.disabled || pending}");
-    expect(runtimeControls).toContain("{activeAction === null && <button");
+    expect(runtimeControls).toContain("{!isRestart && activeAction === null && <button");
     expect(workbench).toContain("runtimeState={runtimeState}");
     expect(runtimeControls).toContain("router.refresh()");
+  });
+
+  test("keeps recovery dialog styling secondary for Dismiss and primary for Restart", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+    expect(css).toContain(".lost-terminal-dismiss { font-size: .7rem; padding: 5px 8px; }");
+    expect(css).toContain(".lost-terminal-dialog-actions .runtime-controls button { font-size: .84rem; padding: 10px 16px; }");
   });
 
   test("keeps creating visible but never attachable", () => {

@@ -4,9 +4,15 @@ export type TerminalUiState = "connecting" | "active" | TerminalServerState;
 
 const terminalVisibleStates = new Set(["creating", "active", "disconnected", "lost"]);
 const terminalDisplayNumberPattern = /^Terminal ([1-9][0-9]*)$/u;
+export const LOST_TERMINAL_SIDEBAR_EXPIRY_MS = 30_000;
 
 export function isTerminalVisibleState(state: string): boolean {
   return terminalVisibleStates.has(state);
+}
+
+export function isTerminalSidebarVisible(state: string, lostAt: number | undefined, now: number): boolean {
+  if (!isTerminalVisibleState(state)) return false;
+  return state !== "lost" || lostAt === undefined || now < lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS;
 }
 
 export function terminalDisplayNumber(title: string): number | undefined {
