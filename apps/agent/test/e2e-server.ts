@@ -1,5 +1,6 @@
 import { createAgentServer } from "../src/server.js";
 import { GatewayHostProbe, PreviewGatewayAdapter, PrivateCaddyAdminTransport, PrivateGatewayProbeTransport, type GatewayPolicy } from "@devspace/gateway-caddy";
+import { getApprovedPreviewBases } from "@devspace/security";
 import { readPreviewBaseRegistry } from "../src/preview-runtime.js";
 
 const socketPath = process.env.DEVSPACE_AGENT_SOCKET_PATH;
@@ -9,7 +10,8 @@ if (managedRoot === undefined) throw new Error("DEVSPACE_MANAGED_ROOT is require
 const caddyAdminSocket = process.env.DEVSPACE_CADDY_ADMIN_SOCKET;
 const previewProbeSocket = process.env.DEVSPACE_PREVIEW_PROBE_SOCKET;
 const rawBases = process.env.DEVSPACE_PREVIEW_BASES;
-const gatewayPolicy: GatewayPolicy | null = rawBases === undefined ? null : { approvedPreviewBases: JSON.parse(rawBases) as GatewayPolicy["approvedPreviewBases"] };
+const parsedRegistry = readPreviewBaseRegistry();
+const gatewayPolicy: GatewayPolicy | null = rawBases === undefined ? null : { approvedPreviewBases: getApprovedPreviewBases(parsedRegistry) };
 const server = createAgentServer({
   socketPath,
   managedRoots: { projects: `${managedRoot}/projects`, workspaces: `${managedRoot}/workspaces`, state: `${managedRoot}/state` },

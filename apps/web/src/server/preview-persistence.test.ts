@@ -3,7 +3,7 @@ import { parseProjectOptionsV1 } from "@devspace/project-options";
 import { describe, expect, test } from "vitest";
 import { materializePreview } from "./preview-persistence.js";
 
-const base = createApprovedPreviewBase("preview-main", "preview.example.com");
+const base = createApprovedPreviewBase("preview-main", "preview.example.com", "-preview");
 if (!base.ok) throw new Error("invalid preview base fixture");
 const registry = createApprovedPreviewBaseRegistry([base.value]);
 if (!registry.ok) throw new Error("invalid preview registry fixture");
@@ -32,7 +32,7 @@ describe("Web preview persistence", () => {
       previewBaseRegistry: registry.value,
       now: "2026-07-16T12:00:00.000Z"
     });
-    expect(row.hostname).toBe("alpha-primary-web-0190a000.preview.example.com");
+    expect(row.hostname).toBe("alpha-primary-web-0190a000-preview.preview.example.com");
     expect(row.routePresent).toBe(false);
     expect(row.serviceId).toBeNull();
     expect(row.containerPort).toBe(3000);

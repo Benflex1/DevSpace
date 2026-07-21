@@ -2,6 +2,11 @@
 
 Private Agent-owned Caddy adapter for exact preview routes. It accepts only an approved hostname and an Agent-owned loopback lease, replaces the dedicated preview route set atomically, and exposes an opaque lease probe. Caddy's admin transport is Unix-socket-only; it receives no Docker socket, browser input, or arbitrary upstream.
 
+Approved hostnames are owned by the administrator-reserved `labelSuffix` namespace. Ownership is
+exactly one DNS label above the configured base; the base domain itself, ordinary application
+subdomains, and deeper subdomains are rejected. Dynamic route documents remain exact Caddy Host
+matchers and the unconditional terminal 404 remains last.
+
 The generated Caddy reverse proxy uses the standard `reverse_proxy` handler with
 immediate flushing, which preserves ordinary HTTP streaming and WebSocket/HMR
 upgrades without rewriting application CSP or frame headers.

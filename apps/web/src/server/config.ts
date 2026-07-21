@@ -1,7 +1,7 @@
 import { AGENT_SOCKET_PATH } from "@devspace/contracts";
 import {
-  createApprovedPreviewBase,
-  createApprovedPreviewBaseRegistry,
+  getApprovedPreviewBases,
+  parseApprovedPreviewBaseRegistryJson,
   type ApprovedPreviewBaseRegistry
 } from "@devspace/security";
 
@@ -15,7 +15,7 @@ export interface WebRuntimeConfig {
   readonly appOrigin: string;
   readonly auth: AuthConfig;
   readonly previewBaseRegistry: ApprovedPreviewBaseRegistry;
-  readonly previewBases: readonly { readonly id: string; readonly domain: string }[];
+  readonly previewBases: readonly { readonly id: string; readonly domain: string; readonly labelSuffix: string }[];
   readonly previewGatewayProtocol: "http:" | "https:";
   readonly previewGatewayPort: number | null;
 }
@@ -30,42 +30,17 @@ function required(env: RuntimeEnvironment, name: string): string {
 
 function readPreviewBaseRegistry(env: RuntimeEnvironment): {
   readonly registry: ApprovedPreviewBaseRegistry;
-  readonly publicBases: readonly { readonly id: string; readonly domain: string }[];
+  readonly publicBases: readonly { readonly id: string; readonly domain: string; readonly labelSuffix: string }[];
 } {
   const raw = env.DEVSPACE_PREVIEW_BASES?.trim();
   if (raw === undefined || raw === "") {
-    const empty = createApprovedPreviewBaseRegistry([]);
+    const empty = parseApprovedPreviewBaseRegistryJson("[]");
     if (!empty.ok) throw new Error("The default preview-base registry is invalid.");
     return { registry: empty.value, publicBases: [] };
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("DEVSPACE_PREVIEW_BASES must be valid JSON.");
-  }
-  if (!Array.isArray(parsed)) throw new Error("DEVSPACE_PREVIEW_BASES must be a JSON array.");
-  const bases = parsed.map((candidate, index) => {
-    if (typeof candidate !== "object" || candidate === null
-      || typeof (candidate as { id?: unknown }).id !== "string"
-      || typeof (candidate as { domain?: unknown }).domain !== "string") {
-      throw new Error(`DEVSPACE_PREVIEW_BASES[${index}] must contain string id and domain fields.`);
-    }
-    const result = createApprovedPreviewBase(
-      (candidate as { id: string }).id,
-      (candidate as { domain: string }).domain
-    );
-    if (!result.ok) throw new Error(`DEVSPACE_PREVIEW_BASES[${index}] is invalid: ${result.error.code}.`);
-    return result.value;
-  });
-  const domains = new Set<string>();
-  for (const base of bases) {
-    if (domains.has(base.domain)) throw new Error(`DEVSPACE_PREVIEW_BASES contains duplicate domain: ${base.domain}.`);
-    domains.add(base.domain);
-  }
-  const registry = createApprovedPreviewBaseRegistry(bases);
+  const registry = parseApprovedPreviewBaseRegistryJson(raw);
   if (!registry.ok) throw new Error(`DEVSPACE_PREVIEW_BASES is invalid: ${registry.error.code}.`);
-  return { registry: registry.value, publicBases: bases.map(({ id, domain }) => ({ id, domain })) };
+  return { registry: registry.value, publicBases: getApprovedPreviewBases(registry.value).map(({ id, domain, labelSuffix }) => ({ id, domain, labelSuffix })) };
 }
 
 export function readWebRuntimeConfig(env: RuntimeEnvironment = process.env): WebRuntimeConfig {

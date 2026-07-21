@@ -63,9 +63,14 @@ const expectedSecurityValidationErrorCodes = [
   "APPROVED_BASE_TOO_LONG",
   "APPROVED_BASE_EMPTY_LABEL",
   "APPROVED_BASE_INVALID_LABEL",
+  "APPROVED_BASE_LABEL_SUFFIX_MISSING",
+  "APPROVED_BASE_LABEL_SUFFIX_EMPTY",
+  "APPROVED_BASE_LABEL_SUFFIX_INVALID",
+  "APPROVED_BASE_REGISTRY_UNKNOWN_FIELD",
   "APPROVED_BASE_REGISTRY_INVALID_SOURCE",
   "APPROVED_BASE_REGISTRY_INVALID_BASE",
   "APPROVED_BASE_DUPLICATE_ID",
+  "APPROVED_BASE_DUPLICATE_DOMAIN",
   "PREVIEW_PATTERN_EMPTY",
   "PREVIEW_PATTERN_MULTIPLE_LABELS",
   "PREVIEW_PATTERN_INVALID_CHARACTER",
@@ -80,6 +85,8 @@ const expectedSecurityValidationErrorCodes = [
   "PREVIEW_PLACEHOLDER_MISSING",
   "PREVIEW_PLACEHOLDER_UNDECLARED",
   "PREVIEW_GENERATED_LABEL_INVALID",
+  "PREVIEW_GENERATED_STEM_EMPTY",
+  "PREVIEW_COMPOSED_LABEL_TOO_LONG",
   "PREVIEW_HOSTNAME_TOO_LONG"
 ] as const;
 
@@ -142,6 +149,11 @@ test("the package root exposes only intentional runtime APIs", () => {
     "composePreviewHostname",
     "createApprovedPreviewBase",
     "createApprovedPreviewBaseRegistry",
+    "getApprovedPreviewBases",
+    "isApprovedPreviewHostname",
+    "isHostnameInApprovedPreviewRegistry",
+    "parseApprovedPreviewBaseRegistry",
+    "parseApprovedPreviewBaseRegistryJson",
     "securityValidationErrorCodes",
     "validateClaimedCanonicalAbsolutePosixPath",
     "validateDnsLabel",
@@ -156,7 +168,7 @@ test("the package root exposes only intentional runtime APIs", () => {
 
 test("the complete 62-code inventory is exact, frozen, and duplicate-free", () => {
   expect(securityValidationErrorCodes).toEqual(expectedSecurityValidationErrorCodes);
-  expect(securityValidationErrorCodes).toHaveLength(62);
+  expect(securityValidationErrorCodes).toHaveLength(69);
   expect(Object.isFrozen(securityValidationErrorCodes)).toBe(true);
   expect(new Set(securityValidationErrorCodes).size).toBe(securityValidationErrorCodes.length);
 });

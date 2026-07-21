@@ -3,6 +3,9 @@ import {
   composePreviewHostname,
   createApprovedPreviewBase,
   createApprovedPreviewBaseRegistry,
+  isApprovedPreviewHostname,
+  parseApprovedPreviewBaseRegistry,
+  parseApprovedPreviewBaseRegistryJson,
   validateDnsLabel,
   validatePreviewHostnamePattern,
   type ApprovedPreviewBase,
@@ -28,7 +31,7 @@ function pattern(input: string): PreviewHostnamePattern {
 }
 
 function base(id: string, domain: string): ApprovedPreviewBase {
-  const result = createApprovedPreviewBase(id, domain);
+  const result = createApprovedPreviewBase(id, domain, "-preview");
   if (!result.ok) {
     throw new Error(`invalid base fixture: ${domain}`);
   }
@@ -90,8 +93,8 @@ describe("administrator-approved preview bases", () => {
     "dev.example",
     `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`
   ])("accepts valid base %j", (domain) => {
-    const result = createApprovedPreviewBase("primary", domain);
-    expect(result).toMatchObject({ ok: true, value: { id: "primary", domain } });
+    const result = createApprovedPreviewBase("primary", domain, "-preview");
+    expect(result).toMatchObject({ ok: true, value: { id: "primary", domain, labelSuffix: "-preview" } });
     if (result.ok) {
       expect(Object.isFrozen(result.value)).toBe(true);
       expect(Reflect.set(result.value, "domain", "other.example.com")).toBe(false);
@@ -116,10 +119,36 @@ describe("administrator-approved preview bases", () => {
     ["primary", " preview.example.com", "APPROVED_BASE_INVALID_LABEL"],
     ["primary", "prév.example.com", "APPROVED_BASE_INVALID_LABEL"]
   ])("rejects invalid approved base id/domain", (id, domain, code) => {
-    expect(createApprovedPreviewBase(id, domain)).toMatchObject({
+    expect(createApprovedPreviewBase(id, domain, "-preview")).toMatchObject({
       ok: false,
       error: { category: "approved-preview-base", code }
     });
+  });
+
+  test("parses the closed reserved namespace registry", () => {
+    const parsed = parseApprovedPreviewBaseRegistryJson(JSON.stringify([{ id: "main", domain: "benflex.dev", labelSuffix: "-preview" }]));
+    expect(parsed).toMatchObject({ ok: true });
+  });
+
+  test.each([
+    [{ id: "main", domain: "benflex.dev" }, "APPROVED_BASE_LABEL_SUFFIX_MISSING"],
+    [{ id: "main", domain: "benflex.dev", labelSuffix: "preview" }, "APPROVED_BASE_LABEL_SUFFIX_INVALID"],
+    [{ id: "main", domain: "benflex.dev", labelSuffix: "-pre.view" }, "APPROVED_BASE_LABEL_SUFFIX_INVALID"],
+    [{ id: "main", domain: "benflex.dev", labelSuffix: "-*preview" }, "APPROVED_BASE_LABEL_SUFFIX_INVALID"],
+    [{ id: "main", domain: "benflex.dev", labelSuffix: "-preview", extra: true }, "APPROVED_BASE_REGISTRY_UNKNOWN_FIELD"]
+  ])("rejects malformed registry entry %j", (entry, code) => {
+    expect(parseApprovedPreviewBaseRegistry([entry])).toMatchObject({ ok: false, error: { code } });
+  });
+
+  test("rejects duplicate IDs and domains", () => {
+    expect(parseApprovedPreviewBaseRegistry([
+      { id: "main", domain: "benflex.dev", labelSuffix: "-preview" },
+      { id: "main", domain: "other.dev", labelSuffix: "-preview" }
+    ])).toMatchObject({ ok: false, error: { code: "APPROVED_BASE_DUPLICATE_ID" } });
+    expect(parseApprovedPreviewBaseRegistry([
+      { id: "main", domain: "benflex.dev", labelSuffix: "-preview" },
+      { id: "other", domain: "benflex.dev", labelSuffix: "-preview" }
+    ])).toMatchObject({ ok: false, error: { code: "APPROVED_BASE_DUPLICATE_DOMAIN" } });
   });
 });
 
@@ -193,7 +222,7 @@ describe("approved-base preview hostname composition", () => {
         ? { workspace: label("primary"), preview: label("web") }
         : { project: label("devspace"), shortId: label("a1b2") };
     expect(composePreviewHostname(pattern(rawPattern), usedValues, "primary", approvedBases))
-      .toEqual({ ok: true, value: `${generated}.preview.example.com` });
+      .toEqual({ ok: true, value: `${generated}-preview.preview.example.com` });
   });
 
   test("rejects an unknown approved base ID", () => {
@@ -220,9 +249,9 @@ describe("approved-base preview hostname composition", () => {
   test("binds each requested ID to only its registered domain", () => {
     const values = { project: label("demo") };
     expect(composePreviewHostname(pattern("{project}"), values, "primary", approvedBases))
-      .toEqual({ ok: true, value: "demo.preview.example.com" });
+      .toEqual({ ok: true, value: "demo-preview.preview.example.com" });
     expect(composePreviewHostname(pattern("{project}"), values, "secondary", approvedBases))
-      .toEqual({ ok: true, value: "demo.other.example.com" });
+      .toEqual({ ok: true, value: "demo-preview.other.example.com" });
   });
 
   test("is deterministic for the same project, workspace, preview, and short ID", () => {
@@ -235,7 +264,7 @@ describe("approved-base preview hostname composition", () => {
     const second = composePreviewHostname(
       pattern("{project}-{workspace}-{preview}-{shortId}"), values, "primary", approvedBases
     );
-    expect(first).toEqual({ ok: true, value: "devspace-primary-web-a1b2c3d4.preview.example.com" });
+    expect(first).toEqual({ ok: true, value: "devspace-primary-web-a1b2c3d4-preview.preview.example.com" });
     expect(second).toEqual(first);
   });
 
@@ -308,13 +337,36 @@ describe("approved-base preview hostname composition", () => {
   });
 
   test("accepts a 253-character FQDN and rejects 254 characters", () => {
-    const exactBase = base("exact", `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(59)}`);
-    const overBase = base("over", `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(60)}`);
+    const exactBase = base("exact", `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(51)}`);
+    const overBase = base("over", `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(52)}`);
     const bases = registry([exactBase, overBase]);
     expect(composePreviewHostname(pattern("{shortId}"), { shortId: label("x") }, "exact", bases))
       .toMatchObject({ ok: true });
     expect(composePreviewHostname(pattern("{shortId}"), { shortId: label("x") }, "over", bases))
       .toMatchObject({ ok: false, error: { code: "PREVIEW_HOSTNAME_TOO_LONG" } });
+  });
+
+  test("rejects empty stems and enforces the composed DNS label limit", () => {
+    expect(composePreviewHostname(pattern("{project}"), { project: "" as DnsLabel }, "primary", approvedBases))
+      .toMatchObject({ ok: false, error: { code: "PREVIEW_GENERATED_STEM_EMPTY" } });
+    expect(composePreviewHostname(pattern("{project}"), { project: label("a".repeat(56)) }, "primary", approvedBases))
+      .toMatchObject({ ok: false, error: { code: "PREVIEW_COMPOSED_LABEL_TOO_LONG" } });
+  });
+});
+
+describe("reserved preview namespace ownership", () => {
+  const namespace = { domain: "benflex.dev", labelSuffix: "-preview" };
+  test.each([
+    ["chess-a8f3-preview.benflex.dev", true],
+    ["code.benflex.dev", false],
+    ["benflex.dev", false],
+    ["-preview.benflex.dev", false],
+    ["foo.preview.benflex.dev", false],
+    ["foo-preview.other.example", false],
+    ["foo-preview.bar.benflex.dev", false],
+    ["foo-preview.benflex.dev", true]
+  ])("owns only the exact reserved namespace host %j", (hostname, expected) => {
+    expect(isApprovedPreviewHostname(hostname, namespace)).toBe(expected);
   });
 });
 
@@ -380,9 +432,9 @@ describe("opaque approved-base registries", () => {
     const bases = registry([upper, lower]);
     const values = { project: label("demo") };
     expect(composePreviewHostname(pattern("{project}"), values, "Primary", bases))
-      .toEqual({ ok: true, value: "demo.upper.example.com" });
+      .toEqual({ ok: true, value: "demo-preview.upper.example.com" });
     expect(composePreviewHostname(pattern("{project}"), values, "primary", bases))
-      .toEqual({ ok: true, value: "demo.lower.example.com" });
+      .toEqual({ ok: true, value: "demo-preview.lower.example.com" });
     expect(composePreviewHostname(pattern("{project}"), values, "PRIMARY", bases))
       .toMatchObject({ ok: false, error: { code: "PREVIEW_BASE_UNKNOWN" } });
   });
@@ -412,7 +464,7 @@ describe("opaque approved-base registries", () => {
       { project: label("demo") },
       "original",
       bases
-    )).toEqual({ ok: true, value: "demo.original.example.com" });
+    )).toEqual({ ok: true, value: "demo-preview.original.example.com" });
     expect(composePreviewHostname(
       pattern("{project}"),
       { project: label("demo") },
@@ -431,6 +483,6 @@ describe("opaque approved-base registries", () => {
       { project: label("demo") },
       "original",
       bases
-    )).toEqual({ ok: true, value: "demo.original.example.com" });
+    )).toEqual({ ok: true, value: "demo-preview.original.example.com" });
   });
 });

@@ -200,7 +200,7 @@ export async function reconcileWorkspacePreviews(projectId: string, actor: strin
       if (preview.desiredState === "active" || preview.routePresent || preview.observedState !== "inactive") {
         await reconcileOne(context, preview, "deactivate", actor, dependencies);
       }
-    } else if (preview.desiredState === "active" || preview.routePresent) {
+    } else if (preview.routePresent || (preview.desiredState === "active" && preview.observedState !== "inactive")) {
       try {
         const observation = await dependencies.agent.inspectPreview(projectId, context.workspace.id, context.revision.id, preview.id);
         persistObservation(dependencies.database, context, preview, observation, undefined);
