@@ -193,7 +193,6 @@ Remaining before Slice 5 is fully closed:
 - ⏳ Configure the production preview environment
 - ⏳ Configure one permanent reserved-namespace rule in the selected outer ingress
 - ⏳ Verify real production preview traffic and HMR through the selected ingress
-- ⏳ Add provider-neutral production authentication (OIDC or another standards-based mode)
 
 Final local checklist:
 
@@ -220,6 +219,11 @@ Final local checklist:
 - ⏳ Explicit reconciliation decision logging
 - ⏳ Safe secret/path redaction policy
 - ⏳ Incident/error IDs that connect UI errors to service logs
+
+### Authentication hardening
+
+- ⏳ Add provider-neutral production authentication (OIDC or another standards-based mode); this
+  is separate future work and does not block completion of the M1 preview slice.
 
 Later operational UX:
 
@@ -252,7 +256,7 @@ Later operational UX:
 
 1. ⏳ Run the final local Slice 5 lifecycle checklist
 2. ⏳ Deploy the preview gateway stack to the home server
-3. ⏳ Configure production wildcard preview routing
+3. ⏳ Configure production reserved-namespace preview routing
 4. ⏳ Validate production previews/HMR
 5. ⏳ Complete focused M1 Slice 6 hardening
 6. ⏳ Evaluate/adopt TypeScript 7 without breaking tooling compatibility

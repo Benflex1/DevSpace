@@ -112,42 +112,13 @@ If either service or socket is temporarily unavailable, the Agent reports the
 preview as not ready and normal startup/reconciliation can recover it. No
 loopback or public fallback bypasses the private socket boundaries.
 
-## Historical Cloudflare-only configuration (superseded)
-
-The older fixed Cloudflare-only topology below is retained for historical context. It is not the
-generic contract and must not be read as requiring Cloudflare or exclusive wildcard ownership.
-
-Configure the existing host-networked `cloudflared` service once with this
-fixed origin:
-
-```text
-*-preview.benflex.dev
-→ Cloudflare Tunnel
-→ http://127.0.0.1:18080
-```
-
-Static external setup consists of:
-
-- DNS/TLS/access coverage for the reserved preview namespace;
-- one permanent outer-ingress rule for the reserved namespace;
-- tunnel origin fixed to `http://127.0.0.1:18080`.
-
-DevSpace supplies only dynamic state:
-
-- exact generated `*-preview.benflex.dev` hostname;
-- health state;
-- exact Caddy host route;
-- leased loopback upstream.
-
-There is no Cloudflare API or Coolify API integration in this path.
-
 ## Manual validation runbook
 
 After this change is merged:
 
 1. Provision an administrator-owned shared runtime directory and select the
    matching gateway UID/GID.
-2. Deploy `deploy/preview-gateway/compose.yaml` through Coolify.
+2. Deploy `deploy/preview-gateway/compose.yaml` with the selected container deployment system.
 3. Mount the same directory into code-server at
    `/srv/devspace/gateway:/run/devspace/gateway`.
 4. Restart code-server if the new bind mount is not applied to the running
@@ -170,7 +141,9 @@ After this change is merged:
    ```
 
 10. After the selected outer-ingress rule is configured, verify that the generated
-    `*-preview.benflex.dev` hostname reaches the Vite application.
+    `<stem>-preview.benflex.dev` hostname reaches the Vite application. The `<stem>` is the
+    generated preview-specific hostname stem; matching the `-preview` suffix is an outer-ingress
+    namespace rule, not a portable wildcard hostname syntax.
 
 ### Diagnostics
 

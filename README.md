@@ -29,8 +29,10 @@ ownership.
 
 The administrator provides DNS/TLS coverage, one permanent outer-ingress rule for that namespace,
 original `Host` preservation, WebSocket-capable forwarding, appropriate access control, and the
-dedicated Preview Gateway. The outer ingress may be Traefik, Caddy, Nginx, Cloudflare Tunnel, or
-another compatible reverse proxy. See
+dedicated Preview Gateway. The generic deployment and ingress contract is documented in
+[`docs/preview-gateway-deployment.md`](docs/preview-gateway-deployment.md). The outer ingress may
+be Traefik, Caddy, Nginx, Cloudflare Tunnel, or another compatible reverse proxy. Optional
+Coolify/Traefik integration guidance is in
 [`docs/integrations/coolify-traefik-preview-ingress.md`](docs/integrations/coolify-traefik-preview-ingress.md).
 
 Current production Web authentication still uses Cloudflare Access; provider-neutral production
