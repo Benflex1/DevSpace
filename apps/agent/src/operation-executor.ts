@@ -4,6 +4,7 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
+import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
 
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
@@ -37,7 +38,8 @@ export class OperationExecutor {
       createTerminal: () => Promise.reject(new Error("execution-manager-unavailable")),
       closeTerminal: () => Promise.reject(new Error("execution-manager-unavailable")),
       stopWorkspace: () => Promise.resolve()
-    }
+    },
+    private readonly logger: StructuredLogger = createLogger({ component: "agent", subsystem: "operations" })
   ) {}
 
   get isHealthy(): boolean { return this.observationHealthy; }
@@ -74,9 +76,18 @@ export class OperationExecutor {
     if (record === undefined || record.state === "succeeded" || record.state === "failed") return;
     const projectId = (record.request as { projectId: string }).projectId;
     const resource = resourceFor(record);
+    const request = record.request as { projectId?: unknown; workspaceId?: unknown; previewId?: unknown };
+    const resourceFields = {
+      ...(typeof request.projectId === "string" ? { projectId: request.projectId } : {}),
+      ...(typeof request.workspaceId === "string" ? { workspaceId: request.workspaceId } : {}),
+      ...(typeof request.previewId === "string" ? { previewId: request.previewId } : {})
+    };
     const previewMutation = record.operationName === "preview.activate" || record.operationName === "preview.deactivate";
     let taskStartCompleted = false;
     try {
+      this.logger.info("agent.operation.started", "Agent operation execution started", {
+        operationId, operationName: record.operationName, operationState: record.state, ...resourceFields
+      });
       await this.managed.awaitProjectExecutionFence(projectId);
       record = await this.journal.markRunning(operationId);
       this.events.progressed(operationId, resource, "Operation execution started.");
@@ -164,6 +175,9 @@ export class OperationExecutor {
       }
       await this.journal.succeed(operationId);
       this.events.succeeded(operationId, resource);
+      this.logger.info("agent.operation.completed", "Agent operation completed", {
+        operationId, operationName: record.operationName, operationState: "succeeded", ...resourceFields
+      });
     } catch (error) {
       if (previewMutation) await this.refreshAfterPreviewMutation();
       // Once private execution evidence says the start occurred, a later journal write outage
@@ -175,6 +189,10 @@ export class OperationExecutor {
       };
       await this.journal.fail(operationId, failure);
       this.events.failed(operationId, resource, failure);
+      this.logger.error("agent.operation.failed", "Agent operation failed", {
+        operationId, operationName: record.operationName, operationState: "failed", errorCategory: "operation",
+        errorCode: failure.code, retryable: failure.retryable, ...resourceFields
+      });
     }
   }
 }

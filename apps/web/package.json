@@ -17,6 +17,7 @@
   "dependencies": {
     "@devspace/contracts": "workspace:*",
     "@devspace/database": "workspace:*",
+    "@devspace/diagnostics": "workspace:*",
     "@devspace/domain": "workspace:*",
     "@devspace/project-options": "workspace:*",
     "@devspace/security": "workspace:*",

@@ -13,6 +13,7 @@
   "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"],
   "references": [
     { "path": "../../packages/contracts/tsconfig.build.json" },
+    { "path": "../../packages/diagnostics/tsconfig.build.json" },
     { "path": "../../packages/domain/tsconfig.build.json" },
     { "path": "../../packages/project-options/tsconfig.build.json" },
     { "path": "../../packages/security/tsconfig.build.json" },

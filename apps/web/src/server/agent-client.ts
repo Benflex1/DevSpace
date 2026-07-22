@@ -18,6 +18,7 @@ import {
   type ProcessInspectionData,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
+import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
 import { v7 as uuidv7 } from "uuid";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -32,12 +33,14 @@ export class AgentResponseError extends Error {
 export function createAgentClient(socketPath: string, options: {
   timeoutMs?: number; mutationReceiptTimeoutMs?: number; observationTimeoutMs?: number;
   createId?: () => string; now?: () => Date;
+  logger?: StructuredLogger;
 } = {}) {
   const defaultTimeoutMs = options.timeoutMs ?? 5_000;
   const mutationReceiptTimeoutMs = options.mutationReceiptTimeoutMs ?? defaultTimeoutMs;
   const observationTimeoutMs = options.observationTimeoutMs ?? defaultTimeoutMs;
   const createId = options.createId ?? uuidv7;
   const now = options.now ?? (() => new Date());
+  const logger = options.logger ?? createLogger({ component: "web", subsystem: "agent-client", now });
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
@@ -49,6 +52,17 @@ export function createAgentClient(socketPath: string, options: {
       ? f10AgentApiV1EndpointByOperation["snapshot.get"]
       : agentApiV1EndpointByOperation[operation];
     const requestId = createId();
+    const callStartedAt = Date.now();
+    const resource = data !== null && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+    const resourceFields = {
+      ...(typeof resource.projectId === "string" ? { projectId: resource.projectId } : {}),
+      ...(typeof resource.workspaceId === "string" ? { workspaceId: resource.workspaceId } : {}),
+      ...(typeof resource.previewId === "string" ? { previewId: resource.previewId } : {})
+    };
+    const diagnosticPreviewCall = operation === "preview.activate" || operation === "preview.deactivate" || operation === "preview.inspect";
+    if (diagnosticPreviewCall) logger.info("web.agent_request.started", "Preview Agent request started", {
+      requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation, ...resourceFields
+    });
     const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs : observationTimeoutMs;
     const body = data === undefined ? undefined : JSON.stringify(endpoint.requestBodySchema.parse({ data }));
     return await new Promise((resolve, reject) => {
@@ -79,9 +93,18 @@ export function createAgentClient(socketPath: string, options: {
           try {
             const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
             if (response.statusCode === endpoint.successStatus) {
+              if (diagnosticPreviewCall) logger.info("web.agent_request.completed", "Preview Agent request completed", {
+                requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation,
+                durationMs: Date.now() - callStartedAt, statusCode: response.statusCode ?? 0, ...resourceFields
+              });
               return resolve(endpoint.successBodySchema.parse(parsed).data);
             }
             const error = endpoint.errorSchema.parse(parsed) as { error: { code: string; message: string } };
+            if (diagnosticPreviewCall) logger.warn("web.agent_request.failed", "Preview Agent request failed", {
+              requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation,
+              durationMs: Date.now() - callStartedAt, statusCode: response.statusCode ?? 0, errorCategory: "agent-response",
+              errorCode: error.error.code, ...resourceFields
+            });
             return reject(new AgentResponseError(error.error.code, error.error.message));
           } catch {
             return reject(new AgentUnavailableError());

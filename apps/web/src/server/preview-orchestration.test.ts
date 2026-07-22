@@ -1,4 +1,5 @@
 import type { PreviewInspectionData } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import { describe, expect, test } from "vitest";
 import { AgentResponseError, AgentUnavailableError } from "./agent-client.js";
 import type { PreviewView, ProjectDatabase } from "./database.js";
@@ -66,6 +67,7 @@ const inspection = (overrides: Partial<PreviewInspectionData> = {}): PreviewInsp
 describe("Web preview orchestration", () => {
   test("sends only persisted activation identity and reconciles the route observation", async () => {
     const fixture = fakeDatabase(preview());
+    const logs: string[] = [];
     let activation: Record<string, unknown> | undefined;
     const agent = {
       activatePreview: (_operationId: string, input: Record<string, unknown>) => { activation = input; return Promise.resolve({ operationId: _operationId }); },
@@ -73,11 +75,22 @@ describe("Web preview orchestration", () => {
       inspectPreview: () => Promise.resolve(inspection()),
       snapshot: () => Promise.resolve({ operationObservations: [{ operationId: "0190a000-0000-7000-8000-000000000014", state: "succeeded" }] })
     };
-    await reconcileWorkspacePreviews(projectId, "actor", "running", { database: fixture.database, agent: agent as never, observationTimeoutMs: 20 });
+    await reconcileWorkspacePreviews(projectId, "actor", "running", {
+      database: fixture.database, agent: agent as never, observationTimeoutMs: 20,
+      logger: createLogger({ component: "web", subsystem: "preview", sink: (line) => logs.push(line) })
+    });
     expect(activation).toEqual({ projectId, workspaceId, revisionId, previewId, previewKey: "web",
       hostname: "alpha-primary-web-0190a000.preview.example.com", projectSlug: "alpha", workspaceSlug: "primary" });
     expect(fixture.observations.at(-1)).toMatchObject({ observedState: "healthy", routePresent: true });
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({ routePresent: true });
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record.event)).toEqual(expect.arrayContaining([
+      "preview.reconciliation.requested", "preview.activate.requested", "preview.agent_operation.succeeded",
+      "preview.inspection.completed", "preview.reconciliation.completed"
+    ]));
+    expect(records.find((record) => record.event === "preview.agent_operation.succeeded")).toMatchObject({
+      operationId: "0190a000-0000-7000-8000-000000000014", projectId, workspaceId, previewId
+    });
   });
 
   test("retains service configuration as an explicit unsupported runtime policy", async () => {

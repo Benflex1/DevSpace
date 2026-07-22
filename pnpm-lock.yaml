@@ -50,6 +50,9 @@ importers:
       '@devspace/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@devspace/diagnostics':
+        specifier: workspace:*
+        version: link:../../packages/diagnostics
       '@devspace/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -90,6 +93,9 @@ importers:
       '@devspace/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@devspace/diagnostics':
+        specifier: workspace:*
+        version: link:../../packages/diagnostics
       '@devspace/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -179,6 +185,8 @@ importers:
       drizzle-kit:
         specifier: 0.31.10
         version: 0.31.10
+
+  packages/diagnostics: {}
 
   packages/domain:
     devDependencies:

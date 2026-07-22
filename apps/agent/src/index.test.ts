@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { agentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { createAgentServer } from "./server.js";
@@ -97,7 +98,9 @@ test("serves health and source inspection through the executable Agent contracts
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-test-")); temporaryDirectories.push(directory);
   const socketPath = path.join(directory, "agent.sock");
   await provisionDefaultRoots(socketPath);
-  const server = createAgentServer({ socketPath, now: () => now, createId: () => id, gitInspector: {
+  const logs: string[] = [];
+  const server = createAgentServer({ socketPath, now: () => now, createId: () => id,
+    logger: createLogger({ component: "agent", subsystem: "test", sink: (line) => logs.push(line) }), gitInspector: {
     inspect: () => Promise.resolve(sourceInspectionDataSchema.parse({ sourceKind: "remote", isGitRepository: true, defaultBranch: "main", headCommit: "0123456789abcdef0123456789abcdef01234567" }))
   } });
   await server.start();
@@ -105,6 +108,10 @@ test("serves health and source inspection through the executable Agent contracts
     const health = await request(socketPath, { method: "GET", path: "/v1/health", headers });
     expect(health.status).toBe(200);
     expect(agentApiV1EndpointByOperation["agent.health.get"].successBodySchema.parse(health.body).data).toEqual({ status: "ok" });
+    expect(JSON.parse(logs.find((line) => line.includes("agent.health.evaluated"))!)).toMatchObject({
+      event: "agent.health.evaluated", requestId: id,
+      healthBreakdown: { "managed-workspace-layer": "healthy", "operation-journal": "healthy", "operation-executor": "healthy", "startup-preview-reconciliation": "healthy" }
+    });
     const body = JSON.stringify({ data: { source: { kind: "remote", url: "https://example.com/repo.git" } } });
     const inspected = await request(socketPath, { method: "POST", path: "/v1/projects/inspect-source", headers: {
       ...headers, "content-length": String(Buffer.byteLength(body))
