@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab
+  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab
 } from "./workbench-tabs.js";
 
 const terminal = (id: string): WorkbenchTab => ({ id: terminalTabId(id), kind: "terminal", terminalId: id, title: `Terminal ${id}` });
@@ -41,5 +41,12 @@ describe("Workbench tab state", () => {
     expect(closeWorkbenchTab(state, "terminal:two").activeTabId).toBe("terminal:three");
     expect(closeWorkbenchTab(closeWorkbenchTab(state, "terminal:two"), "terminal:three").activeTabId).toBe("terminal:one");
     expect(closeWorkbenchTab(state, "terminal:one").activeTabId).toBe("terminal:three");
+  });
+
+  test("closes lost-terminal tabs without closing unrelated tabs", () => {
+    const state = openWorkbenchTab(openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, terminal("lost-1")), terminal("healthy")), terminal("lost-2"));
+    const next = closeWorkbenchTabsForTerminalIds(state, ["lost-1", "lost-2"]);
+    expect(next.tabs.map((tab) => tab.id)).toEqual(["terminal:healthy"]);
+    expect(next.activeTabId).toBe("terminal:healthy");
   });
 });

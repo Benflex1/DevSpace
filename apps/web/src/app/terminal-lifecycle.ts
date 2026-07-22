@@ -40,6 +40,13 @@ export function updateTerminalCollectionState<T extends { readonly id: string; r
   return terminals.map((candidate) => candidate.id === terminalId ? { ...candidate, state } : candidate);
 }
 
+export function removeTerminalCollectionEntries<T extends { readonly id: string }>(
+  terminals: readonly T[], terminalIds: readonly string[]
+): T[] {
+  const ids = new Set(terminalIds);
+  return terminals.filter((terminal) => !ids.has(terminal.id));
+}
+
 export function isTerminalAttachableState(state: string): state is "active" | "disconnected" {
   return state === "active" || state === "disconnected";
 }
