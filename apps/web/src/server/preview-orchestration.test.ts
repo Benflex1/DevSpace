@@ -77,6 +77,7 @@ describe("Web preview orchestration", () => {
     };
     await reconcileWorkspacePreviews(projectId, "actor", "running", {
       database: fixture.database, agent: agent as never, observationTimeoutMs: 20,
+      reason: "test-preview-activation",
       logger: createLogger({ component: "web", subsystem: "preview", sink: (line) => logs.push(line) })
     });
     expect(activation).toEqual({ projectId, workspaceId, revisionId, previewId, previewKey: "web",
@@ -90,6 +91,9 @@ describe("Web preview orchestration", () => {
     ]));
     expect(records.find((record) => record.event === "preview.agent_operation.succeeded")).toMatchObject({
       operationId: "0190a000-0000-7000-8000-000000000014", projectId, workspaceId, previewId
+    });
+    expect(records.find((record) => record.event === "preview.reconciliation.completed")).toMatchObject({
+      projectId, mode: "running", reason: "test-preview-activation"
     });
   });
 
@@ -182,6 +186,23 @@ describe("Web preview orchestration", () => {
     await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
       observedState: "healthy", routePresent: true, lastErrorCode: null
+    });
+  });
+
+  test("logs reconciliation failure without claiming completion and preserves the original error", async () => {
+    const fixture = fakeDatabase(preview());
+    const original = new Error("original-reconciliation-failure");
+    const logs: string[] = [];
+    const database = { ...fixture.database, listPreviews: () => { throw original; } } as never;
+    await expect(reconcileWorkspacePreviews(projectId, "actor", "observe", {
+      database, agent: {} as never, reason: "test-trigger",
+      logger: createLogger({ component: "web", subsystem: "preview", sink: (line) => logs.push(line) })
+    })).rejects.toBe(original);
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record.event)).toContain("preview.reconciliation.failed");
+    expect(records.map((record) => record.event)).not.toContain("preview.reconciliation.completed");
+    expect(records.find((record) => record.event === "preview.reconciliation.failed")).toMatchObject({
+      projectId, mode: "observe", reason: "test-trigger", errorCategory: "preview-reconciliation", errorCode: "RECONCILIATION_FAILED"
     });
   });
 });

@@ -16,7 +16,8 @@ export async function GET(request: Request, context: { params: Promise<{ project
     const { projectId } = await context.params;
     const database = getProjectDatabase(config.databasePath);
     const previews = await reconcileWorkspacePreviews(projectId, actor.identity, "observe", {
-      database, agent: createAgentClient(config.agentSocketPath), previewBaseRegistry: config.previewBaseRegistry
+      database, agent: createAgentClient(config.agentSocketPath), previewBaseRegistry: config.previewBaseRegistry,
+      reason: "preview-liveness-reconciliation"
     });
     return json({ previews }, 200);
   } catch (error) {

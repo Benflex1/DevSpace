@@ -94,7 +94,7 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
       const mode = runtimeState === "running" && live.workspace.observedState === "running" ? "running"
         : live.workspace.observedState === "lost" || runtimeState === "lost" ? "lost" : "observe";
       await reconcileWorkspacePreviews(project.id, actorForPreviewReconciliation(), mode, {
-        database, agent, previewBaseRegistry: config.previewBaseRegistry
+        database, agent, previewBaseRegistry: config.previewBaseRegistry, reason: "project-workspace-load"
       }).catch(() => undefined);
     }
   }

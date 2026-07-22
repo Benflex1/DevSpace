@@ -103,7 +103,7 @@ export function sanitizeLogFields(fields: LogFields | undefined): Partial<LogRec
 }
 
 export function serializeLogRecord(record: LogRecord): string {
-  return `${JSON.stringify(record)}\n`;
+  return JSON.stringify(record);
 }
 
 function defaultSink(line: string, level: LogLevel): void {

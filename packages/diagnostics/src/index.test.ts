@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createLogger, sanitizeLogFields } from "./index.js";
+import { createLogger, sanitizeLogFields, serializeLogRecord, type LogRecord } from "./index.js";
 
 describe("structured diagnostics logging", () => {
   test("serializes stable JSON records with correlation and timing fields", () => {
@@ -8,6 +8,7 @@ describe("structured diagnostics logging", () => {
     logger.info("preview.reconciliation.completed", "Preview reconciliation completed", {
       requestId: "req-1", operationId: "op-1", projectId: "project-1", workspaceId: "workspace-1", previewId: "preview-1", durationMs: 123
     });
+    expect(serializeLogRecord(JSON.parse(lines[0]!) as LogRecord)).not.toContain("\n");
     expect(JSON.parse(lines[0]!)).toMatchObject({ timestamp: "2026-07-22T12:00:00.000Z", level: "info", component: "web",
       subsystem: "preview", event: "preview.reconciliation.completed", message: "Preview reconciliation completed",
       requestId: "req-1", operationId: "op-1", projectId: "project-1", workspaceId: "workspace-1", previewId: "preview-1", durationMs: 123 });

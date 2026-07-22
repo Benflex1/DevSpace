@@ -16,11 +16,19 @@ export interface PreviewOrchestrationDependencies {
   readonly nowMonotonic?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly logger?: StructuredLogger;
+  /** Stable trigger name for production callers; mode is retained only as a bounded internal fallback. */
   readonly reason?: string;
 }
 
 export class PreviewOrchestrationError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "PreviewOrchestrationError"; }
+}
+
+function reconciliationFailure(error: unknown): { readonly errorCategory: string; readonly errorCode: string } {
+  if (error instanceof AgentResponseError) return { errorCategory: "agent-response", errorCode: error.code };
+  if (error instanceof AgentUnavailableError) return { errorCategory: "agent-transport", errorCode: "AGENT_UNAVAILABLE" };
+  if (error instanceof PreviewOrchestrationError) return { errorCategory: "preview-orchestration", errorCode: error.code };
+  return { errorCategory: "preview-reconciliation", errorCode: "RECONCILIATION_FAILED" };
 }
 
 async function waitForOperation(operationId: string, dependencies: PreviewOrchestrationDependencies): Promise<"succeeded" | "failed" | "pending"> {
@@ -269,11 +277,19 @@ export async function reconcileWorkspacePreviews(projectId: string, actor: strin
         }
       }
     }
-    return dependencies.database.listPreviews(projectId, context.workspace.id);
-  } finally {
+    const result = dependencies.database.listPreviews(projectId, context.workspace.id);
     logger.info("preview.reconciliation.completed", "Preview reconciliation completed", {
-      projectId, mode, reason: dependencies.reason ?? mode, durationMs: Math.max(0, (dependencies.nowMonotonic?.() ?? Date.now()) - startedAt)
+      projectId, mode, reason: dependencies.reason ?? mode,
+      durationMs: Math.max(0, (dependencies.nowMonotonic?.() ?? Date.now()) - startedAt)
     });
+    return result;
+  } catch (error) {
+    const failure = reconciliationFailure(error);
+    logger.error("preview.reconciliation.failed", "Preview reconciliation failed", {
+      projectId, mode, reason: dependencies.reason ?? mode,
+      durationMs: Math.max(0, (dependencies.nowMonotonic?.() ?? Date.now()) - startedAt), ...failure
+    });
+    throw error;
   }
 }
 
