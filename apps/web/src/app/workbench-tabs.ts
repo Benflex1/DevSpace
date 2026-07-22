@@ -39,3 +39,12 @@ export function closeWorkbenchTab(state: WorkbenchTabState, tabId: string): Work
   const fallback = tabs[index] ?? tabs[index - 1] ?? null;
   return { tabs, activeTabId: fallback?.id ?? null };
 }
+
+export function closeWorkbenchTabsForTerminalIds(state: WorkbenchTabState, terminalIds: readonly string[]): WorkbenchTabState {
+  const ids = new Set(terminalIds);
+  let next = state;
+  for (const tab of state.tabs) {
+    if (tab.kind === "terminal" && ids.has(tab.terminalId)) next = closeWorkbenchTab(next, tab.id);
+  }
+  return next;
+}

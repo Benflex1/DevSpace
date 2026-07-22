@@ -3,14 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
+  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 
 type Task = { key: string; displayName: string };
@@ -54,6 +54,18 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
+  const dismissLostTerminalDialog = useCallback((ids: readonly string[]) => {
+    const key = lostTerminalSetKey(ids);
+    lostDialogSession.current?.dismiss(ids);
+    window.sessionStorage.setItem(LOST_TERMINAL_DISMISSED_SESSION_KEY, key);
+    setLostDialogIds([]);
+  }, []);
+  const handleLostTerminalRestartSuccess = useCallback(() => {
+    const ids = lostDialogIds;
+    setTerminals((current) => removeTerminalCollectionEntries(current, ids));
+    setTabs((current) => closeWorkbenchTabsForTerminalIds(current, ids));
+    dismissLostTerminalDialog(ids);
+  }, [dismissLostTerminalDialog, lostDialogIds]);
   useEffect(() => {
     const ids = terminals.filter((terminal) => terminal.state === "lost").map((terminal) => terminal.id);
     if (lostDialogSession.current === null) {
@@ -269,11 +281,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     {lostDialogIds.length > 0 && <LostTerminalDialog count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}
       runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
       onDismiss={() => {
-        const key = lostTerminalSetKey(lostDialogIds);
-        lostDialogSession.current?.dismiss(lostDialogIds);
-        window.sessionStorage.setItem(LOST_TERMINAL_DISMISSED_SESSION_KEY, key);
-        setLostDialogIds([]);
-      }} />}
+        dismissLostTerminalDialog(lostDialogIds);
+      }} onRestartSuccess={handleLostTerminalRestartSuccess} />}
     <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
@@ -391,9 +400,9 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
   </div>;
 }
 
-function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onDismiss }: {
+function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onDismiss, onRestartSuccess }: {
   count: number; projectId: string; runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null;
-  canStart: boolean; canStop: boolean; retryStart: boolean; onDismiss: () => void;
+  canStart: boolean; canStop: boolean; retryStart: boolean; onDismiss: () => void; onRestartSuccess: () => void;
 }) {
   return <div className="lost-terminal-dialog-backdrop">
     <section className="lost-terminal-dialog" role="dialog" aria-modal="true" aria-labelledby="lost-terminal-dialog-title">
@@ -402,7 +411,7 @@ function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, 
       <div className="lost-terminal-dialog-actions">
         <button type="button" className="lost-terminal-dismiss" onClick={onDismiss}>Dismiss</button>
         <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
-          canStart={canStart} canStop={canStop} retryStart={retryStart} restart onSuccess={onDismiss} />
+          canStart={canStart} canStop={canStop} retryStart={retryStart} restart onSuccess={onRestartSuccess} />
       </div>
     </section>
   </div>;

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
   isTerminalAttachableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, reconcileTerminalState,
-  sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
+  removeTerminalCollectionEntries, sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
 } from "./terminal-lifecycle.js";
 
 describe("terminal lifecycle reconciliation", () => {
@@ -55,7 +55,9 @@ describe("terminal lifecycle reconciliation", () => {
     expect(workbench).toContain("<LostTerminalDialog");
     expect(workbench).toContain('role="dialog"');
     expect(workbench).not.toContain("lost-terminal-notice");
-    expect(workbench).toContain("restart onSuccess={onDismiss}");
+    expect(workbench).toContain("restart onSuccess={onRestartSuccess}");
+    expect(workbench).toContain("removeTerminalCollectionEntries");
+    expect(workbench).toContain("closeWorkbenchTabsForTerminalIds");
     expect(workbench).toContain("isTerminalSidebarVisible");
     expect(workbench).toContain('const ids = terminals.filter((terminal) => terminal.state === "lost")');
     expect(workbench).toContain("return terminal.title;");
@@ -105,6 +107,15 @@ describe("terminal lifecycle reconciliation", () => {
     const exited = updateTerminalCollectionState(reopened, terminal.id, "closed");
     expect(exited[0]?.state).toBe("closed");
     expect(isTerminalVisibleState(exited[0]?.state ?? "")).toBe(false);
+  });
+
+  test("removes only the terminal rows captured by lost-terminal recovery", () => {
+    const terminals = [
+      { id: "lost-1", title: "Terminal 1", state: "lost" },
+      { id: "healthy-1", title: "Terminal 2", state: "active" },
+      { id: "lost-2", title: "Terminal 3", state: "lost" }
+    ];
+    expect(removeTerminalCollectionEntries(terminals, ["lost-2", "lost-1"])).toEqual([terminals[1]]);
   });
 
   test("sorts terminal labels naturally and deterministically when a gap is reused", () => {
