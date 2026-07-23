@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -282,6 +282,84 @@ describe("Agent preview runtime policy", () => {
     fixtureValue.clock.value = 251;
     await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "healthy" });
     expect(probe.requests).toHaveLength(2);
+  });
+
+  test("resets consecutive-failure backoff after a successful health check", async () => {
+    const probe = new Probe([
+      { kind: "response", statusCode: 503 }, { kind: "response", statusCode: 200 },
+      { kind: "response", statusCode: 200 }, { kind: "response", statusCode: 200 }, { kind: "response", statusCode: 200 }
+    ]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    fixtureValue.clock.value = 251;
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "healthy" });
+    const persisted = JSON.parse(await readFile(path.join(fixtureValue.state, "previews", `${ids.previewId}.json`), "utf8")) as { attempt: number; nextAttemptAt: number };
+    expect(persisted).toMatchObject({ attempt: 0, nextAttemptAt: 0 });
+    for (const value of [252, 253, 254]) {
+      fixtureValue.clock.value = value;
+      await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "healthy" });
+    }
+    expect(probe.requests).toHaveLength(5);
+  });
+
+  test("detects a stopped healthy target on the next normal active liveness poll", async () => {
+    const probe = new Probe([
+      { kind: "response", statusCode: 200 }, { kind: "response", statusCode: 200 }, { kind: "response", statusCode: 200 },
+      { kind: "response", statusCode: 200 }, { kind: "response", statusCode: 200 },
+      { kind: "infrastructure", message: "The loopback preview target is unavailable." }
+    ]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    for (const value of [4_000, 8_000, 12_000, 16_000]) {
+      fixtureValue.clock.value = value;
+      await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "healthy" });
+    }
+    fixtureValue.clock.value = 20_000;
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy", routePresent: false });
+    expect(probe.requests).toHaveLength(6);
+  });
+
+  test("does not let stale failure backoff delay a waiting preview recovery", async () => {
+    const probe = new Probe([
+      { kind: "infrastructure", message: "The loopback preview target is unavailable." },
+      { kind: "infrastructure", message: "The loopback preview target is unavailable." },
+      { kind: "infrastructure", message: "The loopback preview target is unavailable." },
+      { kind: "infrastructure", message: "The loopback preview target is unavailable." },
+      { kind: "infrastructure", message: "The loopback preview target is unavailable." },
+      { kind: "response", statusCode: 200 }
+    ]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    for (const value of [1_500, 3_000, 4_500, 6_000]) {
+      fixtureValue.clock.value = value;
+      await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy" });
+    }
+    fixtureValue.clock.value = 7_500;
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "healthy" });
+    expect(probe.requests).toHaveLength(6);
+  });
+
+  test("retains bounded throttling across consecutive genuine failures", async () => {
+    const probe = new Probe([
+      { kind: "response", statusCode: 503 }, { kind: "response", statusCode: 503 }, { kind: "response", statusCode: 503 }
+    ]);
+    const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    fixtureValue.clock.value = 100;
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "unhealthy" });
+    expect(probe.requests).toHaveLength(1);
+    fixtureValue.clock.value = 251;
+    await fixtureValue.manager.inspect({ ...ids });
+    expect(probe.requests).toHaveLength(2);
+    fixtureValue.clock.value = 300;
+    await fixtureValue.manager.inspect({ ...ids });
+    expect(probe.requests).toHaveLength(2);
+    fixtureValue.clock.value = 752;
+    await fixtureValue.manager.inspect({ ...ids });
+    expect(probe.requests).toHaveLength(3);
+    const persisted = JSON.parse(await readFile(path.join(fixtureValue.state, "previews", `${ids.previewId}.json`), "utf8")) as { attempt: number; nextAttemptAt: number };
+    expect(persisted.nextAttemptAt - fixtureValue.clock.value).toBeLessThanOrEqual(1_000);
+    expect(persisted.attempt).toBe(3);
   });
 
   test("bounds one health attempt by startupTimeoutSeconds", async () => {

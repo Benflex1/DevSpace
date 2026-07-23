@@ -27,6 +27,13 @@ import type { PreviewGatewayAdapterContract as PrivatePreviewGatewayAdapter } fr
 const previewKeySchema = z.string().regex(/^[a-z][a-z0-9-]*$/u);
 const hostnameSchema = z.string().min(1).max(253).refine((value) => value.split(".").every((label) =>
   label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)));
+// Waiting previews are reconciled by Web every 1.5 seconds. Keep Agent-side
+// retry throttling below that cadence so it cannot hide a newly listening target.
+const MAX_HEALTH_RETRY_DELAY_MS = 1_000;
+
+function healthRetryDelayMs(attempt: number): number {
+  return Math.min(MAX_HEALTH_RETRY_DELAY_MS, 250 * 2 ** Math.min(attempt - 1, 7));
+}
 
 export interface PreviewGatewayProbeRequest {
   /** The lease ID is opaque to the probe and resolves only inside the gateway host. */
@@ -504,7 +511,8 @@ export class PreviewRuntimeManager {
       try { await this.removeRoute(record); routePresent = false; }
       catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; }
     }
-    const next = { ...record, routePresent,
+    const attempt = record.attempt + 1;
+    const next = { ...record, routePresent, attempt, nextAttemptAt: this.clock.now() + healthRetryDelayMs(attempt),
       observedState: "lost" as const, containerId: null,
       lastError: routeError ?? (error instanceof Error ? error.message.slice(0, 256) : "exact-runtime-unavailable") };
     await this.save(next);
@@ -512,7 +520,8 @@ export class PreviewRuntimeManager {
   }
   private async healthAttempt(record: PreviewState, association: RuntimeAssociation, force: boolean): Promise<PreviewState> {
     const now = this.clock.now();
-    if (!force && now < record.nextAttemptAt) return record;
+    const retryDelay = record.nextAttemptAt - now;
+    if (!force && record.observedState !== "healthy" && now < record.nextAttemptAt && retryDelay <= MAX_HEALTH_RETRY_DELAY_MS) return record;
     let ownership: RuntimeOwnership;
     try { ownership = await this.runtime.exactRunningOwnership(association); }
     catch (error) { return await this.markRuntimeLoss(record, error); }
@@ -538,7 +547,6 @@ export class PreviewRuntimeManager {
     } catch (error) {
       result = { kind: "infrastructure", message: error instanceof Error ? error.message : "gateway-probe-failed" };
     } finally { if (timeout !== undefined) clearTimeout(timeout); }
-    const nextAttemptAt = this.clock.now() + Math.min(30_000, 250 * 2 ** Math.min(attempt - 1, 7));
     if (result.kind === "response" && record.healthStatuses.includes(result.statusCode)) {
       if (this.gateway !== null) {
         try { await this.gateway.ensureRoute(this.route(record, lease)); }
@@ -548,14 +556,14 @@ export class PreviewRuntimeManager {
           try { await this.removeRoute(record); routePresent = false; }
           catch (removalError) { routeError = removalError instanceof Error ? removalError.message.slice(0, 256) : "preview-route-removal-failed"; routePresent = true; }
           const next = { ...record, observedState: "failed" as const, routePresent,
-            attempt, nextAttemptAt, lastStatusCode: result.statusCode,
+            attempt, nextAttemptAt: this.clock.now() + healthRetryDelayMs(attempt), lastStatusCode: result.statusCode,
             lastError: routeError ?? (error instanceof Error ? error.message.slice(0, 256) : "gateway-route-update-failed"),
             containerId: ownership.developmentContainer.id };
           await this.save(next); return next;
         }
       }
       const next = { ...record, observedState: "healthy" as const, routePresent: this.gateway !== null,
-        attempt, nextAttemptAt, lastStatusCode: result.statusCode, lastError: null, containerId: ownership.developmentContainer.id };
+        attempt: 0, nextAttemptAt: 0, lastStatusCode: result.statusCode, lastError: null, containerId: ownership.developmentContainer.id };
       await this.save(next); return next;
     }
     let routePresent = record.routePresent;
@@ -567,11 +575,11 @@ export class PreviewRuntimeManager {
     const targetNotListening = isTargetNotListening(result);
     if (result.kind === "infrastructure" && !targetNotListening) {
       const next = { ...record, observedState: "failed" as const, routePresent: false as const,
-        attempt, nextAttemptAt, lastStatusCode: null, lastError: result.message.slice(0, 256), containerId: ownership.developmentContainer.id };
+        attempt, nextAttemptAt: this.clock.now() + healthRetryDelayMs(attempt), lastStatusCode: null, lastError: result.message.slice(0, 256), containerId: ownership.developmentContainer.id };
       await this.save({ ...next, routePresent, lastError: routeError ?? next.lastError }); return { ...next, routePresent, lastError: routeError ?? next.lastError };
     }
     const next = { ...record, observedState: "unhealthy" as const, routePresent,
-      attempt, nextAttemptAt, lastStatusCode: result.kind === "response" ? result.statusCode : null,
+      attempt, nextAttemptAt: this.clock.now() + healthRetryDelayMs(attempt), lastStatusCode: result.kind === "response" ? result.statusCode : null,
       lastError: result.kind === "timeout" ? "health-attempt-timeout"
         : targetNotListening ? "health-target-not-listening" : "health-status-not-accepted",
       containerId: ownership.developmentContainer.id };
