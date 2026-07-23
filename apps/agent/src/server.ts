@@ -22,7 +22,7 @@ import { ExecutionManager } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
-import type { PreviewGatewayProbe } from "./preview-runtime.js";
+import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./preview-runtime.js";
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 
@@ -511,7 +511,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           routePresent: data.routePresent, routeStatus: data.routePresent ? "present" : "absent",
           ...(data.diagnosticCode === undefined ? {} : { errorCode: data.diagnosticCode }), ...resourceFields
         });
-        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: toPublicPreviewInspectionData(data) }));
       } catch (error) {
         const errorCode = error instanceof AgentExecutionError ? error.failure.code : "AGENT_INTERNAL_ERROR";
         logger.warn("agent.preview.inspection.failed", "Preview inspection failed", {

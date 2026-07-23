@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { agentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
+import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
@@ -204,12 +204,41 @@ test("logs a safe degraded preview cause once and suppresses unchanged repeats",
     logger: createLogger({ component: "agent", subsystem: "test", environment: {}, sink: (line) => logs.push(line) }) });
   await server.start();
   try {
-    await previewInspectRequest(socketPath);
+    const inspected = await previewInspectRequest(socketPath);
+    const endpoint = agentApiV1EndpointByOperation["preview.inspect"];
+    expect(inspected.status).toBe(200);
+    expect(endpoint.successBodySchema.parse(inspected.body).data).not.toHaveProperty("diagnosticCode");
     await previewInspectRequest(socketPath);
     const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
     const degraded = records.filter((record) => record.event === "agent.preview.observation.degraded");
     expect(degraded).toHaveLength(1);
     expect(degraded[0]).toMatchObject({ level: "warn", errorCode: "HEALTH_STATUS_NOT_ACCEPTED", projectId: "018f0f00-0000-7000-8000-000000000005" });
+  } finally { await server.stop(); }
+});
+
+test("keeps persisted degraded preview diagnostics out of snapshot and public inspection responses", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-snapshot-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  const fixture = await provisionDurableInactivePreview(socketPath);
+  const base = JSON.parse(fixture.contents) as Record<string, unknown>;
+  const degraded = [
+    { previewId: "018f0f00-0000-7000-8000-000000000012", observedState: "unhealthy", lastError: "health-status-not-accepted" },
+    { previewId: "018f0f00-0000-7000-8000-000000000013", observedState: "failed", lastError: "The private gateway probe is unavailable." },
+    { previewId: "018f0f00-0000-7000-8000-000000000014", observedState: "lost", lastError: "exact-runtime-unavailable" }
+  ] as const;
+  for (const state of degraded) await writeFile(path.join(fixture.roots.state, "previews", `${state.previewId}.json`), `${JSON.stringify({
+    ...base, ...state, desiredState: "active", routePresent: false, containerId: null
+  })}\n`, "utf8");
+  const server = createAgentServer({ socketPath, managedRoots: fixture.roots, now: () => now, createId: () => id });
+  await server.start();
+  try {
+    const snapshot = await request(socketPath, { method: "GET", path: "/v1/snapshot", headers });
+    const snapshotEndpoint = f10AgentApiV1EndpointByOperation["snapshot.get"];
+    expect(snapshot.status).toBe(200);
+    const resources = snapshotEndpoint.successBodySchema.parse(snapshot.body).data.resources
+      .filter((resource) => resource.type === "preview");
+    expect(resources).toHaveLength(4);
+    for (const resource of resources) expect(resource.observation).not.toHaveProperty("diagnosticCode");
   } finally { await server.stop(); }
 });
 

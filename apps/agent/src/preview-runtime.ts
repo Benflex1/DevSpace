@@ -89,6 +89,11 @@ export class PreviewRuntimeError extends Error {
 
 export type PreviewInspectionResult = PreviewInspectionData & { readonly diagnosticCode?: string };
 
+export function toPublicPreviewInspectionData(data: PreviewInspectionResult): PreviewInspectionData {
+  const { diagnosticCode: _diagnosticCode, ...publicData } = data;
+  return publicData;
+}
+
 const previewLeaseSchema = z.strictObject({
   version: z.literal(1), leaseId: uuidV7Schema, operationId: uuidV7Schema,
   projectId: uuidV7Schema, workspaceId: uuidV7Schema, revisionId: uuidV7Schema,
@@ -475,10 +480,13 @@ export class PreviewRuntimeManager {
     }
     return persisted.data;
   }
-  private observation(record: PreviewState): PreviewInspectionResult {
-    const data = previewInspectionDataSchema.parse({ projectId: record.projectId, workspaceId: record.workspaceId,
+  private publicObservation(record: PreviewState): PreviewInspectionData {
+    return previewInspectionDataSchema.parse({ projectId: record.projectId, workspaceId: record.workspaceId,
       previewId: record.previewId, previewKey: record.previewKey, desiredState: record.desiredState,
       observedState: record.observedState, routePresent: record.routePresent, hostname: record.hostname });
+  }
+  private diagnosticObservation(record: PreviewState): PreviewInspectionResult {
+    const data = this.publicObservation(record);
     const diagnosticCode = record.observedState === "unhealthy"
       ? record.lastError === "health-attempt-timeout" ? "HEALTH_ATTEMPT_TIMEOUT"
         : record.lastError === "health-target-not-listening" ? "HEALTH_TARGET_NOT_LISTENING"
@@ -654,7 +662,7 @@ export class PreviewRuntimeManager {
       projectId: state.projectId, workspaceId: state.workspaceId, revisionId: state.revisionId,
       revisionHash: state.revisionHash, runtimePlanHash: state.runtimePlanHash, generation: state.generation
     }, state.routePresent === false && loaded.routePresent) : state;
-    return this.observation(next);
+    return this.diagnosticObservation(next);
   }
   async workspaceStopped(association: RuntimeAssociation): Promise<void> {
     for (const record of await this.allStates()) {
@@ -691,7 +699,7 @@ export class PreviewRuntimeManager {
       await readStrictJson(path.join(this.previewsRoot, name), previewStateSchema)));
   }
   async snapshotResources(): Promise<AgentSnapshotResource[]> {
-    return (await this.allStates()).map((record) => ({ type: "preview" as const, observation: this.observation(record) }));
+    return (await this.allStates()).map((record) => ({ type: "preview" as const, observation: this.publicObservation(record) }));
   }
 }
 
