@@ -5,8 +5,8 @@ export function lostTerminalSetKey(ids: readonly string[]): string {
 }
 
 export function lostTerminalDialogBody(count: number): string {
-  if (count === 1) return "A terminal could not be restored after DevSpace restarted. Processes started from it may still be running.";
-  return `${count} terminal sessions could not be restored after DevSpace restarted.`;
+  if (count === 1) return "A terminal could not be restored after DevSpace restarted. Its session cannot be recovered, and processes started from it may still be running. Restart the workspace to clean it up, or stop and start the workspace manually later.";
+  return `${count} terminal sessions could not be restored after DevSpace restarted. They cannot be recovered, and processes started from them may still be running. Restart the workspace to clean them up, or stop and start the workspace manually later.`;
 }
 
 export function shouldShowLostTerminalDialog(ids: readonly string[], dismissedKey: string | null): boolean {

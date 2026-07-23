@@ -3,8 +3,8 @@ import { LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey, 
 
 describe("lost terminal dialog", () => {
   test("uses concise singular and plural copy", () => {
-    expect(lostTerminalDialogBody(1)).toBe("A terminal could not be restored after DevSpace restarted. Processes started from it may still be running.");
-    expect(lostTerminalDialogBody(2)).toBe("2 terminal sessions could not be restored after DevSpace restarted.");
+    expect(lostTerminalDialogBody(1)).toBe("A terminal could not be restored after DevSpace restarted. Its session cannot be recovered, and processes started from it may still be running. Restart the workspace to clean it up, or stop and start the workspace manually later.");
+    expect(lostTerminalDialogBody(2)).toBe("2 terminal sessions could not be restored after DevSpace restarted. They cannot be recovered, and processes started from them may still be running. Restart the workspace to clean them up, or stop and start the workspace manually later.");
   });
 
   test("shows one dialog for one lost terminal and suppresses polling rerenders", () => {

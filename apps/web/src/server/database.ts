@@ -179,6 +179,20 @@ export function openProjectDatabase(path: string, options: {
       db.delete(processes).where(and(eq(processes.id, terminal.processId), eq(processes.kind, "terminal"))).run();
     }
   };
+  const retireLostTerminalResources = (workspaceId: string): void => {
+    const lostTerminals = db.select({ id: terminalSessions.id, processId: terminalSessions.processId })
+      .from(terminalSessions)
+      .where(and(eq(terminalSessions.workspaceId, workspaceId), eq(terminalSessions.state, "lost")))
+      .all();
+    for (const terminal of lostTerminals) {
+      db.delete(terminalSessions).where(and(
+        eq(terminalSessions.id, terminal.id), eq(terminalSessions.workspaceId, workspaceId), eq(terminalSessions.state, "lost")
+      )).run();
+      db.delete(processes).where(and(
+        eq(processes.id, terminal.processId), eq(processes.workspaceId, workspaceId), eq(processes.kind, "terminal")
+      )).run();
+    }
+  };
   const readManagedProject = (project: Project): ManagedProjectView => {
     pruneExpiredLostTerminalSessions();
     const revision = project.activeConfigRevisionId === null ? undefined
@@ -572,6 +586,7 @@ export function openProjectDatabase(path: string, options: {
           if (active.operationName === `workspace.${input.action}`) return active;
           throw new ProjectSetupConflictError("Another runtime action is still in progress.");
         }
+        if (input.action === "stop") retireLostTerminalResources(input.workspaceId);
         let stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
         const target = input.action === "start" ? "running" as const : "stopped" as const;
         if (stack === undefined && input.action === "stop") throw new ProjectSetupConflictError("No development runtime exists to stop.");
