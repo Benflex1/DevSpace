@@ -6,9 +6,10 @@ import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
-import { createPreviewLivenessPoller } from "./preview-liveness.js";
+import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
+import { useTransientNotice } from "./transient-notice.js";
 import {
   activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
@@ -49,8 +50,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
   const [previews, setPreviews] = useState<readonly PreviewLifecycleView[]>(initialPreviews);
   const currentPreviews = useRef(initialPreviews);
-  const [message, setMessage] = useState(initialMessage ?? "");
+  const previewLivenessPoller = useRef<PreviewLivenessPoller | null>(null);
+  const { notice, show: showNotice, clear: clearNotice } = useTransientNotice(initialMessage);
   const [lostDialogIds, setLostDialogIds] = useState<readonly string[]>([]);
+  const lostTerminalRecoveryIds = useRef<readonly string[]>([]);
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
@@ -62,17 +65,26 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, []);
   const handleLostTerminalRestartSuccess = useCallback(() => {
     const ids = lostDialogIds;
+    lostTerminalRecoveryIds.current = [];
     setTerminals((current) => removeTerminalCollectionEntries(current, ids));
     setTabs((current) => closeWorkbenchTabsForTerminalIds(current, ids));
     dismissLostTerminalDialog(ids);
   }, [dismissLostTerminalDialog, lostDialogIds]);
+  const handleLostTerminalRestartInitiated = useCallback(() => {
+    const ids = lostDialogIds;
+    lostTerminalRecoveryIds.current = ids;
+    setTerminals((current) => removeTerminalCollectionEntries(current, ids));
+    setTabs((current) => closeWorkbenchTabsForTerminalIds(current, ids));
+  }, [lostDialogIds]);
   useEffect(() => {
     const ids = terminals.filter((terminal) => terminal.state === "lost").map((terminal) => terminal.id);
     if (lostDialogSession.current === null) {
       lostDialogSession.current = new LostTerminalDialogSession(window.sessionStorage.getItem(LOST_TERMINAL_DISMISSED_SESSION_KEY));
     }
     const next = lostDialogSession.current.observe(ids);
-    if (ids.length === 0 || next.length > 0) setLostDialogIds(next);
+    if (ids.length === 0) {
+      if (lostTerminalRecoveryIds.current.length === 0) setLostDialogIds([]);
+    } else if (next.length > 0) setLostDialogIds(next);
   }, [terminals]);
   useEffect(() => {
     const now = Date.now();
@@ -177,14 +189,20 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       setTimeout: (callback, delay) => window.setTimeout(callback, delay),
       clearTimeout: (timer) => window.clearTimeout(timer)
     });
+    previewLivenessPoller.current = poller;
     const handleVisibility = () => poller.visibilityChanged();
     document.addEventListener("visibilitychange", handleVisibility);
     poller.start();
     return () => {
       document.removeEventListener("visibilitychange", handleVisibility);
       poller.stop();
+      if (previewLivenessPoller.current === poller) previewLivenessPoller.current = null;
     };
   }, [refreshPreviews]);
+
+  useEffect(() => {
+    previewLivenessPoller.current?.previewsChanged();
+  }, [previews]);
 
   const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) =>
     isTerminalSidebarVisible(terminal.state, lostTerminalObservedAt.current.get(terminal.id), sidebarNow))), [sidebarNow, terminals]);
@@ -222,42 +240,42 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, []);
   const createTerminal = async () => {
     if (!actionsAvailable) return;
-    setMessage("Creating terminal…");
+    showNotice("Creating terminal…", "pending");
     const response = await fetch(`/api/projects/${projectId}/terminals`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "create" }) });
     const body = await response.json() as { terminalId?: string; message?: string };
     if (!response.ok || body.terminalId === undefined) {
-      setMessage(body.message ?? "Terminal creation failed.");
+      showNotice(body.message ?? "Terminal creation failed.", "error");
       return;
     }
     const data = await refresh();
     const terminal = data.terminals.find((candidate) => candidate.id === body.terminalId);
     if (terminal === undefined || !isTerminalAttachableState(terminal.state)) {
-      setMessage("Terminal creation succeeded, but its current state is not attachable.");
+      showNotice("Terminal creation succeeded, but its current state is not attachable.", "error");
       return;
     }
     openTerminalTab(terminal);
-    setMessage("");
+    clearNotice();
   };
   const closeTab = (tab: WorkbenchTab) => {
     setTabs((current) => closeWorkbenchTab(current, tab.id));
   };
   const runTask = async (taskKey: string) => {
     if (!actionsAvailable) return;
-    setMessage("Starting task…");
+    showNotice("Starting task…", "pending");
     const response = await fetch(`/api/projects/${projectId}/tasks`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "run", taskKey }) });
     const result = await response.json() as { message?: string };
-    setMessage(response.ok ? "Task started." : result.message ?? "Task action failed.");
+    showNotice(response.ok ? "Task started." : result.message ?? "Task action failed.", response.ok ? "success" : "error");
     await refresh();
   };
   const reloadPreview = async (previewId: string) => {
-    setMessage("Reconciling preview…");
+    showNotice("Reconciling preview…", "pending");
     const response = await fetch(`/api/projects/${projectId}/previews`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "reload", previewId }) });
     const result = await response.json() as { message?: string; previews?: PreviewLifecycleView[] };
     if (Array.isArray(result.previews)) setPreviews(result.previews);
-    setMessage(response.ok ? "Preview reconciliation requested." : result.message ?? "Preview reconciliation failed.");
+    showNotice(response.ok ? "Preview reconciliation requested." : result.message ?? "Preview reconciliation failed.", response.ok ? "success" : "error");
   };
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
@@ -267,22 +285,23 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     <div className="workbench-body">
       <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab}
-        onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
-        onRunTask={(taskKey) => { runTask(taskKey).catch(() => setMessage("Task action failed.")); }} />
+        onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
+        onRunTask={(taskKey) => { runTask(taskKey).catch(() => showNotice("Task action failed.", "error")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
         <WorkbenchTabStrip tabs={tabs} onActivate={(tabId) => setTabs((current) => activateWorkbenchTab(current, tabId))}
-          onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => setMessage("Terminal creation failed.")); }}
+          onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
           canCreateTerminal={actionsAvailable} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway} />
-        {message !== "" && <p className="workbench-message message" role="status">{message}</p>}
+        {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">{notice.message}</p>}
       </section>
     </div>
     {lostDialogIds.length > 0 && <LostTerminalDialog count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}
       runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
       onDismiss={() => {
+        lostTerminalRecoveryIds.current = [];
         dismissLostTerminalDialog(lostDialogIds);
-      }} onRestartSuccess={handleLostTerminalRestartSuccess} />}
+      }} onRestartInitiated={handleLostTerminalRestartInitiated} onRestartSuccess={handleLostTerminalRestartSuccess} />}
     <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
@@ -400,9 +419,9 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
   </div>;
 }
 
-function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onDismiss, onRestartSuccess }: {
+function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onDismiss, onRestartInitiated, onRestartSuccess }: {
   count: number; projectId: string; runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null;
-  canStart: boolean; canStop: boolean; retryStart: boolean; onDismiss: () => void; onRestartSuccess: () => void;
+  canStart: boolean; canStop: boolean; retryStart: boolean; onDismiss: () => void; onRestartInitiated: () => void; onRestartSuccess: () => void;
 }) {
   return <div className="lost-terminal-dialog-backdrop">
     <section className="lost-terminal-dialog" role="dialog" aria-modal="true" aria-labelledby="lost-terminal-dialog-title">
@@ -411,7 +430,7 @@ function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, 
       <div className="lost-terminal-dialog-actions">
         <button type="button" className="lost-terminal-dismiss" onClick={onDismiss}>Dismiss</button>
         <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
-          canStart={canStart} canStop={canStop} retryStart={retryStart} restart onSuccess={onRestartSuccess} />
+          canStart={canStart} canStop={canStop} retryStart={retryStart} restart onRestartInitiated={onRestartInitiated} onSuccess={onRestartSuccess} />
       </div>
     </section>
   </div>;

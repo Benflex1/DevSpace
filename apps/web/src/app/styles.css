@@ -69,3 +69,12 @@ button { justify-self: start; border: 0; border-radius: 9px; padding: 12px 18px;
 .lost-terminal-dialog-actions { align-items: center; }
 .lost-terminal-dialog-actions .runtime-controls button { font-size: .84rem; padding: 10px 16px; }
 .lost-terminal-dismiss { font-size: .7rem; padding: 5px 8px; }
+
+/* Small status notices stay readable without competing with the work surface. */
+.message { line-height: 1.4; }
+.message.pending { color: #8a4e16; }
+.message.info { color: #5d6b64; }
+.workbench-message { background: #1a282a; border: 1px solid #304744; border-radius: 5px; bottom: 8px; color: #c8d8d0; font-size: .78rem; left: 18px; max-width: calc(100% - 36px); padding: 7px 10px; position: absolute; z-index: 2; }
+.workbench-message.success { border-color: #2a7650; color: #8cdaad; }
+.workbench-message.error { border-color: #744246; color: #e6a5a5; }
+.workbench-message.pending { border-color: #77603a; color: #e5c386; }

@@ -26,6 +26,7 @@ export interface PreviewLivenessPoller {
   readonly start: () => void;
   readonly stop: () => void;
   readonly visibilityChanged: () => void;
+  readonly previewsChanged: () => void;
 }
 
 export function createPreviewLivenessPoller(options: PreviewLivenessPollerOptions): PreviewLivenessPoller {
@@ -33,20 +34,24 @@ export function createPreviewLivenessPoller(options: PreviewLivenessPollerOption
   let started = false;
   let inFlight = false;
   let timer: number | null = null;
+  let scheduledDelay: number | null = null;
   let current = options.readPreviews();
 
   const clear = () => {
     if (timer === null) return;
     options.clearTimeout(timer);
     timer = null;
+    scheduledDelay = null;
   };
   const schedule = () => {
-    if (stopped || options.readVisibility() !== "visible" || timer !== null) return;
+    if (!started || stopped || options.readVisibility() !== "visible" || timer !== null) return;
     current = options.readPreviews();
     const delay = previewLivenessInterval(current);
     if (delay === null) return;
+    scheduledDelay = delay;
     timer = options.setTimeout(() => {
       timer = null;
+      scheduledDelay = null;
       if (stopped || options.readVisibility() !== "visible" || inFlight) return;
       inFlight = true;
       void options.refreshPreviews().then((next) => {
@@ -56,6 +61,23 @@ export function createPreviewLivenessPoller(options: PreviewLivenessPollerOption
         schedule();
       });
     }, delay);
+  };
+  const previewsChanged = () => {
+    current = options.readPreviews();
+    if (!started || stopped) return;
+    if (options.readVisibility() !== "visible") {
+      clear();
+      return;
+    }
+    const delay = previewLivenessInterval(current);
+    if (delay === null) {
+      clear();
+      return;
+    }
+    if (inFlight) return;
+    if (timer !== null && scheduledDelay === delay) return;
+    clear();
+    schedule();
   };
   return {
     start: () => {
@@ -70,6 +92,7 @@ export function createPreviewLivenessPoller(options: PreviewLivenessPollerOption
     visibilityChanged: () => {
       if (options.readVisibility() === "hidden") clear();
       else schedule();
-    }
+    },
+    previewsChanged
   };
 }

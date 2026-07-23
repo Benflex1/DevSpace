@@ -66,6 +66,65 @@ describe("preview liveness polling", () => {
     expect(refreshes).toBe(0);
   });
 
+  test("wakes when an eligible preview appears after starting dormant", () => {
+    const clock = timers();
+    let current = [preview({ desiredState: "inactive" })];
+    let refreshes = 0;
+    const poller = createPreviewLivenessPoller({
+      readPreviews: () => current, readVisibility: () => "visible", setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      refreshPreviews: () => { refreshes += 1; return Promise.resolve(current); }
+    });
+    poller.start();
+    expect(clock.pending.size).toBe(0);
+    current = [preview({ observedState: "unhealthy", routePresent: false })];
+    poller.previewsChanged();
+    expect([...clock.pending.values()][0]?.delay).toBe(PREVIEW_CHANGING_POLL_MS);
+    return clock.runNext().then(() => expect(refreshes).toBe(1));
+  });
+
+  test("reschedules from waiting to stable cadence when a preview becomes ready", () => {
+    const clock = timers();
+    let current = [preview({ observedState: "unhealthy", routePresent: false })];
+    const poller = createPreviewLivenessPoller({
+      readPreviews: () => current, readVisibility: () => "visible", setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      refreshPreviews: () => Promise.resolve(current)
+    });
+    poller.start();
+    current = [preview()];
+    poller.previewsChanged();
+    expect(clock.pending.size).toBe(1);
+    expect([...clock.pending.values()][0]?.delay).toBe(PREVIEW_STABLE_POLL_MS);
+  });
+
+  test("reschedules from stable to waiting cadence when a preview degrades", () => {
+    const clock = timers();
+    let current = [preview()];
+    const poller = createPreviewLivenessPoller({
+      readPreviews: () => current, readVisibility: () => "visible", setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      refreshPreviews: () => Promise.resolve(current)
+    });
+    poller.start();
+    current = [preview({ observedState: "unhealthy", routePresent: false })];
+    poller.previewsChanged();
+    expect(clock.pending.size).toBe(1);
+    expect([...clock.pending.values()][0]?.delay).toBe(PREVIEW_CHANGING_POLL_MS);
+  });
+
+  test("stops when the last eligible preview becomes inactive", () => {
+    const clock = timers();
+    let current = [preview()];
+    let refreshes = 0;
+    const poller = createPreviewLivenessPoller({
+      readPreviews: () => current, readVisibility: () => "visible", setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      refreshPreviews: () => { refreshes += 1; return Promise.resolve(current); }
+    });
+    poller.start();
+    current = [preview({ desiredState: "inactive", routePresent: false })];
+    poller.previewsChanged();
+    expect(clock.pending.size).toBe(0);
+    return clock.runNext().then(() => expect(refreshes).toBe(0));
+  });
+
   test("refreshes a Ready preview and schedules from its new liveness state", async () => {
     const clock = timers();
     const visible: "visible" | "hidden" = "visible";
@@ -113,5 +172,30 @@ describe("preview liveness polling", () => {
     expect(refreshes).toBe(1);
     poller.stop();
     expect(clock.pending.size).toBe(0);
+  });
+
+  test("does not overlap a liveness request when preview state changes in flight", async () => {
+    const clock = timers();
+    let current = [preview()];
+    let activeRequests = 0;
+    let maximumRequests = 0;
+    let resolveRefresh!: (value: readonly PreviewLifecycleView[]) => void;
+    const refresh = new Promise<readonly PreviewLifecycleView[]>((resolve) => { resolveRefresh = resolve; });
+    const poller = createPreviewLivenessPoller({
+      readPreviews: () => current, readVisibility: () => "visible", setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      refreshPreviews: () => { activeRequests += 1; maximumRequests = Math.max(maximumRequests, activeRequests); return refresh.finally(() => { activeRequests -= 1; }); }
+    });
+    poller.start();
+    await clock.runNext();
+    current = [preview({ observedState: "unhealthy", routePresent: false })];
+    poller.previewsChanged();
+    expect(clock.pending.size).toBe(0);
+    resolveRefresh(current);
+    await refresh;
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(maximumRequests).toBe(1);
   });
 });
