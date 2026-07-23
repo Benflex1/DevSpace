@@ -298,6 +298,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     maxPayload: 65_537, perMessageDeflate: false, handleProtocols: (protocols) => protocols.size === 1 && protocols.has("devspace.terminal.v1")
       ? "devspace.terminal.v1" : false });
   const eventResponses = new Set<ServerResponse>();
+  const previewObservationLog = new Map<string, string>();
   let started = false;
   let ownedSocket: SocketIdentity | undefined;
   let startupPreviewReconciliationHealthy = true;
@@ -487,12 +488,28 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
       const startedAt = now().valueOf();
       const resourceFields = diagnosticResourceFields(body.data);
-      logger.info("agent.preview.inspection.started", "Preview inspection started", { requestId, ...resourceFields });
+      logger.debug("agent.preview.inspection.started", "Preview inspection started", { requestId, ...resourceFields });
       try {
         const data = await managed.inspectPreview(body.data);
-        logger.info("agent.preview.inspection.completed", "Preview inspection completed", {
+        const observationKey = `${body.data.projectId}:${body.data.workspaceId}:${body.data.previewId}`;
+        const observationSignature = `${data.observedState}:${data.routePresent}:${data.diagnosticCode ?? ""}`;
+        const previousObservation = previewObservationLog.get(observationKey);
+        if (["failed", "lost", "unhealthy"].includes(data.observedState)) {
+          if (previousObservation !== observationSignature) logger.warn("agent.preview.observation.degraded", "Preview observation is degraded", {
+            requestId, durationMs: Math.max(0, now().valueOf() - startedAt), errorCategory: "preview-observation",
+            ...(data.diagnosticCode === undefined ? {} : { errorCode: data.diagnosticCode }), ...resourceFields
+          });
+        } else if (previousObservation !== undefined && previousObservation !== observationSignature) {
+          logger.info("agent.preview.observation.recovered", "Preview observation recovered", {
+            requestId, durationMs: Math.max(0, now().valueOf() - startedAt), observedState: data.observedState,
+            routePresent: data.routePresent, ...resourceFields
+          });
+        }
+        previewObservationLog.set(observationKey, observationSignature);
+        logger.debug("agent.preview.inspection.completed", "Preview inspection completed", {
           requestId, durationMs: Math.max(0, now().valueOf() - startedAt), observedState: data.observedState,
-          routePresent: data.routePresent, routeStatus: data.routePresent ? "present" : "absent", ...resourceFields
+          routePresent: data.routePresent, routeStatus: data.routePresent ? "present" : "absent",
+          ...(data.diagnosticCode === undefined ? {} : { errorCode: data.diagnosticCode }), ...resourceFields
         });
         return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
       } catch (error) {

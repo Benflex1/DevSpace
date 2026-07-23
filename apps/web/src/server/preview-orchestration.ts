@@ -80,12 +80,18 @@ function persistObservation(
     errorMessage,
     ...(operationId === undefined ? {} : { operationId })
   });
-  logger?.info("preview.observed_state", "Final observed preview state recorded", {
-    ...(operationId === null || operationId === undefined ? {} : { operationId }),
-    projectId: context.project.id, workspaceId: context.workspace.id, previewId: preview.id,
-    observedState: observation.observedState, routePresent: observation.routePresent,
-    ...(errorCode === null ? {} : { errorCode, errorCategory: "preview" })
-  });
+  const stateChanged = preview.observedState !== observation.observedState || preview.routePresent !== observation.routePresent;
+  const failureChanged = errorCode !== null && preview.lastErrorCode !== errorCode;
+  if (logger !== undefined && (stateChanged || failureChanged)) {
+    const fields = {
+      ...(operationId === null || operationId === undefined ? {} : { operationId }),
+      projectId: context.project.id, workspaceId: context.workspace.id, previewId: preview.id,
+      observedState: observation.observedState, routePresent: observation.routePresent,
+      ...(errorCode === null ? {} : { errorCode, errorCategory: "preview" })
+    };
+    if (["failed", "lost", "unhealthy"].includes(observation.observedState)) logger.warn("preview.observed_state", "Preview observed state degraded", fields);
+    else logger.info("preview.observed_state", "Preview observed state changed", fields);
+  }
 }
 
 async function inspectAndPersist(
@@ -98,20 +104,22 @@ async function inspectAndPersist(
   logger: StructuredLogger
 ): Promise<void> {
   const startedAt = Date.now();
-  logger.info("preview.inspection.started", "Preview inspection started", {
+  logger.debug("preview.inspection.started", "Preview inspection started", {
     projectId: context.project.id, workspaceId: context.workspace.id, previewId: preview.id, ...(operationId === null ? {} : { operationId })
   });
   try {
     const observation = await dependencies.agent.inspectPreview(context.project.id, context.workspace.id, context.revision.id, preview.id);
     persistObservation(dependencies.database, context, preview, observation, operationId, null, null, logger);
-    logger.info("preview.inspection.completed", "Preview inspection completed", {
+    logger.debug("preview.inspection.completed", "Preview inspection completed", {
       projectId: context.project.id, workspaceId: context.workspace.id, previewId: preview.id, ...(operationId === null ? {} : { operationId }),
       durationMs: Math.max(0, Date.now() - startedAt), observedState: observation.observedState, routePresent: observation.routePresent,
       routeStatus: observation.routePresent ? "present" : "absent"
     });
   } catch (error) {
     const errorCode = error instanceof AgentResponseError ? error.code : error instanceof AgentUnavailableError ? "AGENT_UNAVAILABLE" : "AGENT_INTERNAL_ERROR";
-    logger.warn("preview.inspection.failed", "Preview inspection failed", {
+    const expectedMissingPreview = error instanceof AgentResponseError && error.code === "RESOURCE_NOT_FOUND" && action === "deactivate";
+    const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
+    if (!expectedMissingPreview && retained.lastErrorCode !== errorCode) logger.warn("preview.inspection.failed", "Preview inspection failed", {
       projectId: context.project.id, workspaceId: context.workspace.id, previewId: preview.id, ...(operationId === null ? {} : { operationId }),
       durationMs: Math.max(0, Date.now() - startedAt), errorCategory: "preview-inspection", errorCode
     });
@@ -132,19 +140,16 @@ async function inspectAndPersist(
     }
     if (error instanceof AgentResponseError) {
       dependencies.database.finishOperation(operationId!, { state: "failed", code: error.code, message: error.message });
-      const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
       persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: false }, operationId,
         error.code, error.message, logger);
       return;
     }
     if (error instanceof AgentUnavailableError) {
-      const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
       persistObservation(dependencies.database, context, retained, { observedState: "lost", routePresent: false },
         operationId, "AGENT_UNAVAILABLE", error.message, logger);
       return;
     }
     dependencies.database.finishOperation(operationId!, { state: "failed", code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely." });
-    const retained = currentPreview(dependencies.database, context.project.id, context.workspace.id, preview.id) ?? preview;
     persistObservation(dependencies.database, context, retained, { observedState: "failed", routePresent: false }, operationId,
       "AGENT_INTERNAL_ERROR", "The preview could not be inspected safely.", logger);
   }
@@ -230,9 +235,10 @@ export async function reconcileWorkspacePreviews(projectId: string, actor: strin
   dependencies: PreviewOrchestrationDependencies, previewId?: string): Promise<readonly PreviewView[]> {
   const logger = dependencies.logger ?? createLogger({ component: "web", subsystem: "preview" });
   const startedAt = dependencies.nowMonotonic?.() ?? Date.now();
-  logger.info("preview.reconciliation.requested", "Preview reconciliation requested", { projectId, mode, reason: dependencies.reason ?? mode });
   try {
-    logger.info("preview.reconciliation.started", "Preview reconciliation started", { projectId, mode, reason: dependencies.reason ?? mode });
+    const startFields = { projectId, mode, reason: dependencies.reason ?? mode };
+    if (mode === "observe") logger.debug("preview.reconciliation.started", "Preview reconciliation started", startFields);
+    else logger.info("preview.reconciliation.started", "Preview reconciliation started", startFields);
     const context = dependencies.database.getRuntimeContext(projectId);
     if (dependencies.previewBaseRegistry !== undefined) {
       dependencies.database.materializePreviews({ projectId, workspaceId: context.workspace.id, revisionId: context.revision.id,
@@ -253,11 +259,11 @@ export async function reconcileWorkspacePreviews(projectId: string, actor: strin
         }
       } else if (preview.routePresent || (preview.desiredState === "active" && preview.observedState !== "inactive")) {
         const inspectionStartedAt = Date.now();
-        logger.info("preview.inspection.started", "Preview inspection started", { projectId, workspaceId: context.workspace.id, previewId: preview.id });
+        logger.debug("preview.inspection.started", "Preview inspection started", { projectId, workspaceId: context.workspace.id, previewId: preview.id });
         try {
           const observation = await dependencies.agent.inspectPreview(projectId, context.workspace.id, context.revision.id, preview.id);
           persistObservation(dependencies.database, context, preview, observation, undefined, null, null, logger);
-          logger.info("preview.inspection.completed", "Preview inspection completed", {
+          logger.debug("preview.inspection.completed", "Preview inspection completed", {
             projectId, workspaceId: context.workspace.id, previewId: preview.id, durationMs: Date.now() - inspectionStartedAt,
             observedState: observation.observedState, routePresent: observation.routePresent, routeStatus: observation.routePresent ? "present" : "absent"
           });
@@ -269,19 +275,22 @@ export async function reconcileWorkspacePreviews(projectId: string, actor: strin
           const missing = (error instanceof AgentResponseError && error.code === "RESOURCE_NOT_FOUND")
             || error instanceof AgentUnavailableError;
           const observedState = missing ? "lost" as const : "failed" as const;
-          logger.warn("preview.inspection.failed", "Preview inspection failed", {
+          const retained = currentPreview(dependencies.database, projectId, context.workspace.id, preview.id) ?? preview;
+          if (retained.lastErrorCode !== code) logger.warn("preview.inspection.failed", "Preview inspection failed", {
             projectId, workspaceId: context.workspace.id, previewId: preview.id, durationMs: Date.now() - inspectionStartedAt,
             errorCategory: "preview-inspection", errorCode: code
           });
-          persistObservation(dependencies.database, context, preview, { observedState, routePresent: false }, undefined, code, message, logger);
+          persistObservation(dependencies.database, context, retained, { observedState, routePresent: false }, undefined, code, message, logger);
         }
       }
     }
     const result = dependencies.database.listPreviews(projectId, context.workspace.id);
-    logger.info("preview.reconciliation.completed", "Preview reconciliation completed", {
+    const completionFields = {
       projectId, mode, reason: dependencies.reason ?? mode,
       durationMs: Math.max(0, (dependencies.nowMonotonic?.() ?? Date.now()) - startedAt)
-    });
+    };
+    if (mode === "observe") logger.debug("preview.reconciliation.completed", "Preview reconciliation completed", completionFields);
+    else logger.info("preview.reconciliation.completed", "Preview reconciliation completed", completionFields);
     return result;
   } catch (error) {
     const failure = reconciliationFailure(error);

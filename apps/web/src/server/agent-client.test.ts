@@ -48,7 +48,7 @@ test("rejects malformed envelopes and unavailable sockets without exposing inter
 test("emits one terminal diagnostic for a preview transport failure", async () => {
   const logs: string[] = [];
   const client = createAgentClient(path.join(tmpdir(), `missing-preview-${id}.sock`), {
-    timeoutMs: 50, createId: () => id, logger: createLogger({ component: "web", subsystem: "agent-client", sink: (line) => logs.push(line) })
+    timeoutMs: 50, createId: () => id, logger: createLogger({ component: "web", subsystem: "agent-client", environment: { DEVSPACE_LOG_LEVEL: "debug" }, sink: (line) => logs.push(line) })
   });
   await expect(client.inspectPreview(id, "018f0f00-0000-7000-8000-000000000002", "018f0f00-0000-7000-8000-000000000003", "018f0f00-0000-7000-8000-000000000004"))
     .rejects.toBeInstanceOf(AgentUnavailableError);
@@ -64,7 +64,7 @@ test("emits one terminal diagnostic for a malformed preview response", async () 
   const logs: string[] = [];
   try {
     const client = createAgentClient(service.socketPath, {
-      createId: () => id, now: () => new Date(timestamp), logger: createLogger({ component: "web", subsystem: "agent-client", sink: (line) => logs.push(line) })
+      createId: () => id, now: () => new Date(timestamp), logger: createLogger({ component: "web", subsystem: "agent-client", environment: { DEVSPACE_LOG_LEVEL: "debug" }, sink: (line) => logs.push(line) })
     });
     await expect(client.inspectPreview(id, "018f0f00-0000-7000-8000-000000000002", "018f0f00-0000-7000-8000-000000000003", "018f0f00-0000-7000-8000-000000000004"))
       .rejects.toBeInstanceOf(AgentUnavailableError);

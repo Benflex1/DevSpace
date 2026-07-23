@@ -214,7 +214,7 @@ describe("Agent preview runtime policy", () => {
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
     await fixtureValue.manager.activate(activation, association, options, ids.operationId);
     const inspection = await fixtureValue.manager.inspect({ ...ids });
-    expect(inspection.observedState).toBe("unhealthy");
+    expect(inspection).toMatchObject({ observedState: "unhealthy", diagnosticCode: "HEALTH_STATUS_NOT_ACCEPTED" });
     expect(inspection.routePresent).toBe(false);
     expect(inspection.hostname).toBe(activation.hostname);
   });
@@ -237,7 +237,9 @@ describe("Agent preview runtime policy", () => {
     const probe = new Probe([{ kind: "infrastructure", message: "The private gateway probe is unavailable." }]);
     const fixtureValue = await fixture(probe); cleanup.push(fixtureValue.root);
     await fixtureValue.manager.activate(activation, association, options, ids.operationId);
-    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({ observedState: "failed", routePresent: false });
+    await expect(fixtureValue.manager.inspect({ ...ids })).resolves.toMatchObject({
+      observedState: "failed", routePresent: false, diagnosticCode: "PREVIEW_GATEWAY_UNAVAILABLE"
+    });
   });
 
   test("accepts configured status codes and preserves WebSocket probe metadata", async () => {

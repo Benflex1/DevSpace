@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createLogger, sanitizeLogFields, serializeLogRecord, type LogRecord } from "./index.js";
+import { createLogger, resolveLogLevel, sanitizeLogFields, serializeLogRecord, type LogRecord } from "./index.js";
 
 describe("structured diagnostics logging", () => {
   test("serializes stable JSON records with correlation and timing fields", () => {
@@ -23,5 +23,16 @@ describe("structured diagnostics logging", () => {
     const output = lines.join("");
     expect(output).not.toContain("top-secret");
     expect(output).not.toContain("requestBody");
+  });
+
+  test("filters debug records at the safe info default and enables them explicitly", () => {
+    expect(resolveLogLevel({})).toBe("info");
+    expect(resolveLogLevel({ DEVSPACE_LOG_LEVEL: "not-a-level" })).toBe("info");
+    const infoLines: string[] = [];
+    createLogger({ component: "web", sink: (line) => infoLines.push(line), environment: {} }).debug("debug.detail", "hidden");
+    expect(infoLines).toHaveLength(0);
+    const debugLines: string[] = [];
+    createLogger({ component: "web", sink: (line) => debugLines.push(line), environment: { DEVSPACE_LOG_LEVEL: "debug" } }).debug("debug.detail", "visible");
+    expect(debugLines).toHaveLength(1);
   });
 });

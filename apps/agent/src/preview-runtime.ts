@@ -87,6 +87,8 @@ export class PreviewRuntimeError extends Error {
   }
 }
 
+export type PreviewInspectionResult = PreviewInspectionData & { readonly diagnosticCode?: string };
+
 const previewLeaseSchema = z.strictObject({
   version: z.literal(1), leaseId: uuidV7Schema, operationId: uuidV7Schema,
   projectId: uuidV7Schema, workspaceId: uuidV7Schema, revisionId: uuidV7Schema,
@@ -473,10 +475,19 @@ export class PreviewRuntimeManager {
     }
     return persisted.data;
   }
-  private observation(record: PreviewState): PreviewInspectionData {
-    return previewInspectionDataSchema.parse({ projectId: record.projectId, workspaceId: record.workspaceId,
+  private observation(record: PreviewState): PreviewInspectionResult {
+    const data = previewInspectionDataSchema.parse({ projectId: record.projectId, workspaceId: record.workspaceId,
       previewId: record.previewId, previewKey: record.previewKey, desiredState: record.desiredState,
       observedState: record.observedState, routePresent: record.routePresent, hostname: record.hostname });
+    const diagnosticCode = record.observedState === "unhealthy"
+      ? record.lastError === "health-attempt-timeout" ? "HEALTH_ATTEMPT_TIMEOUT"
+        : record.lastError === "health-target-not-listening" ? "HEALTH_TARGET_NOT_LISTENING"
+          : record.lastError === "health-status-not-accepted" ? "HEALTH_STATUS_NOT_ACCEPTED" : "PREVIEW_HEALTH_CHECK_FAILED"
+      : record.observedState === "failed"
+        ? record.lastError === "gateway-route-update-failed" || record.lastError === "preview-route-removal-failed" ? "GATEWAY_UPDATE_FAILED"
+          : record.lastError === "The private gateway probe is unavailable." ? "PREVIEW_GATEWAY_UNAVAILABLE" : "PREVIEW_INSPECTION_FAILED"
+        : record.observedState === "lost" ? "PREVIEW_RUNTIME_LOST" : undefined;
+    return diagnosticCode === undefined ? data : { ...data, diagnosticCode };
   }
   private async markRuntimeLoss(record: PreviewState, error: unknown): Promise<PreviewState> {
     let routePresent = record.routePresent;

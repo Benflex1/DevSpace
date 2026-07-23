@@ -61,7 +61,7 @@ export function createAgentClient(socketPath: string, options: {
     };
     const diagnosticPreviewCall = operation === "preview.activate" || operation === "preview.deactivate" || operation === "preview.inspect";
     let terminalLogged = false;
-    if (diagnosticPreviewCall) logger.info("web.agent_request.started", "Preview Agent request started", {
+    if (diagnosticPreviewCall) logger.debug("web.agent_request.started", "Preview Agent request started", {
       requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation, ...resourceFields
     });
     const logFailure = (errorCategory: string, errorCode: string, statusCode?: number): void => {
@@ -76,7 +76,7 @@ export function createAgentClient(socketPath: string, options: {
     const logCompleted = (statusCode: number): void => {
       if (!diagnosticPreviewCall || terminalLogged) return;
       terminalLogged = true;
-      logger.info("web.agent_request.completed", "Preview Agent request completed", {
+      logger.debug("web.agent_request.completed", "Preview Agent request completed", {
         requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation,
         durationMs: Date.now() - callStartedAt, statusCode, ...resourceFields
       });

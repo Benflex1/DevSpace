@@ -1,5 +1,12 @@
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+const logLevelRank: Readonly<Record<LogLevel, number>> = { debug: 10, info: 20, warn: 30, error: 40 };
+
+export function resolveLogLevel(environment: Readonly<Record<string, string | undefined>> = process.env): LogLevel {
+  const value = environment.DEVSPACE_LOG_LEVEL;
+  return value === "debug" || value === "info" || value === "warn" || value === "error" ? value : "info";
+}
+
 export interface LogContext {
   readonly requestId?: string;
   readonly operationId?: string;
@@ -118,6 +125,8 @@ export interface StructuredLoggerOptions {
   readonly now?: () => Date;
   readonly sink?: LogSink;
   readonly context?: LogContext;
+  readonly level?: LogLevel;
+  readonly environment?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface StructuredLogger {
@@ -134,10 +143,13 @@ export function createLogger(options: StructuredLoggerOptions): StructuredLogger
   const now = options.now ?? (() => new Date());
   const sink = options.sink ?? defaultSink;
   const context = options.context ?? {};
+  const level = options.level ?? resolveLogLevel(options.environment);
+  const loggerLevel = level;
   const logger: StructuredLogger = {
     context,
     child: (childContext) => createLogger({ ...options, context: { ...context, ...childContext } }),
     log: (level, event, message, fields) => {
+      if (logLevelRank[level] < logLevelRank[loggerLevel]) return;
       const sanitized = sanitizeLogFields({ ...context, ...fields });
       const record = {
         timestamp: now().toISOString(), level, component: options.component, subsystem: options.subsystem ?? "runtime",

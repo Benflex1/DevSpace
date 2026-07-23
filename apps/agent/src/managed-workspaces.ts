@@ -45,7 +45,7 @@ import {
 } from "./private-state.js";
 import { WorkspaceRuntimeError, WorkspaceRuntimeManager, verifyRuntimePlanAgainstOptions, type RuntimeOwnership } from "./workspace-runtime.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy } from "./docker-runtime.js";
-import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, type PreviewGatewayProbe } from "./preview-runtime.js";
+import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, type PreviewGatewayProbe, type PreviewInspectionResult } from "./preview-runtime.js";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 
@@ -1161,7 +1161,7 @@ export class ManagedWorkspaces {
     catch (error) { throw this.previewFailure(error, input.workspaceId, "deactivate", input.previewId, null); }
   }
 
-  async inspectPreview(input: import("@devspace/contracts").PreviewIdentityData): Promise<import("@devspace/contracts").PreviewInspectionData> {
+  async inspectPreview(input: import("@devspace/contracts").PreviewIdentityData): Promise<PreviewInspectionResult> {
     let context;
     try { context = await this.previewContext(input.projectId, input.workspaceId); }
     catch (error) { throw this.previewInspectionFailure(error, input.workspaceId, input.previewId); }
