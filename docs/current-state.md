@@ -190,7 +190,8 @@ description does not imply runtime timeout enforcement.
 - The first local scan found two Semgrep CE parser errors in existing test-only type expressions;
   narrow type-only import rewrites preserve behavior and now allow all 316 tracked files to parse.
   The rerun has zero scanner errors. Existing findings remain documented for later contextual
-  review; the three mutable action references introduced by this workflow were pinned to full SHAs.
+  review; the three new workflow action references and the three existing CI action references are
+  now pinned to full SHAs.
 - Findings are evidence for contextual AI and human review, not automatic truth. The current
   workflow does not fail for findings, but it does fail for scanner, report, and summary-generation
   failures. Blocking high-confidence security or correctness findings can be considered after the

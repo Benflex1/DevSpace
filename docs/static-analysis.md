@@ -109,11 +109,11 @@ After important findings are resolved or classified, rerun normal CI and Semgrep
 testing where applicable, and then merge only after review. High-confidence security or correctness
 findings may become blocking after the ruleset and baseline have been tuned.
 
-## Initial foundation scan
+## Original local foundation scan
 
-The first local scan of this foundation branch used Semgrep `1.171.0`, `p/default`, JSON output,
-and `--metrics=off`. It scanned 316 tracked files and reported 24 findings (13 `ERROR`, 8
-`WARNING`, and 3 `MEDIUM`) plus two CE parser errors. The parser errors were caused by two existing TypeScript test-only type expressions that
+The original local foundation scan used Semgrep `1.171.0`, `p/default`, JSON output, and
+`--metrics=off`. It scanned 316 tracked files and reported 24 findings (13 `ERROR`, 8 `WARNING`,
+and 3 `MEDIUM`) plus two CE parser errors. The parser errors were caused by two existing TypeScript test-only type expressions that
 Semgrep CE could not parse; the equivalent type-only imports below preserve test behavior and allow
 all 316 files to be parsed:
 
@@ -132,10 +132,25 @@ The first-run findings were classified individually as follows:
 | 3 | Existing `.github/workflows/ci.yml` mutable action references | DEFER | High-confidence supply-chain hardening, but outside this separate Semgrep foundation and the existing CI workflow was not restructured. |
 | 3 | Existing `pnpm-workspace.yaml` dependency-policy findings | DEFER | Worth a separate pnpm policy and lockfile-compatibility review; not changed as unrelated scope. |
 
-The first-run total is therefore 24: 3 MUST FIX, 15 FALSE POSITIVE, and 6 DEFER. After the
-parser-compatibility edits and action pinning, the same scan completed with zero scanner errors and
-21 existing findings: 13 ERROR, 5 WARNING, and 3 MEDIUM. Existing findings remain visible in the
-artifact for later contextual review; no broad suppressions were added.
+The original local total was therefore 24: 3 MUST FIX, 15 FALSE POSITIVE, and 6 DEFER. The three
+MUST FIX findings in that scan were the new workflow's own mutable action references; those were
+resolved during the foundation implementation. No broad suppressions were added.
+
+## First real PR artifact and post-hardening baseline
+
+The first real GitHub Actions `semgrep-results` artifact completed successfully before this
+hardening fix. It reported 21 findings, 0 scanner errors, and 316 scanned files. Its independently
+reviewed disposition was:
+
+| Findings | Classification | Disposition |
+| ---: | --- | --- |
+| 3 | MUST FIX | Existing `.github/workflows/ci.yml` action references were promoted from DEFER and are pinned in this change. |
+| 15 | FALSE POSITIVE | Loopback-only E2E/test-server HTTP requests and the two fixed-input regular expressions remain unchanged. |
+| 3 | DEFER | `blockExoticSubdeps`, `minimumReleaseAge`, and `trustPolicy` remain deferred for a separate pnpm policy/compatibility review. |
+
+The expected and resulting post-hardening baseline is 18 findings with 0 unaddressed MUST FIX
+findings: 15 FALSE POSITIVE and 3 DEFER. The three deferred pnpm policy findings are intentionally
+not enabled here because they may change dependency installation and lockfile behavior.
 
 ## Limitations and future evaluation
 
