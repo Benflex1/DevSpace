@@ -1,9 +1,10 @@
 import { beforeEach, expect, test, vi } from "vitest";
+import type { validateApprovedPreviewBaseDomain } from "./preview-base-domain.js";
 
 const domainValidationProbe = vi.hoisted(() => ({ calls: 0, failOnCall: 3 }));
 
 vi.mock("./preview-base-domain.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./preview-base-domain.js")>();
+  const original = await importOriginal<{ validateApprovedPreviewBaseDomain: typeof validateApprovedPreviewBaseDomain }>();
   return {
     ...original,
     validateApprovedPreviewBaseDomain: (

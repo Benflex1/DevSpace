@@ -243,6 +243,18 @@ Later operational UX:
 - ⏳ Local development launcher should use a short Unix socket path automatically
 - ⏳ Eliminate the current manual `/run/user/.../devspace` socket workaround
 
+### Static-analysis hardening
+
+- 🟢 Add a separate, accountless Semgrep Community Edition workflow for pull requests, pushes to
+  `main`, and manual runs using the curated `p/default` ruleset.
+- 🟢 Retain complete JSON findings and publish a deterministic, source-snippet-free job summary;
+  findings are monitoring-only while scanner and report failures remain blocking.
+- ⏳ Tune the curated ruleset through AI-assisted contextual review before making high-confidence
+  security or correctness findings blocking.
+- ⏳ Evaluate additional free options later, including self-hosted SonarQube Community, CodeScene
+  through eligible GitHub Student benefits, and any GitHub Student Pack security tooling that is
+  genuinely free for this private repository. These options have not been adopted.
+
 ### Toolchain maintenance
 
 - ⏳ Evaluate and adopt TypeScript 7 for faster typechecking where compatible
