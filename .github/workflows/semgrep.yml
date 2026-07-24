@@ -22,7 +22,6 @@ jobs:
     env:
       SEMGREP_IMAGE: semgrep/semgrep:1.171.0@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
       SEMGREP_CONFIG: p/default
-      SEMGREP_REPORT: ${{ runner.temp }}/semgrep/semgrep-results.json
 
     steps:
       - name: Check out repository
@@ -40,6 +39,8 @@ jobs:
           test "$semgrep_version" = "1.171.0"
 
       - name: Run Semgrep CE scan
+        env:
+          SEMGREP_REPORT: ${{ runner.temp }}/semgrep/semgrep-results.json
         run: |
           mkdir -p "$(dirname "$SEMGREP_REPORT")"
           docker run --rm --init \
@@ -56,6 +57,8 @@ jobs:
       - name: Generate Semgrep job summary
         id: summary
         if: always()
+        env:
+          SEMGREP_REPORT: ${{ runner.temp }}/semgrep/semgrep-results.json
         run: |
           test -s "$SEMGREP_REPORT"
           node tooling/semgrep-summary.mjs \
@@ -67,6 +70,8 @@ jobs:
 
       - name: Fail if the Semgrep report contains scanner errors
         if: always() && steps.summary.outputs.report_valid == 'true'
+        env:
+          SEMGREP_REPORT: ${{ runner.temp }}/semgrep/semgrep-results.json
         run: node tooling/semgrep-summary.mjs --input "$SEMGREP_REPORT" --check-scanner-errors
 
       - name: Upload Semgrep JSON report
