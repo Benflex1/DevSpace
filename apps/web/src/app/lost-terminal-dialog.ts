@@ -1,12 +1,37 @@
 export const LOST_TERMINAL_DISMISSED_SESSION_KEY = "devspace:lost-terminal-dialog:dismissed";
 
+export type LostTerminalDialogStep = "warning" | "confirmation";
+
+export interface LostTerminalDialogCopy {
+  readonly warningStatement: string;
+  readonly warningSupporting: string;
+  readonly confirmationTitle: string;
+  readonly confirmationBody: string;
+}
+
 export function lostTerminalSetKey(ids: readonly string[]): string {
   return [...new Set(ids)].sort().join(",");
 }
 
-export function lostTerminalDialogBody(count: number): string {
-  if (count === 1) return "A terminal could not be restored after DevSpace restarted. Its session cannot be recovered, and processes started from it may still be running. Restart the workspace to clean it up, or stop and start the workspace manually later.";
-  return `${count} terminal sessions could not be restored after DevSpace restarted. They cannot be recovered, and processes started from them may still be running. Restart the workspace to clean them up, or stop and start the workspace manually later.`;
+export function lostTerminalDialogCopy(count: number): LostTerminalDialogCopy {
+  if (count === 1) return {
+    warningStatement: "This terminal cannot be recovered.",
+    warningSupporting: "Processes started from it may still be running.",
+    confirmationTitle: "Continue without restarting?",
+    confirmationBody: "Processes started from the lost terminal may continue running. To guarantee cleanup later, stop and start the workspace manually."
+  };
+  return {
+    warningStatement: "These terminal sessions cannot be recovered.",
+    warningSupporting: "Processes started from them may still be running.",
+    confirmationTitle: "Continue without restarting?",
+    confirmationBody: "Processes started from the lost terminals may continue running. To guarantee cleanup later, stop and start the workspace manually."
+  };
+}
+
+export function lostTerminalDialogStepAfter(step: LostTerminalDialogStep, action: "dismiss" | "go-back"): LostTerminalDialogStep {
+  if (step === "warning" && action === "dismiss") return "confirmation";
+  if (step === "confirmation" && action === "go-back") return "warning";
+  return step;
 }
 
 export function shouldShowLostTerminalDialog(ids: readonly string[], dismissedKey: string | null): boolean {

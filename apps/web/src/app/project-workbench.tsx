@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
-import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogBody, lostTerminalSetKey } from "./lost-terminal-dialog.js";
+import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogCopy, lostTerminalDialogStepAfter, lostTerminalSetKey, type LostTerminalDialogStep } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
@@ -296,7 +296,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">{notice.message}</p>}
       </section>
     </div>
-    {lostDialogIds.length > 0 && <LostTerminalDialog count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}
+    {lostDialogIds.length > 0 && <LostTerminalDialog key={lostTerminalSetKey(lostDialogIds)} count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}
       runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
       onDismiss={() => {
         lostTerminalRecoveryIds.current = [];
@@ -423,15 +423,33 @@ function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, 
   count: number; projectId: string; runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null;
   canStart: boolean; canStop: boolean; retryStart: boolean; onDismiss: () => void; onRestartInitiated: () => void; onRestartSuccess: () => void;
 }) {
+  const [step, setStep] = useState<LostTerminalDialogStep>("warning");
+  const copy = lostTerminalDialogCopy(count);
+  const goToStep = (action: "dismiss" | "go-back") => setStep((current) => lostTerminalDialogStepAfter(current, action));
   return <div className="lost-terminal-dialog-backdrop">
-    <section className="lost-terminal-dialog" role="dialog" aria-modal="true" aria-labelledby="lost-terminal-dialog-title">
-      <h2 id="lost-terminal-dialog-title">Terminal session lost</h2>
-      <p>{lostTerminalDialogBody(count)}</p>
-      <div className="lost-terminal-dialog-actions">
-        <button type="button" className="lost-terminal-dismiss" onClick={onDismiss}>Dismiss</button>
-        <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
-          canStart={canStart} canStop={canStop} retryStart={retryStart} restart onRestartInitiated={onRestartInitiated} onSuccess={onRestartSuccess} />
-      </div>
+    <section className={`lost-terminal-dialog ${step}`} role="dialog" aria-modal="true" aria-labelledby="lost-terminal-dialog-title" aria-describedby="lost-terminal-dialog-description">
+      {step === "warning" ? <>
+        <h2 id="lost-terminal-dialog-title">Terminal session lost</h2>
+        <div className="lost-terminal-warning-summary">
+          <span className="lost-terminal-warning-icon" aria-hidden="true">!</span>
+          <div>
+            <p className="lost-terminal-warning-statement">{copy.warningStatement}</p>
+            <p className="lost-terminal-warning-supporting" id="lost-terminal-dialog-description">{copy.warningSupporting}</p>
+          </div>
+        </div>
+        <div className="lost-terminal-dialog-actions">
+          <button type="button" className="lost-terminal-dismiss" onClick={() => goToStep("dismiss")}>Dismiss</button>
+          <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction}
+            canStart={canStart} canStop={canStop} retryStart={retryStart} restart onRestartInitiated={onRestartInitiated} onSuccess={onRestartSuccess} />
+        </div>
+      </> : <>
+        <h2 id="lost-terminal-dialog-title">{copy.confirmationTitle}</h2>
+        <p className="lost-terminal-confirmation-body" id="lost-terminal-dialog-description">{copy.confirmationBody}</p>
+        <div className="lost-terminal-dialog-actions lost-terminal-confirmation-actions">
+          <button type="button" className="lost-terminal-go-back" onClick={() => goToStep("go-back")}>Go back</button>
+          <button type="button" className="lost-terminal-dismiss-anyway" onClick={onDismiss}>Dismiss anyway</button>
+        </div>
+      </>}
     </section>
   </div>;
 }
