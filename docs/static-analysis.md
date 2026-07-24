@@ -125,14 +125,14 @@ The first-run findings were classified individually as follows:
 | Findings | Location and rule | Classification | Disposition |
 | ---: | --- | --- | --- |
 | 3 | New `.github/workflows/semgrep.yml` mutable action references | MUST FIX | Pinned checkout, setup-node, and upload-artifact to verified full commit SHAs. |
-| 13 | `e2e/primary-workspace.spec.ts` loopback `http://127.0.0.1` test-control requests | FALSE POSITIVE | The requests stay on the local E2E harness and do not transmit application data over an external network. |
+| 12 | `e2e/primary-workspace.spec.ts` loopback `http://127.0.0.1` test-control requests | FALSE POSITIVE | The requests stay on the local E2E harness and do not transmit application data over an external network. |
 | 1 | `tooling/run-e2e-server.mjs:137` loopback readiness request | FALSE POSITIVE | The request only probes the local E2E web child on loopback. |
 | 1 | `e2e/primary-workspace.spec.ts:80` dynamic test-only `RegExp` | FALSE POSITIVE | The value is a locally created project ID used to assert a Playwright URL, not attacker-controlled input. |
 | 1 | `tooling/check-preview-gateway-deployment.mjs:19` dynamic `RegExp` | FALSE POSITIVE | `serviceName` is selected from three fixed repository-owned Compose service names. |
 | 3 | Existing `.github/workflows/ci.yml` mutable action references | DEFER | High-confidence supply-chain hardening, but outside this separate Semgrep foundation and the existing CI workflow was not restructured. |
 | 3 | Existing `pnpm-workspace.yaml` dependency-policy findings | DEFER | Worth a separate pnpm policy and lockfile-compatibility review; not changed as unrelated scope. |
 
-The first-run total is therefore 24: 3 MUST FIX, 16 FALSE POSITIVE, and 6 DEFER. After the
+The first-run total is therefore 24: 3 MUST FIX, 15 FALSE POSITIVE, and 6 DEFER. After the
 parser-compatibility edits and action pinning, the same scan completed with zero scanner errors and
 21 existing findings: 13 ERROR, 5 WARNING, and 3 MEDIUM. Existing findings remain visible in the
 artifact for later contextual review; no broad suppressions were added.
