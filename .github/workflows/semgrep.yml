@@ -1,0 +1,79 @@
+name: Semgrep CE
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SEMGREP_IMAGE: semgrep/semgrep:1.171.0@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
+      SEMGREP_CONFIG: p/default
+      SEMGREP_REPORT: ${{ runner.temp }}/semgrep/semgrep-results.json
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.18.0"
+
+      - name: Print pinned Semgrep CE version
+        run: |
+          semgrep_version="$(docker run --rm "$SEMGREP_IMAGE" semgrep --version)"
+          printf 'Semgrep CE version: %s\n' "$semgrep_version"
+          test "$semgrep_version" = "1.171.0"
+
+      - name: Run Semgrep CE scan
+        run: |
+          mkdir -p "$(dirname "$SEMGREP_REPORT")"
+          docker run --rm --init \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --volume "$(dirname "$SEMGREP_REPORT"):/output" \
+            --workdir /src \
+            "$SEMGREP_IMAGE" \
+            semgrep scan \
+            --config="$SEMGREP_CONFIG" \
+            --json \
+            --output=/output/semgrep-results.json \
+            --metrics=off
+
+      - name: Generate Semgrep job summary
+        id: summary
+        if: always()
+        run: |
+          test -s "$SEMGREP_REPORT"
+          node tooling/semgrep-summary.mjs \
+            --input "$SEMGREP_REPORT" \
+            --output "$GITHUB_STEP_SUMMARY" \
+            --configuration "$SEMGREP_CONFIG" \
+            --scanner-version "1.171.0"
+          echo "report_valid=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if the Semgrep report contains scanner errors
+        if: always() && steps.summary.outputs.report_valid == 'true'
+        run: node tooling/semgrep-summary.mjs --input "$SEMGREP_REPORT" --check-scanner-errors
+
+      - name: Upload Semgrep JSON report
+        if: always() && steps.summary.outputs.report_valid == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: semgrep-results
+          path: ${{ runner.temp }}/semgrep/semgrep-results.json
+          if-no-files-found: error
+          retention-days: 14

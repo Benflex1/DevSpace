@@ -4,6 +4,7 @@
 
 - `architecture.md` — system structure and service boundaries.
 - `security/threat-model.md` — trust boundaries, assets, and security assumptions.
+- `static-analysis.md` — Semgrep CE workflow, report summary, and AI triage policy.
 - `roadmap.md` — product milestones and sequencing.
 - `specs/` — versioned implementation contracts.
 - `decisions/` — durable accepted ADRs.

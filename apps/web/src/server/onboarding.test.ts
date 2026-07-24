@@ -1,13 +1,14 @@
 import { expect, test } from "vitest";
 import { sourceInspectionDataSchema } from "@devspace/contracts";
 import { AgentUnavailableError, type AgentClient } from "./agent-client.js";
+import type { ProjectDatabase } from "./database.js";
 import { OnboardingValidationError, onboardProject, parseOnboardingInput } from "./onboarding.js";
 
 const input = { repositoryUrl: "https://example.com/repo.git", name: "Repo", slug: "repo" };
-const database = { createProject: (value: Parameters<import("./database.js").ProjectDatabase["createProject"]>[0]) => ({
+const database = { createProject: (value: Parameters<ProjectDatabase["createProject"]>[0]) => ({
   id: "018f0f00-0000-7000-8000-000000000001", name: value.name, slug: value.slug, repositoryUrl: value.repositoryUrl,
   defaultBranch: value.defaultBranch, state: "registering" as const, createdAt: "2026-07-17T00:00:00.000Z"
-}) } as import("./database.js").ProjectDatabase;
+}) } as ProjectDatabase;
 
 test("validates remote onboarding input and rejects local paths", () => {
   expect(parseOnboardingInput(input)).toEqual(input);

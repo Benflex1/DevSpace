@@ -8,7 +8,9 @@ The first focused M1 Slice 6 diagnostics foundation is implemented: Web and Agen
 allowlisted machine-readable JSON logging with request/operation/resource correlation, bounded
 preview reconciliation lifecycle timing, and an internal Agent health breakdown. Logs are emitted
 to service stderr/stdout only; persistent retention, a diagnostics UI, and external tracing remain
-future work.
+future work. A separate Semgrep Community Edition static-analysis workflow now scans pull requests,
+pushes to `main`, and manual runs in monitoring mode, retaining the complete JSON report as the
+`semgrep-results` artifact for AI-assisted review without uploading source or findings to Semgrep.
 
 ## Implemented product path
 
@@ -179,3 +181,20 @@ Individual task termination and exact descendant ownership, task Stop, forceful 
 long-running task supervision, runtime timeout enforcement, `replace` concurrency, and configured
 interactive tasks are deferred execution-supervision work for M2. M1's `foreground one-shot`
 description does not imply runtime timeout enforcement.
+
+## M1 Slice 6 hardening status
+
+- Semgrep CE monitoring foundation is implemented in `.github/workflows/semgrep.yml` with the
+  pinned official `semgrep/semgrep:1.171.0` image, curated `p/default` ruleset, JSON artifact,
+  deterministic job summary, and repository-owned summary tests.
+- The first local scan found two Semgrep CE parser errors in existing test-only type expressions;
+  narrow type-only import rewrites preserve behavior and now allow all 316 tracked files to parse.
+  The rerun has zero scanner errors. Existing findings remain documented for later contextual
+  review; the three mutable action references introduced by this workflow were pinned to full SHAs.
+- Findings are evidence for contextual AI and human review, not automatic truth. The current
+  workflow does not fail for findings, but it does fail for scanner, report, and summary-generation
+  failures. Blocking high-confidence security or correctness findings can be considered after the
+  ruleset is tuned and the initial finding history is reviewed.
+- Additional free hardening options remain unevaluated: self-hosted SonarQube Community, CodeScene
+  through eligible GitHub Student benefits, and any GitHub Student Pack security tooling that is
+  genuinely free for this private repository. None of these tools is adopted.
