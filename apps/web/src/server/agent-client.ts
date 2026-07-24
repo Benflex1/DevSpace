@@ -18,6 +18,7 @@ import {
   type ProcessInspectionData,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
+import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
 import { v7 as uuidv7 } from "uuid";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -32,12 +33,14 @@ export class AgentResponseError extends Error {
 export function createAgentClient(socketPath: string, options: {
   timeoutMs?: number; mutationReceiptTimeoutMs?: number; observationTimeoutMs?: number;
   createId?: () => string; now?: () => Date;
+  logger?: StructuredLogger;
 } = {}) {
   const defaultTimeoutMs = options.timeoutMs ?? 5_000;
   const mutationReceiptTimeoutMs = options.mutationReceiptTimeoutMs ?? defaultTimeoutMs;
   const observationTimeoutMs = options.observationTimeoutMs ?? defaultTimeoutMs;
   const createId = options.createId ?? uuidv7;
   const now = options.now ?? (() => new Date());
+  const logger = options.logger ?? createLogger({ component: "web", subsystem: "agent-client", now });
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
@@ -49,8 +52,42 @@ export function createAgentClient(socketPath: string, options: {
       ? f10AgentApiV1EndpointByOperation["snapshot.get"]
       : agentApiV1EndpointByOperation[operation];
     const requestId = createId();
+    const callStartedAt = Date.now();
+    const resource = data !== null && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+    const resourceFields = {
+      ...(typeof resource.projectId === "string" ? { projectId: resource.projectId } : {}),
+      ...(typeof resource.workspaceId === "string" ? { workspaceId: resource.workspaceId } : {}),
+      ...(typeof resource.previewId === "string" ? { previewId: resource.previewId } : {})
+    };
+    const diagnosticPreviewCall = operation === "preview.activate" || operation === "preview.deactivate" || operation === "preview.inspect";
+    let terminalLogged = false;
+    if (diagnosticPreviewCall) logger.debug("web.agent_request.started", "Preview Agent request started", {
+      requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation, ...resourceFields
+    });
+    const logFailure = (errorCategory: string, errorCode: string, statusCode?: number): void => {
+      if (!diagnosticPreviewCall || terminalLogged) return;
+      terminalLogged = true;
+      logger.warn("web.agent_request.failed", "Preview Agent request failed", {
+        requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation,
+        durationMs: Date.now() - callStartedAt, errorCategory, errorCode,
+        ...(statusCode === undefined ? {} : { statusCode }), ...resourceFields
+      });
+    };
+    const logCompleted = (statusCode: number): void => {
+      if (!diagnosticPreviewCall || terminalLogged) return;
+      terminalLogged = true;
+      logger.debug("web.agent_request.completed", "Preview Agent request completed", {
+        requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation,
+        durationMs: Date.now() - callStartedAt, statusCode, ...resourceFields
+      });
+    };
     const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs : observationTimeoutMs;
-    const body = data === undefined ? undefined : JSON.stringify(endpoint.requestBodySchema.parse({ data }));
+    let body: string | undefined;
+    try { body = data === undefined ? undefined : JSON.stringify(endpoint.requestBodySchema.parse({ data })); }
+    catch (error) {
+      logFailure("agent-protocol", "REQUEST_SERIALIZATION_FAILED");
+      throw error;
+    }
     return await new Promise((resolve, reject) => {
       const request = http.request({
         socketPath,
@@ -72,24 +109,48 @@ export function createAgentClient(socketPath: string, options: {
         let bytes = 0;
         response.on("data", (chunk: Buffer) => {
           bytes += chunk.length;
-          if (bytes > MAX_RESPONSE_BYTES) request.destroy(new AgentUnavailableError());
+          if (bytes > MAX_RESPONSE_BYTES) {
+            logFailure("agent-transport", "AGENT_RESPONSE_TOO_LARGE");
+            request.destroy(new AgentUnavailableError());
+          }
           else chunks.push(chunk);
         });
         response.on("end", () => {
-          try {
-            const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            if (response.statusCode === endpoint.successStatus) {
-              return resolve(endpoint.successBodySchema.parse(parsed).data);
+          const statusCode = response.statusCode ?? 0;
+          let parsed: unknown;
+          try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+          catch {
+            logFailure("agent-protocol", "MALFORMED_RESPONSE", statusCode);
+            return reject(new AgentUnavailableError());
+          }
+          if (statusCode === endpoint.successStatus) {
+            try {
+              const data = endpoint.successBodySchema.parse(parsed).data;
+              logCompleted(statusCode);
+              return resolve(data);
+            } catch {
+              logFailure("agent-protocol", "INVALID_RESPONSE_CONTRACT", statusCode);
+              return reject(new AgentUnavailableError());
             }
+          }
+          try {
             const error = endpoint.errorSchema.parse(parsed) as { error: { code: string; message: string } };
+            logFailure("agent-response", error.error.code, statusCode);
             return reject(new AgentResponseError(error.error.code, error.error.message));
           } catch {
+            logFailure("agent-protocol", "INVALID_RESPONSE_CONTRACT", statusCode);
             return reject(new AgentUnavailableError());
           }
         });
       });
-      request.setTimeout(timeoutMs, () => request.destroy(new AgentUnavailableError()));
-      request.on("error", (error) => reject(error instanceof AgentUnavailableError ? error : new AgentUnavailableError()));
+      request.setTimeout(timeoutMs, () => {
+        logFailure("agent-transport", "AGENT_REQUEST_TIMEOUT");
+        request.destroy(new AgentUnavailableError());
+      });
+      request.on("error", (error) => {
+        if (!(error instanceof AgentUnavailableError)) logFailure("agent-transport", "AGENT_UNAVAILABLE");
+        reject(error instanceof AgentUnavailableError ? error : new AgentUnavailableError());
+      });
       if (body !== undefined) request.write(body);
       request.end();
     });

@@ -21,7 +21,8 @@ import { OperationConflictError, OperationJournal } from "./operation-journal.js
 import { ExecutionManager } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
-import type { PreviewGatewayProbe } from "./preview-runtime.js";
+import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
+import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./preview-runtime.js";
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 
@@ -52,6 +53,7 @@ export interface AgentServerOptions {
   readonly eventRetention?: number;
   readonly now?: () => Date;
   readonly createId?: () => string;
+  readonly logger?: StructuredLogger;
 }
 
 export interface AgentServer {
@@ -111,7 +113,8 @@ function sendEndpointErrorResponse(
   now: () => Date,
   failure: unknown,
   source: unknown,
-  createId: () => string
+  createId: () => string,
+  logger: StructuredLogger
 ): void {
   const intended = endpoint.errorSchema.safeParse({ meta: meta(requestId, now), error: failure });
   if (intended.success) {
@@ -120,13 +123,11 @@ function sendEndpointErrorResponse(
   }
 
   const incidentId = createId();
-  console.error(JSON.stringify({
-    event: "agent.error_response_schema_mismatch",
-    operation: endpoint.operation,
-    incidentId,
-    failure: safeFailureLog(source),
-    schemaIssuePaths: intended.error.issues.map((issue) => issue.path)
-  }));
+  const safeFailure = safeFailureLog(source);
+  logger.error("agent.error_response_schema_mismatch", "Agent error response did not match its contract", {
+    requestId, errorCategory: "response-schema", errorCode: typeof safeFailure.code === "string" ? safeFailure.code : "AGENT_INTERNAL_ERROR",
+    endpoint: endpoint.operation, incidentId, detailKeys: Array.isArray(safeFailure.detailKeys) ? safeFailure.detailKeys : []
+  });
 
   const fallback = endpoint.errorSchema.safeParse({ meta: meta(requestId, now), error: {
     code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
@@ -139,11 +140,9 @@ function sendEndpointErrorResponse(
 
   // Every executable endpoint includes AGENT_INTERNAL_ERROR in its error union.
   // Keep the request alive even if that contract invariant is ever violated.
-  console.error(JSON.stringify({
-    event: "agent.error_response_fallback_schema_mismatch",
-    operation: endpoint.operation,
-    incidentId
-  }));
+  logger.error("agent.error_response_fallback_schema_mismatch", "Agent error response fallback did not match its contract", {
+    requestId, errorCategory: "response-schema", errorCode: "AGENT_INTERNAL_ERROR", endpoint: endpoint.operation, incidentId
+  });
   sendJson(response, 500, { meta: meta(requestId, now), error: {
     code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
     details: { incidentId }
@@ -159,6 +158,16 @@ function requestError(response: ServerResponse, requestId: string, now: () => Da
     meta: meta(requestId, now),
     error: { code: "REQUEST_INVALID", message: "The Agent request is invalid.", retryable: false, details: input }
   });
+}
+
+function diagnosticResourceFields(value: unknown): { projectId?: string; workspaceId?: string; previewId?: string } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  const data = value as { projectId?: unknown; workspaceId?: unknown; previewId?: unknown };
+  return {
+    ...(typeof data.projectId === "string" ? { projectId: data.projectId } : {}),
+    ...(typeof data.workspaceId === "string" ? { workspaceId: data.workspaceId } : {}),
+    ...(typeof data.previewId === "string" ? { previewId: data.previewId } : {})
+  };
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -260,6 +269,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const inspector = options.gitInspector ?? createProductionGitInspector();
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? uuidv7;
+  const logger = options.logger ?? createLogger({ component: "agent", subsystem: "lifecycle", now });
   const fallbackManagedRoot = socketPath === AGENT_SOCKET_PATH
     ? "/srv/devspace"
     : path.join(path.dirname(socketPath), ".devspace-managed");
@@ -283,11 +293,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
-  const executor = new OperationExecutor(journal, managed, events, createId, execution);
+  const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const terminalWebSockets = new WebSocketServer({ noServer: true, clientTracking: false,
     maxPayload: 65_537, perMessageDeflate: false, handleProtocols: (protocols) => protocols.size === 1 && protocols.has("devspace.terminal.v1")
       ? "devspace.terminal.v1" : false });
   const eventResponses = new Set<ServerResponse>();
+  const previewObservationLog = new Map<string, string>();
   let started = false;
   let ownedSocket: SocketIdentity | undefined;
   let startupPreviewReconciliationHealthy = true;
@@ -358,9 +369,15 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if ((request.headers["content-length"] ?? "0") !== "0" || request.headers["transfer-encoding"] !== undefined) {
         return requestError(response, requestId, now, { location: "body", field: null, reason: "inconsistent" });
       }
-      return sendJson(response, 200, healthEndpoint.successBodySchema.parse({
-        meta: meta(requestId, now), data: { status: managed.isHealthy && journal.isHealthy && executor.isHealthy && startupPreviewReconciliationHealthy ? "ok" : "degraded" }
-      }));
+      const healthBreakdown = {
+        "managed-workspace-layer": managed.isHealthy ? "healthy" : "unhealthy",
+        "operation-journal": journal.isHealthy ? "healthy" : "unhealthy",
+        "operation-executor": executor.isHealthy ? "healthy" : "unhealthy",
+        "startup-preview-reconciliation": startupPreviewReconciliationHealthy ? "healthy" : "unhealthy"
+      };
+      const status = Object.values(healthBreakdown).every((value) => value === "healthy") ? "ok" : "degraded";
+      logger.info("agent.health.evaluated", "Agent health evaluated", { requestId, healthBreakdown });
+      return sendJson(response, 200, healthEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data: { status } }));
     }
 
     if (request.method === "GET" && url.pathname === runtimeStatusEndpoint.path) {
@@ -442,6 +459,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       try {
         const wasKnown = journal.get(operationId) !== undefined;
         record = await journal.accept(operationId, operation, body.data);
+        logger.info("agent.operation.accepted", "Agent operation accepted", {
+          requestId, operationId, operationName: operation, operationState: record.state, ...diagnosticResourceFields(body.data)
+        });
         if (!wasKnown && record.state === "accepted") events.progressed(operationId,
           { type: "project", projectId: (body.data as { projectId: string }).projectId }, "Operation durably accepted.");
       }
@@ -466,20 +486,47 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       let body;
       try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
       catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      const startedAt = now().valueOf();
+      const resourceFields = diagnosticResourceFields(body.data);
+      logger.debug("agent.preview.inspection.started", "Preview inspection started", { requestId, ...resourceFields });
       try {
         const data = await managed.inspectPreview(body.data);
-        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+        const observationKey = `${body.data.projectId}:${body.data.workspaceId}:${body.data.previewId}`;
+        const observationSignature = `${data.observedState}:${data.routePresent}:${data.diagnosticCode ?? ""}`;
+        const previousObservation = previewObservationLog.get(observationKey);
+        if (["failed", "lost", "unhealthy"].includes(data.observedState)) {
+          if (previousObservation !== observationSignature) logger.warn("agent.preview.observation.degraded", "Preview observation is degraded", {
+            requestId, durationMs: Math.max(0, now().valueOf() - startedAt), errorCategory: "preview-observation",
+            ...(data.diagnosticCode === undefined ? {} : { errorCode: data.diagnosticCode }), ...resourceFields
+          });
+        } else if (previousObservation !== undefined && previousObservation !== observationSignature) {
+          logger.info("agent.preview.observation.recovered", "Preview observation recovered", {
+            requestId, durationMs: Math.max(0, now().valueOf() - startedAt), observedState: data.observedState,
+            routePresent: data.routePresent, ...resourceFields
+          });
+        }
+        previewObservationLog.set(observationKey, observationSignature);
+        logger.debug("agent.preview.inspection.completed", "Preview inspection completed", {
+          requestId, durationMs: Math.max(0, now().valueOf() - startedAt), observedState: data.observedState,
+          routePresent: data.routePresent, routeStatus: data.routePresent ? "present" : "absent",
+          ...(data.diagnosticCode === undefined ? {} : { errorCode: data.diagnosticCode }), ...resourceFields
+        });
+        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: toPublicPreviewInspectionData(data) }));
       } catch (error) {
+        const errorCode = error instanceof AgentExecutionError ? error.failure.code : "AGENT_INTERNAL_ERROR";
+        logger.warn("agent.preview.inspection.failed", "Preview inspection failed", {
+          requestId, durationMs: Math.max(0, now().valueOf() - startedAt), errorCategory: "preview-inspection", errorCode, ...resourceFields
+        });
         if (error instanceof AgentExecutionError) {
           const status = error.failure.code === "RESOURCE_NOT_FOUND" ? 404
             : error.failure.code === "ROOTLESS_RUNTIME_UNAVAILABLE" ? 503 : 500;
-          sendEndpointErrorResponse(endpoint, response, status, requestId, now, error.failure, error, createId);
+          sendEndpointErrorResponse(endpoint, response, status, requestId, now, error.failure, error, createId, logger);
           return;
         }
         sendEndpointErrorResponse(endpoint, response, 500, requestId, now, {
           code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely.", retryable: true,
           details: { incidentId: createId() }
-        }, error, createId);
+        }, error, createId, logger);
         return;
       }
     }
@@ -648,8 +695,17 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         }
       }
       if (managed.isHealthy && journal.isHealthy) {
-        try { await managed.reconcilePreviewRoutes(); }
-        catch { startupPreviewReconciliationHealthy = false; }
+        const startedAt = now().valueOf();
+        logger.info("agent.startup.preview_reconciliation.started", "Startup preview reconciliation started");
+        try {
+          await managed.reconcilePreviewRoutes();
+          logger.info("agent.startup.preview_reconciliation.completed", "Startup preview reconciliation completed", { durationMs: Math.max(0, now().valueOf() - startedAt) });
+        } catch {
+          startupPreviewReconciliationHealthy = false;
+          logger.error("agent.startup.preview_reconciliation.failed", "Startup preview reconciliation failed", {
+            durationMs: Math.max(0, now().valueOf() - startedAt), errorCategory: "startup-reconciliation", errorCode: "AGENT_INTERNAL_ERROR"
+          });
+        }
       }
       if (managed.isHealthy && journal.isHealthy) await executor.initialize();
       await prepareSocketPath(socketPath, now, createId);

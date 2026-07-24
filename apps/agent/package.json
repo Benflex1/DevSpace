@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",
+    "@devspace/diagnostics": "workspace:*",
     "@devspace/domain": "workspace:*",
     "@devspace/gateway-caddy": "workspace:*",
     "@devspace/project-options": "workspace:*",

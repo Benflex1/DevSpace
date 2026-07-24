@@ -1,4 +1,5 @@
 import type { PreviewInspectionData } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import { describe, expect, test } from "vitest";
 import { AgentResponseError, AgentUnavailableError } from "./agent-client.js";
 import type { PreviewView, ProjectDatabase } from "./database.js";
@@ -66,6 +67,7 @@ const inspection = (overrides: Partial<PreviewInspectionData> = {}): PreviewInsp
 describe("Web preview orchestration", () => {
   test("sends only persisted activation identity and reconciles the route observation", async () => {
     const fixture = fakeDatabase(preview());
+    const logs: string[] = [];
     let activation: Record<string, unknown> | undefined;
     const agent = {
       activatePreview: (_operationId: string, input: Record<string, unknown>) => { activation = input; return Promise.resolve({ operationId: _operationId }); },
@@ -73,11 +75,26 @@ describe("Web preview orchestration", () => {
       inspectPreview: () => Promise.resolve(inspection()),
       snapshot: () => Promise.resolve({ operationObservations: [{ operationId: "0190a000-0000-7000-8000-000000000014", state: "succeeded" }] })
     };
-    await reconcileWorkspacePreviews(projectId, "actor", "running", { database: fixture.database, agent: agent as never, observationTimeoutMs: 20 });
+    await reconcileWorkspacePreviews(projectId, "actor", "running", {
+      database: fixture.database, agent: agent as never, observationTimeoutMs: 20,
+      reason: "test-preview-activation",
+      logger: createLogger({ component: "web", subsystem: "preview", sink: (line) => logs.push(line) })
+    });
     expect(activation).toEqual({ projectId, workspaceId, revisionId, previewId, previewKey: "web",
       hostname: "alpha-primary-web-0190a000.preview.example.com", projectSlug: "alpha", workspaceSlug: "primary" });
     expect(fixture.observations.at(-1)).toMatchObject({ observedState: "healthy", routePresent: true });
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({ routePresent: true });
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record.event)).toEqual(expect.arrayContaining([
+      "preview.reconciliation.started", "preview.activate.requested", "preview.agent_operation.accepted",
+      "preview.agent_operation.succeeded", "preview.observed_state", "preview.reconciliation.completed"
+    ]));
+    expect(records.find((record) => record.event === "preview.agent_operation.succeeded")).toMatchObject({
+      operationId: "0190a000-0000-7000-8000-000000000014", projectId, workspaceId, previewId
+    });
+    expect(records.find((record) => record.event === "preview.reconciliation.completed")).toMatchObject({
+      projectId, mode: "running", reason: "test-preview-activation"
+    });
   });
 
   test("retains service configuration as an explicit unsupported runtime policy", async () => {
@@ -91,6 +108,41 @@ describe("Web preview orchestration", () => {
     await reconcileWorkspacePreviews(projectId, "actor", "running", { database: fixture.database, agent: agent as never, observationTimeoutMs: 20 });
     expect(activated).toBe(false);
     expect(fixture.observations.at(-1)).toMatchObject({ observedState: "failed", routePresent: false });
+  });
+
+  test("does not emit an INFO trace for an unchanged successful liveness reconciliation", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
+    const logs: string[] = [];
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      inspectPreview: () => Promise.resolve(inspection()), snapshot: () => Promise.resolve({ operationObservations: [] })
+    };
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", {
+      database: fixture.database, agent: agent as never, reason: "test-preview-liveness",
+      logger: createLogger({ component: "web", subsystem: "preview", environment: {}, sink: (line) => logs.push(line) })
+    });
+    expect(logs).toHaveLength(0);
+  });
+
+  test("logs one warning when an unchanged failed observation is first entered", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "starting", routePresent: false }));
+    const logs: string[] = [];
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      inspectPreview: () => Promise.resolve(inspection({ observedState: "failed", routePresent: false })),
+      snapshot: () => Promise.resolve({ operationObservations: [] })
+    };
+    const dependencies = {
+      database: fixture.database, agent: agent as never, reason: "test-preview-liveness",
+      logger: createLogger({ component: "web", subsystem: "preview", environment: {}, sink: (line) => logs.push(line) })
+    };
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", dependencies);
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", dependencies);
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.filter((record) => record.event === "preview.observed_state")).toHaveLength(1);
+    expect(records.find((record) => record.event === "preview.observed_state")).toMatchObject({ level: "warn", observedState: "failed" });
   });
 
   test("keeps a newly configured preview Waiting until its first runtime activation", async () => {
@@ -169,6 +221,23 @@ describe("Web preview orchestration", () => {
     await reconcileWorkspacePreviews(projectId, "actor", "observe", { database: fixture.database, agent: agent as never });
     expect(fixture.database.listPreviews(projectId, workspaceId)[0]).toMatchObject({
       observedState: "healthy", routePresent: true, lastErrorCode: null
+    });
+  });
+
+  test("logs reconciliation failure without claiming completion and preserves the original error", async () => {
+    const fixture = fakeDatabase(preview());
+    const original = new Error("original-reconciliation-failure");
+    const logs: string[] = [];
+    const database = { ...fixture.database, listPreviews: () => { throw original; } } as never;
+    await expect(reconcileWorkspacePreviews(projectId, "actor", "observe", {
+      database, agent: {} as never, reason: "test-trigger",
+      logger: createLogger({ component: "web", subsystem: "preview", sink: (line) => logs.push(line) })
+    })).rejects.toBe(original);
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record.event)).toContain("preview.reconciliation.failed");
+    expect(records.map((record) => record.event)).not.toContain("preview.reconciliation.completed");
+    expect(records.find((record) => record.event === "preview.reconciliation.failed")).toMatchObject({
+      projectId, mode: "observe", reason: "test-trigger", errorCategory: "preview-reconciliation", errorCode: "RECONCILIATION_FAILED"
     });
   });
 });

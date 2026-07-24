@@ -4,6 +4,12 @@
 
 Milestone 1 — in progress.
 
+The first focused M1 Slice 6 diagnostics foundation is implemented: Web and Agent share
+allowlisted machine-readable JSON logging with request/operation/resource correlation, bounded
+preview reconciliation lifecycle timing, and an internal Agent health breakdown. Logs are emitted
+to service stderr/stdout only; persistent retention, a diagnostics UI, and external tracing remain
+future work.
+
 ## Implemented product path
 
 - Browser project onboarding in the Next.js Web application.

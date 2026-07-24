@@ -186,6 +186,59 @@ test("allocates stable lowest available terminal numbers and reuses dead-termina
   ]));
 });
 
+test("retires lost terminal resources when a workspace stop intent is accepted", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const lost = database.prepareTerminalCreate(project.id, "actor");
+  const active = database.prepareTerminalCreate(project.id, "actor");
+  const disconnected = database.prepareTerminalCreate(project.id, "actor");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: lost.terminalId, state: "lost" }));
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: active.terminalId, state: "active" }));
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: disconnected.terminalId, state: "disconnected" }));
+  const raw = new BetterSqlite3(databasePath);
+  const service = raw.prepare("select id from workspace_services where runtime_stack_id = (select id from runtime_stacks where workspace_id = ?)").get(workspaceId) as { id: string };
+  const taskProcessId = "018f0f00-0000-7000-8000-000000000020";
+  raw.prepare(`insert into processes
+    (id, workspace_id, service_id, kind, definition_key, desired_state, observed_state, exit_code, started_at, finished_at, last_observed_at)
+    values (?, ?, ?, 'task', 'build', 'running', 'running', null, null, null, null)`).run(taskProcessId, workspaceId, service.id);
+  raw.close();
+  const operationsBefore = database.listOperations();
+  const auditEventsBefore = database.listAuditEvents();
+  const runtime = database.listRuntimeStacks()[0];
+  if (runtime === undefined) throw new Error("runtime stack was not created");
+
+  const stop = database.prepareRuntimeMutation({ projectId: project.id, workspaceId, actor: "actor", action: "stop",
+    runtimePlanHash: runtime.runtimePlanHash, imageReference: "node:24-bookworm" });
+  expect(stop.operationName).toBe("workspace.stop");
+
+  const retired = new BetterSqlite3(databasePath);
+  expect(retired.prepare("select id from terminal_sessions where id = ?").get(lost.terminalId)).toBeUndefined();
+  expect(retired.prepare("select id from processes where id = ?").get(lost.terminalId)).toBeUndefined();
+  expect(retired.prepare("select id from terminal_sessions where id in (?, ?)").all(active.terminalId, disconnected.terminalId)).toHaveLength(2);
+  expect(retired.prepare("select id from processes where id = ? and kind = 'task'").get(taskProcessId)).toEqual({ id: taskProcessId });
+  retired.close();
+  expect(database.listOperations()).toHaveLength(operationsBefore.length + 1);
+  expect(database.listOperations()).toEqual(expect.arrayContaining([...operationsBefore, stop]));
+  expect(database.listAuditEvents()).toEqual(auditEventsBefore);
+  expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: active.terminalId, state: "active" }),
+    expect.objectContaining({ id: disconnected.terminalId, state: "disconnected" })
+  ]));
+  expect(database.getManagedProject(project.id)?.terminals.some((terminal) => terminal.id === lost.terminalId)).toBe(false);
+
+  const restarted = new BetterSqlite3(databasePath);
+  restarted.prepare("update workspaces set desired_state = 'running', observed_state = 'running' where id = ?").run(workspaceId);
+  restarted.prepare("update runtime_stacks set desired_state = 'running', observed_state = 'running' where workspace_id = ?").run(workspaceId);
+  restarted.prepare("update workspace_services set desired_state = 'running', observed_state = 'running' where runtime_stack_id = (select id from runtime_stacks where workspace_id = ?)").run(workspaceId);
+  restarted.close();
+  const replacement = database.prepareTerminalCreate(project.id, "actor");
+  expect(database.getManagedProject(project.id)?.terminals.some((terminal) => terminal.id === lost.terminalId)).toBe(false);
+  expect(database.getManagedProject(project.id)?.terminals).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: replacement.terminalId })
+  ]));
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: lost.terminalId, state: "lost", agentBootId: "018f0f00-0000-7000-8000-000000000100" }));
+  expect(database.getManagedProject(project.id)?.terminals.some((terminal) => terminal.id === lost.terminalId)).toBe(false);
+});
+
 test("retains a newly lost terminal, then retires its session and process once without refreshing closed_at", async () => {
   let currentTime = new Date("2026-07-19T00:00:00.000Z");
   const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });

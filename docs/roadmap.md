@@ -207,17 +207,17 @@ Final local checklist:
 
 ## Slice 6 — M1 hardening and diagnostics
 
-**Status: ⏳ Planned**
+**Status: 🟡 In progress**
 
 ### Diagnostics and logging
 
-- ⏳ Structured Web and Agent logs
-- ⏳ Request/operation/resource correlation IDs
-- ⏳ Lifecycle stage and timing information
+- ✅ Structured Web and Agent JSON logs (bounded preview lifecycle foundation)
+- ✅ Request/operation/resource correlation IDs on the instrumented preview path
+- ✅ Lifecycle stage and timing information for preview reconciliation and Agent operations
 - ⏳ Stable failure categories with safe underlying cause details
-- ⏳ Better health breakdown instead of only `Agent degraded`
-- ⏳ Explicit reconciliation decision logging
-- ⏳ Safe secret/path redaction policy
+- ✅ Better internal health breakdown instead of only `Agent degraded`
+- ✅ Explicit reconciliation decision logging
+- ✅ Safe secret/path redaction policy
 - ⏳ Incident/error IDs that connect UI errors to service logs
 
 ### Authentication hardening

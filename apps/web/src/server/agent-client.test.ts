@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { createAgentClient, AgentUnavailableError } from "./agent-client.js";
+import { createLogger } from "@devspace/diagnostics";
 
 const id = "018f0f00-0000-7000-8000-000000000001";
 const timestamp = "2026-07-17T00:00:00.000Z";
@@ -42,6 +43,35 @@ test("rejects malformed envelopes and unavailable sockets without exposing inter
   } finally { await service.close(); }
   await expect(createAgentClient(path.join(tmpdir(), `missing-${id}.sock`), { timeoutMs: 50 }).health())
     .rejects.toBeInstanceOf(AgentUnavailableError);
+});
+
+test("emits one terminal diagnostic for a preview transport failure", async () => {
+  const logs: string[] = [];
+  const client = createAgentClient(path.join(tmpdir(), `missing-preview-${id}.sock`), {
+    timeoutMs: 50, createId: () => id, logger: createLogger({ component: "web", subsystem: "agent-client", environment: { DEVSPACE_LOG_LEVEL: "debug" }, sink: (line) => logs.push(line) })
+  });
+  await expect(client.inspectPreview(id, "018f0f00-0000-7000-8000-000000000002", "018f0f00-0000-7000-8000-000000000003", "018f0f00-0000-7000-8000-000000000004"))
+    .rejects.toBeInstanceOf(AgentUnavailableError);
+  const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(records.map((record) => record.event)).toEqual(["web.agent_request.started", "web.agent_request.failed"]);
+  expect(records[1]).toMatchObject({ requestId: id, operationName: "preview.inspect", projectId: id,
+    workspaceId: "018f0f00-0000-7000-8000-000000000002", previewId: "018f0f00-0000-7000-8000-000000000004",
+    errorCategory: "agent-transport", errorCode: "AGENT_UNAVAILABLE" });
+});
+
+test("emits one terminal diagnostic for a malformed preview response", async () => {
+  const service = await listen((_request, response) => { response.end("not-json"); });
+  const logs: string[] = [];
+  try {
+    const client = createAgentClient(service.socketPath, {
+      createId: () => id, now: () => new Date(timestamp), logger: createLogger({ component: "web", subsystem: "agent-client", environment: { DEVSPACE_LOG_LEVEL: "debug" }, sink: (line) => logs.push(line) })
+    });
+    await expect(client.inspectPreview(id, "018f0f00-0000-7000-8000-000000000002", "018f0f00-0000-7000-8000-000000000003", "018f0f00-0000-7000-8000-000000000004"))
+      .rejects.toBeInstanceOf(AgentUnavailableError);
+  } finally { await service.close(); }
+  const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(records.map((record) => record.event)).toEqual(["web.agent_request.started", "web.agent_request.failed"]);
+  expect(records[1]).toMatchObject({ requestId: id, operationName: "preview.inspect", errorCategory: "agent-protocol", errorCode: "MALFORMED_RESPONSE" });
 });
 
 test("sends the canonical typed preview activation fields and parses the mutation receipt", async () => {

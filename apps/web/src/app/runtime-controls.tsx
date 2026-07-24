@@ -4,19 +4,21 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { restartRuntime, type RuntimeRestartAuthorization } from "./runtime-restart.js";
 import { runtimeControlState, runtimeRestartControlState, type RuntimeControlAction } from "./runtime-control-state.js";
+import { useTransientNotice } from "./transient-notice.js";
 
-export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction, stopLabel, restart = false, onSuccess }: {
+export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, action: requestedAction, stopLabel, restart = false, onSuccess, onRestartInitiated }: {
   projectId: string; runtimeAvailable: boolean;
   runtimeState: string; activeAction: RuntimeControlAction | null; canStart: boolean; canStop: boolean; retryStart: boolean;
   action?: RuntimeControlAction;
   stopLabel?: string;
   restart?: boolean;
   onSuccess?: () => void;
+  onRestartInitiated?: () => void;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
-  const [message, setMessage] = useState("");
+  const { notice, show: showNotice } = useTransientNotice();
   const isRestart = restart;
   const state = runtimeControlState({ runtimeState, runtimeAvailable, activeAction, canStart, canStop,
     ...(requestedAction === undefined ? {} : { requestedAction }) });
@@ -26,7 +28,7 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
   const mutate = async () => {
     if (pendingRef.current) return;
     pendingRef.current = true;
-    setPending(true); setMessage(isRestart ? "Restarting workspace…" : action === "start" ? "Starting runtime…" : "Stopping runtime…");
+    setPending(true); showNotice(isRestart ? "Restarting workspace…" : action === "start" ? "Starting runtime…" : "Stopping runtime…", "pending");
     try {
       const request = async (requested: RuntimeControlAction, rejectInProgress: boolean) => {
         const action = requested;
@@ -36,13 +38,14 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
         });
         const body = await response.json() as { message?: string };
         if (response.status === 202 && rejectInProgress) throw new Error(body.message ?? "The runtime action is still in progress; restart was not completed.");
-        if (response.status === 202) { setMessage(body.message ?? "The runtime action is still in progress."); return false; }
+        if (response.status === 202) { showNotice(body.message ?? "The runtime action is still in progress.", "info"); return false; }
         if (!response.ok) throw new Error(body.message ?? "The runtime action failed.");
         return true;
       };
       if (isRestart) {
         const mode = restartState?.mode;
         if (mode === null || mode === undefined) return;
+        onRestartInitiated?.();
         const readAuthorization = async (): Promise<RuntimeRestartAuthorization> => {
           const response = await fetch(`/api/projects/${projectId}/runtime`, { cache: "no-store" });
           const body = await response.json() as RuntimeRestartAuthorization & { message?: string };
@@ -52,17 +55,17 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
         await restartRuntime(mode, async (requested) => {
           await request(requested, true);
         }, mode === "running" ? readAuthorization : undefined);
-        setMessage("Workspace restarted.");
+        showNotice("Workspace restarted.", "success");
         router.refresh();
         onSuccess?.();
       } else {
         const completed = await request(action, false);
         if (!completed) return;
-        setMessage(action === "start" ? "Runtime is running." : "Runtime is stopped.");
+        showNotice(action === "start" ? "Runtime is running." : "Runtime is stopped.", "success");
         router.refresh();
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : isRestart ? "Workspace restart failed." : "The runtime action failed.");
+      showNotice(error instanceof Error ? error.message : isRestart ? "Workspace restart failed." : "The runtime action failed.", "error");
       if (isRestart) router.refresh();
     } finally {
       pendingRef.current = false;
@@ -83,6 +86,6 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
         : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : (stopLabel ?? "Stop runtime")}
     </button>}
     {!runtimeAvailable && <p className="message error">The dedicated rootless runtime is unavailable.</p>}
-    {message !== "" && <p className={`message ${message.includes("running") || message.includes("stopped") ? "success" : ""}`} role="status">{message}</p>}
+    {notice !== null && <p className={`message ${notice.kind}`} role="status">{notice.message}</p>}
   </div>;
 }

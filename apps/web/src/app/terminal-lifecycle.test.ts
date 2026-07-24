@@ -55,7 +55,17 @@ describe("terminal lifecycle reconciliation", () => {
     expect(workbench).toContain("<LostTerminalDialog");
     expect(workbench).toContain('role="dialog"');
     expect(workbench).not.toContain("lost-terminal-notice");
-    expect(workbench).toContain("restart onSuccess={onRestartSuccess}");
+    expect(workbench).toContain("onRestartInitiated={handleLostTerminalRestartInitiated}");
+    expect(workbench).toContain("onRestartSuccess={handleLostTerminalRestartSuccess}");
+    expect(workbench).toContain('aria-labelledby="lost-terminal-dialog-title"');
+    expect(workbench).toContain('aria-describedby="lost-terminal-dialog-description"');
+    expect(workbench).toContain('step === "warning" ? <>');
+    expect(workbench).toContain('onClick={() => goToStep("dismiss")}>Dismiss</button>');
+    expect(workbench).toContain('onClick={() => goToStep("go-back")}>Go back</button>');
+    expect(workbench).toContain('onClick={onDismiss}>Dismiss anyway</button>');
+    expect(workbench).toContain("lost-terminal-warning-statement");
+    expect(workbench).toContain("lost-terminal-warning-supporting");
+    expect(workbench).toContain("lostTerminalDialogStepAfter");
     expect(workbench).toContain("removeTerminalCollectionEntries");
     expect(workbench).toContain("closeWorkbenchTabsForTerminalIds");
     expect(workbench).toContain("isTerminalSidebarVisible");
@@ -68,6 +78,7 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain("runtimeControlState");
     expect(runtimeControls).toContain('"Restart workspace"');
     expect(runtimeControls).toContain("restartRuntime");
+    expect(runtimeControls).toContain("onRestartInitiated?.();");
     expect(runtimeControls).toContain("if (pendingRef.current) return;");
   });
 

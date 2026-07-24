@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { agentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
+import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
+import type { PreviewInspectionResult } from "./preview-runtime.js";
 import { createAgentServer } from "./server.js";
 import { parseLsRemoteOutput } from "./git-inspector.js";
 
@@ -80,6 +82,16 @@ class ThrowingPreviewManagedWorkspaces extends ManagedWorkspaces {
   }
 }
 
+class ReturningPreviewManagedWorkspaces extends ManagedWorkspaces {
+  constructor(roots: ConstructorParameters<typeof ManagedWorkspaces>[0], private readonly observation: PreviewInspectionResult) {
+    super(roots);
+  }
+
+  override inspectPreview(..._args: Parameters<ManagedWorkspaces["inspectPreview"]>): Promise<PreviewInspectionResult> {
+    return Promise.resolve(this.observation);
+  }
+}
+
 const previewInspectBody = JSON.stringify({ data: {
   projectId: "018f0f00-0000-7000-8000-000000000005",
   workspaceId: "018f0f00-0000-7000-8000-000000000009",
@@ -97,7 +109,9 @@ test("serves health and source inspection through the executable Agent contracts
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-test-")); temporaryDirectories.push(directory);
   const socketPath = path.join(directory, "agent.sock");
   await provisionDefaultRoots(socketPath);
-  const server = createAgentServer({ socketPath, now: () => now, createId: () => id, gitInspector: {
+  const logs: string[] = [];
+  const server = createAgentServer({ socketPath, now: () => now, createId: () => id,
+    logger: createLogger({ component: "agent", subsystem: "test", sink: (line) => logs.push(line) }), gitInspector: {
     inspect: () => Promise.resolve(sourceInspectionDataSchema.parse({ sourceKind: "remote", isGitRepository: true, defaultBranch: "main", headCommit: "0123456789abcdef0123456789abcdef01234567" }))
   } });
   await server.start();
@@ -105,6 +119,10 @@ test("serves health and source inspection through the executable Agent contracts
     const health = await request(socketPath, { method: "GET", path: "/v1/health", headers });
     expect(health.status).toBe(200);
     expect(agentApiV1EndpointByOperation["agent.health.get"].successBodySchema.parse(health.body).data).toEqual({ status: "ok" });
+    expect(JSON.parse(logs.find((line) => line.includes("agent.health.evaluated"))!)).toMatchObject({
+      event: "agent.health.evaluated", requestId: id,
+      healthBreakdown: { "managed-workspace-layer": "healthy", "operation-journal": "healthy", "operation-executor": "healthy", "startup-preview-reconciliation": "healthy" }
+    });
     const body = JSON.stringify({ data: { source: { kind: "remote", url: "https://example.com/repo.git" } } });
     const inspected = await request(socketPath, { method: "POST", path: "/v1/projects/inspect-source", headers: {
       ...headers, "content-length": String(Buffer.byteLength(body))
@@ -168,6 +186,60 @@ test("logs invalid preview error shapes safely and returns the route fallback", 
     logged.mockRestore();
     await server.stop();
   }
+});
+
+test("logs a safe degraded preview cause once and suppresses unchanged repeats", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-preview-diagnostics-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const roots = { projects: path.join(directory, ".devspace-managed/projects"),
+    workspaces: path.join(directory, ".devspace-managed/workspaces"), state: path.join(directory, ".devspace-managed/state") };
+  const logs: string[] = [];
+  const server = createAgentServer({ socketPath, managedRoots: roots,
+    managedWorkspaces: new ReturningPreviewManagedWorkspaces(roots, {
+      projectId: "018f0f00-0000-7000-8000-000000000005", workspaceId: "018f0f00-0000-7000-8000-000000000009",
+      previewId: "018f0f00-0000-7000-8000-000000000010", previewKey: "web", desiredState: "active", observedState: "unhealthy",
+      routePresent: false, hostname: "project-workspace-web-018f0f00-preview.preview.example.com", diagnosticCode: "HEALTH_STATUS_NOT_ACCEPTED"
+    }), now: () => now, createId: () => id,
+    logger: createLogger({ component: "agent", subsystem: "test", environment: {}, sink: (line) => logs.push(line) }) });
+  await server.start();
+  try {
+    const inspected = await previewInspectRequest(socketPath);
+    const endpoint = agentApiV1EndpointByOperation["preview.inspect"];
+    expect(inspected.status).toBe(200);
+    expect(endpoint.successBodySchema.parse(inspected.body).data).not.toHaveProperty("diagnosticCode");
+    await previewInspectRequest(socketPath);
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const degraded = records.filter((record) => record.event === "agent.preview.observation.degraded");
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]).toMatchObject({ level: "warn", errorCode: "HEALTH_STATUS_NOT_ACCEPTED", projectId: "018f0f00-0000-7000-8000-000000000005" });
+  } finally { await server.stop(); }
+});
+
+test("keeps persisted degraded preview diagnostics out of snapshot and public inspection responses", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-snapshot-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  const fixture = await provisionDurableInactivePreview(socketPath);
+  const base = JSON.parse(fixture.contents) as Record<string, unknown>;
+  const degraded = [
+    { previewId: "018f0f00-0000-7000-8000-000000000012", observedState: "unhealthy", lastError: "health-status-not-accepted" },
+    { previewId: "018f0f00-0000-7000-8000-000000000013", observedState: "failed", lastError: "The private gateway probe is unavailable." },
+    { previewId: "018f0f00-0000-7000-8000-000000000014", observedState: "lost", lastError: "exact-runtime-unavailable" }
+  ] as const;
+  for (const state of degraded) await writeFile(path.join(fixture.roots.state, "previews", `${state.previewId}.json`), `${JSON.stringify({
+    ...base, ...state, desiredState: "active", routePresent: false, containerId: null
+  })}\n`, "utf8");
+  const server = createAgentServer({ socketPath, managedRoots: fixture.roots, now: () => now, createId: () => id });
+  await server.start();
+  try {
+    const snapshot = await request(socketPath, { method: "GET", path: "/v1/snapshot", headers });
+    const snapshotEndpoint = f10AgentApiV1EndpointByOperation["snapshot.get"];
+    expect(snapshot.status).toBe(200);
+    const resources = snapshotEndpoint.successBodySchema.parse(snapshot.body).data.resources
+      .filter((resource) => resource.type === "preview");
+    expect(resources).toHaveLength(4);
+    for (const resource of resources) expect(resource.observation).not.toHaveProperty("diagnosticCode");
+  } finally { await server.stop(); }
 });
 
 test("successful startup preview reconciliation leaves Agent health healthy", async () => {

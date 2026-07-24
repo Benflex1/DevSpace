@@ -1,6 +1,7 @@
 export const expectedPackages = new Map([
   ["apps/web", { name: "@devspace/web", kind: "application", dependencies: [
     "@devspace/contracts",
+    "@devspace/diagnostics",
     "@devspace/domain",
     "@devspace/project-options",
     "@devspace/database",
@@ -8,6 +9,7 @@ export const expectedPackages = new Map([
   ] }],
   ["apps/agent", { name: "@devspace/agent", kind: "application", dependencies: [
     "@devspace/contracts",
+    "@devspace/diagnostics",
     "@devspace/domain",
     "@devspace/project-options",
     "@devspace/security",
@@ -19,6 +21,7 @@ export const expectedPackages = new Map([
   ["packages/contracts", { name: "@devspace/contracts", kind: "library", dependencies: [
     "@devspace/domain"
   ] }],
+  ["packages/diagnostics", { name: "@devspace/diagnostics", kind: "library", dependencies: [] }],
   ["packages/domain", { name: "@devspace/domain", kind: "library", dependencies: [] }],
   ["packages/database", { name: "@devspace/database", kind: "library", dependencies: [
     "@devspace/domain"

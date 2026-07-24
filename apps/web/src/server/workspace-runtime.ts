@@ -25,7 +25,9 @@ async function reconcilePreviewsAfterRuntime(action: "start" | "stop", projectId
   try {
     const orchestration = { database: dependencies.database, agent: dependencies.agent as PreviewOrchestrationAgent };
     await reconcileWorkspacePreviews(projectId, actor, action === "start" ? "running" : "stopped",
-      dependencies.previewBaseRegistry === undefined ? orchestration : { ...orchestration, previewBaseRegistry: dependencies.previewBaseRegistry });
+      dependencies.previewBaseRegistry === undefined
+        ? { ...orchestration, reason: "runtime-lifecycle-transition" }
+        : { ...orchestration, previewBaseRegistry: dependencies.previewBaseRegistry, reason: "runtime-lifecycle-transition" });
   } catch {
     // Preview failures are retained in the preview row. They must not turn a
     // proven runtime start/stop into an unproven runtime operation.
