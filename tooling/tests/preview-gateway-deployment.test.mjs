@@ -42,35 +42,68 @@ test("generic preview gateway Compose remains provider-neutral", async () => {
   );
 });
 
-test("Coolify Compose Location includes the generic contract and network override", async () => {
-  await assertDeploymentFileMutationRejected(
-    "compose.coolify.yaml",
-    (compose) => compose.replace("compose.yaml", "compose.duplicated.yaml"),
-    /include the generic contract/u
+test("Coolify artifact is generated from the generic contract", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace(
+      "    restart: unless-stopped\n",
+      "    restart: unless-stopped\n    stop_grace_period: 10s\n"
+    ),
+    /Coolify Compose artifact has drifted/u
   );
 });
 
-test("Coolify adapter requires an explicit non-empty proxy network", async () => {
+test("Coolify artifact rejects unapproved local edits", async () => {
   await assertDeploymentFileMutationRejected(
-    "compose.coolify-network.yaml",
+    "compose.coolify.yaml",
+    (compose) => compose.replace(
+      '    restart: "unless-stopped"\n',
+      '    restart: "unless-stopped"\n    privileged: true\n'
+    ),
+    /drifted from the generic contract/u
+  );
+});
+
+test("Coolify artifact rejects include and extends dependencies", async () => {
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify.yaml",
+    (compose) => `${compose}include:\n  - compose.yaml\n`,
+    /must not use include or extends/u
+  );
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify.yaml",
+    (compose) => compose.replace(
+      "  caddy:\n",
+      "  caddy:\n    extends:\n      file: compose.yaml\n      service: caddy\n"
+    ),
+    /include or extends/u
+  );
+});
+
+test("Coolify artifact requires the explicit network expression and stable alias", async () => {
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify.yaml",
     (compose) => compose.replace(
       "${DEVSPACE_COOLIFY_PROXY_NETWORK:?DEVSPACE_COOLIFY_PROXY_NETWORK must be set and non-empty}",
       "${DEVSPACE_COOLIFY_PROXY_NETWORK:-default}"
     ),
-    /required administrator-selected external network/u
+    /drifted from the generic contract/u
+  );
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify.yaml",
+    (compose) => compose.replace("devspace-preview-ingress", "generated-resource-name"),
+    /drifted from the generic contract/u
   );
 });
 
-test("Coolify adapter attaches only the connector with the stable alias", async () => {
-  await assertDeploymentFileMutationRejected(
-    "compose.coolify-network.yaml",
-    (compose) => compose.replace("preview-ingress-connector", "caddy"),
-    /attach only the connector/u
+test("Coolify artifact contains no committed home-server UUID or network name", async () => {
+  const compose = await readFile(
+    path.resolve("deploy/preview-gateway/compose.coolify.yaml"),
+    "utf8"
   );
-  await assertDeploymentFileMutationRejected(
-    "compose.coolify-network.yaml",
-    (compose) => compose.replace("devspace-preview-ingress", "generated-resource-name"),
-    /stable alias/u
+  assert.doesNotMatch(compose, /[a-z0-9]{24}/u);
+  assert.match(
+    compose,
+    /\$\{DEVSPACE_COOLIFY_PROXY_NETWORK:\?DEVSPACE_COOLIFY_PROXY_NETWORK must be set and non-empty\}/u
   );
 });
 

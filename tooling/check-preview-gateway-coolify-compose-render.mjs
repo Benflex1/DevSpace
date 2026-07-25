@@ -72,7 +72,8 @@ export function validateRenderedCoolifyPreviewGatewayCompose(model, expected, ex
   );
   const connectorProxy = object(connectorNetworks[proxyNetworkKey], "connector proxy network attachment");
   requireCondition(
-    Array.isArray(connectorProxy.aliases) && connectorProxy.aliases.includes(proxyNetworkAlias),
+    Array.isArray(connectorProxy.aliases) &&
+      connectorProxy.aliases.filter((alias) => alias === proxyNetworkAlias).length === 1,
     `preview-ingress-connector must receive the stable ${proxyNetworkAlias} alias.`
   );
   return true;

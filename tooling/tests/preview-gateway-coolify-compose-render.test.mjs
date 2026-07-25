@@ -23,18 +23,30 @@ function renderedModel() {
   return {
     services: {
       caddy: {
+        command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"],
         user: "12345:12346",
         network_mode: "host",
         restart: "unless-stopped",
         volumes: [volumeMount("gateway-runtime", "/run/devspace/gateway")]
       },
       "preview-gateway-host": {
+        environment: {
+          DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: "/run/devspace/gateway/lease-resolver.sock",
+          DEVSPACE_PREVIEW_PROBE_SOCKET: "/run/devspace/gateway/preview-probe.sock",
+          NODE_ENV: "production"
+        },
         user: "12345:12346",
         network_mode: "host",
         restart: "unless-stopped",
         volumes: [volumeMount("gateway-runtime", "/run/devspace/gateway")]
       },
       "preview-ingress-connector": {
+        command: ["node", "dist/connector-index.js"],
+        environment: {
+          DEVSPACE_PREVIEW_HTTP_SOCKET: "/run/devspace/gateway/ingress/preview-http.sock",
+          DEVSPACE_PREVIEW_INGRESS_PORT: "18081",
+          NODE_ENV: "production"
+        },
         user: "12345:12346",
         restart: "unless-stopped",
         expose: ["18081"],

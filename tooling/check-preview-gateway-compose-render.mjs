@@ -66,6 +66,24 @@ function assertNoDockerSocket(serviceModel, serviceName) {
   }
 }
 
+function assertCommand(serviceModel, serviceName, expectedCommand) {
+  requireCondition(Array.isArray(serviceModel.command), `${serviceName} command must render as an array.`);
+  requireCondition(
+    JSON.stringify(serviceModel.command) === JSON.stringify(expectedCommand),
+    `${serviceName} command contract changed.`
+  );
+}
+
+function assertEnvironment(serviceModel, serviceName, expectedEnvironment) {
+  const environment = object(serviceModel.environment, `${serviceName} environment`);
+  const keys = Object.keys(environment);
+  requireCondition(
+    keys.length === Object.keys(expectedEnvironment).length &&
+      keys.every((key) => environment[key] === expectedEnvironment[key]),
+    `${serviceName} environment contract changed.`
+  );
+}
+
 function assertSafeNamedVolumeSource(mount, serviceName, expectedSource) {
   requireCondition(typeof mount.source === "string", `${serviceName} volume source must be a rendered string.`);
   requireCondition(!mount.source.includes("${"), `${serviceName} volume source must not contain interpolation.`);
@@ -139,6 +157,10 @@ export function validateRenderedPreviewGatewayCompose(model, expected = expected
   object(model, "rendered Compose model");
   const services = object(model.services, "services");
   for (const serviceName of requiredServices) service({ services }, serviceName);
+  requireCondition(
+    Object.keys(services).length === requiredServices.length,
+    "services must contain exactly caddy, preview-gateway-host, and preview-ingress-connector."
+  );
 
   const topVolumes = object(model.volumes, "top-level volumes");
   const topVolumeNames = Object.keys(topVolumes);
@@ -149,6 +171,22 @@ export function validateRenderedPreviewGatewayCompose(model, expected = expected
   assertHostService(services.caddy, "caddy", expected);
   assertHostService(services["preview-gateway-host"], "preview-gateway-host", expected);
   assertConnector(services["preview-ingress-connector"], expected);
+  assertCommand(services.caddy, "caddy", [
+    "caddy", "run", "--config", "/etc/caddy/caddy.json"
+  ]);
+  assertCommand(services["preview-ingress-connector"], "preview-ingress-connector", [
+    "node", "dist/connector-index.js"
+  ]);
+  assertEnvironment(services["preview-gateway-host"], "preview-gateway-host", {
+    DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: "/run/devspace/gateway/lease-resolver.sock",
+    DEVSPACE_PREVIEW_PROBE_SOCKET: "/run/devspace/gateway/preview-probe.sock",
+    NODE_ENV: "production"
+  });
+  assertEnvironment(services["preview-ingress-connector"], "preview-ingress-connector", {
+    DEVSPACE_PREVIEW_HTTP_SOCKET: "/run/devspace/gateway/ingress/preview-http.sock",
+    DEVSPACE_PREVIEW_INGRESS_PORT: expected.ingressPort,
+    NODE_ENV: "production"
+  });
   return true;
 }
 

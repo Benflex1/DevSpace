@@ -55,7 +55,10 @@ jobs:
           node tooling/check-preview-gateway-compose-render.mjs \
             "$RUNNER_TEMP/devspace-preview-gateway-compose.json"
 
-      - name: Validate rendered Coolify Raw Compose adapter
+      - name: Reproduce Coolify selected-artifact materialization boundary
+        run: pnpm preview-gateway:coolify-materialization-check
+
+      - name: Validate rendered self-contained Coolify Raw Compose adapter
         run: |
           if env -u DEVSPACE_COOLIFY_PROXY_NETWORK \
             docker compose \

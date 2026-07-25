@@ -197,14 +197,15 @@ Repository-side readiness:
   fail-closed route removal, stable hostname restoration, Agent restart reconciliation, and HMR
 - ✅ Raw Compose Deployment preserves the exact external gateway bind volumes and runs all three
   services plus all four private sockets
-- 🟡 Coolify Raw Compose network adapter implemented for connector-only attachment to an explicit
-  administrator-selected external proxy network; production redeployment remains
+- 🟡 Corrected self-contained Coolify Raw Compose adapter implemented with deterministic
+  generic-contract generation, connector-only attachment to an explicit external proxy network,
+  and arbitrary-directory selected-file regression coverage; production deployment remains
 
 Production deployment remains pending:
 
 - ✅ Provision the selected gateway host runtime root and its private `ingress` subdirectory
 - ✅ Create and inspect the two exact external local-driver bind volumes
-- 🟡 Redeploy the preview gateway through the Coolify-specific Raw Compose adapter
+- 🟡 Merge, then deliberately deploy the corrected self-contained Coolify Raw Compose adapter
 - ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
 - ⏳ Configure the production preview environment
 - ⏳ Configure one permanent reserved-namespace rule in the selected outer ingress
@@ -214,7 +215,9 @@ Current deployment target and production checklist:
 
 - ✅ Provision the configured gateway host root and ingress subdirectory with the selected UID/GID and mode `0700`
 - ✅ Deploy the gateway stack in Coolify Raw Compose and verify four Unix sockets plus `127.0.0.1:18080`
-- ⏳ Redeploy with the durable connector-only external proxy-network adapter and verify its alias
+- ✅ Preserve the healthy generic gateway after the failed include-based adapter deployment
+- ⏳ Deploy the corrected self-contained connector-only external proxy-network adapter and verify
+  its alias
 - ⏳ Add the shared gateway and dedicated rootless-Docker mounts to code-server without exposing a host/Coolify Docker socket
 - ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace router for the current deployment
 - ⏳ Validate external Vite/HMR, stop/restart, fail-closed route removal, stable hostname restoration, and Agent health
@@ -285,15 +288,18 @@ Later operational UX:
 
 # Immediate next steps
 
-1. 🟡 Complete and merge the administrator-precreated external-volume repository correction.
-2. ⏳ Create and inspect the exact external volumes on the production host.
-3. ⏳ Redeploy the existing `DevSpace: Caddy` resource.
-4. ⏳ Verify the four private sockets and the `127.0.0.1:18080` listener.
-5. ⏳ Configure code-server gateway and dedicated rootless-Docker mounts plus the production preview environment.
-6. ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace through the current Traefik integration.
-7. ⏳ Validate external production preview traffic and HMR through the complete path.
-8. ⏳ Complete the remaining focused M1 Slice 6 hardening.
-9. ⏳ Close Milestone 1 only after production preview validation succeeds.
+1. 🟡 Merge the corrected self-contained Coolify adapter; do not disturb the healthy generic
+   gateway before deliberate deployment.
+2. ⏳ Deploy with Base Directory `/deploy/preview-gateway`, Compose Location
+   `/compose.coolify.yaml`, Raw Compose enabled, and an explicit
+   `DEVSPACE_COOLIFY_PROXY_NETWORK`.
+3. ⏳ Inspect the generated Compose, exact external volumes, real container mounts/networks, four
+   private sockets, connector alias, and `127.0.0.1:18080`.
+4. ⏳ Configure code-server gateway and dedicated rootless-Docker mounts plus the production preview environment.
+5. ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace through the current Traefik integration.
+6. ⏳ Validate external production preview traffic and HMR through the complete path.
+7. ⏳ Complete the remaining focused M1 Slice 6 hardening.
+8. ⏳ Close Milestone 1 only after production preview validation succeeds.
 
 ---
 

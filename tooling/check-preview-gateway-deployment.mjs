@@ -1,12 +1,15 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  generateCoolifyPreviewGatewayCompose,
+  parseCompose
+} from "./generate-preview-gateway-coolify-compose.mjs";
 
 const caddyConfigPath = "deploy/preview-gateway/caddy.json";
 const caddyDockerfilePath = "deploy/preview-gateway/Caddy.Dockerfile";
 const composePath = "deploy/preview-gateway/compose.yaml";
 const coolifyComposePath = "deploy/preview-gateway/compose.coolify.yaml";
-const coolifyNetworkPath = "deploy/preview-gateway/compose.coolify-network.yaml";
 const dockerfilePath = "deploy/preview-gateway/Dockerfile";
 const gatewayUserExpression = '"${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"';
 const runtimeVolumeName = "gateway-runtime";
@@ -133,12 +136,11 @@ function requireConnectorBasics(block) {
 }
 
 export async function validatePreviewGatewayDeployment(repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
-  const [caddyText, caddyDockerfile, compose, coolifyCompose, coolifyNetwork, dockerfile] = await Promise.all([
+  const [caddyText, caddyDockerfile, compose, coolifyCompose, dockerfile] = await Promise.all([
     readFile(path.join(repositoryRoot, caddyConfigPath), "utf8"),
     readFile(path.join(repositoryRoot, caddyDockerfilePath), "utf8"),
     readFile(path.join(repositoryRoot, composePath), "utf8"),
     readFile(path.join(repositoryRoot, coolifyComposePath), "utf8"),
-    readFile(path.join(repositoryRoot, coolifyNetworkPath), "utf8"),
     readFile(path.join(repositoryRoot, dockerfilePath), "utf8")
   ]);
   let caddy;
@@ -191,37 +193,37 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
     "The generic Compose file must remain provider-neutral."
   );
 
-  const expectedCoolifyCompose = [
-    "include:",
-    "  - path:",
-    "      - compose.yaml",
-    "      - compose.coolify-network.yaml"
-  ].join("\n");
+  const coolifyModel = parseCompose(coolifyCompose, "Coolify Compose artifact");
   requireCondition(
-    coolifyCompose.trim() === expectedCoolifyCompose,
-    "Coolify Compose Location must include the generic contract and only the repository-owned network override."
-  );
-
-  const expectedCoolifyNetwork = [
-    "services:",
-    "  preview-ingress-connector:",
-    "    networks:",
-    "      coolify-proxy:",
-    "        aliases:",
-    `          - ${coolifyProxyNetworkAlias}`,
-    "",
-    "networks:",
-    "  coolify-proxy:",
-    "    external: true",
-    `    name: \${${coolifyProxyNetworkVariable}:?${coolifyProxyNetworkVariable} must be set and non-empty}`
-  ].join("\n");
-  requireCondition(
-    coolifyNetwork.trim() === expectedCoolifyNetwork,
-    "Coolify network override must attach only the connector to one required administrator-selected external network and stable alias."
+    !/(?:^|\n)\s*(?:include|extends):/u.test(coolifyCompose),
+    "Coolify Compose artifact must not use include or extends."
   );
   requireCondition(
-    !coolifyNetwork.includes("ports:") && !coolifyNetwork.includes("docker.sock"),
-    "Coolify network override must not publish ports or mount a Docker socket."
+    coolifyCompose === generateCoolifyPreviewGatewayCompose(compose),
+    "committed Coolify Compose artifact has drifted from the generic contract and approved network augmentation; run pnpm preview-gateway:coolify-generate."
+  );
+  const coolifyServices = coolifyModel.services;
+  requireCondition(
+    Object.keys(coolifyServices).length === 3 &&
+      Object.hasOwn(coolifyServices, "caddy") &&
+      Object.hasOwn(coolifyServices, "preview-gateway-host") &&
+      Object.hasOwn(coolifyServices, "preview-ingress-connector"),
+    "Coolify Compose artifact must contain exactly the three generic services."
+  );
+  requireCondition(
+    coolifyServices["preview-ingress-connector"]?.networks?.["coolify-proxy"]?.aliases?.length === 1 &&
+      coolifyServices["preview-ingress-connector"].networks["coolify-proxy"].aliases[0] === coolifyProxyNetworkAlias,
+    "Coolify Compose artifact must attach only the connector with the stable alias."
+  );
+  requireCondition(
+    coolifyModel.networks?.["coolify-proxy"]?.external === true &&
+      coolifyModel.networks["coolify-proxy"].name ===
+        `\${${coolifyProxyNetworkVariable}:?${coolifyProxyNetworkVariable} must be set and non-empty}`,
+    "Coolify Compose artifact must require one explicit administrator-selected external network."
+  );
+  requireCondition(
+    !/[a-z0-9]{24}/u.test(coolifyCompose),
+    "Coolify Compose artifact must not commit a home-server resource UUID or network name."
   );
 
   return true;
