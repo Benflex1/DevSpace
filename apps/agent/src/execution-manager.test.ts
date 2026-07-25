@@ -471,6 +471,19 @@ async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, termi
   cleanup?.release();
 }
 
+async function waitForTerminalAttachmentFinalization(manager: ExecutionManager, terminalId: string): Promise<void> {
+  const executions = (manager as unknown as {
+    executions: Map<string, { attachmentCleanup: Promise<void> | null; attachment: unknown }>;
+  }).executions;
+  const live = executions.get(terminalId);
+  expect(live).toBeDefined();
+  const cleanup = live?.attachmentCleanup;
+  expect(cleanup).not.toBeNull();
+  await cleanup;
+  expect(live?.attachmentCleanup).toBeNull();
+  expect(live?.attachment).toBeNull();
+}
+
 test("a CLOSING terminal attachment retains the slot until close cleanup has persisted", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-attachment-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -608,6 +621,7 @@ test("attachment cleanup persistence failure becomes lost without overlap or an 
   await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
   socket.readyState = socket.CLOSING; socket.emit("error", new Error("transport failed")); socket.emit("close");
   expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  await waitForTerminalAttachmentFinalization(manager, terminalId);
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const terminal = manager.snapshotResources().find((item) => item.type === "terminal");
     if (terminal?.type === "terminal" && terminal.state === "lost") break;

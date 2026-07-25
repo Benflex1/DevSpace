@@ -17,6 +17,11 @@ route removal, stable hostname restoration, Agent restart reconciliation, and HM
 lost-session retirement and warning UX are complete for M1. Production preview deployment remains
 the principal M1 blocker.
 
+After PR #33 was merged, production deployment was attempted. Coolify rejected the variable
+interpolation in service-level volume sources during its pre-Compose security validation, before
+container replacement. The existing production deployment was not intentionally modified by this
+repository task. The repository-side named-bind compatibility correction is now the active blocker.
+
 ## Implemented product path
 
 - Browser project onboarding in the Next.js Web application.
@@ -152,6 +157,9 @@ the principal M1 blocker.
   Agent-managed routes. The generic Compose stack runs pinned Caddy, the host probe, and an isolated
   byte-transparent connector with no Docker socket or public Docker ports. Coolify/Traefik setup is
   optional and documented in `docs/integrations/coolify-traefik-preview-ingress.md`.
+- The repository-side Coolify compatibility correction is complete in this proposed change: service
+  mounts use stable named volume IDs, while top-level local-driver devices retain the configurable
+  administrator-owned host paths. Production deployment remains pending.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means

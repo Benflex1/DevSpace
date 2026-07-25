@@ -38,6 +38,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate raw preview-gateway Compose contract
+        run: pnpm preview-gateway:check
+
       - name: Validate rendered preview-gateway Compose contract
         run: |
           docker compose version

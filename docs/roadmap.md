@@ -195,6 +195,8 @@ Repository-side readiness:
 - ✅ Checked-in Caddy configuration, deployment validation, and real-Caddy smoke coverage
 - ✅ Local lifecycle coverage: Vite `Waiting → Ready`, Vite stop/restart, runtime stop/start,
   fail-closed route removal, stable hostname restoration, Agent restart reconciliation, and HMR
+- ✅ Coolify named-bind compatibility correction: stable service volume IDs with portable
+  top-level local-driver bind devices
 
 Production deployment remains pending:
 
@@ -279,12 +281,12 @@ Later operational UX:
 
 # Immediate next steps
 
-1. ⏳ Merge the production-preview repository-readiness fixes.
-2. ⏳ Provision the selected gateway host runtime root and private ingress subdirectory.
-3. ⏳ Deploy the gateway stack in the current Coolify production environment using the staged validation runbook.
-4. ⏳ Add code-server’s shared gateway and dedicated rootless-Docker mounts plus the production preview environment.
-5. ⏳ Configure and validate the authenticated `*-preview.benflex.dev` reserved namespace through the current Traefik integration.
-6. ⏳ Validate external preview traffic and HMR through the complete production path.
+1. ✅ Complete the repository-side Coolify named-bind compatibility correction in the proposed change.
+2. ⏳ Redeploy the existing `DevSpace: Caddy` resource.
+3. ⏳ Verify the four private sockets and the `127.0.0.1:18080` listener.
+4. ⏳ Configure code-server gateway and dedicated rootless-Docker mounts plus the production preview environment.
+5. ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace through the current Traefik integration.
+6. ⏳ Validate external production preview traffic and HMR through the complete path.
 7. ⏳ Complete the remaining focused M1 Slice 6 hardening.
 8. ⏳ Close Milestone 1 only after production preview validation succeeds.
 

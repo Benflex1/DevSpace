@@ -25,6 +25,26 @@ The connector is selected because Coolify Traefik owns the exact administrator-r
 Coolify is an outer-ingress integration only. DevSpace does not call Coolify or Traefik APIs,
 create one resource per preview, or require a particular Coolify proxy-network name.
 
+## Coolify Compose volume compatibility
+
+Coolify validates Compose volume sources before Docker Compose executes. Its security parser
+rejects variable interpolation in a service-level volume source, such as
+`source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}`. This is a Coolify integration
+incompatibility, not a universal Docker Compose limitation.
+
+The checked-in generic Compose file therefore uses the stable service-level named volume IDs
+`gateway-runtime` and `gateway-ingress`. Portability remains in the top-level local-driver
+`device` values: `DEVSPACE_GATEWAY_HOST_DIR` is configurable, and the current home-server value
+is `/srv/devspace/gateway`; the ingress device appends `/ingress`. These named volumes are only an
+indirection around administrator-owned host directories. The root and its `ingress` child must
+already exist with the selected UID/GID and mode `0700`; Coolify or Docker must not be relied on
+to create them silently.
+
+Do not add Coolify UI storage definitions, switch to Raw Compose mode, or add a Coolify-specific
+duplicate Compose file. Do not assign a service domain or host port to any gateway service. The
+connector remains internal-only and the existing reserved Traefik namespace router remains the
+administrator-managed outer-ingress configuration.
+
 ## Reserved namespace rule
 
 Configure the matching DevSpace preview base:

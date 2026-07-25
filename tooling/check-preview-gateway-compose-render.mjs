@@ -3,6 +3,8 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const requiredServices = ["caddy", "preview-gateway-host", "preview-ingress-connector"];
+const runtimeVolumeName = "gateway-runtime";
+const ingressVolumeName = "gateway-ingress";
 const expectedDefaults = {
   hostDir: "/tmp/devspace-gateway-compose-contract",
   uid: "12345",
@@ -50,11 +52,6 @@ function volumes(serviceModel, serviceName) {
   return Object.entries(raw).map(([target, mount]) => ({ target, ...object(mount, `${serviceName} volume ${target}`) }));
 }
 
-function mountField(mount, field, serviceName) {
-  requireCondition(typeof mount[field] === "string", `${serviceName} bind mount ${field} must be a rendered string.`);
-  return mount[field];
-}
-
 function assertNoHostPorts(serviceModel, serviceName) {
   requireCondition(serviceModel.ports === undefined || (Array.isArray(serviceModel.ports) && serviceModel.ports.length === 0), `${serviceName} must not publish host ports.`);
 }
@@ -66,15 +63,28 @@ function assertNoDockerSocket(serviceModel, serviceName) {
   }
 }
 
-function assertBindMount(mount, serviceName, expectedSource, expectedTarget, { readOnly = false } = {}) {
-  requireCondition(mount.type === "bind", `${serviceName} must use a bind mount.`);
-  requireCondition(mountField(mount, "source", serviceName) === expectedSource, `${serviceName} bind source must be ${expectedSource}.`);
-  requireCondition(mountField(mount, "target", serviceName) === expectedTarget, `${serviceName} bind target must be ${expectedTarget}.`);
-  const bind = mount.bind;
-  requireCondition(bind === undefined || (bind !== null && typeof bind === "object" && !Array.isArray(bind)), `${serviceName} bind options must be an object when present.`);
-  const createHostPath = bind?.create_host_path;
-  requireCondition(createHostPath === undefined || createHostPath === false, `${serviceName} bind mount must not enable automatic host-path creation.`);
-  if (readOnly) requireCondition(mount.read_only === true, `${serviceName} ingress bind mount must be read-only.`);
+function assertSafeNamedVolumeSource(mount, serviceName, expectedSource) {
+  requireCondition(typeof mount.source === "string", `${serviceName} volume source must be a rendered string.`);
+  requireCondition(!mount.source.includes("${"), `${serviceName} volume source must not contain interpolation.`);
+  requireCondition(!/[`$;&|<>()[\]{}!*?\\]/u.test(mount.source), `${serviceName} volume source must not contain shell metacharacters.`);
+  requireCondition(!mount.source.startsWith("/") && !mount.source.startsWith("."), `${serviceName} volume source must not be an absolute or relative path.`);
+  requireCondition(/^[a-z][a-z0-9_-]*$/u.test(mount.source), `${serviceName} volume source must be a stable named-volume identifier.`);
+  requireCondition(mount.source === expectedSource, `${serviceName} volume source must be ${expectedSource}.`);
+}
+
+function assertNocopyIfRetained(mount, serviceName) {
+  if (mount.volume === undefined) return;
+  const volume = object(mount.volume, `${serviceName} volume options`);
+  requireCondition(volume.nocopy === undefined || volume.nocopy === true, `${serviceName} volume.nocopy must remain enabled.`);
+}
+
+function assertVolumeMount(mount, serviceName, expectedSource, expectedTarget, { readOnly = false } = {}) {
+  requireCondition(mount.type === "volume", `${serviceName} must use a named volume mount.`);
+  assertSafeNamedVolumeSource(mount, serviceName, expectedSource);
+  requireCondition(mount.target === expectedTarget, `${serviceName} volume target must be ${expectedTarget}.`);
+  assertNocopyIfRetained(mount, serviceName);
+  if (readOnly) requireCondition(mount.read_only === true, `${serviceName} ingress volume must be read-only.`);
+  else requireCondition(mount.read_only === undefined || mount.read_only === false, `${serviceName} runtime volume must remain read-write.`);
 }
 
 function assertHostService(serviceModel, serviceName, expected) {
@@ -84,8 +94,8 @@ function assertHostService(serviceModel, serviceName, expected) {
   assertNoHostPorts(serviceModel, serviceName);
   assertNoDockerSocket(serviceModel, serviceName);
   const mounts = volumes(serviceModel, serviceName);
-  requireCondition(mounts.length === 1, `${serviceName} must have exactly one gateway bind mount.`);
-  assertBindMount(mounts[0], serviceName, expected.hostDir, runtimeRoot);
+  requireCondition(mounts.length === 1, `${serviceName} must have exactly one gateway volume mount.`);
+  assertVolumeMount(mounts[0], serviceName, runtimeVolumeName, runtimeRoot);
 }
 
 function assertConnector(serviceModel, expected) {
@@ -96,8 +106,9 @@ function assertConnector(serviceModel, expected) {
   assertNoHostPorts(serviceModel, "preview-ingress-connector");
   assertNoDockerSocket(serviceModel, "preview-ingress-connector");
   const mounts = volumes(serviceModel, "preview-ingress-connector");
-  requireCondition(mounts.length === 1, "preview-ingress-connector must receive only the ingress bind mount.");
-  assertBindMount(mounts[0], "preview-ingress-connector", `${expected.hostDir}/ingress`, ingressRoot, { readOnly: true });
+  requireCondition(mounts.length === 1, "preview-ingress-connector must receive only the ingress volume.");
+  assertVolumeMount(mounts[0], "preview-ingress-connector", ingressVolumeName, ingressRoot, { readOnly: true });
+  requireCondition(mounts[0].source !== runtimeVolumeName && mounts[0].target !== runtimeRoot, "preview-ingress-connector must not receive the parent runtime volume.");
   const mountText = JSON.stringify(mounts[0]);
   for (const forbiddenPath of forbiddenConnectorPaths) {
     requireCondition(!mountText.includes(forbiddenPath), `preview-ingress-connector must not receive ${forbiddenPath}.`);
@@ -109,14 +120,35 @@ function assertConnector(serviceModel, expected) {
   requireCondition(exposedPorts.length === 1 && exposedPorts[0] === expected.ingressPort, `preview-ingress-connector internal port must be ${expected.ingressPort}.`);
 }
 
+function assertTopLevelVolume(model, volumeName, expectedDevice) {
+  const topVolumes = object(model.volumes, "top-level volumes");
+  requireCondition(Object.hasOwn(topVolumes, volumeName), `top-level volume ${volumeName} is missing.`);
+  const volume = object(topVolumes[volumeName], `top-level volume ${volumeName}`);
+  requireCondition(volume.driver === "local", `${volumeName} must use the local volume driver.`);
+  const driverOptions = object(volume.driver_opts, `${volumeName} driver_opts`);
+  requireCondition(driverOptions.type === "none", `${volumeName} driver_opts.type must be none.`);
+  requireCondition(driverOptions.o === "bind", `${volumeName} driver_opts.o must be bind.`);
+  requireCondition(driverOptions.device === expectedDevice, `${volumeName} device must be ${expectedDevice}.`);
+  requireCondition(!JSON.stringify(volume).includes("docker.sock"), `${volumeName} must not map a Docker socket.`);
+  requireCondition(!JSON.stringify(volume).includes("/var/run") && !JSON.stringify(volume).includes("/etc/"), `${volumeName} must not map a sensitive host path.`);
+}
+
 export function validateRenderedPreviewGatewayCompose(model, expected = expectedDefaults) {
   object(model, "rendered Compose model");
-  object(model.services, "services");
-  for (const serviceName of requiredServices) service(model, serviceName);
+  const services = object(model.services, "services");
+  for (const serviceName of requiredServices) service({ services }, serviceName);
 
-  assertHostService(service(model, "caddy"), "caddy", expected);
-  assertHostService(service(model, "preview-gateway-host"), "preview-gateway-host", expected);
-  assertConnector(service(model, "preview-ingress-connector"), expected);
+  const topVolumes = object(model.volumes, "top-level volumes");
+  const topVolumeNames = Object.keys(topVolumes);
+  requireCondition(topVolumeNames.length === 2 && topVolumeNames.includes(runtimeVolumeName) && topVolumeNames.includes(ingressVolumeName), "top-level volumes must contain only the runtime and ingress gateway volumes.");
+  assertTopLevelVolume(model, runtimeVolumeName, expected.hostDir);
+  assertTopLevelVolume(model, ingressVolumeName, `${expected.hostDir}/ingress`);
+  requireCondition(!JSON.stringify(topVolumes).includes("docker.sock"), "top-level volumes must not map a Docker socket.");
+  requireCondition(!JSON.stringify(topVolumes).includes("/var/run") && !JSON.stringify(topVolumes).includes("/etc/"), "top-level volumes must not map a sensitive host path.");
+
+  assertHostService(services.caddy, "caddy", expected);
+  assertHostService(services["preview-gateway-host"], "preview-gateway-host", expected);
+  assertConnector(services["preview-ingress-connector"], expected);
   return true;
 }
 
