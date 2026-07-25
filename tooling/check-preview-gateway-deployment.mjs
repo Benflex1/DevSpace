@@ -6,8 +6,10 @@ const caddyConfigPath = "deploy/preview-gateway/caddy.json";
 const caddyDockerfilePath = "deploy/preview-gateway/Caddy.Dockerfile";
 const composePath = "deploy/preview-gateway/compose.yaml";
 const dockerfilePath = "deploy/preview-gateway/Dockerfile";
-const sharedRuntimeSource = "/srv/devspace/gateway";
+const gatewayHostSource = "${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}";
+const gatewayIngressHostSource = "${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress";
 const sharedRuntimeTarget = "/run/devspace/gateway";
+const ingressRuntimeTarget = "/run/devspace/gateway/ingress";
 const adminSocket = "unix//run/devspace/gateway/caddy-admin.sock|0660";
 const previewHttpSocket = "unix//run/devspace/gateway/ingress/preview-http.sock|0660";
 
@@ -21,24 +23,42 @@ function serviceBlock(compose, serviceName) {
   return match[1];
 }
 
+function bindMountBlocks(block, serviceName) {
+  const mounts = [...block.matchAll(/\n {6}- type: bind\n([\s\S]*?)(?=\n {6}- type: bind\n|$)/gu)].map((match) => match[1]);
+  requireCondition(mounts.length > 0, `${serviceName} must define at least one bind mount.`);
+  for (const mount of mounts) {
+    requireCondition(mount.includes("\n        bind:\n") && mount.includes("\n          create_host_path: false\n"), `${serviceName} bind mounts must set create_host_path: false.`);
+  }
+  return mounts;
+}
+
 function requireHostServiceBasics(block, serviceName) {
   requireCondition(/\n? {4}network_mode: host\n/u.test(block), `${serviceName} must use host networking.`);
   requireCondition(!/\n? {4}ports:/u.test(block), `${serviceName} must not publish Docker ports.`);
   requireCondition(!block.includes("docker.sock"), `${serviceName} must not mount a Docker socket.`);
-  requireCondition(block.includes(`source: ${sharedRuntimeSource}`), `${serviceName} must mount ${sharedRuntimeSource}.`);
-  requireCondition(block.includes(`target: ${sharedRuntimeTarget}`), `${serviceName} must mount ${sharedRuntimeTarget}.`);
+  requireCondition(block.includes("\n    restart: unless-stopped\n"), `${serviceName} must use the unless-stopped restart policy.`);
+  const mounts = bindMountBlocks(block, serviceName);
+  requireCondition(mounts.length === 1, `${serviceName} must have exactly one gateway bind mount.`);
+  requireCondition(mounts[0].includes(`source: ${gatewayHostSource}\n`), `${serviceName} must mount the configurable gateway host root.`);
+  requireCondition(mounts[0].includes(`target: ${sharedRuntimeTarget}\n`), `${serviceName} must mount the complete gateway runtime root.`);
 }
 
 function requireConnectorBasics(block) {
   requireCondition(!/\n? {4}network_mode:/u.test(block), "preview-ingress-connector must use an isolated Compose network.");
   requireCondition(!/\n? {4}ports:/u.test(block), "preview-ingress-connector must not publish a host port.");
   requireCondition(/\n? {4}expose:/u.test(block), "preview-ingress-connector must expose its internal service port.");
-  requireCondition(block.includes("source: /srv/devspace/gateway/ingress"), "preview-ingress-connector must mount only the ingress directory.");
-  requireCondition(block.includes("target: /run/devspace/gateway/ingress"), "preview-ingress-connector must mount the ingress directory at the private data-plane path.");
-  requireCondition(!block.includes("source: /srv/devspace/gateway\n") && !block.includes("target: /run/devspace/gateway\n"), "preview-ingress-connector must not mount the parent private runtime directory.");
+  requireCondition(block.includes("\n    restart: unless-stopped\n"), "preview-ingress-connector must use the unless-stopped restart policy.");
+  requireCondition(!block.includes("docker.sock"), "preview-ingress-connector must not mount a Docker socket.");
+  const mounts = bindMountBlocks(block, "preview-ingress-connector");
+  requireCondition(mounts.length === 1, "preview-ingress-connector must have exactly one bind mount.");
+  requireCondition(mounts[0].includes(`source: ${gatewayIngressHostSource}\n`), "preview-ingress-connector must mount only the ingress directory.");
+  requireCondition(mounts[0].includes(`target: ${ingressRuntimeTarget}\n`), "preview-ingress-connector must mount the ingress directory at the private data-plane path.");
+  requireCondition(mounts[0].includes("\n        read_only: true\n"), "preview-ingress-connector ingress mount must be read-only.");
+  requireCondition(!mounts[0].includes(`source: ${gatewayHostSource}\n`) && !mounts[0].includes(`target: ${sharedRuntimeTarget}\n`), "preview-ingress-connector must not mount the parent private runtime directory.");
   for (const forbidden of ["caddy-admin.sock", "preview-probe.sock", "lease-resolver.sock", "agent.sock", "docker.sock"]) {
     requireCondition(!block.includes(forbidden), `preview-ingress-connector must not receive ${forbidden}.`);
   }
+  requireCondition(block.includes('- "${DEVSPACE_PREVIEW_INGRESS_PORT:-8080}"'), "preview-ingress-connector must retain the bounded configurable internal ingress port.");
 }
 
 export async function validatePreviewGatewayDeployment(repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
@@ -69,16 +89,23 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
   const caddyService = serviceBlock(compose, "caddy");
   const hostService = serviceBlock(compose, "preview-gateway-host");
   const connectorService = serviceBlock(compose, "preview-ingress-connector");
+  requireCondition(compose.includes(`source: ${gatewayHostSource}\n`), "Gateway bind sources must use DEVSPACE_GATEWAY_HOST_DIR with the /srv/devspace/gateway default.");
+  requireCondition(compose.includes(`source: ${gatewayIngressHostSource}\n`), "Connector bind source must append /ingress to DEVSPACE_GATEWAY_HOST_DIR.");
+  requireCondition(!/\n {4}ports:/u.test(compose), "The gateway stack must not publish host ports.");
+  requireCondition(!compose.includes("docker.sock"), "The gateway stack must not mount a Docker socket.");
   requireCondition(caddyService.includes("build:\n      context: ../..\n      dockerfile: deploy/preview-gateway/Caddy.Dockerfile"), "Caddy must use the self-contained deployment image build.");
   requireCondition(caddyDockerfile.includes("FROM caddy:2.11.3"), "Caddy deployment image must be based on caddy:2.11.3.");
   requireCondition(caddyDockerfile.includes("COPY deploy/preview-gateway/caddy.json /etc/caddy/caddy.json"), "Caddy deployment image must bake in caddy.json.");
+  requireCondition(!caddyService.includes("source: ./caddy.json") && !caddyService.includes("target: /etc/caddy/caddy.json"), "Caddy must not use a repository-relative caddy.json bind mount.");
+  requireCondition(!caddyService.includes("--adapter"), "Native Caddy JSON configuration must not use the json adapter.");
+  const allBindMounts = [...compose.matchAll(/\n {6}- type: bind\n[\s\S]*?(?=\n {6}- type: bind\n|\n {2}[A-Za-z0-9_-]+:\n|$)/gu)];
+  requireCondition(allBindMounts.length === 3 && allBindMounts.every((match) => match[0].includes("create_host_path: false")), "All gateway bind mounts must set create_host_path: false.");
   requireHostServiceBasics(caddyService, "caddy");
   requireHostServiceBasics(hostService, "preview-gateway-host");
   requireConnectorBasics(connectorService);
+  requireCondition(connectorService.includes("\n    expose:\n") && !connectorService.includes("\n    network_mode: host\n"), "preview-ingress-connector must remain on an isolated Compose network rather than host networking.");
   requireCondition(connectorService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1] === hostService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1], "Connector must support the same configured UID/GID as the gateway services.");
   requireCondition(connectorService.includes("command: [\"node\", \"dist/connector-index.js\"]"), "Connector must run the dedicated byte-transparent entry point.");
-  requireCondition(!caddyService.includes("source: ./caddy.json") && !caddyService.includes("target: /etc/caddy/caddy.json"), "Caddy must not use a repository-relative caddy.json bind mount.");
-  requireCondition(!caddyService.includes("--adapter"), "Native Caddy JSON configuration must not use the json adapter.");
   requireCondition(caddyService.includes("command: [\"caddy\", \"run\", \"--config\", \"/etc/caddy/caddy.json\"]"), "Caddy must invoke the native JSON configuration through the caddy executable without an adapter.");
   requireCondition(caddyService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1] === hostService.match(/\n? {4}user: ([^\n]+)\n/u)?.[1], "Both services must support the same configured UID/GID.");
   requireCondition(hostService.includes("DEVSPACE_PREVIEW_PROBE_SOCKET: /run/devspace/gateway/preview-probe.sock"), "Host service probe socket is missing.");
