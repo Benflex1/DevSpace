@@ -10,13 +10,14 @@ const expected = {
 };
 
 function bindMount(source, target, options = {}) {
-  return {
+  const mount = {
     type: "bind",
     source,
     target,
-    read_only: options.readOnly ?? false,
-    bind: { create_host_path: options.createHostPath ?? false }
+    read_only: options.readOnly ?? false
   };
+  if (options.createHostPath !== undefined) mount.bind = { create_host_path: options.createHostPath };
+  return mount;
 }
 
 function renderedModel() {
@@ -72,10 +73,22 @@ test("rejects a connector mount that is not read-only", () => {
   assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /read-only/u);
 });
 
-test("rejects an enabled create_host_path", () => {
+test("accepts an explicit create_host_path false", () => {
   const model = cloneModel();
-  model.services.caddy.volumes[0].bind.create_host_path = true;
-  assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /create_host_path/u);
+  model.services.caddy.volumes[0].bind = { create_host_path: false };
+  assert.equal(validateRenderedPreviewGatewayCompose(model, expected), true);
+});
+
+test("rejects enabled or malformed create_host_path values", () => {
+  for (const value of [true, "false", "true", 0, 1, null, [], {}]) {
+    const model = cloneModel();
+    model.services.caddy.volumes[0].bind = { create_host_path: value };
+    assert.throws(
+      () => validateRenderedPreviewGatewayCompose(model, expected),
+      /must not enable automatic host-path creation/u,
+      `create_host_path=${JSON.stringify(value)} should be rejected`
+    );
+  }
 });
 
 test("rejects host networking on the connector", () => {

@@ -70,7 +70,10 @@ function assertBindMount(mount, serviceName, expectedSource, expectedTarget, { r
   requireCondition(mount.type === "bind", `${serviceName} must use a bind mount.`);
   requireCondition(mountField(mount, "source", serviceName) === expectedSource, `${serviceName} bind source must be ${expectedSource}.`);
   requireCondition(mountField(mount, "target", serviceName) === expectedTarget, `${serviceName} bind target must be ${expectedTarget}.`);
-  requireCondition(mount.bind?.create_host_path === false, `${serviceName} bind mount create_host_path must be false.`);
+  const bind = mount.bind;
+  requireCondition(bind === undefined || (bind !== null && typeof bind === "object" && !Array.isArray(bind)), `${serviceName} bind options must be an object when present.`);
+  const createHostPath = bind?.create_host_path;
+  requireCondition(createHostPath === undefined || createHostPath === false, `${serviceName} bind mount must not enable automatic host-path creation.`);
   if (readOnly) requireCondition(mount.read_only === true, `${serviceName} ingress bind mount must be read-only.`);
 }
 
