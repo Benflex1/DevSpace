@@ -8,6 +8,9 @@ const composePath = "deploy/preview-gateway/compose.yaml";
 const dockerfilePath = "deploy/preview-gateway/Dockerfile";
 const gatewayHostSource = "${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}";
 const gatewayIngressHostSource = "${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress";
+const gatewayUserExpression = '"${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"';
+const runtimeVolumeName = "gateway-runtime";
+const ingressVolumeName = "gateway-ingress";
 const sharedRuntimeTarget = "/run/devspace/gateway";
 const ingressRuntimeTarget = "/run/devspace/gateway/ingress";
 const adminSocket = "unix//run/devspace/gateway/caddy-admin.sock|0660";
@@ -23,13 +26,74 @@ function serviceBlock(compose, serviceName) {
   return match[1];
 }
 
-function bindMountBlocks(block, serviceName) {
-  const mounts = [...block.matchAll(/\n {6}- type: bind\n([\s\S]*?)(?=\n {6}- type: bind\n|$)/gu)].map((match) => match[1]);
-  requireCondition(mounts.length > 0, `${serviceName} must define at least one bind mount.`);
-  for (const mount of mounts) {
-    requireCondition(mount.includes("\n        bind:\n") && mount.includes("\n          create_host_path: false\n"), `${serviceName} bind mounts must set create_host_path: false.`);
-  }
+function lineValue(block, field, indent) {
+  const match = new RegExp(`(?:^|\\n)${" ".repeat(indent)}${field}: ([^\\n]+)`, "u").exec(block);
+  return match?.[1]?.trim();
+}
+
+function serviceMounts(block, serviceName) {
+  requireCondition(block.includes("\n    volumes:\n"), `${serviceName} must define service volumes.`);
+  const volumeSection = block.slice(block.indexOf("\n    volumes:\n"));
+  requireCondition(!/\n {6}- (?!type:)/u.test(volumeSection), `${serviceName} must use long volume syntax.`);
+
+  const mounts = [...block.matchAll(/\n {6}- type: ([^\n]+)\n([\s\S]*?)(?=\n {6}- type: [^\n]+\n|$)/gu)].map((match) => ({
+    type: match[1].trim(),
+    body: match[2],
+    source: lineValue(match[2], "source", 8),
+    target: lineValue(match[2], "target", 8)
+  }));
+  requireCondition(mounts.length > 0, `${serviceName} must define at least one volume mount.`);
   return mounts;
+}
+
+function requireSafeServiceVolumeSource(mount, serviceName) {
+  requireCondition(typeof mount.source === "string", `${serviceName} volume source is missing.`);
+  requireCondition(!mount.source.includes("${"), `${serviceName} service volume source must not contain variable interpolation for Coolify compatibility.`);
+  requireCondition(!/[`$;&|<>()[\]{}!*?\\]/u.test(mount.source), `${serviceName} service volume source must not contain shell metacharacters.`);
+  requireCondition(!mount.source.startsWith("/"), `${serviceName} service volume source must not be an absolute host path.`);
+  requireCondition(!mount.source.startsWith("."), `${serviceName} service volume source must not be a relative path.`);
+  requireCondition(/^[a-z][a-z0-9_-]*$/u.test(mount.source), `${serviceName} service volume source must be a stable named-volume identifier.`);
+}
+
+function requireNocopy(mount, serviceName) {
+  requireCondition(mount.body.includes("\n        volume:\n") && mount.body.includes("\n          nocopy: true\n"), `${serviceName} volume mount must set volume.nocopy: true.`);
+}
+
+function requireNamedVolumeMount(mount, serviceName, expectedSource, expectedTarget, { readOnly = false } = {}) {
+  requireCondition(mount.type === "volume", `${serviceName} must use a volume mount.`);
+  requireSafeServiceVolumeSource(mount, serviceName);
+  requireCondition(mount.source === expectedSource, `${serviceName} must mount named volume ${expectedSource}.`);
+  requireCondition(mount.target === expectedTarget, `${serviceName} must mount ${expectedTarget}.`);
+  requireNocopy(mount, serviceName);
+  if (readOnly) requireCondition(mount.body.includes("\n        read_only: true\n"), `${serviceName} ingress mount must be read-only.`);
+  else requireCondition(!mount.body.includes("\n        read_only: true\n"), `${serviceName} runtime mount must remain read-write.`);
+}
+
+function topLevelVolumeSection(compose) {
+  const match = /\nvolumes:\n([\s\S]*)$/u.exec(compose);
+  requireCondition(match !== null, "top-level Compose volumes are missing.");
+  return match[1];
+}
+
+function topLevelVolumeNames(section) {
+  return [...section.matchAll(/(?:^|\n) {2}([A-Za-z0-9_-]+):\n/gu)].map((match) => match[1]);
+}
+
+function topLevelVolumeBlock(section, volumeName) {
+  const match = new RegExp(`(?:^|\\n)  ${volumeName}:\\n([\\s\\S]*?)(?=\\n  [A-Za-z0-9_-]+:\\n|$)`, "u").exec(section);
+  requireCondition(match !== null, `top-level volume ${volumeName} is missing.`);
+  return match[1];
+}
+
+function requireLocalBindVolume(section, volumeName, expectedDevice) {
+  const block = topLevelVolumeBlock(section, volumeName);
+  requireCondition(lineValue(block, "driver", 4) === "local", `${volumeName} must use the local volume driver.`);
+  const driverOptions = block.match(/(?:^|\n) {4}driver_opts:\n([\s\S]*)/u)?.[1];
+  requireCondition(driverOptions !== undefined, `${volumeName} must define driver_opts.`);
+  requireCondition(lineValue(driverOptions, "type", 6) === "none", `${volumeName} driver_opts.type must be none.`);
+  requireCondition(lineValue(driverOptions, "o", 6) === "bind", `${volumeName} driver_opts.o must be bind.`);
+  requireCondition(lineValue(driverOptions, "device", 6) === expectedDevice, `${volumeName} device must be ${expectedDevice}.`);
+  requireCondition(!driverOptions.includes("docker.sock") && !driverOptions.includes("/var/run") && !driverOptions.includes("/etc/"), `${volumeName} must not map a sensitive host path.`);
 }
 
 function requireHostServiceBasics(block, serviceName) {
@@ -37,10 +101,10 @@ function requireHostServiceBasics(block, serviceName) {
   requireCondition(!/\n? {4}ports:/u.test(block), `${serviceName} must not publish Docker ports.`);
   requireCondition(!block.includes("docker.sock"), `${serviceName} must not mount a Docker socket.`);
   requireCondition(block.includes("\n    restart: unless-stopped\n"), `${serviceName} must use the unless-stopped restart policy.`);
-  const mounts = bindMountBlocks(block, serviceName);
-  requireCondition(mounts.length === 1, `${serviceName} must have exactly one gateway bind mount.`);
-  requireCondition(mounts[0].includes(`source: ${gatewayHostSource}\n`), `${serviceName} must mount the configurable gateway host root.`);
-  requireCondition(mounts[0].includes(`target: ${sharedRuntimeTarget}\n`), `${serviceName} must mount the complete gateway runtime root.`);
+  requireCondition(lineValue(block, "user", 4) === gatewayUserExpression, `${serviceName} must retain the portable UID/GID configuration.`);
+  const mounts = serviceMounts(block, serviceName);
+  requireCondition(mounts.length === 1, `${serviceName} must have exactly one gateway volume mount.`);
+  requireNamedVolumeMount(mounts[0], serviceName, runtimeVolumeName, sharedRuntimeTarget);
 }
 
 function requireConnectorBasics(block) {
@@ -48,13 +112,12 @@ function requireConnectorBasics(block) {
   requireCondition(!/\n? {4}ports:/u.test(block), "preview-ingress-connector must not publish a host port.");
   requireCondition(/\n? {4}expose:/u.test(block), "preview-ingress-connector must expose its internal service port.");
   requireCondition(block.includes("\n    restart: unless-stopped\n"), "preview-ingress-connector must use the unless-stopped restart policy.");
+  requireCondition(lineValue(block, "user", 4) === gatewayUserExpression, "preview-ingress-connector must retain the portable UID/GID configuration.");
   requireCondition(!block.includes("docker.sock"), "preview-ingress-connector must not mount a Docker socket.");
-  const mounts = bindMountBlocks(block, "preview-ingress-connector");
-  requireCondition(mounts.length === 1, "preview-ingress-connector must have exactly one bind mount.");
-  requireCondition(mounts[0].includes(`source: ${gatewayIngressHostSource}\n`), "preview-ingress-connector must mount only the ingress directory.");
-  requireCondition(mounts[0].includes(`target: ${ingressRuntimeTarget}\n`), "preview-ingress-connector must mount the ingress directory at the private data-plane path.");
-  requireCondition(mounts[0].includes("\n        read_only: true\n"), "preview-ingress-connector ingress mount must be read-only.");
-  requireCondition(!mounts[0].includes(`source: ${gatewayHostSource}\n`) && !mounts[0].includes(`target: ${sharedRuntimeTarget}\n`), "preview-ingress-connector must not mount the parent private runtime directory.");
+  const mounts = serviceMounts(block, "preview-ingress-connector");
+  requireCondition(mounts.length === 1, "preview-ingress-connector must have exactly one volume mount.");
+  requireNamedVolumeMount(mounts[0], "preview-ingress-connector", ingressVolumeName, ingressRuntimeTarget, { readOnly: true });
+  requireCondition(mounts[0].source !== runtimeVolumeName && mounts[0].target !== sharedRuntimeTarget, "preview-ingress-connector must not mount the parent private runtime volume.");
   for (const forbidden of ["caddy-admin.sock", "preview-probe.sock", "lease-resolver.sock", "agent.sock", "docker.sock"]) {
     requireCondition(!block.includes(forbidden), `preview-ingress-connector must not receive ${forbidden}.`);
   }
@@ -89,17 +152,21 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
   const caddyService = serviceBlock(compose, "caddy");
   const hostService = serviceBlock(compose, "preview-gateway-host");
   const connectorService = serviceBlock(compose, "preview-ingress-connector");
-  requireCondition(compose.includes(`source: ${gatewayHostSource}\n`), "Gateway bind sources must use DEVSPACE_GATEWAY_HOST_DIR with the /srv/devspace/gateway default.");
-  requireCondition(compose.includes(`source: ${gatewayIngressHostSource}\n`), "Connector bind source must append /ingress to DEVSPACE_GATEWAY_HOST_DIR.");
-  requireCondition(!/\n {4}ports:/u.test(compose), "The gateway stack must not publish host ports.");
+  const volumes = topLevelVolumeSection(compose);
+  const volumeNames = topLevelVolumeNames(volumes);
+  requireCondition(volumeNames.length === 2 && volumeNames.includes(runtimeVolumeName) && volumeNames.includes(ingressVolumeName), "top-level volumes must contain only the runtime and ingress gateway volumes.");
+  requireLocalBindVolume(volumes, runtimeVolumeName, gatewayHostSource);
+  requireLocalBindVolume(volumes, ingressVolumeName, gatewayIngressHostSource);
+  requireCondition(compose.includes(`device: ${gatewayHostSource}\n`), "Runtime volume device must use DEVSPACE_GATEWAY_HOST_DIR with the /srv/devspace/gateway default.");
+  requireCondition(compose.includes(`device: ${gatewayIngressHostSource}\n`), "Ingress volume device must append /ingress to DEVSPACE_GATEWAY_HOST_DIR.");
   requireCondition(!compose.includes("docker.sock"), "The gateway stack must not mount a Docker socket.");
+  requireCondition(!volumes.includes("/var/run") && !volumes.includes("/etc/"), "Gateway top-level volumes must not map sensitive host paths.");
+  requireCondition(!/\n {4}ports:/u.test(compose), "The gateway stack must not publish host ports.");
   requireCondition(caddyService.includes("build:\n      context: ../..\n      dockerfile: deploy/preview-gateway/Caddy.Dockerfile"), "Caddy must use the self-contained deployment image build.");
   requireCondition(caddyDockerfile.includes("FROM caddy:2.11.3"), "Caddy deployment image must be based on caddy:2.11.3.");
   requireCondition(caddyDockerfile.includes("COPY deploy/preview-gateway/caddy.json /etc/caddy/caddy.json"), "Caddy deployment image must bake in caddy.json.");
   requireCondition(!caddyService.includes("source: ./caddy.json") && !caddyService.includes("target: /etc/caddy/caddy.json"), "Caddy must not use a repository-relative caddy.json bind mount.");
   requireCondition(!caddyService.includes("--adapter"), "Native Caddy JSON configuration must not use the json adapter.");
-  const allBindMounts = [...compose.matchAll(/\n {6}- type: bind\n[\s\S]*?(?=\n {6}- type: bind\n|\n {2}[A-Za-z0-9_-]+:\n|$)/gu)];
-  requireCondition(allBindMounts.length === 3 && allBindMounts.every((match) => match[0].includes("create_host_path: false")), "All gateway bind mounts must set create_host_path: false.");
   requireHostServiceBasics(caddyService, "caddy");
   requireHostServiceBasics(hostService, "preview-gateway-host");
   requireConnectorBasics(connectorService);

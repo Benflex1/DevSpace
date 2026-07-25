@@ -18,35 +18,99 @@ async function assertComposeMutationRejected(mutate, message) {
   }
 }
 
-test("preview gateway deployment artifacts satisfy the repository contract", async () => {
+test("preview gateway deployment accepts the valid named-bind source model", async () => {
   assert.equal(await validatePreviewGatewayDeployment(), true);
 });
 
-test("preview gateway deployment requires create_host_path false on every bind", async () => {
+test("preview gateway deployment rejects Coolify-incompatible service interpolation", async () => {
   await assertComposeMutationRejected(
-    (compose) => compose.replace("create_host_path: false", "create_host_path: true"),
-    /create_host_path: false/u
+    (compose) => compose.replace("source: gateway-runtime", "source: ${DEVSPACE_GATEWAY_HOST_DIR:-gateway-runtime}"),
+    /must not contain variable interpolation/u
   );
 });
 
-test("preview gateway deployment keeps the connector on the ingress-only read-only mount", async () => {
+test("preview gateway deployment rejects service-level absolute and relative paths", async () => {
   await assertComposeMutationRejected(
-    (compose) => compose.replace(
-      "source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress",
-      "source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}"
-    ),
-    /Connector bind source must append \/ingress|mount only the ingress directory/u
+    (compose) => compose.replace("source: gateway-runtime", "source: /srv/devspace/gateway"),
+    /must not be an absolute host path/u
   );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("source: gateway-runtime", "source: ./gateway"),
+    /must not be a relative path/u
+  );
+});
+
+test("preview gateway deployment keeps runtime and connector volume identities isolated", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("source: gateway-ingress", "source: gateway-runtime"),
+    /must mount named volume gateway-ingress/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("source: gateway-ingress", "source: gateway-runtime").replace(
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress",
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}"
+    ),
+    /must append \/ingress|device must be/u
+  );
+});
+
+test("preview gateway deployment requires connector read-only isolation", async () => {
   await assertComposeMutationRejected(
     (compose) => compose.replace("read_only: true", "read_only: false"),
-    /must be read-only/u
+    /ingress mount must be read-only/u
   );
 });
 
-test("preview gateway deployment requires the portable host source contract", async () => {
+test("preview gateway deployment keeps the shared runtime mounts read-write", async () => {
   await assertComposeMutationRejected(
-    (compose) => compose.replace("source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}", "source: /srv/devspace/gateway"),
-    /configurable gateway host root|DEVSPACE_GATEWAY_HOST_DIR/u
+    (compose) => compose.replace("target: /run/devspace/gateway\n        volume:", "target: /run/devspace/gateway\n        read_only: true\n        volume:"),
+    /runtime mount must remain read-write/u
+  );
+});
+
+test("preview gateway deployment requires nocopy on every service volume", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("          nocopy: true", "          nocopy: false"),
+    /volume\.nocopy: true/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("          nocopy: true\n", ""),
+    /volume\.nocopy: true/u
+  );
+});
+
+test("preview gateway deployment requires local top-level bind volumes", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("driver: local", "driver: nfs"),
+    /local volume driver/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("      o: bind\n", ""),
+    /driver_opts\.o must be bind/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace(
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}",
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/wrong"
+    ),
+    /device must be \$\{DEVSPACE_GATEWAY_HOST_DIR/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace(
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress",
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}"
+    ),
+    /device must be \$\{DEVSPACE_GATEWAY_HOST_DIR/u
+  );
+});
+
+test("preview gateway deployment rejects Docker sockets and sensitive top-level paths", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace(
+      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}",
+      "device: /var/run/docker.sock"
+    ),
+    /sensitive host path|device must be/u
   );
 });
 
