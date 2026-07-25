@@ -18,7 +18,7 @@ async function assertComposeMutationRejected(mutate, message) {
   }
 }
 
-test("preview gateway deployment accepts the valid named-bind source model", async () => {
+test("preview gateway deployment accepts the valid external-volume model", async () => {
   assert.equal(await validatePreviewGatewayDeployment(), true);
 });
 
@@ -46,11 +46,8 @@ test("preview gateway deployment keeps runtime and connector volume identities i
     /must mount named volume gateway-ingress/u
   );
   await assertComposeMutationRejected(
-    (compose) => compose.replace("source: gateway-ingress", "source: gateway-runtime").replace(
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress",
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}"
-    ),
-    /must append \/ingress|device must be/u
+    (compose) => compose.replace("target: /run/devspace/gateway/ingress", "target: /run/devspace/gateway"),
+    /must mount \/run\/devspace\/gateway\/ingress|parent private runtime/u
   );
 });
 
@@ -79,38 +76,64 @@ test("preview gateway deployment requires nocopy on every service volume", async
   );
 });
 
-test("preview gateway deployment requires local top-level bind volumes", async () => {
+test("preview gateway deployment requires exact external volume definitions", async () => {
   await assertComposeMutationRejected(
-    (compose) => compose.replace("driver: local", "driver: nfs"),
-    /local volume driver/u
+    (compose) => compose.replace("external: true", "external: false"),
+    /must set external: true/u
   );
   await assertComposeMutationRejected(
-    (compose) => compose.replace("      o: bind\n", ""),
-    /driver_opts\.o must be bind/u
+    (compose) => compose.replace("    external: true\n", ""),
+    /must set external: true/u
   );
   await assertComposeMutationRejected(
-    (compose) => compose.replace(
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}",
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/wrong"
-    ),
-    /device must be \$\{DEVSPACE_GATEWAY_HOST_DIR/u
+    (compose) => compose.replace("name: devspace-gateway-runtime", "name: wrong-runtime"),
+    /external name must be exactly devspace-gateway-runtime/u
   );
   await assertComposeMutationRejected(
-    (compose) => compose.replace(
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress",
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}"
-    ),
-    /device must be \$\{DEVSPACE_GATEWAY_HOST_DIR/u
+    (compose) => compose.replace("name: devspace-gateway-ingress", "name: wrong-ingress"),
+    /external name must be exactly devspace-gateway-ingress/u
   );
 });
 
-test("preview gateway deployment rejects Docker sockets and sensitive top-level paths", async () => {
+test("preview gateway deployment rejects reintroduced local-driver options", async () => {
   await assertComposeMutationRejected(
     (compose) => compose.replace(
-      "device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}",
-      "device: /var/run/docker.sock"
+      "    name: devspace-gateway-runtime",
+      "    name: devspace-gateway-runtime\n    driver: local\n    driver_opts:\n      type: none\n      o: bind\n      device: /srv/devspace/gateway"
     ),
-    /sensitive host path|device must be/u
+    /driver, driver_opts, or device|host path/u
+  );
+});
+
+test("preview gateway deployment rejects top-level devices, host paths, and interpolation", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("    name: devspace-gateway-runtime", "    name: devspace-gateway-runtime\n    device: /srv/devspace/gateway"),
+    /driver, driver_opts, or device|host path/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("name: devspace-gateway-runtime", "name: ${DEVSPACE_GATEWAY_VOLUME:-devspace-gateway-runtime}"),
+    /external name|interpolation/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("name: devspace-gateway-runtime", "name: /srv/devspace/gateway"),
+    /external name|host path/u
+  );
+});
+
+test("preview gateway deployment rejects unexpected top-level volumes", async () => {
+  await assertComposeMutationRejected(
+    (compose) => `${compose}\n  unexpected:\n    external: true\n    name: devspace-unexpected\n`,
+    /only the runtime and ingress gateway volumes/u
+  );
+});
+
+test("preview gateway deployment rejects Docker socket service mounts", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace(
+      "    volumes:\n",
+      "    volumes:\n      - type: bind\n        source: /var/run/docker.sock\n        target: /var/run/docker.sock\n"
+    ),
+    /long volume syntax|Docker socket|exactly one gateway volume mount/u
   );
 });
 

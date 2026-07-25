@@ -63,17 +63,16 @@ Both paths preserve the same Caddy Host-route and Agent-lease contract. The isol
 the selected entry path for the current home-server Coolify/Traefik integration; that choice is
 not a provider-neutral core requirement.
 
-## Provision the host runtime directory
+## Provision the external gateway volumes
 
-`DEVSPACE_GATEWAY_HOST_DIR` is a deployment-level host path used by Compose. It is not an Agent
-runtime variable. The default and current home-server example is `/srv/devspace/gateway`; another
-administrator can set the variable to a different administrator-provisioned directory.
-Keep the selected directory outside project worktrees and the production directory.
+`DEVSPACE_GATEWAY_HOST_DIR` is an administrator-provisioning value, not a Compose or Agent runtime
+variable. The default and current home-server example is `/srv/devspace/gateway`; another
+administrator may select a different absolute host directory outside project worktrees and the
+production directory. The checked-in Compose file never contains that host path.
 
-Both directories must exist before Compose deployment. The named local-driver volumes below are
-only an indirection around those administrator-owned directories; they are not Docker-managed
-application storage and must not be used to provision missing paths. The intended mode is `0700`;
-setgid is not required.
+Both directories must exist before the external Docker volumes are created. The local-driver bind
+volumes are an indirection around administrator-owned directories, not ordinary Docker-managed
+application storage. The intended directory mode is `0700`; setgid is not required.
 
 Use the selected deployment values to provision the root and its private ingress subdirectory:
 
@@ -115,9 +114,78 @@ The parent directory is shared by Caddy, `preview-gateway-host`, and the Agent. 
 container and Agent require read-write access to the parent directory so the Agent can create
 `lease-resolver.sock`. Do not use permissive fallback modes such as `0777`.
 
-The Compose file uses stable named-volume identifiers at service level. This avoids a Coolify
-parser incompatibility with `${...}` in service volume sources while keeping the host path
-portable in the top-level local-driver volume devices:
+With the gateway stack stopped, verify that no process owns a stale known socket. Remove only the
+known socket and lock files, and only after confirming there are no active listeners:
+
+```bash
+for socket in \
+  caddy-admin.sock \
+  preview-probe.sock \
+  lease-resolver.sock \
+  ingress/preview-http.sock
+do
+  socket_path="$DEVSPACE_GATEWAY_HOST_DIR/$socket"
+  if test -S "$socket_path"; then
+    if sudo fuser "$socket_path"; then
+      printf 'active socket owner: %s\n' "$socket_path" >&2
+      exit 1
+    fi
+  fi
+done
+
+sudo rm -f \
+  "$DEVSPACE_GATEWAY_HOST_DIR/caddy-admin.sock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/caddy-admin.sock.lock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/preview-probe.sock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/preview-probe.sock.lock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/lease-resolver.sock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/lease-resolver.sock.lock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/ingress/preview-http.sock" \
+  "$DEVSPACE_GATEWAY_HOST_DIR/ingress/preview-http.sock.lock"
+```
+
+Do not remove a socket owned by an active process. Then create the two stable external volumes:
+
+```bash
+docker volume create \
+  --driver local \
+  --opt type=none \
+  --opt o=bind \
+  --opt device="$DEVSPACE_GATEWAY_HOST_DIR" \
+  devspace-gateway-runtime
+
+docker volume create \
+  --driver local \
+  --opt type=none \
+  --opt o=bind \
+  --opt device="$DEVSPACE_GATEWAY_HOST_DIR/ingress" \
+  devspace-gateway-ingress
+```
+
+Inspect both exact objects before deployment:
+
+```bash
+docker volume inspect \
+  devspace-gateway-runtime \
+  devspace-gateway-ingress \
+  --format '{{json .Name}} {{json .Driver}} {{json .Options}}'
+```
+
+The runtime volume must report the equivalent of:
+
+```json
+{
+  "type": "none",
+  "o": "bind",
+  "device": "/srv/devspace/gateway"
+}
+```
+
+The ingress volume must report the same values with
+`"device": "/srv/devspace/gateway/ingress"`. Docker may print object keys in another order.
+
+The Compose file uses stable logical IDs at service level and exact administrator-precreated
+external names at top level:
 
 ```yaml
 services:
@@ -148,30 +216,31 @@ services:
 
 volumes:
   gateway-runtime:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}
+    external: true
+    name: devspace-gateway-runtime
   gateway-ingress:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress
+    external: true
+    name: devspace-gateway-ingress
 ```
 
 The container path remains fixed at `/run/devspace/gateway` and the connector target remains
 `/run/devspace/gateway/ingress`. `nocopy: true` prevents image contents from being copied into
 either administrator-owned host directory. The connector receives only the `ingress` volume and
 is read-only; Caddy and `preview-gateway-host` share the complete runtime volume read-write.
+Coolify UI storage must remain empty. Coolify must neither create these volumes nor replace them
+with project-scoped volumes.
+
+The exact names are the generic single-gateway production contract. They are deployment
+infrastructure identifiers, not host paths. Multiple simultaneous gateway deployments must use
+distinct administrator-provisioned names and a separately validated deployment adapter. Compose
+interpolation in top-level `name:` is intentionally not used because its behavior through
+Coolify's Git-based Compose transformation is unverified.
 
 Validate the rendered Compose model before deployment. The raw check verifies the source contract;
-the real Compose render check verifies that the named mounts resolve to the expected local-driver
-devices without starting the stack:
+the real Compose render check verifies the logical mounts and exact external names without
+starting the stack:
 
 ```bash
-DEVSPACE_GATEWAY_HOST_DIR=/tmp/devspace-gateway-test \
 DEVSPACE_GATEWAY_UID="$(id -u)" \
 DEVSPACE_GATEWAY_GID="$(id -g)" \
 docker compose \
@@ -182,9 +251,9 @@ node tooling/check-preview-gateway-compose-render.mjs \
   /tmp/devspace-preview-gateway-compose.json
 ```
 
-The rendered Caddy and `preview-gateway-host` sources must remain `gateway-runtime`, and the
-connector source must remain `gateway-ingress`. The top-level local-driver devices must be
-`/tmp/devspace-gateway-test` and `/tmp/devspace-gateway-test/ingress` respectively.
+The rendered Caddy and `preview-gateway-host` sources must remain `gateway-runtime`, the connector
+source must remain `gateway-ingress`, and the top-level definitions must resolve to the exact
+external names without driver options or devices.
 
 The repository-only contract check does not need Docker or a Caddy binary:
 
@@ -192,55 +261,26 @@ The repository-only contract check does not need Docker or a Caddy binary:
 pnpm preview-gateway:check
 ```
 
-Repository CI additionally renders this Compose model with a synthetic non-default host root and
-UID/GID/port. Administrators should still run the same `docker compose config --format json` check
-with their real deployment values before deployment.
+Repository CI additionally renders this Compose model with synthetic UID/GID/port values.
 
-## Change the host path after deployment
+## Safely recreate the external volumes
 
-Compose-managed local-driver volume objects retain their driver options across container
-recreation. Changing `DEVSPACE_GATEWAY_HOST_DIR` therefore requires recreating only the two
-gateway volume objects; changing the environment variable and recreating containers alone does
-not retarget an existing volume object. The underlying administrator-owned files are preserved
-when the Docker volume objects are removed.
-
-Use the exact Compose project name assigned to this deployment. Stop the stack without removing
-volumes, identify exactly one object for each DevSpace logical volume by its Compose labels,
-inspect those two objects, and remove only those exact names:
+Changing `DEVSPACE_GATEWAY_HOST_DIR` does not retarget an existing external volume. Stop the stack,
+ensure no dependent containers remain, inspect the two exact objects, and remove only those exact
+volume names:
 
 ```bash
-COMPOSE_PROJECT_NAME='the-existing-devspace-caddy-project'
-COMPOSE_FILE=deploy/preview-gateway/compose.yaml
-
-docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" down
-
-mapfile -t runtime_volumes < <(
-  docker volume ls \
-    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
-    --filter 'label=com.docker.compose.volume=gateway-runtime' \
-    --format '{{.Name}}'
-)
-mapfile -t ingress_volumes < <(
-  docker volume ls \
-    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
-    --filter 'label=com.docker.compose.volume=gateway-ingress' \
-    --format '{{.Name}}'
-)
-test "${#runtime_volumes[@]}" -eq 1
-test "${#ingress_volumes[@]}" -eq 1
-docker volume inspect "${runtime_volumes[0]}" "${ingress_volumes[0]}"
-docker volume rm "${runtime_volumes[0]}" "${ingress_volumes[0]}"
-
-DEVSPACE_GATEWAY_HOST_DIR=/srv/devspace/new-gateway \
-docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d
+docker volume inspect devspace-gateway-runtime devspace-gateway-ingress
+docker ps -a --filter volume=devspace-gateway-runtime
+docker ps -a --filter volume=devspace-gateway-ingress
+docker volume rm devspace-gateway-runtime devspace-gateway-ingress
 ```
 
-Provision `/srv/devspace/new-gateway` and its `ingress` child with mode `0700` and the selected
-UID/GID before the final `up`. The `docker volume rm` command above removes only the two named
-volume objects and does not remove files from either host directory. Never use
-`docker volume prune` or an unfiltered volume removal command. On a first deployment the two
-objects may be absent; do not assume their presence in a generic runbook—verify the exact state
-before choosing whether there is anything to recreate.
+Both `docker ps` results must be empty before removal. Deleting a local-driver bind volume object
+does not delete the underlying host directory or its files, but volume-removal commands must still
+be scoped precisely. Preserve and reprovision the selected root and `ingress` directory, then
+rerun the two exact `docker volume create` commands with the intended paths. Never use
+`docker volume prune`, a wildcard, or an unfiltered volume removal command.
 
 ## Deploy the stack
 
@@ -248,6 +288,17 @@ The artifacts are in `deploy/preview-gateway/`. Deploy the Compose file through 
 administrator-controlled container system. Do not expose gateway services through automatically
 assigned public service domains; use the selected administrator-owned outer-ingress contract.
 Provider-specific instructions belong in integration documentation.
+
+The production sequence is: provision the two `0700` host directories; verify no active process
+owns stale known sockets; remove stale known socket/lock files only while stopped; create and
+inspect both exact external volumes; deploy or redeploy; verify each container's configured user
+and mounted volume name; then verify all four sockets and `127.0.0.1:18080`. For example:
+
+```bash
+docker inspect \
+  --format '{{.Name}} user={{.Config.User}} mounts={{range .Mounts}}{{.Name}}:{{.Destination}}:rw={{.RW}} {{end}}' \
+  <caddy-container> <gateway-host-container> <connector-container>
+```
 
 The Caddy service uses a small deployment image with `caddy.json` baked in. Its listeners are
 `127.0.0.1:18080` and `/run/devspace/gateway/ingress/preview-http.sock`; the initial route set
@@ -299,9 +350,10 @@ DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET=/run/devspace/gateway/lease-resolver.sock
 DEVSPACE_DOCKER_SOCKET_PATH=/run/devspace-docker/docker.sock
 ```
 
-`DEVSPACE_GATEWAY_RUNTIME_DIR` is not a required variable. The deployment-level
-`DEVSPACE_GATEWAY_HOST_DIR` controls the host-side Compose bind source; the fixed container-side
-runtime path and the socket variables above are the sharing contract.
+`DEVSPACE_GATEWAY_RUNTIME_DIR` is not a required variable. `DEVSPACE_GATEWAY_HOST_DIR` selects the
+administrator-provisioned bind devices and code-server mount; the checked-in Compose file uses
+only the fixed external volume names. The fixed container-side runtime path and socket variables
+above are the sharing contract.
 
 Startup is intentionally fail-closed and retryable:
 
@@ -324,27 +376,32 @@ After this change is merged:
 
 1. Provision the configured shared runtime root and private `ingress` directory with the selected
    UID/GID and mode `0700`.
-2. Deploy `deploy/preview-gateway/compose.yaml` with the selected container deployment system.
-3. Mount the same host directory into code-server at
+2. Confirm the stack is stopped, no process owns stale known sockets, and remove only stale known
+   socket/lock files.
+3. Create and inspect `devspace-gateway-runtime` and `devspace-gateway-ingress` with the exact
+   local-driver bind options above.
+4. Deploy `deploy/preview-gateway/compose.yaml` with the selected container deployment system.
+5. Verify container users, exact mounted volume names, four sockets, and the loopback listener.
+6. Mount the same host directory into code-server at
    `${DEVSPACE_GATEWAY_HOST_DIR}:/run/devspace/gateway`.
-4. Restart code-server if the new bind mount is not applied to the running container.
-5. Start DevSpace with all preview socket variables above and the existing `DEVSPACE_APP_ORIGIN`.
-6. Start or retain the existing project runtime.
-7. Inside the workspace run:
+7. Restart code-server if the new bind mount is not applied to the running container.
+8. Start DevSpace with all preview socket variables above and the existing `DEVSPACE_APP_ORIGIN`.
+9. Start or retain the existing project runtime.
+10. Inside the workspace run:
 
    ```bash
    pnpm exec vite --host=0.0.0.0
    ```
 
-8. Request Preview reconciliation.
-9. Expect the preview state to move from:
+11. Request Preview reconciliation.
+12. Expect the preview state to move from:
 
    ```text
    Unavailable/Waiting
    → Ready
    ```
 
-10. After the selected outer-ingress rule is configured, verify that the generated reserved
+13. After the selected outer-ingress rule is configured, verify that the generated reserved
     namespace hostname reaches the Vite application. The suffix rule is an integration invariant,
     not a portable wildcard hostname syntax.
 

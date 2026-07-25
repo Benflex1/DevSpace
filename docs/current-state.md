@@ -17,10 +17,14 @@ route removal, stable hostname restoration, Agent restart reconciliation, and HM
 lost-session retirement and warning UX are complete for M1. Production preview deployment remains
 the principal M1 blocker.
 
-After PR #33 was merged, production deployment was attempted. Coolify rejected the variable
-interpolation in service-level volume sources during its pre-Compose security validation, before
-container replacement. The existing production deployment was not intentionally modified by this
-repository task. The repository-side named-bind compatibility correction is now the active blocker.
+After PR #33 was merged, Coolify rejected interpolation in service-level volume sources before
+Compose deployment. PR #34 was then merged with stable logical service sources and top-level
+local-driver bind options. That revision progressed past the parser rejection, but Coolify's
+normal Git-based Compose transformation created plain project-scoped volumes with `Options: null`.
+Caddy and `preview-gateway-host` received Docker-managed `_data` directories instead of the
+administrator-owned `0700` host directory and both failed with `EACCES`. No failed containers or
+active DevSpace socket listeners remain. Administrator-precreated external named bind volumes are
+now the active repository correction; production deployment remains incomplete.
 
 ## Implemented product path
 
@@ -157,9 +161,10 @@ repository task. The repository-side named-bind compatibility correction is now 
   Agent-managed routes. The generic Compose stack runs pinned Caddy, the host probe, and an isolated
   byte-transparent connector with no Docker socket or public Docker ports. Coolify/Traefik setup is
   optional and documented in `docs/integrations/coolify-traefik-preview-ingress.md`.
-- The repository-side Coolify compatibility correction is complete in this proposed change: service
-  mounts use stable named volume IDs, while top-level local-driver devices retain the configurable
-  administrator-owned host paths. Production deployment remains pending.
+- The production-discovered Coolify correction now uses stable logical service mount IDs backed by
+  exact administrator-precreated external volume names. Host-path mapping lives in deployment
+  provisioning rather than the Coolify-consumed Compose file. Production redeployment remains
+  pending.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means
@@ -180,10 +185,11 @@ repository task. The repository-side named-bind compatibility correction is now 
   exact one-label namespace ownership, Caddy's loopback listener plus private
   `ingress/preview-http.sock`, and a byte-transparent isolated connector. Coolify/Traefik and other
   outer-ingress APIs remain optional deployment concerns documented outside core runtime.
-- The gateway Compose host runtime root is configurable through the deployment-level
-  `DEVSPACE_GATEWAY_HOST_DIR` variable. The current validated home-server target uses
-  `/srv/devspace/gateway`, UID/GID `1000`, Coolify, Traefik, Cloudflare, and `benflex.dev`.
-  These deployment-specific values are not universal DevSpace core requirements.
+- The gateway Compose contract uses fixed external names for the current generic single-gateway
+  deployment. `DEVSPACE_GATEWAY_HOST_DIR` remains an administrator-provisioning value, and the
+  current home-server target maps those external volumes to `/srv/devspace/gateway` and its
+  `ingress` child with UID/GID `1000`. Those host paths, identities, and the Coolify, Traefik,
+  Cloudflare, and `benflex.dev` choices are not universal DevSpace core requirements.
 
 ## Still absent
 

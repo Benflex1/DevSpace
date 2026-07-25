@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -7,8 +7,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const composeFile = path.join(repositoryRoot, "deploy/preview-gateway/compose.yaml");
 const caddyImage = "caddy:2.11.3";
-const caddyConfig = path.join(repositoryRoot, "deploy/preview-gateway/caddy.json");
 const adminSocketName = "caddy-admin.sock";
 const previewHttpSocketName = "preview-http.sock";
 const routesPath = "/config/apps/http/servers/devspace-preview/routes";
@@ -119,10 +119,17 @@ async function main() {
   const uid = configuredId("DEVSPACE_GATEWAY_UID", "1000");
   const gid = configuredId("DEVSPACE_GATEWAY_GID", "1000");
   const runtimeDirectory = await mkdtemp(path.join(os.tmpdir(), "devspace-caddy-smoke-"));
+  const uniqueId = path.basename(runtimeDirectory).replace(/[^a-z0-9]/gu, "").toLowerCase();
+  const composeProject = `devspacecaddysmoke${uniqueId}`;
+  const runtimeVolumeName = `devspace-caddy-smoke-runtime-${uniqueId}`;
+  const ingressVolumeName = `devspace-caddy-smoke-ingress-${uniqueId}`;
+  const overrideFile = path.join(runtimeDirectory, "compose.smoke.yaml");
   const adminSocket = path.join(runtimeDirectory, adminSocketName);
   const ingressDirectory = path.join(runtimeDirectory, "ingress");
   const previewHttpSocket = path.join(ingressDirectory, previewHttpSocketName);
   let containerId;
+  let runtimeVolumeCreated = false;
+  let ingressVolumeCreated = false;
   try {
     // The real deployment provisions this directory for the selected UID/GID.
     // The setgid bit preserves the smoke runner's group on Caddy's configured
@@ -131,15 +138,51 @@ async function main() {
     await chmod(runtimeDirectory, 0o2777);
     await mkdir(ingressDirectory, { mode: 0o2777 });
     await chmod(ingressDirectory, 0o2777);
-    const mountConfig = `type=bind,src=${caddyConfig},dst=/etc/caddy/caddy.json,readonly`;
-    const mountRuntime = `type=bind,src=${runtimeDirectory},dst=/run/devspace/gateway`;
-    const started = await runDocker([
-      "run", "--detach", "--user", `${uid}:${gid}`, "--network", "none",
-      "--mount", mountConfig, "--mount", mountRuntime, caddyImage,
-      "caddy", "run", "--config", "/etc/caddy/caddy.json"
+    await writeFile(overrideFile, [
+      "services:",
+      "  caddy:",
+      "    network_mode: none",
+      "volumes:",
+      "  gateway-runtime:",
+      "    external: true",
+      `    name: ${runtimeVolumeName}`,
+      "  gateway-ingress:",
+      "    external: true",
+      `    name: ${ingressVolumeName}`,
+      ""
+    ].join("\n"));
+    await runDocker([
+      "volume", "create", "--driver", "local", "--opt", "type=none", "--opt", "o=bind",
+      "--opt", `device=${runtimeDirectory}`, runtimeVolumeName
     ]);
+    runtimeVolumeCreated = true;
+    await runDocker([
+      "volume", "create", "--driver", "local", "--opt", "type=none", "--opt", "o=bind",
+      "--opt", `device=${ingressDirectory}`, ingressVolumeName
+    ]);
+    ingressVolumeCreated = true;
+    for (const [volumeName, device] of [
+      [runtimeVolumeName, runtimeDirectory],
+      [ingressVolumeName, ingressDirectory]
+    ]) {
+      const inspected = await runDocker(["volume", "inspect", volumeName, "--format", "{{json .Options}}"]);
+      assert.deepEqual(JSON.parse(inspected.stdout), { device, o: "bind", type: "none" });
+    }
+
+    const composeArgs = ["compose", "-p", composeProject, "-f", composeFile, "-f", overrideFile];
+    await runDocker([
+      ...composeArgs, "up", "--build", "--detach", "--no-deps", "caddy"
+    ]);
+    const started = await runDocker([...composeArgs, "ps", "--quiet", "caddy"]);
     containerId = started.stdout.trim();
     assert.match(containerId, /^[0-9a-f]+$/u, "Docker did not return a Caddy container ID.");
+    const mounts = await runDocker(["inspect", "--format", "{{json .Mounts}}", containerId]);
+    const runtimeMount = JSON.parse(mounts.stdout).find((mount) => mount.Destination === "/run/devspace/gateway");
+    const containerUser = await runDocker(["inspect", "--format", "{{.Config.User}}", containerId]);
+    assert.equal(containerUser.stdout.trim(), `${uid}:${gid}`, "Caddy must retain the configured UID/GID.");
+    assert.equal(runtimeMount?.Type, "volume", "Caddy runtime mount must remain a volume.");
+    assert.equal(runtimeMount?.Name, runtimeVolumeName, "Caddy must receive the isolated external runtime volume.");
+    assert.equal(runtimeMount?.RW, true, "Caddy runtime volume must remain read-write.");
     await waitForSocket(adminSocket, containerId);
 
     const initial = await adminRequest(adminSocket, "GET");
@@ -175,7 +218,7 @@ async function main() {
     const final = await adminRequest(adminSocket, "GET");
     assert.equal(final.status, 200, "final route inspection must succeed");
     assertFallback(final.body, "final route inspection");
-    console.log(`real Caddy ${caddyImage} smoke passed (native JSON, Unix Admin socket, GET, PATCH, fallback restore)`);
+    console.log(`real Caddy ${caddyImage} smoke passed (isolated external bind volume, native JSON, Unix Admin socket, GET, PATCH, fallback restore)`);
   } catch (error) {
     if (containerId !== undefined) {
       const logs = await runDocker(["logs", containerId], true);
@@ -185,7 +228,13 @@ async function main() {
     }
     throw error;
   } finally {
+    await runDocker([
+      "compose", "-p", composeProject, "-f", composeFile, "-f", overrideFile,
+      "down", "--remove-orphans"
+    ], true);
     if (containerId !== undefined) await runDocker(["rm", "--force", containerId], true);
+    if (ingressVolumeCreated) await runDocker(["volume", "rm", ingressVolumeName], true);
+    if (runtimeVolumeCreated) await runDocker(["volume", "rm", runtimeVolumeName], true);
     await rm(runtimeDirectory, { recursive: true, force: true });
   }
 }

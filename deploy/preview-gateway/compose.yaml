@@ -55,15 +55,9 @@ services:
 
 volumes:
   gateway-runtime:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}
+    external: true
+    name: devspace-gateway-runtime
 
   gateway-ingress:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress
+    external: true
+    name: devspace-gateway-ingress
