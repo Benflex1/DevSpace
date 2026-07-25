@@ -55,8 +55,42 @@ jobs:
           node tooling/check-preview-gateway-compose-render.mjs \
             "$RUNNER_TEMP/devspace-preview-gateway-compose.json"
 
+      - name: Validate rendered Coolify Raw Compose adapter
+        run: |
+          if env -u DEVSPACE_COOLIFY_PROXY_NETWORK \
+            docker compose \
+              -f deploy/preview-gateway/compose.coolify.yaml \
+              config >/dev/null 2>&1
+          then
+            echo "Coolify adapter unexpectedly accepted an unset proxy network" >&2
+            exit 1
+          fi
+          if DEVSPACE_COOLIFY_PROXY_NETWORK= \
+            docker compose \
+              -f deploy/preview-gateway/compose.coolify.yaml \
+              config >/dev/null 2>&1
+          then
+            echo "Coolify adapter unexpectedly accepted an empty proxy network" >&2
+            exit 1
+          fi
+          DEVSPACE_GATEWAY_UID=12345 \
+          DEVSPACE_GATEWAY_GID=12346 \
+          DEVSPACE_PREVIEW_INGRESS_PORT=18081 \
+          DEVSPACE_COOLIFY_PROXY_NETWORK=devspace-ci-temporary-proxy \
+          docker compose \
+            -f deploy/preview-gateway/compose.coolify.yaml \
+            config \
+            --format json \
+            > "$RUNNER_TEMP/devspace-preview-gateway-coolify-compose.json"
+          node tooling/check-preview-gateway-coolify-compose-render.mjs \
+            "$RUNNER_TEMP/devspace-preview-gateway-coolify-compose.json" \
+            devspace-ci-temporary-proxy
+
       - name: Smoke test pinned Caddy preview gateway
         run: pnpm preview-gateway:caddy-smoke
+
+      - name: Smoke test Coolify Raw Compose network adapter
+        run: pnpm preview-gateway:coolify-smoke
 
       - name: Verify workspace graph
         run: pnpm workspace:check

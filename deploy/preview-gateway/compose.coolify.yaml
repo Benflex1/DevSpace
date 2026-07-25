@@ -1,0 +1,4 @@
+include:
+  - path:
+      - compose.yaml
+      - compose.coolify-network.yaml

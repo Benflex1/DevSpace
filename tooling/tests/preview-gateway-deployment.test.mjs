@@ -18,8 +18,60 @@ async function assertComposeMutationRejected(mutate, message) {
   }
 }
 
+async function assertDeploymentFileMutationRejected(fileName, mutate, message) {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-deployment-test-"));
+  try {
+    await cp(path.resolve("deploy/preview-gateway"), path.join(root, "deploy/preview-gateway"), { recursive: true });
+    const filePath = path.join(root, "deploy/preview-gateway", fileName);
+    const source = await readFile(filePath, "utf8");
+    await writeFile(filePath, mutate(source));
+    await assert.rejects(() => validatePreviewGatewayDeployment(root), message);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 test("preview gateway deployment accepts the valid external-volume model", async () => {
   assert.equal(await validatePreviewGatewayDeployment(), true);
+});
+
+test("generic preview gateway Compose remains provider-neutral", async () => {
+  await assertComposeMutationRejected(
+    (compose) => `${compose}\n# Coolify proxy integration\n`,
+    /provider-neutral/u
+  );
+});
+
+test("Coolify Compose Location includes the generic contract and network override", async () => {
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify.yaml",
+    (compose) => compose.replace("compose.yaml", "compose.duplicated.yaml"),
+    /include the generic contract/u
+  );
+});
+
+test("Coolify adapter requires an explicit non-empty proxy network", async () => {
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify-network.yaml",
+    (compose) => compose.replace(
+      "${DEVSPACE_COOLIFY_PROXY_NETWORK:?DEVSPACE_COOLIFY_PROXY_NETWORK must be set and non-empty}",
+      "${DEVSPACE_COOLIFY_PROXY_NETWORK:-default}"
+    ),
+    /required administrator-selected external network/u
+  );
+});
+
+test("Coolify adapter attaches only the connector with the stable alias", async () => {
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify-network.yaml",
+    (compose) => compose.replace("preview-ingress-connector", "caddy"),
+    /attach only the connector/u
+  );
+  await assertDeploymentFileMutationRejected(
+    "compose.coolify-network.yaml",
+    (compose) => compose.replace("devspace-preview-ingress", "generated-resource-name"),
+    /stable alias/u
+  );
 });
 
 test("preview gateway deployment rejects Coolify-incompatible service interpolation", async () => {

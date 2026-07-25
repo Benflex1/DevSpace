@@ -1,6 +1,9 @@
 # Preview Gateway Deployment
 
 This is the provider-neutral repository deployment contract for the M1 workspace preview path.
+Provider-specific entrypoints may include this contract without changing it. The current
+Coolify Raw Compose adapter and its deployment runbook live in
+[`integrations/coolify-traefik-preview-ingress.md`](./integrations/coolify-traefik-preview-ingress.md).
 The Compose stack contains three services:
 
 ```text
@@ -227,14 +230,14 @@ The container path remains fixed at `/run/devspace/gateway` and the connector ta
 `/run/devspace/gateway/ingress`. `nocopy: true` prevents image contents from being copied into
 either administrator-owned host directory. The connector receives only the `ingress` volume and
 is read-only; Caddy and `preview-gateway-host` share the complete runtime volume read-write.
-Coolify UI storage must remain empty. Coolify must neither create these volumes nor replace them
-with project-scoped volumes.
+The selected deployment system must preserve these external volume identities and must neither
+create replacements nor rewrite the service mounts.
 
 The exact names are the generic single-gateway production contract. They are deployment
 infrastructure identifiers, not host paths. Multiple simultaneous gateway deployments must use
 distinct administrator-provisioned names and a separately validated deployment adapter. Compose
-interpolation in top-level `name:` is intentionally not used because its behavior through
-Coolify's Git-based Compose transformation is unverified.
+interpolation in top-level `name:` is intentionally not used so the generic single-gateway
+storage contract remains exact.
 
 Validate the rendered Compose model before deployment. The raw check verifies the source contract;
 the real Compose render check verifies the logical mounts and exact external names without
@@ -288,6 +291,11 @@ The artifacts are in `deploy/preview-gateway/`. Deploy the Compose file through 
 administrator-controlled container system. Do not expose gateway services through automatically
 assigned public service domains; use the selected administrator-owned outer-ingress contract.
 Provider-specific instructions belong in integration documentation.
+
+For a generic Compose deployment, the entrypoint is
+`deploy/preview-gateway/compose.yaml`. Do not point a Coolify resource at that generic file:
+the current Coolify integration requires Raw Compose Deployment and the provider-specific
+`deploy/preview-gateway/compose.coolify.yaml` entrypoint documented separately.
 
 The production sequence is: provision the two `0700` host directories; verify no active process
 owns stale known sockets; remove stale known socket/lock files only while stopped; create and
@@ -380,7 +388,8 @@ After this change is merged:
    socket/lock files.
 3. Create and inspect `devspace-gateway-runtime` and `devspace-gateway-ingress` with the exact
    local-driver bind options above.
-4. Deploy `deploy/preview-gateway/compose.yaml` with the selected container deployment system.
+4. Deploy `deploy/preview-gateway/compose.yaml` with a provider-neutral container deployment
+   system, or use the selected provider-specific entrypoint and its integration runbook.
 5. Verify container users, exact mounted volume names, four sockets, and the loopback listener.
 6. Mount the same host directory into code-server at
    `${DEVSPACE_GATEWAY_HOST_DIR}:/run/devspace/gateway`.

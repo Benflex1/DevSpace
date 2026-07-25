@@ -1,0 +1,11 @@
+services:
+  preview-ingress-connector:
+    networks:
+      coolify-proxy:
+        aliases:
+          - devspace-preview-ingress
+
+networks:
+  coolify-proxy:
+    external: true
+    name: ${DEVSPACE_COOLIFY_PROXY_NETWORK:?DEVSPACE_COOLIFY_PROXY_NETWORK must be set and non-empty}

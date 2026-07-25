@@ -17,14 +17,16 @@ route removal, stable hostname restoration, Agent restart reconciliation, and HM
 lost-session retirement and warning UX are complete for M1. Production preview deployment remains
 the principal M1 blocker.
 
-After PR #33 was merged, Coolify rejected interpolation in service-level volume sources before
-Compose deployment. PR #34 was then merged with stable logical service sources and top-level
-local-driver bind options. That revision progressed past the parser rejection, but Coolify's
-normal Git-based Compose transformation created plain project-scoped volumes with `Options: null`.
-Caddy and `preview-gateway-host` received Docker-managed `_data` directories instead of the
-administrator-owned `0700` host directory and both failed with `EACCES`. No failed containers or
-active DevSpace socket listeners remain. Administrator-precreated external named bind volumes are
-now the active repository correction; production deployment remains incomplete.
+Normal Coolify Compose mode is invalid for the Preview Gateway because it rewrites the external
+volume service mounts. Raw Compose Deployment preserves the two administrator-created external
+bind volumes and now runs Caddy, `preview-gateway-host`, and `preview-ingress-connector`
+successfully with all four private sockets and the expected fallback HTTP 404. Production
+inspection then showed that the connector's generated private default network and Coolify
+Traefik's stable resource network were disjoint. A temporary connector-only attachment with alias
+`devspace-preview-ingress` proved the complete network-to-Caddy fallback path and was removed.
+The repository now carries a Coolify-specific Raw Compose adapter that requires an explicit
+external proxy network and makes that connector-only attachment durable; deployment of this
+adapter remains pending.
 
 ## Implemented product path
 
@@ -161,10 +163,12 @@ now the active repository correction; production deployment remains incomplete.
   Agent-managed routes. The generic Compose stack runs pinned Caddy, the host probe, and an isolated
   byte-transparent connector with no Docker socket or public Docker ports. Coolify/Traefik setup is
   optional and documented in `docs/integrations/coolify-traefik-preview-ingress.md`.
-- The production-discovered Coolify correction now uses stable logical service mount IDs backed by
-  exact administrator-precreated external volume names. Host-path mapping lives in deployment
-  provisioning rather than the Coolify-consumed Compose file. Production redeployment remains
-  pending.
+- The generic gateway Compose contract remains provider-neutral and uses stable logical service
+  mount IDs backed by exact administrator-precreated external volume names. The Coolify-specific
+  single-location entrypoint includes that generic contract plus a network-only override, requires
+  `DEVSPACE_COOLIFY_PROXY_NETWORK`, and attaches only the connector with alias
+  `devspace-preview-ingress`. Raw Compose rendering and topology are repository-validated; the
+  production adapter redeployment remains pending.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means
