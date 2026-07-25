@@ -38,6 +38,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate rendered preview-gateway Compose contract
+        run: |
+          docker compose version
+          DEVSPACE_GATEWAY_HOST_DIR=/tmp/devspace-gateway-compose-contract \
+          DEVSPACE_GATEWAY_UID=12345 \
+          DEVSPACE_GATEWAY_GID=12346 \
+          DEVSPACE_PREVIEW_INGRESS_PORT=18081 \
+          docker compose \
+            -f deploy/preview-gateway/compose.yaml \
+            config \
+            --format json \
+            > "$RUNNER_TEMP/devspace-preview-gateway-compose.json"
+          node tooling/check-preview-gateway-compose-render.mjs \
+            "$RUNNER_TEMP/devspace-preview-gateway-compose.json"
+
       - name: Smoke test pinned Caddy preview gateway
         run: pnpm preview-gateway:caddy-smoke
 

@@ -5,7 +5,7 @@ The Compose stack contains three services:
 
 ```text
 dedicated Caddy (host network, 127.0.0.1:18080)
-preview-gateway-host (host network, private probe and lease-resolver sockets)
+preview-gateway-host (host network, owns probe socket and consumes Agent lease-resolver socket)
 preview-ingress-connector (isolated Compose network, internal TCP port only)
 ```
 
@@ -147,12 +147,17 @@ The repository-only contract check does not need Docker or a Caddy binary:
 pnpm preview-gateway:check
 ```
 
+Repository CI additionally renders this Compose model with a synthetic non-default host root.
+That check verifies both the default-expression interpolation syntax and the literal `/ingress`
+suffix without starting containers. Administrators should still run `docker compose config` with
+their real deployment values before deployment.
+
 ## Deploy the stack
 
 The artifacts are in `deploy/preview-gateway/`. Deploy the Compose file through the selected
-administrator-controlled container system. Do not assign a Coolify-generated service domain to
-Caddy, `preview-gateway-host`, or `preview-ingress-connector`; the current Coolify integration
-uses one administrator-managed reserved-namespace router instead.
+administrator-controlled container system. Do not expose gateway services through automatically
+assigned public service domains; use the selected administrator-owned outer-ingress contract.
+Provider-specific instructions belong in integration documentation.
 
 The Caddy service uses a small deployment image with `caddy.json` baked in. Its listeners are
 `127.0.0.1:18080` and `/run/devspace/gateway/ingress/preview-http.sock`; the initial route set
