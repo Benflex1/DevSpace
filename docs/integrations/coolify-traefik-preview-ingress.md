@@ -1,151 +1,194 @@
-# Coolify / Traefik shared preview ingress
+# Coolify Raw Compose preview ingress
 
-This document describes the current validated home-server integration. It is not a requirement
-for DevSpace core: other administrators may select another outer ingress that can enforce the
-same reserved-namespace, Host-preservation, WebSocket, and authentication invariants.
+This document is the provider-specific deployment adapter for the current home-server
+Coolify/Traefik integration. The provider-neutral gateway contract remains
+[`deploy/preview-gateway/compose.yaml`](../../deploy/preview-gateway/compose.yaml) and
+[`preview-gateway-deployment.md`](../preview-gateway-deployment.md).
 
-## Current home-server topology
+## Validated deployment mode
 
-For the current deployment target, the selected path is:
+The gateway must use **Raw Compose Deployment**. Normal Coolify Compose mode transforms the
+external-volume service mounts and has produced project-scoped Docker-managed storage instead of
+the administrator-created bind volumes. That mode is not valid for this gateway.
+
+Raw Compose preserves the exact external objects:
+
+- `devspace-gateway-runtime`
+- `devspace-gateway-ingress`
+
+Coolify's Persistent Storage page may still display stale definitions from a deployment before
+Raw Compose was enabled. Do not use that page as runtime truth and do not recreate storage from
+it. The generated Compose model and `docker inspect` output are authoritative.
+
+Configure the Coolify resource with this single Compose Location:
 
 ```text
-Cloudflare Tunnel
-→ Coolify Traefik
+/deploy/preview-gateway/compose.coolify.yaml
+```
+
+The leading slash is the Coolify repository-location form. The entrypoint uses Compose `include`
+to render the generic contract together with `compose.coolify-network.yaml`; the adapter does not
+duplicate the three service definitions. Repository CI runs `docker compose config` through this
+exact entrypoint and validates the rendered model.
+
+Set this non-secret deployment variable explicitly:
+
+```text
+DEVSPACE_COOLIFY_PROXY_NETWORK=<administrator-selected-external-network>
+```
+
+There is no default. `${DEVSPACE_COOLIFY_PROXY_NETWORK:?...}` interpolation rejects both an unset
+and an empty value so a deployment cannot silently start with an isolated connector.
+
+## Observed production evidence
+
+Raw Compose successfully runs all three gateway services with the selected UID/GID, preserves
+both external bind volumes, creates all four private sockets, and returns Caddy's fallback HTTP
+404. The Agent reports healthy rootless runtime and operation journal availability.
+
+The remaining failure was network topology: Raw Compose attached the connector only to its
+generated private `<resource>_default` network, while Coolify's Traefik proxy used the separate
+stable `<resource>` network. The generated environment did not contain
+`COOLIFY_RESOURCE_UUID`. A temporary connector-only attachment to the stable network with alias
+`devspace-preview-ingress` returned the expected Caddy 404 and was removed after the proof.
+
+The observed proxy was Traefik `3.6.13` from `traefik:v3.6`; generated Compose labels reported
+version `5.3.1`. The connector exposed `8080/tcp` and had no published host port. These are
+deployment observations, not generic defaults or names embedded in the adapter.
+
+## Resulting network boundary
+
+The rendered topology is:
+
+```text
+Coolify Traefik
+→ administrator-selected external proxy network
+→ devspace-preview-ingress:8080
 → preview-ingress-connector
-→ private ingress Unix socket
-→ dedicated Caddy
-→ Agent-managed loopback lease
-→ workspace container
+→ /run/devspace/gateway/ingress/preview-http.sock
+→ Caddy
 ```
 
-The connector is selected because Coolify Traefik owns the exact administrator-reserved
-`*-preview.benflex.dev` namespace rule. Ordinary hosts such as `code.benflex.dev` and
-`app.benflex.dev` remain outside DevSpace preview routing.
+Only `preview-ingress-connector` joins the selected external network, with the stable alias
+`devspace-preview-ingress`. The connector exposes `8080/tcp` internally by default, publishes no
+host port, mounts only `devspace-gateway-ingress` read-only, and receives no Docker socket.
 
-Coolify is an outer-ingress integration only. DevSpace does not call Coolify or Traefik APIs,
-create one resource per preview, or require a particular Coolify proxy-network name.
+`caddy` and `preview-gateway-host` remain `network_mode: host`. They must not join the Coolify
+proxy network, publish ports, or mount the host/Coolify Docker socket. The connector must not
+receive the full `devspace-gateway-runtime` volume.
 
-## Coolify Compose volume compatibility
+Do not use `docker network connect` as durable setup. A manual attachment is useful only as
+temporary diagnosis and disappears on container replacement. The repository adapter owns the
+durable attachment.
 
-Two separate production behaviors constrain this integration. Coolify's security parser rejects
-variable interpolation in a service-level volume source, such as
-`source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}`. This is a Coolify integration
-incompatibility, not a universal Docker Compose limitation.
+## Select and verify the proxy network
 
-PR #34 moved the host paths into top-level local-driver `driver_opts`. Normal Compose validation
-and smoke tests passed, but the Git-based Coolify deployment transformed those definitions into
-project-scoped ordinary volumes whose Docker `Options` were `null`. Caddy and the gateway host
-therefore mounted Docker-managed `_data` directories instead of the administrator-owned runtime
-directory and failed with `EACCES`. This is a Coolify resource-transformation behavior, not a
-universal Docker Compose limitation.
-
-The corrected generic Compose file keeps logical service sources `gateway-runtime` and
-`gateway-ingress`, but declares exact external names `devspace-gateway-runtime` and
-`devspace-gateway-ingress`. An administrator must create both as local-driver bind volumes before
-deployment. The checked-in Compose file contains no host path or `driver_opts`, and Coolify must
-not create or rewrite the external objects.
-
-After provisioning the selected host root and `ingress` child with the selected UID/GID and mode
-`0700`, create the objects outside Coolify:
+List every Docker network currently attached to Coolify's Traefik proxy:
 
 ```bash
-docker volume create \
-  --driver local \
-  --opt type=none \
-  --opt o=bind \
-  --opt device="$DEVSPACE_GATEWAY_HOST_DIR" \
-  devspace-gateway-runtime
-
-docker volume create \
-  --driver local \
-  --opt type=none \
-  --opt o=bind \
-  --opt device="$DEVSPACE_GATEWAY_HOST_DIR/ingress" \
-  devspace-gateway-ingress
-
-docker volume inspect devspace-gateway-runtime devspace-gateway-ingress
+docker inspect coolify-proxy \
+  --format '{{range $network, $_ := .NetworkSettings.Networks}}{{println $network}}{{end}}' \
+  | sort
 ```
 
-The runtime `Options` must be equivalent to
-`{"type":"none","o":"bind","device":"/srv/devspace/gateway"}` for the current home-server target;
-the ingress object must use `/srv/devspace/gateway/ingress`.
-
-These fixed names are the current single-gateway production contract. Multiple simultaneous
-gateway instances require distinct external names through a separately validated deployment
-adapter. Top-level `name:` interpolation is intentionally rejected because it has not been proven
-safe through Coolify's Git-based transformation.
-
-Keep Coolify UI storage empty. Do not add UI storage definitions, let Coolify create the volumes,
-switch deployment mechanisms, assign a service domain or host port, or mount the host/Coolify
-Docker socket. The connector remains internal-only and the reserved Traefik namespace router
-remains administrator-managed.
-
-## Reserved namespace rule
-
-Configure the matching DevSpace preview base:
+Inspect candidate networks before selecting one:
 
 ```bash
-DEVSPACE_PREVIEW_BASES='[{"id":"main","domain":"benflex.dev","labelSuffix":"-preview"}]'
+docker network inspect <candidate-network> \
+  --format 'name={{.Name}} driver={{.Driver}} scope={{.Scope}} containers={{json .Containers}}'
 ```
 
-The permanent namespace router must forward only one-label hosts matching
-`<generated-stem>-preview.benflex.dev`, preserve the original `Host`, support HTTP/1.1/WebSocket
-upgrades, and apply the required authenticated access policy. Ordinary hosts such as
-`code.benflex.dev` and deeper hosts such as `foo-preview.bar.benflex.dev` must remain with the
-normal application routers.
+Select the administrator-managed network intended to connect this Coolify resource to
+`coolify-proxy`, then set its exact name as `DEVSPACE_COOLIFY_PROXY_NETWORK`. Do not derive it
+from `COOLIFY_RESOURCE_UUID`: that variable is absent from the observed Raw Compose environment,
+and the adapter intentionally does not depend on it.
 
-For a current Traefik v3 installation, the rule can conceptually resemble:
+After deployment, identify the real connector container from the generated Compose deployment
+and inspect its effective networks and aliases:
 
-```text
-HostRegexp(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-preview\\.benflex\\.dev$`)
+```bash
+docker inspect <preview-ingress-connector-container> \
+  --format '{{json .NetworkSettings.Networks}}' \
+  | jq
 ```
 
-Derive the escaped domain and suffix from the actual `DEVSPACE_PREVIEW_BASES` entry. This example
-is illustrative, not generic core configuration: suffixes containing multiple hyphens and base
-domains with multiple labels must be rendered from the administrator configuration. Keep the
-service target pointed at the connector's internal Compose-network port; do not publish that port
-on the host.
+The output must contain the selected external network and the alias
+`devspace-preview-ingress`. Confirm network membership from the other direction:
 
-Do not assign a Coolify-generated service domain to the Caddy, `preview-gateway-host`, or
-`preview-ingress-connector` services. The connector should not publish a host port, and no
-host/Coolify Docker socket may be mounted. Do not manually attach arbitrary proxy networks unless
-verified deployment evidence shows that the selected integration requires one. The permanent
-namespace router is administrator-managed integration configuration, not per-preview DevSpace
-state.
+```bash
+docker network inspect "$DEVSPACE_COOLIFY_PROXY_NETWORK" \
+  --format '{{json .Containers}}' \
+  | jq
+```
 
-Before applying a rule, verify the installed Traefik version from the running deployment, for
-example by inspecting the image tag and running the container's `traefik version` command where
-available. Adapt the versioned `HostRegexp` syntax, router field names, entrypoint names, and
-provider configuration to that installed version rather than copying this example as universal
-product configuration.
+Verify the remaining topology and mounts from Docker itself:
 
-## Deployment checks
+```bash
+docker inspect \
+  --format '{{.Name}} network_mode={{.HostConfig.NetworkMode}} ports={{json .HostConfig.PortBindings}} mounts={{range .Mounts}}{{.Name}}:{{.Destination}}:rw={{.RW}} {{end}}' \
+  <caddy-container> \
+  <preview-gateway-host-container> \
+  <preview-ingress-connector-container>
+```
 
-1. Inspect persisted preview rows before changing `DEVSPACE_PREVIEW_BASES`.
-2. Provision `DEVSPACE_GATEWAY_HOST_DIR` and its private `ingress` subdirectory with the selected
-   gateway UID/GID and mode `0700`.
-3. With the stack stopped, verify no process owns stale known sockets and remove only stale known
-   socket/lock files.
-4. Create `devspace-gateway-runtime` and `devspace-gateway-ingress` with the exact local-driver
-   bind options in `docs/preview-gateway-deployment.md`, then verify both with
-   `docker volume inspect`.
-5. Confirm Coolify UI storage is empty, deploy or redeploy
-   `deploy/preview-gateway/compose.yaml`, and run `pnpm preview-gateway:check`.
-6. Confirm container users and mounted volume names, then verify `caddy-admin.sock`,
-   `preview-probe.sock`, `lease-resolver.sock`, `ingress/preview-http.sock`, and
-   `127.0.0.1:18080`.
-7. Confirm the three gateway services have no Coolify-generated domains, no host-port publication,
-   and no host/Coolify Docker socket mount.
-8. Add one permanent reserved-namespace router to the existing Traefik deployment.
-9. Confirm an ordinary application hostname does not reach DevSpace, while a generated reserved
-   hostname reaches the terminal 404 until an exact route is materialized.
-10. Confirm the incoming `Host` and WebSocket upgrade reach the Preview Gateway unchanged.
+Expected results:
 
-Changing a domain or suffix changes canonical hostname identities. Retire/rematerialize affected
-preview state in a controlled Web-owned process, remove stale Caddy routes first, then activate
-the new namespace. DevSpace intentionally does not perform an unsafe automatic hostname
-migration.
+- Caddy and the gateway host use `network_mode=host`.
+- All `PortBindings` values are empty.
+- Caddy and the gateway host mount `devspace-gateway-runtime` read-write.
+- The connector mounts only `devspace-gateway-ingress` at
+  `/run/devspace/gateway/ingress`, read-only.
+- No mount source or destination is a host/Coolify Docker socket.
 
-The current production Web authentication mode remains Cloudflare Access. This does not make the
-preview ingress provider-dependent; a future provider-neutral OIDC or standards-based production
-authentication mode is tracked separately on the roadmap.
+## Storage and service configuration
+
+Provision and inspect the two administrator-owned external bind volumes exactly as described in
+[`preview-gateway-deployment.md`](../preview-gateway-deployment.md). For the current home server,
+their bind devices are `/srv/devspace/gateway` and `/srv/devspace/gateway/ingress`, and the
+selected service identity is UID/GID `1000:1000`. Those are administrator deployment values, not
+hardcoded adapter defaults.
+
+Keep Coolify storage configuration empty for this Raw Compose resource. Ignore stale
+pre-Raw-Compose entries in the Persistent Storage page; verify the generated Compose and real
+container mounts instead.
+
+Do not:
+
+- add a Coolify-generated service domain to any gateway service;
+- publish connector port `8080`;
+- attach Caddy or `preview-gateway-host` to the proxy network;
+- mount `/var/run/docker.sock`, the Coolify Docker socket, or another host Docker socket;
+- replace the exact external volumes with Coolify-managed project volumes;
+- use a manual `docker network connect` as the permanent configuration.
+
+## Deployment and reachability checks
+
+1. Enable Raw Compose Deployment on the gateway resource.
+2. Set Compose Location to `/deploy/preview-gateway/compose.coolify.yaml`.
+3. Set `DEVSPACE_COOLIFY_PROXY_NETWORK` to the exact selected external network name.
+4. Keep the resource's Persistent Storage and service-domain configuration empty.
+5. Confirm the exact external bind volumes already exist and their Docker `Options` point to the
+   intended directories.
+6. Deploy the Raw Compose resource.
+7. Inspect the generated Compose model and all three real containers.
+8. Verify `caddy-admin.sock`, `preview-probe.sock`, `lease-resolver.sock`, and
+   `ingress/preview-http.sock`.
+9. From a temporary diagnostic container on the selected proxy network, request the stable alias
+   without publishing a port:
+
+   ```bash
+   docker run --rm \
+     --network "$DEVSPACE_COOLIFY_PROXY_NETWORK" \
+     curlimages/curl:8.17.0 \
+     --silent --output /dev/null --write-out '%{http_code}\n' \
+     --header 'Host: network-proof-preview.invalid' \
+     http://devspace-preview-ingress:8080/
+   ```
+
+   Before an exact Agent-managed preview route exists, the expected status is Caddy's fallback
+   `404`.
+
+This task establishes durable network reachability only. Do **not** add the permanent Traefik
+`HostRegexp` router as part of this deployment change. The authenticated reserved-namespace
+router, Host preservation, WebSocket validation, and external preview verification are the next
+production stage after this change is merged and deployed.

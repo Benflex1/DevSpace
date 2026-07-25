@@ -191,19 +191,20 @@ Security and deployment support completed:
 Repository-side readiness:
 
 - ✅ Shared-ingress connector and reserved `labelSuffix` hostname namespace
-- 🟡 Portable gateway Compose contract corrected to administrator-precreated external volumes
+- ✅ Portable gateway Compose contract validated with administrator-precreated external volumes
 - ✅ Checked-in Caddy configuration, deployment validation, and real-Caddy smoke coverage
 - ✅ Local lifecycle coverage: Vite `Waiting → Ready`, Vite stop/restart, runtime stop/start,
   fail-closed route removal, stable hostname restoration, Agent restart reconciliation, and HMR
-- 🟡 Prior named-bind attempt was insufficient: Coolify replaced top-level local-driver bind
-  options with plain project-scoped volumes whose `Options` were `null`
-- 🟡 Active repository correction: exact administrator-precreated external gateway volume names
+- ✅ Raw Compose Deployment preserves the exact external gateway bind volumes and runs all three
+  services plus all four private sockets
+- 🟡 Coolify Raw Compose network adapter implemented for connector-only attachment to an explicit
+  administrator-selected external proxy network; production redeployment remains
 
 Production deployment remains pending:
 
-- ⏳ Provision the selected gateway host runtime root and its private `ingress` subdirectory
-- ⏳ Create and inspect the two exact external local-driver bind volumes
-- ⏳ Deploy the preview gateway stack on the home server
+- ✅ Provision the selected gateway host runtime root and its private `ingress` subdirectory
+- ✅ Create and inspect the two exact external local-driver bind volumes
+- 🟡 Redeploy the preview gateway through the Coolify-specific Raw Compose adapter
 - ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
 - ⏳ Configure the production preview environment
 - ⏳ Configure one permanent reserved-namespace rule in the selected outer ingress
@@ -211,8 +212,9 @@ Production deployment remains pending:
 
 Current deployment target and production checklist:
 
-- ⏳ Provision the configured gateway host root and ingress subdirectory with the selected UID/GID and mode `0700`
-- ⏳ Deploy the gateway stack in Coolify production and verify four Unix sockets plus `127.0.0.1:18080`
+- ✅ Provision the configured gateway host root and ingress subdirectory with the selected UID/GID and mode `0700`
+- ✅ Deploy the gateway stack in Coolify Raw Compose and verify four Unix sockets plus `127.0.0.1:18080`
+- ⏳ Redeploy with the durable connector-only external proxy-network adapter and verify its alias
 - ⏳ Add the shared gateway and dedicated rootless-Docker mounts to code-server without exposing a host/Coolify Docker socket
 - ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace router for the current deployment
 - ⏳ Validate external Vite/HMR, stop/restart, fail-closed route removal, stable hostname restoration, and Agent health

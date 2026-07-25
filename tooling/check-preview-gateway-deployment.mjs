@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const caddyConfigPath = "deploy/preview-gateway/caddy.json";
 const caddyDockerfilePath = "deploy/preview-gateway/Caddy.Dockerfile";
 const composePath = "deploy/preview-gateway/compose.yaml";
+const coolifyComposePath = "deploy/preview-gateway/compose.coolify.yaml";
+const coolifyNetworkPath = "deploy/preview-gateway/compose.coolify-network.yaml";
 const dockerfilePath = "deploy/preview-gateway/Dockerfile";
 const gatewayUserExpression = '"${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"';
 const runtimeVolumeName = "gateway-runtime";
@@ -17,6 +19,8 @@ const sharedRuntimeTarget = "/run/devspace/gateway";
 const ingressRuntimeTarget = "/run/devspace/gateway/ingress";
 const adminSocket = "unix//run/devspace/gateway/caddy-admin.sock|0660";
 const previewHttpSocket = "unix//run/devspace/gateway/ingress/preview-http.sock|0660";
+const coolifyProxyNetworkVariable = "DEVSPACE_COOLIFY_PROXY_NETWORK";
+const coolifyProxyNetworkAlias = "devspace-preview-ingress";
 
 function requireCondition(condition, message) {
   if (!condition) throw new Error(`preview gateway deployment validation failed: ${message}`);
@@ -129,10 +133,12 @@ function requireConnectorBasics(block) {
 }
 
 export async function validatePreviewGatewayDeployment(repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
-  const [caddyText, caddyDockerfile, compose, dockerfile] = await Promise.all([
+  const [caddyText, caddyDockerfile, compose, coolifyCompose, coolifyNetwork, dockerfile] = await Promise.all([
     readFile(path.join(repositoryRoot, caddyConfigPath), "utf8"),
     readFile(path.join(repositoryRoot, caddyDockerfilePath), "utf8"),
     readFile(path.join(repositoryRoot, composePath), "utf8"),
+    readFile(path.join(repositoryRoot, coolifyComposePath), "utf8"),
+    readFile(path.join(repositoryRoot, coolifyNetworkPath), "utf8"),
     readFile(path.join(repositoryRoot, dockerfilePath), "utf8")
   ]);
   let caddy;
@@ -180,6 +186,43 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
   requireCondition(hostService.includes("DEVSPACE_PREVIEW_PROBE_SOCKET: /run/devspace/gateway/preview-probe.sock"), "Host service probe socket is missing.");
   requireCondition(hostService.includes("DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: /run/devspace/gateway/lease-resolver.sock"), "Host service lease resolver socket is missing.");
   requireCondition(dockerfile.includes("pnpm deploy --filter @devspace/preview-gateway-host --prod --legacy /runtime"), "Preview gateway Dockerfile must use pnpm's legacy deploy mode.");
+  requireCondition(
+    !/coolify|traefik|DEVSPACE_COOLIFY_PROXY_NETWORK|devspace-preview-ingress/iu.test(compose),
+    "The generic Compose file must remain provider-neutral."
+  );
+
+  const expectedCoolifyCompose = [
+    "include:",
+    "  - path:",
+    "      - compose.yaml",
+    "      - compose.coolify-network.yaml"
+  ].join("\n");
+  requireCondition(
+    coolifyCompose.trim() === expectedCoolifyCompose,
+    "Coolify Compose Location must include the generic contract and only the repository-owned network override."
+  );
+
+  const expectedCoolifyNetwork = [
+    "services:",
+    "  preview-ingress-connector:",
+    "    networks:",
+    "      coolify-proxy:",
+    "        aliases:",
+    `          - ${coolifyProxyNetworkAlias}`,
+    "",
+    "networks:",
+    "  coolify-proxy:",
+    "    external: true",
+    `    name: \${${coolifyProxyNetworkVariable}:?${coolifyProxyNetworkVariable} must be set and non-empty}`
+  ].join("\n");
+  requireCondition(
+    coolifyNetwork.trim() === expectedCoolifyNetwork,
+    "Coolify network override must attach only the connector to one required administrator-selected external network and stable alias."
+  );
+  requireCondition(
+    !coolifyNetwork.includes("ports:") && !coolifyNetwork.includes("docker.sock"),
+    "Coolify network override must not publish ports or mount a Docker socket."
+  );
 
   return true;
 }
