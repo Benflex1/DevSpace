@@ -3,7 +3,6 @@ import test from "node:test";
 import { validateRenderedPreviewGatewayCompose } from "../check-preview-gateway-compose-render.mjs";
 
 const expected = {
-  hostDir: "/tmp/devspace-gateway-compose-contract",
   uid: "12345",
   gid: "12346",
   ingressPort: "18081"
@@ -20,10 +19,10 @@ function volumeMount(source, target, options = {}) {
   return mount;
 }
 
-function localBindVolume(device, options = {}) {
+function externalVolume(name, options = {}) {
   return {
-    driver: options.driver ?? "local",
-    driver_opts: options.driverOpts ?? { type: "none", o: "bind", device }
+    external: options.external ?? true,
+    name
   };
 }
 
@@ -52,8 +51,8 @@ function renderedModel() {
       }
     },
     volumes: {
-      "gateway-runtime": localBindVolume(expected.hostDir),
-      "gateway-ingress": localBindVolume(`${expected.hostDir}/ingress`)
+      "gateway-runtime": externalVolume("devspace-gateway-runtime"),
+      "gateway-ingress": externalVolume("devspace-gateway-ingress")
     }
   };
 }
@@ -62,7 +61,7 @@ function cloneModel() {
   return structuredClone(renderedModel());
 }
 
-test("accepts the valid rendered named-bind Compose model", () => {
+test("accepts the valid rendered external-volume Compose model", () => {
   assert.equal(validateRenderedPreviewGatewayCompose(renderedModel(), expected), true);
 });
 
@@ -115,33 +114,33 @@ test("accepts Compose-omitted false/default fields", () => {
   assert.equal(validateRenderedPreviewGatewayCompose(model, expected), true);
 });
 
-test("rejects a non-local top-level volume driver", () => {
+test("rejects a top-level volume that is not external", () => {
   const model = cloneModel();
-  model.volumes["gateway-runtime"].driver = "nfs";
-  assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /local volume driver/u);
+  model.volumes["gateway-runtime"].external = false;
+  assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /must remain external/u);
 });
 
-test("rejects a top-level volume without bind mode", () => {
-  const model = cloneModel();
-  delete model.volumes["gateway-runtime"].driver_opts.o;
-  assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /driver_opts\.o/u);
-});
-
-test("rejects incorrect rendered runtime and ingress devices", () => {
+test("rejects incorrect rendered external volume names", () => {
   const runtime = cloneModel();
-  runtime.volumes["gateway-runtime"].driver_opts.device = "/tmp/wrong";
-  assert.throws(() => validateRenderedPreviewGatewayCompose(runtime, expected), /gateway-runtime device/u);
+  runtime.volumes["gateway-runtime"].name = "wrong-runtime";
+  assert.throws(() => validateRenderedPreviewGatewayCompose(runtime, expected), /gateway-runtime external name/u);
 
   const ingress = cloneModel();
-  ingress.volumes["gateway-ingress"].driver_opts.device = expected.hostDir;
-  assert.throws(() => validateRenderedPreviewGatewayCompose(ingress, expected), /gateway-ingress device/u);
+  ingress.volumes["gateway-ingress"].name = "wrong-ingress";
+  assert.throws(() => validateRenderedPreviewGatewayCompose(ingress, expected), /gateway-ingress external name/u);
 });
 
-test("rejects malformed rendered driver options", () => {
-  for (const driverOpts of [null, { type: "bind", o: "bind", device: expected.hostDir }, { type: "none", o: ["bind"], device: expected.hostDir }]) {
+test("rejects malformed rendered external-volume definitions", () => {
+  for (const mutation of [
+    (volume) => { delete volume.external; },
+    (volume) => { volume.driver = "local"; },
+    (volume) => { volume.driver_opts = { type: "none", o: "bind", device: "/srv/devspace/gateway" }; },
+    (volume) => { volume.device = "/srv/devspace/gateway"; },
+    (volume) => { volume.name = "${DEVSPACE_GATEWAY_VOLUME:-devspace-gateway-runtime}"; }
+  ]) {
     const model = cloneModel();
-    model.volumes["gateway-runtime"].driver_opts = driverOpts;
-    assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /driver_opts|must be none|must be bind/u);
+    mutation(model.volumes["gateway-runtime"]);
+    assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /external|driver|device|host path|interpolation/u);
   }
 });
 
@@ -151,13 +150,13 @@ test("rejects Docker socket and sensitive extra mounts", () => {
   assert.throws(() => validateRenderedPreviewGatewayCompose(socket, expected), /exactly one gateway volume mount|Docker socket/u);
 
   const sensitiveVolume = cloneModel();
-  sensitiveVolume.volumes["gateway-runtime"].driver_opts.device = "/etc/shadow";
-  assert.throws(() => validateRenderedPreviewGatewayCompose(sensitiveVolume, expected), /sensitive host path|device/u);
+  sensitiveVolume.volumes["gateway-runtime"].device = "/etc/shadow";
+  assert.throws(() => validateRenderedPreviewGatewayCompose(sensitiveVolume, expected), /driver|device|host path/u);
 });
 
 test("rejects unexpected top-level volumes", () => {
   const model = cloneModel();
-  model.volumes.extra = localBindVolume("/var/lib/docker");
+  model.volumes.extra = externalVolume("devspace-unexpected");
   assert.throws(() => validateRenderedPreviewGatewayCompose(model, expected), /only the runtime and ingress/u);
 });
 

@@ -6,11 +6,13 @@ const caddyConfigPath = "deploy/preview-gateway/caddy.json";
 const caddyDockerfilePath = "deploy/preview-gateway/Caddy.Dockerfile";
 const composePath = "deploy/preview-gateway/compose.yaml";
 const dockerfilePath = "deploy/preview-gateway/Dockerfile";
-const gatewayHostSource = "${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}";
-const gatewayIngressHostSource = "${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress";
 const gatewayUserExpression = '"${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"';
 const runtimeVolumeName = "gateway-runtime";
 const ingressVolumeName = "gateway-ingress";
+const externalVolumeNames = {
+  [runtimeVolumeName]: "devspace-gateway-runtime",
+  [ingressVolumeName]: "devspace-gateway-ingress"
+};
 const sharedRuntimeTarget = "/run/devspace/gateway";
 const ingressRuntimeTarget = "/run/devspace/gateway/ingress";
 const adminSocket = "unix//run/devspace/gateway/caddy-admin.sock|0660";
@@ -85,15 +87,17 @@ function topLevelVolumeBlock(section, volumeName) {
   return match[1];
 }
 
-function requireLocalBindVolume(section, volumeName, expectedDevice) {
+function requireExternalVolume(section, volumeName) {
   const block = topLevelVolumeBlock(section, volumeName);
-  requireCondition(lineValue(block, "driver", 4) === "local", `${volumeName} must use the local volume driver.`);
-  const driverOptions = block.match(/(?:^|\n) {4}driver_opts:\n([\s\S]*)/u)?.[1];
-  requireCondition(driverOptions !== undefined, `${volumeName} must define driver_opts.`);
-  requireCondition(lineValue(driverOptions, "type", 6) === "none", `${volumeName} driver_opts.type must be none.`);
-  requireCondition(lineValue(driverOptions, "o", 6) === "bind", `${volumeName} driver_opts.o must be bind.`);
-  requireCondition(lineValue(driverOptions, "device", 6) === expectedDevice, `${volumeName} device must be ${expectedDevice}.`);
-  requireCondition(!driverOptions.includes("docker.sock") && !driverOptions.includes("/var/run") && !driverOptions.includes("/etc/"), `${volumeName} must not map a sensitive host path.`);
+  const expectedName = externalVolumeNames[volumeName];
+  requireCondition(lineValue(block, "external", 4) === "true", `${volumeName} must set external: true so Coolify does not create or rewrite it.`);
+  requireCondition(lineValue(block, "name", 4) === expectedName, `${volumeName} external name must be exactly ${expectedName}.`);
+  requireCondition(!block.includes("${"), `${volumeName} external name must not use interpolation across the unverified Coolify parser boundary.`);
+  requireCondition(!/(?:^|\n) {4}(?:driver|driver_opts|device):/u.test(block), `${volumeName} must not define driver, driver_opts, or device in the Coolify-consumed Compose file.`);
+  requireCondition(!/[/\\]/u.test(block), `${volumeName} must not contain a host path.`);
+  requireCondition(!block.includes("docker.sock") && !block.includes("/var/run") && !block.includes("/etc/"), `${volumeName} must not map a Docker socket or sensitive host path.`);
+  const keys = [...block.matchAll(/(?:^|\n) {4}([A-Za-z0-9_-]+):/gu)].map((match) => match[1]);
+  requireCondition(keys.length === 2 && keys.includes("external") && keys.includes("name"), `${volumeName} must contain only external and name.`);
 }
 
 function requireHostServiceBasics(block, serviceName) {
@@ -155,12 +159,10 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
   const volumes = topLevelVolumeSection(compose);
   const volumeNames = topLevelVolumeNames(volumes);
   requireCondition(volumeNames.length === 2 && volumeNames.includes(runtimeVolumeName) && volumeNames.includes(ingressVolumeName), "top-level volumes must contain only the runtime and ingress gateway volumes.");
-  requireLocalBindVolume(volumes, runtimeVolumeName, gatewayHostSource);
-  requireLocalBindVolume(volumes, ingressVolumeName, gatewayIngressHostSource);
-  requireCondition(compose.includes(`device: ${gatewayHostSource}\n`), "Runtime volume device must use DEVSPACE_GATEWAY_HOST_DIR with the /srv/devspace/gateway default.");
-  requireCondition(compose.includes(`device: ${gatewayIngressHostSource}\n`), "Ingress volume device must append /ingress to DEVSPACE_GATEWAY_HOST_DIR.");
+  requireExternalVolume(volumes, runtimeVolumeName);
+  requireExternalVolume(volumes, ingressVolumeName);
   requireCondition(!compose.includes("docker.sock"), "The gateway stack must not mount a Docker socket.");
-  requireCondition(!volumes.includes("/var/run") && !volumes.includes("/etc/"), "Gateway top-level volumes must not map sensitive host paths.");
+  requireCondition(!volumes.includes("${") && !/[/\\]/u.test(volumes), "Gateway top-level volumes must not contain interpolation or host paths.");
   requireCondition(!/\n {4}ports:/u.test(compose), "The gateway stack must not publish host ports.");
   requireCondition(caddyService.includes("build:\n      context: ../..\n      dockerfile: deploy/preview-gateway/Caddy.Dockerfile"), "Caddy must use the self-contained deployment image build.");
   requireCondition(caddyDockerfile.includes("FROM caddy:2.11.3"), "Caddy deployment image must be based on caddy:2.11.3.");

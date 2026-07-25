@@ -191,16 +191,18 @@ Security and deployment support completed:
 Repository-side readiness:
 
 - ✅ Shared-ingress connector and reserved `labelSuffix` hostname namespace
-- ✅ Portable gateway Compose contract with configurable host runtime directory
+- 🟡 Portable gateway Compose contract corrected to administrator-precreated external volumes
 - ✅ Checked-in Caddy configuration, deployment validation, and real-Caddy smoke coverage
 - ✅ Local lifecycle coverage: Vite `Waiting → Ready`, Vite stop/restart, runtime stop/start,
   fail-closed route removal, stable hostname restoration, Agent restart reconciliation, and HMR
-- ✅ Coolify named-bind compatibility correction: stable service volume IDs with portable
-  top-level local-driver bind devices
+- 🟡 Prior named-bind attempt was insufficient: Coolify replaced top-level local-driver bind
+  options with plain project-scoped volumes whose `Options` were `null`
+- 🟡 Active repository correction: exact administrator-precreated external gateway volume names
 
 Production deployment remains pending:
 
 - ⏳ Provision the selected gateway host runtime root and its private `ingress` subdirectory
+- ⏳ Create and inspect the two exact external local-driver bind volumes
 - ⏳ Deploy the preview gateway stack on the home server
 - ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
 - ⏳ Configure the production preview environment
@@ -281,14 +283,15 @@ Later operational UX:
 
 # Immediate next steps
 
-1. ✅ Complete the repository-side Coolify named-bind compatibility correction in the proposed change.
-2. ⏳ Redeploy the existing `DevSpace: Caddy` resource.
-3. ⏳ Verify the four private sockets and the `127.0.0.1:18080` listener.
-4. ⏳ Configure code-server gateway and dedicated rootless-Docker mounts plus the production preview environment.
-5. ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace through the current Traefik integration.
-6. ⏳ Validate external production preview traffic and HMR through the complete path.
-7. ⏳ Complete the remaining focused M1 Slice 6 hardening.
-8. ⏳ Close Milestone 1 only after production preview validation succeeds.
+1. 🟡 Complete and merge the administrator-precreated external-volume repository correction.
+2. ⏳ Create and inspect the exact external volumes on the production host.
+3. ⏳ Redeploy the existing `DevSpace: Caddy` resource.
+4. ⏳ Verify the four private sockets and the `127.0.0.1:18080` listener.
+5. ⏳ Configure code-server gateway and dedicated rootless-Docker mounts plus the production preview environment.
+6. ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace through the current Traefik integration.
+7. ⏳ Validate external production preview traffic and HMR through the complete path.
+8. ⏳ Complete the remaining focused M1 Slice 6 hardening.
+9. ⏳ Close Milestone 1 only after production preview validation succeeds.
 
 ---
 

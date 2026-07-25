@@ -5,8 +5,11 @@ import { pathToFileURL } from "node:url";
 const requiredServices = ["caddy", "preview-gateway-host", "preview-ingress-connector"];
 const runtimeVolumeName = "gateway-runtime";
 const ingressVolumeName = "gateway-ingress";
+const externalVolumeNames = {
+  [runtimeVolumeName]: "devspace-gateway-runtime",
+  [ingressVolumeName]: "devspace-gateway-ingress"
+};
 const expectedDefaults = {
-  hostDir: "/tmp/devspace-gateway-compose-contract",
   uid: "12345",
   gid: "12346",
   ingressPort: "18081"
@@ -120,17 +123,16 @@ function assertConnector(serviceModel, expected) {
   requireCondition(exposedPorts.length === 1 && exposedPorts[0] === expected.ingressPort, `preview-ingress-connector internal port must be ${expected.ingressPort}.`);
 }
 
-function assertTopLevelVolume(model, volumeName, expectedDevice) {
+function assertTopLevelVolume(model, volumeName) {
   const topVolumes = object(model.volumes, "top-level volumes");
   requireCondition(Object.hasOwn(topVolumes, volumeName), `top-level volume ${volumeName} is missing.`);
   const volume = object(topVolumes[volumeName], `top-level volume ${volumeName}`);
-  requireCondition(volume.driver === "local", `${volumeName} must use the local volume driver.`);
-  const driverOptions = object(volume.driver_opts, `${volumeName} driver_opts`);
-  requireCondition(driverOptions.type === "none", `${volumeName} driver_opts.type must be none.`);
-  requireCondition(driverOptions.o === "bind", `${volumeName} driver_opts.o must be bind.`);
-  requireCondition(driverOptions.device === expectedDevice, `${volumeName} device must be ${expectedDevice}.`);
-  requireCondition(!JSON.stringify(volume).includes("docker.sock"), `${volumeName} must not map a Docker socket.`);
-  requireCondition(!JSON.stringify(volume).includes("/var/run") && !JSON.stringify(volume).includes("/etc/"), `${volumeName} must not map a sensitive host path.`);
+  requireCondition(volume.external === true, `${volumeName} must remain external.`);
+  requireCondition(volume.name === externalVolumeNames[volumeName], `${volumeName} external name must be exactly ${externalVolumeNames[volumeName]}.`);
+  requireCondition(!volume.name.includes("${"), `${volumeName} external name must not contain interpolation.`);
+  requireCondition(volume.driver === undefined && volume.driver_opts === undefined && volume.device === undefined, `${volumeName} must not contain a driver, driver_opts, or device.`);
+  requireCondition(!/[/\\]/u.test(JSON.stringify(volume)), `${volumeName} must not contain a host path.`);
+  requireCondition(Object.keys(volume).every((key) => key === "external" || key === "name"), `${volumeName} must contain only external and name.`);
 }
 
 export function validateRenderedPreviewGatewayCompose(model, expected = expectedDefaults) {
@@ -141,10 +143,8 @@ export function validateRenderedPreviewGatewayCompose(model, expected = expected
   const topVolumes = object(model.volumes, "top-level volumes");
   const topVolumeNames = Object.keys(topVolumes);
   requireCondition(topVolumeNames.length === 2 && topVolumeNames.includes(runtimeVolumeName) && topVolumeNames.includes(ingressVolumeName), "top-level volumes must contain only the runtime and ingress gateway volumes.");
-  assertTopLevelVolume(model, runtimeVolumeName, expected.hostDir);
-  assertTopLevelVolume(model, ingressVolumeName, `${expected.hostDir}/ingress`);
-  requireCondition(!JSON.stringify(topVolumes).includes("docker.sock"), "top-level volumes must not map a Docker socket.");
-  requireCondition(!JSON.stringify(topVolumes).includes("/var/run") && !JSON.stringify(topVolumes).includes("/etc/"), "top-level volumes must not map a sensitive host path.");
+  assertTopLevelVolume(model, runtimeVolumeName);
+  assertTopLevelVolume(model, ingressVolumeName);
 
   assertHostService(services.caddy, "caddy", expected);
   assertHostService(services["preview-gateway-host"], "preview-gateway-host", expected);

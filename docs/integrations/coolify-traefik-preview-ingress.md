@@ -27,23 +27,58 @@ create one resource per preview, or require a particular Coolify proxy-network n
 
 ## Coolify Compose volume compatibility
 
-Coolify validates Compose volume sources before Docker Compose executes. Its security parser
-rejects variable interpolation in a service-level volume source, such as
+Two separate production behaviors constrain this integration. Coolify's security parser rejects
+variable interpolation in a service-level volume source, such as
 `source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}`. This is a Coolify integration
 incompatibility, not a universal Docker Compose limitation.
 
-The checked-in generic Compose file therefore uses the stable service-level named volume IDs
-`gateway-runtime` and `gateway-ingress`. Portability remains in the top-level local-driver
-`device` values: `DEVSPACE_GATEWAY_HOST_DIR` is configurable, and the current home-server value
-is `/srv/devspace/gateway`; the ingress device appends `/ingress`. These named volumes are only an
-indirection around administrator-owned host directories. The root and its `ingress` child must
-already exist with the selected UID/GID and mode `0700`; Coolify or Docker must not be relied on
-to create them silently.
+PR #34 moved the host paths into top-level local-driver `driver_opts`. Normal Compose validation
+and smoke tests passed, but the Git-based Coolify deployment transformed those definitions into
+project-scoped ordinary volumes whose Docker `Options` were `null`. Caddy and the gateway host
+therefore mounted Docker-managed `_data` directories instead of the administrator-owned runtime
+directory and failed with `EACCES`. This is a Coolify resource-transformation behavior, not a
+universal Docker Compose limitation.
 
-Do not add Coolify UI storage definitions, switch to Raw Compose mode, or add a Coolify-specific
-duplicate Compose file. Do not assign a service domain or host port to any gateway service. The
-connector remains internal-only and the existing reserved Traefik namespace router remains the
-administrator-managed outer-ingress configuration.
+The corrected generic Compose file keeps logical service sources `gateway-runtime` and
+`gateway-ingress`, but declares exact external names `devspace-gateway-runtime` and
+`devspace-gateway-ingress`. An administrator must create both as local-driver bind volumes before
+deployment. The checked-in Compose file contains no host path or `driver_opts`, and Coolify must
+not create or rewrite the external objects.
+
+After provisioning the selected host root and `ingress` child with the selected UID/GID and mode
+`0700`, create the objects outside Coolify:
+
+```bash
+docker volume create \
+  --driver local \
+  --opt type=none \
+  --opt o=bind \
+  --opt device="$DEVSPACE_GATEWAY_HOST_DIR" \
+  devspace-gateway-runtime
+
+docker volume create \
+  --driver local \
+  --opt type=none \
+  --opt o=bind \
+  --opt device="$DEVSPACE_GATEWAY_HOST_DIR/ingress" \
+  devspace-gateway-ingress
+
+docker volume inspect devspace-gateway-runtime devspace-gateway-ingress
+```
+
+The runtime `Options` must be equivalent to
+`{"type":"none","o":"bind","device":"/srv/devspace/gateway"}` for the current home-server target;
+the ingress object must use `/srv/devspace/gateway/ingress`.
+
+These fixed names are the current single-gateway production contract. Multiple simultaneous
+gateway instances require distinct external names through a separately validated deployment
+adapter. Top-level `name:` interpolation is intentionally rejected because it has not been proven
+safe through Coolify's Git-based transformation.
+
+Keep Coolify UI storage empty. Do not add UI storage definitions, let Coolify create the volumes,
+switch deployment mechanisms, assign a service domain or host port, or mount the host/Coolify
+Docker socket. The connector remains internal-only and the reserved Traefik namespace router
+remains administrator-managed.
 
 ## Reserved namespace rule
 
@@ -87,15 +122,24 @@ product configuration.
 ## Deployment checks
 
 1. Inspect persisted preview rows before changing `DEVSPACE_PREVIEW_BASES`.
-2. Provision the configured `DEVSPACE_GATEWAY_HOST_DIR` and its private `ingress` subdirectory
-   with the selected gateway UID/GID and mode `0700`.
-3. Deploy `deploy/preview-gateway/compose.yaml` and run `pnpm preview-gateway:check`.
-4. Confirm the three gateway services have no Coolify-generated domains, no host-port publication,
+2. Provision `DEVSPACE_GATEWAY_HOST_DIR` and its private `ingress` subdirectory with the selected
+   gateway UID/GID and mode `0700`.
+3. With the stack stopped, verify no process owns stale known sockets and remove only stale known
+   socket/lock files.
+4. Create `devspace-gateway-runtime` and `devspace-gateway-ingress` with the exact local-driver
+   bind options in `docs/preview-gateway-deployment.md`, then verify both with
+   `docker volume inspect`.
+5. Confirm Coolify UI storage is empty, deploy or redeploy
+   `deploy/preview-gateway/compose.yaml`, and run `pnpm preview-gateway:check`.
+6. Confirm container users and mounted volume names, then verify `caddy-admin.sock`,
+   `preview-probe.sock`, `lease-resolver.sock`, `ingress/preview-http.sock`, and
+   `127.0.0.1:18080`.
+7. Confirm the three gateway services have no Coolify-generated domains, no host-port publication,
    and no host/Coolify Docker socket mount.
-5. Add one permanent reserved-namespace router to the existing Traefik deployment.
-6. Confirm an ordinary application hostname does not reach DevSpace, while a generated reserved
+8. Add one permanent reserved-namespace router to the existing Traefik deployment.
+9. Confirm an ordinary application hostname does not reach DevSpace, while a generated reserved
    hostname reaches the terminal 404 until an exact route is materialized.
-7. Confirm the incoming `Host` and WebSocket upgrade reach the Preview Gateway unchanged.
+10. Confirm the incoming `Host` and WebSocket upgrade reach the Preview Gateway unchanged.
 
 Changing a domain or suffix changes canonical hostname identities. Retire/rematerialize affected
 preview state in a controlled Web-owned process, remove stale Caddy routes first, then activate
