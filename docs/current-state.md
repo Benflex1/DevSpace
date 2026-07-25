@@ -24,9 +24,17 @@ successfully with all four private sockets and the expected fallback HTTP 404. P
 inspection then showed that the connector's generated private default network and Coolify
 Traefik's stable resource network were disjoint. A temporary connector-only attachment with alias
 `devspace-preview-ingress` proved the complete network-to-Caddy fallback path and was removed.
-The repository now carries a Coolify-specific Raw Compose adapter that requires an explicit
-external proxy network and makes that connector-only attachment durable; deployment of this
-adapter remains pending.
+The initial repository adapter used Compose `include` and passed CI only because all sibling files
+were present in the checkout. Coolify materialized the selected file alone as `docker-compose.yaml`;
+Docker Compose then failed while looking for the missing sibling `compose.yaml`. The failed
+deployment did not stop or replace the healthy generic gateway.
+
+The corrected repository adapter is a committed self-contained artifact generated
+deterministically from the generic contract plus the connector-only external network. Validation
+rejects drift, `include`, `extends`, and a missing or empty selected network, and reproduces the
+arbitrary-directory single-file materialization boundary. It has not been deployed. The running
+generic gateway remains the safe fallback until the correction is merged and deliberately
+deployed.
 
 ## Implemented product path
 
@@ -165,10 +173,11 @@ adapter remains pending.
   optional and documented in `docs/integrations/coolify-traefik-preview-ingress.md`.
 - The generic gateway Compose contract remains provider-neutral and uses stable logical service
   mount IDs backed by exact administrator-precreated external volume names. The Coolify-specific
-  single-location entrypoint includes that generic contract plus a network-only override, requires
-  `DEVSPACE_COOLIFY_PROXY_NETWORK`, and attaches only the connector with alias
-  `devspace-preview-ingress`. Raw Compose rendering and topology are repository-validated; the
-  production adapter redeployment remains pending.
+  artifact is generated from that source of truth, contains the full service and volume model,
+  requires `DEVSPACE_COOLIFY_PROXY_NETWORK`, and adds only the connector attachment with alias
+  `devspace-preview-ingress` plus its top-level external network. Drift and arbitrary-directory
+  single-file materialization are repository-validated; corrected production deployment remains
+  pending.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means

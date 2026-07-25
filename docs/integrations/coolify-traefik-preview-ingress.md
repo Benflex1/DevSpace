@@ -20,16 +20,28 @@ Coolify's Persistent Storage page may still display stale definitions from a dep
 Raw Compose was enabled. Do not use that page as runtime truth and do not recreate storage from
 it. The generated Compose model and `docker inspect` output are authoritative.
 
-Configure the Coolify resource with this single Compose Location:
+The committed adapter is a generated, self-contained copy of the generic service and volume
+contract plus only the selected proxy-network attachment. Configure the Coolify resource with
+these exact values:
 
 ```text
-/deploy/preview-gateway/compose.coolify.yaml
+Repository path: deploy/preview-gateway/compose.coolify.yaml
+Base Directory: /deploy/preview-gateway
+Compose Location: /compose.coolify.yaml
+Raw Compose Deployment: enabled
 ```
 
-The leading slash is the Coolify repository-location form. The entrypoint uses Compose `include`
-to render the generic contract together with `compose.coolify-network.yaml`; the adapter does not
-duplicate the three service definitions. Repository CI runs `docker compose config` through this
-exact entrypoint and validates the rendered model.
+With the Base Directory applied, `/compose.coolify.yaml` selects the checked-in repository path
+shown above. Do not combine the repository path and Compose Location into
+`/deploy/preview-gateway/compose.coolify.yaml` in the UI.
+
+`deploy/preview-gateway/compose.yaml` remains authoritative. Run
+`pnpm preview-gateway:coolify-generate` after changing it; repository validation fails if the
+committed artifact differs from deterministic generation. CI also copies only the selected
+artifact into a fresh arbitrary directory as `docker-compose.yaml`, supplies an explicit
+environment file and project directory, and renders that file without any repository deployment
+sibling. The adapter must not use Compose `include`, `extends`, repository-relative configuration
+includes, or `compose.coolify-network.yaml`.
 
 Set this non-secret deployment variable explicitly:
 
@@ -55,6 +67,21 @@ stable `<resource>` network. The generated environment did not contain
 The observed proxy was Traefik `3.6.13` from `traefik:v3.6`; generated Compose labels reported
 version `5.3.1`. The connector exposed `8080/tcp` and had no published host port. These are
 deployment observations, not generic defaults or names embedded in the adapter.
+
+### Failed include-based adapter deployment
+
+The first Coolify adapter used Compose `include`. It passed CI because the GitHub Actions checkout
+contained `compose.coolify.yaml`, `compose.yaml`, and `compose.coolify-network.yaml` together in
+their repository directory. At deployment, Coolify materialized only the selected Compose artifact
+under its application data directory as `docker-compose.yaml`. Docker Compose resolved the
+included `compose.yaml` relative to that materialization directory and failed because the sibling
+file did not exist.
+
+That evidence makes an include-based adapter invalid at this Coolify Raw Compose boundary, even
+when repository-directory rendering passes. The failed deployment did not stop or replace the
+healthy generic gateway. Until this corrected adapter is merged and deliberately deployed, the
+currently running generic gateway is the safe fallback; the corrected adapter must not be
+described as production-deployed.
 
 ## Resulting network boundary
 
@@ -148,7 +175,7 @@ their bind devices are `/srv/devspace/gateway` and `/srv/devspace/gateway/ingres
 selected service identity is UID/GID `1000:1000`. Those are administrator deployment values, not
 hardcoded adapter defaults.
 
-Keep Coolify storage configuration empty for this Raw Compose resource. Ignore stale
+Keep Coolify Persistent Storage configuration empty for this Raw Compose resource. Ignore stale
 pre-Raw-Compose entries in the Persistent Storage page; verify the generated Compose and real
 container mounts instead.
 
@@ -163,18 +190,19 @@ Do not:
 
 ## Deployment and reachability checks
 
-1. Enable Raw Compose Deployment on the gateway resource.
-2. Set Compose Location to `/deploy/preview-gateway/compose.coolify.yaml`.
-3. Set `DEVSPACE_COOLIFY_PROXY_NETWORK` to the exact selected external network name.
-4. Keep the resource's Persistent Storage and service-domain configuration empty.
-5. Confirm the exact external bind volumes already exist and their Docker `Options` point to the
+1. Set Base Directory to `/deploy/preview-gateway`.
+2. Set Compose Location to `/compose.coolify.yaml`.
+3. Enable Raw Compose Deployment.
+4. Set `DEVSPACE_COOLIFY_PROXY_NETWORK` to the exact selected external network name.
+5. Keep Persistent Storage empty and configure no Coolify service domain.
+6. Confirm the exact external bind volumes already exist and their Docker `Options` point to the
    intended directories.
-6. Deploy the Raw Compose resource.
-7. Inspect the generated Compose model and all three real containers.
-8. Verify `caddy-admin.sock`, `preview-probe.sock`, `lease-resolver.sock`, and
+7. Deploy the Raw Compose resource deliberately.
+8. Inspect the generated Compose model and all three real containers.
+9. Verify `caddy-admin.sock`, `preview-probe.sock`, `lease-resolver.sock`, and
    `ingress/preview-http.sock`.
-9. From a temporary diagnostic container on the selected proxy network, request the stable alias
-   without publishing a port:
+10. From a temporary diagnostic container on the selected proxy network, request the stable alias
+    without publishing a port:
 
    ```bash
    docker run --rm \

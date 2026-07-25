@@ -1,8 +1,8 @@
 # Preview Gateway Deployment
 
 This is the provider-neutral repository deployment contract for the M1 workspace preview path.
-Provider-specific entrypoints may include this contract without changing it. The current
-Coolify Raw Compose adapter and its deployment runbook live in
+Provider-specific artifacts must be deterministically derived from this contract without changing
+it. The current self-contained Coolify Raw Compose adapter and its deployment runbook live in
 [`integrations/coolify-traefik-preview-ingress.md`](./integrations/coolify-traefik-preview-ingress.md).
 The Compose stack contains three services:
 
@@ -295,7 +295,17 @@ Provider-specific instructions belong in integration documentation.
 For a generic Compose deployment, the entrypoint is
 `deploy/preview-gateway/compose.yaml`. Do not point a Coolify resource at that generic file:
 the current Coolify integration requires Raw Compose Deployment and the provider-specific
-`deploy/preview-gateway/compose.coolify.yaml` entrypoint documented separately.
+`deploy/preview-gateway/compose.coolify.yaml` artifact documented separately. The Coolify file is
+self-contained because Coolify may materialize only the selected artifact. It is generated from
+the generic contract plus the approved connector-only external-network attachment:
+
+```bash
+pnpm preview-gateway:coolify-generate
+pnpm preview-gateway:check
+```
+
+Do not add Compose `include`, `extends`, or another required repository sibling to the Coolify
+artifact.
 
 The production sequence is: provision the two `0700` host directories; verify no active process
 owns stale known sockets; remove stale known socket/lock files only while stopped; create and

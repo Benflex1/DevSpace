@@ -25,6 +25,8 @@
     "db:migrate:test": "pnpm --filter @devspace/database run db:migrate:test",
     "workspace:check": "node tooling/check-workspace-graph.mjs",
     "preview-gateway:check": "node tooling/check-preview-gateway-deployment.mjs",
+    "preview-gateway:coolify-generate": "node tooling/generate-preview-gateway-coolify-compose.mjs --write",
+    "preview-gateway:coolify-materialization-check": "node tooling/check-preview-gateway-coolify-materialization.mjs",
     "preview-gateway:caddy-smoke": "node tooling/preview-gateway-caddy-smoke.mjs",
     "preview-gateway:coolify-smoke": "node tooling/preview-gateway-coolify-smoke.mjs"
   },
@@ -40,6 +42,7 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "8.63.0",
     "vitest": "^4.1.6",
-    "ws": "8.18.3"
+    "ws": "8.18.3",
+    "yaml": "^2.9.0"
   }
 }

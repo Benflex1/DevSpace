@@ -1,4 +1,75 @@
-include:
-  - path:
-      - compose.yaml
-      - compose.coolify-network.yaml
+# Generated from compose.yaml by tooling/generate-preview-gateway-coolify-compose.mjs.
+# Run `pnpm preview-gateway:coolify-generate` after changing the generic contract.
+services:
+  caddy:
+    build:
+      context: "../.."
+      dockerfile: "deploy/preview-gateway/Caddy.Dockerfile"
+    user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
+    network_mode: "host"
+    restart: "unless-stopped"
+    command:
+      - "caddy"
+      - "run"
+      - "--config"
+      - "/etc/caddy/caddy.json"
+    volumes:
+      - type: "volume"
+        source: "gateway-runtime"
+        target: "/run/devspace/gateway"
+        volume:
+          nocopy: true
+  preview-gateway-host:
+    build:
+      context: "../.."
+      dockerfile: "deploy/preview-gateway/Dockerfile"
+    user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
+    network_mode: "host"
+    restart: "unless-stopped"
+    environment:
+      NODE_ENV: "production"
+      DEVSPACE_PREVIEW_PROBE_SOCKET: "/run/devspace/gateway/preview-probe.sock"
+      DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: "/run/devspace/gateway/lease-resolver.sock"
+    volumes:
+      - type: "volume"
+        source: "gateway-runtime"
+        target: "/run/devspace/gateway"
+        volume:
+          nocopy: true
+  preview-ingress-connector:
+    build:
+      context: "../.."
+      dockerfile: "deploy/preview-gateway/Dockerfile"
+    user: "${DEVSPACE_GATEWAY_UID:-1000}:${DEVSPACE_GATEWAY_GID:-1000}"
+    restart: "unless-stopped"
+    command:
+      - "node"
+      - "dist/connector-index.js"
+    expose:
+      - "${DEVSPACE_PREVIEW_INGRESS_PORT:-8080}"
+    environment:
+      NODE_ENV: "production"
+      DEVSPACE_PREVIEW_INGRESS_PORT: "${DEVSPACE_PREVIEW_INGRESS_PORT:-8080}"
+      DEVSPACE_PREVIEW_HTTP_SOCKET: "/run/devspace/gateway/ingress/preview-http.sock"
+    volumes:
+      - type: "volume"
+        source: "gateway-ingress"
+        target: "/run/devspace/gateway/ingress"
+        read_only: true
+        volume:
+          nocopy: true
+    networks:
+      coolify-proxy:
+        aliases:
+          - "devspace-preview-ingress"
+volumes:
+  gateway-runtime:
+    external: true
+    name: "devspace-gateway-runtime"
+  gateway-ingress:
+    external: true
+    name: "devspace-gateway-ingress"
+networks:
+  coolify-proxy:
+    external: true
+    name: "${DEVSPACE_COOLIFY_PROXY_NETWORK:?DEVSPACE_COOLIFY_PROXY_NETWORK must be set and non-empty}"
