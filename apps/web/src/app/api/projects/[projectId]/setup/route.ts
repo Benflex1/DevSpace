@@ -7,17 +7,19 @@ import { RequestBodyMalformedError, RequestBodyTooLargeError, readBoundedJsonBod
 import {
   WorkspaceSetupExecutionError, WorkspaceSetupValidationError, parseWorkspaceSetupInput, setupPrimaryWorkspace
 } from "../../../../../server/workspace-setup.js";
+import { normalizeUserFacingFailure } from "../../../../../server/user-facing-failure.js";
 
 export const dynamic = "force-dynamic";
 const json = (body: unknown, status: number) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 
 export async function POST(request: Request, context: { params: Promise<{ projectId: string }> }) {
+  let projectId: string | undefined;
   try {
     const config = readWebRuntimeConfig();
     const actor = await authenticateHeaders(request.headers, config.auth);
     assertCsrf(request, config.appOrigin);
     const input = parseWorkspaceSetupInput(await readBoundedJsonBody(request));
-    const { projectId } = await context.params;
+    ({ projectId } = await context.params);
     const result = await setupPrimaryWorkspace(input, projectId, actor.identity, {
       agent: createAgentClient(config.agentSocketPath), database: getProjectDatabase(config.databasePath),
       previewBaseRegistry: config.previewBaseRegistry
@@ -27,12 +29,19 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     if (error instanceof WorkspaceSetupValidationError) return json({ message: error.message }, 422);
     if (error instanceof ProjectSetupConflictError) return json({ message: error.message }, 409);
-    if (error instanceof WorkspaceSetupExecutionError) return json({ message: error.message, code: error.code }, error.code === "SETUP_IN_PROGRESS" ? 202 : 503);
-    if (error instanceof AgentUnavailableError) return json({ message: "The DevSpace Agent is unavailable. Start it and retry setup." }, 503);
-    if (error instanceof AgentResponseError) return json({ message: "The Agent rejected workspace setup.", code: error.code }, 503);
+    if (error instanceof WorkspaceSetupExecutionError || error instanceof AgentUnavailableError || error instanceof AgentResponseError) {
+      const failure = normalizeUserFacingFailure(error, {
+        fallbackMessage: "Workspace setup failed safely.", event: "web.workspace_setup.failed",
+        logMessage: "User-facing workspace setup failed", context: { ...(projectId === undefined ? {} : { projectId }) }
+      });
+      return json(failure, error instanceof WorkspaceSetupExecutionError && error.code === "SETUP_IN_PROGRESS" ? 202 : 503);
+    }
     if (error instanceof RequestBodyTooLargeError) return json({ message: error.message }, 413);
     if (error instanceof RequestBodyMalformedError) return json({ message: "Request body must be valid JSON." }, 400);
     if (error instanceof Error && error.message === "CSRF_REJECTED") return json({ message: "Request origin could not be verified." }, 403);
-    return json({ message: "Workspace setup failed safely." }, 500);
+    return json(normalizeUserFacingFailure(error, {
+      fallbackMessage: "Workspace setup failed safely.", event: "web.workspace_setup.failed",
+      logMessage: "User-facing workspace setup failed", context: { ...(projectId === undefined ? {} : { projectId }) }
+    }), 500);
   }
 }

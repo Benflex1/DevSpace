@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { restartRuntime, type RuntimeRestartAuthorization } from "./runtime-restart.js";
+import { IncidentReference } from "./incident-reference.js";
 import { runtimeControlState, runtimeRestartControlState, type RuntimeControlAction } from "./runtime-control-state.js";
 import { useTransientNotice } from "./transient-notice.js";
 
@@ -36,10 +37,11 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
           method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" },
           body: JSON.stringify({ action })
         });
-        const body = await response.json() as { message?: string };
-        if (response.status === 202 && rejectInProgress) throw new Error(body.message ?? "The runtime action is still in progress; restart was not completed.");
+        const body = await response.json() as { message?: string; incidentId?: string };
+        if (response.status === 202 && rejectInProgress) throw new RuntimeActionError(
+          body.message ?? "The runtime action is still in progress; restart was not completed.", body.incidentId);
         if (response.status === 202) { showNotice(body.message ?? "The runtime action is still in progress.", "info"); return false; }
-        if (!response.ok) throw new Error(body.message ?? "The runtime action failed.");
+        if (!response.ok) throw new RuntimeActionError(body.message ?? "The runtime action failed.", body.incidentId);
         return true;
       };
       if (isRestart) {
@@ -65,7 +67,8 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
         router.refresh();
       }
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : isRestart ? "Workspace restart failed." : "The runtime action failed.", "error");
+      showNotice(error instanceof Error ? error.message : isRestart ? "Workspace restart failed." : "The runtime action failed.", "error",
+        error instanceof RuntimeActionError ? error.incidentId : undefined);
       if (isRestart) router.refresh();
     } finally {
       pendingRef.current = false;
@@ -86,6 +89,15 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
         : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : (stopLabel ?? "Stop runtime")}
     </button>}
     {!runtimeAvailable && <p className="message error">The dedicated rootless runtime is unavailable.</p>}
-    {notice !== null && <p className={`message ${notice.kind}`} role="status">{notice.message}</p>}
+    {notice !== null && <p className={`message ${notice.kind}`} role="status"><span>{notice.message}</span>
+      <IncidentReference incidentId={notice.referenceId} />
+    </p>}
   </div>;
+}
+
+class RuntimeActionError extends Error {
+  constructor(message: string, readonly incidentId?: string) {
+    super(message);
+    this.name = "RuntimeActionError";
+  }
 }

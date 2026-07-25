@@ -4,11 +4,14 @@
 
 Milestone 1 — in progress.
 
-The first focused M1 Slice 6 diagnostics foundation is implemented: Web and Agent share
-allowlisted machine-readable JSON logging with request/operation/resource correlation, bounded
-preview reconciliation lifecycle timing, and an internal Agent health breakdown. Logs are emitted
-to service stderr/stdout only; persistent retention, a diagnostics UI, and external tracing remain
-future work. A separate Semgrep Community Edition static-analysis workflow now scans pull requests,
+The focused M1 Slice 6 diagnostics checkpoint is implemented: Web and Agent share allowlisted
+machine-readable JSON logging, a closed safe failure classification, and incident IDs that connect
+unexpected Workbench errors to the corresponding structured service logs. Validated Agent incident
+IDs are preserved end-to-end; Web creates a UUIDv7 only at the user-facing boundary for qualifying
+transport, protocol, dependency, or internal failures without an existing incident. Expected
+validation and lifecycle conflicts remain specific and do not receive references. Logs are emitted
+to service stderr/stdout only; persistent retention, a diagnostics UI, log search, and external
+tracing remain future work. A separate Semgrep Community Edition static-analysis workflow now scans pull requests,
 pushes to `main`, and manual runs in monitoring mode, retaining the complete JSON report as the
 `semgrep-results` artifact for AI-assisted review without uploading source or findings to Semgrep.
 The Semgrep foundation and first contextual triage remain complete. Local preview lifecycle
@@ -238,6 +241,19 @@ description does not imply runtime timeout enforcement.
 
 ## M1 Slice 6 hardening status
 
+- Stable failure classification now distinguishes `user-error`, `state-conflict`,
+  `dependency-unavailable`, `transport-failure`, `protocol-failure`, and `internal-failure`.
+  The Web Agent client may retain endpoint-schema-validated Agent messages as server-private text,
+  but browser and persisted error text comes only from an exhaustive Web-owned failure-code map;
+  arbitrary Agent messages and details are never projected or logged.
+- Unexpected Workbench runtime, task, terminal, preview, and applicable setup failures now pass
+  through one server-side normalization boundary. Agent UUIDv7 incidents are preserved exactly;
+  otherwise Web mints one UUIDv7 at that boundary, emits one correlated terminal Web error record,
+  and returns the same restrained, copyable `Reference ID` to the existing error treatment.
+- Expected input, configuration, authorization, lifecycle-conflict, Waiting, Ready, Inactive, and
+  Unavailable presentations retain their existing semantics and do not gain incident references.
+  This checkpoint adds no database migration, persistent logging, public diagnostics endpoint,
+  diagnostics dashboard, or broader health-detail projection.
 - Semgrep CE monitoring foundation is implemented in `.github/workflows/semgrep.yml` with the
   pinned official `semgrep/semgrep:1.171.0` image, curated `p/default` ruleset, JSON artifact,
   deterministic job summary, and repository-owned summary tests.

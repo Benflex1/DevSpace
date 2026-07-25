@@ -9,6 +9,7 @@ import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
+import { IncidentReference } from "./incident-reference.js";
 import { useTransientNotice } from "./transient-notice.js";
 import {
   activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
@@ -243,9 +244,9 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     showNotice("Creating terminal…", "pending");
     const response = await fetch(`/api/projects/${projectId}/terminals`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "create" }) });
-    const body = await response.json() as { terminalId?: string; message?: string };
+    const body = await response.json() as { terminalId?: string; message?: string; incidentId?: string };
     if (!response.ok || body.terminalId === undefined) {
-      showNotice(body.message ?? "Terminal creation failed.", "error");
+      showNotice(body.message ?? "Terminal creation failed.", "error", body.incidentId);
       return;
     }
     const data = await refresh();
@@ -265,17 +266,19 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     showNotice("Starting task…", "pending");
     const response = await fetch(`/api/projects/${projectId}/tasks`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "run", taskKey }) });
-    const result = await response.json() as { message?: string };
-    showNotice(response.ok ? "Task started." : result.message ?? "Task action failed.", response.ok ? "success" : "error");
+    const result = await response.json() as { message?: string; incidentId?: string };
+    showNotice(response.ok ? "Task started." : result.message ?? "Task action failed.", response.ok ? "success" : "error",
+      response.ok ? undefined : result.incidentId);
     await refresh();
   };
   const reloadPreview = async (previewId: string) => {
     showNotice("Reconciling preview…", "pending");
     const response = await fetch(`/api/projects/${projectId}/previews`, { method: "POST",
       headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "reload", previewId }) });
-    const result = await response.json() as { message?: string; previews?: PreviewLifecycleView[] };
+    const result = await response.json() as { message?: string; previews?: PreviewLifecycleView[]; incidentId?: string };
     if (Array.isArray(result.previews)) setPreviews(result.previews);
-    showNotice(response.ok ? "Preview reconciliation requested." : result.message ?? "Preview reconciliation failed.", response.ok ? "success" : "error");
+    showNotice(response.ok ? "Preview reconciliation requested." : result.message ?? "Preview reconciliation failed.", response.ok ? "success" : "error",
+      response.ok ? undefined : result.incidentId);
   };
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
@@ -293,7 +296,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           canCreateTerminal={actionsAvailable} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway} />
-        {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">{notice.message}</p>}
+        {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">
+          <span>{notice.message}</span>
+          <IncidentReference incidentId={notice.referenceId} />
+        </p>}
       </section>
     </div>
     {lostDialogIds.length > 0 && <LostTerminalDialog key={lostTerminalSetKey(lostDialogIds)} count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}

@@ -1,8 +1,25 @@
 import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import type { ProjectDatabase } from "./database.js";
+import { persistedFailureMessage } from "./failure-policy.js";
+import { SafeWebFailure, type SafeFailureMetadata } from "./user-facing-failure.js";
 
-export class ExecutionMutationError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = "ExecutionMutationError"; }
+export class ExecutionMutationError extends SafeWebFailure {
+  constructor(code: string, message: string, metadata: SafeFailureMetadata = {}) {
+    super(code, message, metadata);
+    this.name = "ExecutionMutationError";
+  }
+}
+
+function agentExecutionError(error: AgentResponseError | AgentUnavailableError): ExecutionMutationError {
+  return new ExecutionMutationError(error.code, persistedFailureMessage(error.code), {
+    failureCategory: error.failureCategory,
+    retryable: error.retryable,
+    incidentId: error.incidentId,
+    requestId: error.requestId,
+    operationId: error.operationId,
+    diagnosticContext: error.diagnosticContext,
+    messageOwnership: "agent-code"
+  });
 }
 
 async function requireAgentRuntime(agent: FullAgentClient): Promise<void> {
@@ -12,7 +29,10 @@ async function requireAgentRuntime(agent: FullAgentClient): Promise<void> {
     if (health.status !== "ok" || runtime.rootlessRuntime !== "available" || runtime.operationJournal !== "available") {
       throw new Error("agent-runtime-unavailable");
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof AgentResponseError || error instanceof AgentUnavailableError) {
+      throw agentExecutionError(error);
+    }
     throw new ExecutionMutationError("AGENT_UNAVAILABLE", "The DevSpace Agent and its required runtime are unavailable.");
   }
 }
@@ -27,7 +47,16 @@ async function observeOperation(operationId: string, dependencies: {
     dependencies.database.applyExecutionSnapshot(snapshot);
     const observation = snapshot.operationObservations.find((item) => item.operationId === operationId);
     if (observation?.state === "succeeded") return;
-    if (observation?.state === "failed") throw new ExecutionMutationError(observation.failure.code, observation.failure.message);
+    if (observation?.state === "failed") {
+      const details = observation.failure.details;
+      const incidentId = "incidentId" in details ? details.incidentId : undefined;
+      throw new ExecutionMutationError(observation.failure.code, persistedFailureMessage(observation.failure.code), {
+        retryable: observation.failure.retryable,
+        operationId,
+        messageOwnership: "agent-code",
+        ...(incidentId === undefined ? {} : { incidentId })
+      });
+    }
     await new Promise((resolve) => setTimeout(resolve, delay));
     delay = Math.min(Math.ceil(delay * 1.7), 500);
   }
@@ -45,9 +74,10 @@ export async function openTerminal(projectId: string, actor: string, dependencie
     return { terminalId: intent.terminalId, workspaceId: intent.workspaceId };
   } catch (error) {
     if (error instanceof AgentResponseError) {
+      const message = persistedFailureMessage(error.code);
       dependencies.database.failTerminalCreate({ operationId: intent.operation.operationId, terminalId: intent.terminalId,
-        code: error.code, message: error.message });
-      throw new ExecutionMutationError(error.code, error.message);
+        code: error.code, message });
+      throw agentExecutionError(error);
     }
     if (error instanceof ExecutionMutationError && error.code !== "EXECUTION_ACTION_IN_PROGRESS") {
       dependencies.database.failTerminalCreate({ operationId: intent.operation.operationId, terminalId: intent.terminalId,

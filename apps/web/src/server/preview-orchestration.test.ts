@@ -224,6 +224,34 @@ describe("Web preview orchestration", () => {
     });
   });
 
+  test("retains background reconciliation diagnostics without creating a browser incident", async () => {
+    const fixture = fakeDatabase(preview({ observedState: "healthy", routePresent: true }));
+    const logs: string[] = [];
+    const agent = {
+      activatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      deactivatePreview: () => Promise.resolve({ operationId: "0190a000-0000-7000-8000-000000000014" }),
+      inspectPreview: () => Promise.reject(new AgentUnavailableError()),
+      snapshot: () => Promise.resolve({ operationObservations: [] })
+    };
+
+    await reconcileWorkspacePreviews(projectId, "actor", "observe", {
+      database: fixture.database,
+      agent: agent as never,
+      reason: "background-preview-reconciliation",
+      logger: createLogger({ component: "web", subsystem: "preview", sink: (line) => logs.push(line) })
+    });
+
+    const records = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.find((record) => record.event === "preview.inspection.failed")).toMatchObject({
+      projectId, workspaceId, previewId, errorCode: "AGENT_UNAVAILABLE"
+    });
+    expect(records.find((record) => record.event === "preview.observed_state")).toMatchObject({
+      projectId, workspaceId, previewId, observedState: "lost"
+    });
+    expect(records.some((record) => record.event === "web.preview_action.failed")).toBe(false);
+    expect(records.some((record) => "incidentId" in record)).toBe(false);
+  });
+
   test("logs reconciliation failure without claiming completion and preserves the original error", async () => {
     const fixture = fakeDatabase(preview());
     const original = new Error("original-reconciliation-failure");

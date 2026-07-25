@@ -11,6 +11,7 @@ import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
 import { parseProjectOptionsV1 } from "@devspace/project-options";
+import { persistedFailureMessage } from "./failure-policy.js";
 import { materializePreviews as materializePreviewRows } from "./preview-persistence.js";
 
 export interface ProjectView {
@@ -150,7 +151,7 @@ function toPreviewView(preview: Preview): PreviewView {
     runtimeGeneration: preview.runtimeGeneration,
     lastObservationJson: preview.lastObservationJson,
     lastErrorCode: preview.lastErrorCode,
-    lastErrorMessage: preview.lastErrorMessage
+    lastErrorMessage: preview.lastErrorCode === null ? null : persistedFailureMessage(preview.lastErrorCode)
   };
 }
 
@@ -227,7 +228,8 @@ export function openProjectDatabase(path: string, options: {
       },
       runtime: runtime === undefined ? null : { id: runtime.id, desiredState: runtime.desiredState,
         observedState: runtime.observedState, generation: runtime.runtimeGeneration,
-        errorMessage: runtime.lastErrorMessage, serviceObservedState: development?.observedState ?? null },
+        errorMessage: runtime.lastErrorCode === null ? null : persistedFailureMessage(runtime.lastErrorCode),
+        serviceObservedState: development?.observedState ?? null },
       tasks: projectOptions?.tasks.map((task) => ({ key: task.key, displayName: task.displayName })) ?? [],
       taskRuns: recentRuns.map((run) => { const process = run.processId === null ? undefined
         : db.select().from(processes).where(eq(processes.id, run.processId)).get();
@@ -783,12 +785,13 @@ export function openProjectDatabase(path: string, options: {
           if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"].includes(local.operationName)) continue;
           if (operation.state === "succeeded") this.finishOperation(local.operationId, { state: "succeeded" });
           else if (operation.state === "failed") {
+            const message = persistedFailureMessage(operation.failure.code);
             this.finishOperation(local.operationId, { state: "failed",
-              code: operation.failure.code, message: operation.failure.message.slice(0, 512) });
+              code: operation.failure.code, message });
             if (local.operationName === "preview.activate" || local.operationName === "preview.deactivate") {
               const preview = currentPreviewForOperation(local);
               if (preview !== undefined) db.update(previews).set({ observedState: "failed", routePresent: preview.routePresent,
-                  lastErrorCode: operation.failure.code, lastErrorMessage: operation.failure.message.slice(0, 512),
+                  lastErrorCode: operation.failure.code, lastErrorMessage: message,
                   operationId: local.operationId, updatedAt: timestamp
                 }).where(eq(previews.id, preview.id)).run();
             } else if (local.operationName === "terminal.create") {
