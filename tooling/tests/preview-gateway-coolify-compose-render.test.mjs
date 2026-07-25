@@ -72,6 +72,15 @@ test("accepts the rendered Coolify single-network adapter topology", () => {
   );
 });
 
+test("accepts Docker Compose v2.38.2 empty IPAM normalization", () => {
+  const model = renderedModel();
+  model.networks["coolify-proxy"].ipam = {};
+  assert.equal(
+    validateRenderedCoolifyPreviewGatewayCompose(model, expected, proxyNetwork),
+    true
+  );
+});
+
 test("requires the exact supplied external proxy network", () => {
   const wrongName = renderedModel();
   wrongName.networks["coolify-proxy"].name = "another-network";
@@ -85,6 +94,22 @@ test("requires the exact supplied external proxy network", () => {
   assert.throws(
     () => validateRenderedCoolifyPreviewGatewayCompose(managed, expected, proxyNetwork),
     /must remain external/u
+  );
+
+  const configuredIpam = renderedModel();
+  configuredIpam.networks["coolify-proxy"].ipam = {
+    config: [{ subnet: "192.0.2.0/24" }]
+  };
+  assert.throws(
+    () => validateRenderedCoolifyPreviewGatewayCompose(configuredIpam, expected, proxyNetwork),
+    /must not define IPAM configuration/u
+  );
+
+  const driver = renderedModel();
+  driver.networks["coolify-proxy"].driver = "bridge";
+  assert.throws(
+    () => validateRenderedCoolifyPreviewGatewayCompose(driver, expected, proxyNetwork),
+    /may contain only external, name/u
   );
 });
 

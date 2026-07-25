@@ -43,9 +43,16 @@ export function validateRenderedCoolifyPreviewGatewayCompose(model, expected, ex
     proxyNetwork.name === expectedProxyNetwork,
     `the selected proxy network name must be exactly ${expectedProxyNetwork}.`
   );
+  if (proxyNetwork.ipam !== undefined) {
+    const ipam = object(proxyNetwork.ipam, "selected proxy network IPAM normalization");
+    requireCondition(
+      Object.keys(ipam).length === 0,
+      "the selected external proxy network must not define IPAM configuration."
+    );
+  }
   requireCondition(
-    Object.keys(proxyNetwork).every((key) => key === "external" || key === "name"),
-    "the selected proxy network may contain only external and name."
+    Object.keys(proxyNetwork).every((key) => key === "external" || key === "name" || key === "ipam"),
+    "the selected proxy network may contain only external, name, and Compose's empty IPAM normalization."
   );
 
   for (const serviceName of ["caddy", "preview-gateway-host"]) {
