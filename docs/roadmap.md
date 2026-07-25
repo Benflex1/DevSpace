@@ -40,7 +40,7 @@ Completed:
 
 # Milestone 1 — Usable Primary Workspace
 
-**Status: 🟡 Final stretch — roughly 95% complete; production preview deployment remains**
+**Status: 🟡 Final stretch — Slice 5 is complete; focused M1 Slice 6 hardening remains**
 
 ## Definition of done
 
@@ -56,7 +56,8 @@ A user can:
 8. stop/restart the workspace through the normal ownership-checked lifecycle;
 9. recover cleanly enough from normal Agent/Web restarts for daily use.
 
-The full core path now works locally. Remaining work is focused hardening and production preview deployment.
+The full core path now works locally and the production preview path is validated. Remaining work is
+the focused M1 Slice 6 hardening described below.
 
 ## Slice 1 — Project onboarding
 
@@ -137,7 +138,7 @@ Completed terminal lifecycle and Workbench polish:
 
 ## Slice 5 — Preview path
 
-**Status: 🟢 Local implementation and lifecycle validation complete / 🟡 production deployment pending**
+**Status: 🟢 Production deployment and validation complete**
 
 Working locally:
 
@@ -197,30 +198,31 @@ Repository-side readiness:
   fail-closed route removal, stable hostname restoration, Agent restart reconciliation, and HMR
 - ✅ Raw Compose Deployment preserves the exact external gateway bind volumes and runs all three
   services plus all four private sockets
-- 🟡 Corrected self-contained Coolify Raw Compose adapter implemented with deterministic
-  generic-contract generation, connector-only attachment to an explicit external proxy network,
-  and arbitrary-directory selected-file regression coverage; production deployment remains
+- ✅ Corrected self-contained Coolify Raw Compose adapter generated deterministically from the
+  generic contract, durably attached to the selected external proxy network, and validated at the
+  arbitrary-directory selected-file boundary
 
-Production deployment remains pending:
+Production deployment and validation completed:
 
 - ✅ Provision the selected gateway host runtime root and its private `ingress` subdirectory
 - ✅ Create and inspect the two exact external local-driver bind volumes
-- 🟡 Merge, then deliberately deploy the corrected self-contained Coolify Raw Compose adapter
-- ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
-- ⏳ Configure the production preview environment
-- ⏳ Configure one permanent reserved-namespace rule in the selected outer ingress
-- ⏳ Verify real production preview traffic and HMR through the selected ingress
+- ✅ Merge and deliberately deploy the corrected self-contained Coolify Raw Compose adapter
+- ✅ Mount the shared gateway runtime directory into code-server/DevSpace
+- ✅ Configure the production preview environment through Coolify Raw Compose with the explicit
+  proxy-network setting and exact Base Directory/Compose Location
+- ✅ Configure one permanent reserved-namespace rule in the selected outer ingress
+- ✅ Verify real production preview traffic and HMR through the selected ingress
 
 Current deployment target and production checklist:
 
 - ✅ Provision the configured gateway host root and ingress subdirectory with the selected UID/GID and mode `0700`
 - ✅ Deploy the gateway stack in Coolify Raw Compose and verify four Unix sockets plus `127.0.0.1:18080`
 - ✅ Preserve the healthy generic gateway after the failed include-based adapter deployment
-- ⏳ Deploy the corrected self-contained connector-only external proxy-network adapter and verify
-  its alias
-- ⏳ Add the shared gateway and dedicated rootless-Docker mounts to code-server without exposing a host/Coolify Docker socket
-- ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace router for the current deployment
-- ⏳ Validate external Vite/HMR, stop/restart, fail-closed route removal, stable hostname restoration, and Agent health
+- ✅ Deploy the corrected self-contained connector-only external proxy-network adapter and verify
+  its durable network attachment and alias
+- ✅ Add the shared gateway and dedicated rootless-Docker mounts to code-server without exposing a host/Coolify Docker socket
+- ✅ Configure the authenticated reserved `*-preview.benflex.dev` namespace router for the current deployment
+- ✅ Validate external Vite/HMR, stop/restart, fail-closed route removal, stable hostname restoration, and Agent health
 
 The `*-preview.benflex.dev`, Coolify, and Traefik values describe the current home-server
 deployment target, not a universal DevSpace core requirement. Generic deployments may use another
@@ -288,18 +290,8 @@ Later operational UX:
 
 # Immediate next steps
 
-1. 🟡 Merge the corrected self-contained Coolify adapter; do not disturb the healthy generic
-   gateway before deliberate deployment.
-2. ⏳ Deploy with Base Directory `/deploy/preview-gateway`, Compose Location
-   `/compose.coolify.yaml`, Raw Compose enabled, and an explicit
-   `DEVSPACE_COOLIFY_PROXY_NETWORK`.
-3. ⏳ Inspect the generated Compose, exact external volumes, real container mounts/networks, four
-   private sockets, connector alias, and `127.0.0.1:18080`.
-4. ⏳ Configure code-server gateway and dedicated rootless-Docker mounts plus the production preview environment.
-5. ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace through the current Traefik integration.
-6. ⏳ Validate external production preview traffic and HMR through the complete path.
-7. ⏳ Complete the remaining focused M1 Slice 6 hardening.
-8. ⏳ Close Milestone 1 only after production preview validation succeeds.
+1. ⏳ Complete the remaining focused M1 Slice 6 hardening.
+2. ⏳ Close Milestone 1 after that bounded hardening checkpoint.
 
 ---
 

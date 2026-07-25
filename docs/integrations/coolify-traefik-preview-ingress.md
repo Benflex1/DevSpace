@@ -52,17 +52,19 @@ DEVSPACE_COOLIFY_PROXY_NETWORK=<administrator-selected-external-network>
 There is no default. `${DEVSPACE_COOLIFY_PROXY_NETWORK:?...}` interpolation rejects both an unset
 and an empty value so a deployment cannot silently start with an isolated connector.
 
-## Observed production evidence
+## Validated production deployment
 
-Raw Compose successfully runs all three gateway services with the selected UID/GID, preserves
-both external bind volumes, creates all four private sockets, and returns Caddy's fallback HTTP
-404. The Agent reports healthy rootless runtime and operation journal availability.
+The self-contained generated adapter is merged and deployed. Coolify uses Base Directory
+`/deploy/preview-gateway`, Compose Location `/compose.coolify.yaml`, Raw Compose Deployment, and
+an explicit `DEVSPACE_COOLIFY_PROXY_NETWORK`. Raw Compose runs all three gateway services with the
+selected UID/GID, preserves the two exact administrator-created external bind volumes, creates all
+four private sockets with the intended ownership and mode, and returns Caddy's fallback HTTP 404.
+The Agent reports healthy rootless runtime and operation journal availability.
 
-The remaining failure was network topology: Raw Compose attached the connector only to its
-generated private `<resource>_default` network, while Coolify's Traefik proxy used the separate
-stable `<resource>` network. The generated environment did not contain
-`COOLIFY_RESOURCE_UUID`. A temporary connector-only attachment to the stable network with alias
-`devspace-preview-ingress` returned the expected Caddy 404 and was removed after the proof.
+The connector is durably attached to the selected Coolify Traefik network with the stable alias
+`devspace-preview-ingress`. The durable proxy-network → connector → Unix socket → Caddy fallback
+path returns 404. Caddy and `preview-gateway-host` remain on host networking, while the connector
+has only the ingress volume and no Docker socket or published host port.
 
 The observed proxy was Traefik `3.6.13` from `traefik:v3.6`; generated Compose labels reported
 version `5.3.1`. The connector exposed `8080/tcp` and had no published host port. These are
@@ -79,11 +81,10 @@ file did not exist.
 
 That evidence makes an include-based adapter invalid at this Coolify Raw Compose boundary, even
 when repository-directory rendering passes. The failed deployment did not stop or replace the
-healthy generic gateway. Until this corrected adapter is merged and deliberately deployed, the
-currently running generic gateway is the safe fallback; the corrected adapter must not be
-described as production-deployed.
+healthy generic gateway. The corrected self-contained adapter removes that deployment dependency
+and is the deployed production artifact.
 
-## Resulting network boundary
+## Validated network boundary
 
 The rendered topology is:
 
@@ -107,6 +108,23 @@ receive the full `devspace-gateway-runtime` volume.
 Do not use `docker network connect` as durable setup. A manual attachment is useful only as
 temporary diagnosis and disappears on container replacement. The repository adapter owns the
 durable attachment.
+
+The permanent Coolify Traefik router matches only the reserved one-label preview namespace ending
+in `-preview.benflex.dev`. Coolify Traefik is the outer ingress for this deployment; Caddy is the
+private gateway reached after the connector and Unix-socket hop.
+
+## Cloudflare Tunnel and Access
+
+Cloudflare Tunnel sends `*.benflex.dev` to `https://localhost:443`, using origin server name
+`benflex.dev` with TLS verification enabled. Cloudflare Access protects the reserved preview
+namespace with an owner-only allow policy. Without an Access session, requests receive a Cloudflare
+Access 302; with an authenticated session, they reach the preview gateway.
+
+Embedded previews require the Access application settings SameSite cookie attribute `None` and
+`allow_iframe: true`. The Cloudflare login page itself cannot be displayed in the iframe. When the
+Access session is absent or expired, authenticate in a top-level tab before loading the embedded
+preview. Firefox may require Enhanced Tracking Protection to be disabled specifically for the
+DevSpace Web site so the Access authorization cookie is available in the cross-origin iframe.
 
 ## Select and verify the proxy network
 
@@ -216,7 +234,6 @@ Do not:
    Before an exact Agent-managed preview route exists, the expected status is Caddy's fallback
    `404`.
 
-This task establishes durable network reachability only. Do **not** add the permanent Traefik
-`HostRegexp` router as part of this deployment change. The authenticated reserved-namespace
-router, Host preservation, WebSocket validation, and external preview verification are the next
-production stage after this change is merged and deployed.
+The production deployment and validation are complete. The validated path preserves the preview
+Host boundary and supports WebSocket/HMR. A real workspace preview reached the gateway through the
+complete production path; application CSP and `X-Frame-Options` were not removed globally.

@@ -14,8 +14,8 @@ pushes to `main`, and manual runs in monitoring mode, retaining the complete JSO
 The Semgrep foundation and first contextual triage remain complete. Local preview lifecycle
 validation is complete, including Vite readiness, stop/restart, runtime stop/start, fail-closed
 route removal, stable hostname restoration, Agent restart reconciliation, and HMR. Terminal
-lost-session retirement and warning UX are complete for M1. Production preview deployment remains
-the principal M1 blocker.
+lost-session retirement and warning UX are complete for M1. The production Preview Gateway path is
+now deployed and manually validated; the remaining M1 work is the bounded Slice 6 hardening below.
 
 Normal Coolify Compose mode is invalid for the Preview Gateway because it rewrites the external
 volume service mounts. Raw Compose Deployment preserves the two administrator-created external
@@ -29,12 +29,30 @@ were present in the checkout. Coolify materialized the selected file alone as `d
 Docker Compose then failed while looking for the missing sibling `compose.yaml`. The failed
 deployment did not stop or replace the healthy generic gateway.
 
-The corrected repository adapter is a committed self-contained artifact generated
-deterministically from the generic contract plus the connector-only external network. Validation
-rejects drift, `include`, `extends`, and a missing or empty selected network, and reproduces the
-arbitrary-directory single-file materialization boundary. It has not been deployed. The running
-generic gateway remains the safe fallback until the correction is merged and deliberately
-deployed.
+The corrected repository adapter is a committed, self-contained artifact generated deterministically
+from the generic contract plus the connector-only external network. It is deployed through Coolify
+Raw Compose with Base Directory `/deploy/preview-gateway`, Compose Location `/compose.coolify.yaml`,
+Raw Compose Deployment enabled, and an explicit `DEVSPACE_COOLIFY_PROXY_NETWORK`. The connector is
+durably attached to the selected Coolify Traefik network with alias `devspace-preview-ingress`.
+The two exact administrator-created external bind volumes are preserved; Caddy and
+`preview-gateway-host` remain on host networking; and all four private gateway sockets exist with
+the intended ownership and mode. The durable proxy-network → connector → Unix socket → Caddy
+fallback path returns 404.
+
+Coolify Traefik remains the outer ingress. Its permanent router matches only the reserved
+one-label namespace ending in `-preview.benflex.dev`. Cloudflare Tunnel routes `*.benflex.dev` to
+`https://localhost:443` with origin server name `benflex.dev` and TLS verification enabled.
+Cloudflare Access protects the preview namespace with an owner-only allow policy: unauthenticated
+requests receive an Access 302, while authenticated requests reach the preview gateway. A real
+workspace preview has been validated through the complete production path, including HTTP,
+WebSocket/HMR, Waiting → Ready, application stop/restart, runtime stop/start, stable hostname
+restoration, route removal, and Agent restart reconciliation.
+
+Embedded previews work with Access SameSite cookie attribute `None` and `allow_iframe: true`. The
+Cloudflare login page cannot be displayed inside the iframe; an absent or expired Access session
+must be authenticated in a top-level tab first. Firefox may also require Enhanced Tracking
+Protection to be disabled specifically for the DevSpace Web site so the Access authorization cookie
+is available to the cross-origin iframe.
 
 ## Implemented product path
 
@@ -176,8 +194,8 @@ deployed.
   artifact is generated from that source of truth, contains the full service and volume model,
   requires `DEVSPACE_COOLIFY_PROXY_NETWORK`, and adds only the connector attachment with alias
   `devspace-preview-ingress` plus its top-level external network. Drift and arbitrary-directory
-  single-file materialization are repository-validated; corrected production deployment remains
-  pending.
+  single-file materialization are repository-validated; the corrected adapter is deployed and the
+  production network path has been manually validated through the Coolify Traefik outer ingress.
 - Preview lifecycle truth is represented by the materialized hostname plus independent route state:
   `Waiting` means the configured preview is known but not route-ready (including before the app
   listens), `Ready` means an accepted health response and exact route are present, `Inactive` means
