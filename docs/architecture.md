@@ -32,6 +32,10 @@ Caddy receives traffic for the administrator-reserved preview namespace and rout
 hosts to workspace services. A provider-neutral byte-transparent connector exposes only Caddy's
 private HTTP data plane to an administrator-selected outer ingress. The agent is the only Caddy
 admin client; Coolify, Traefik, Cloudflare, and DNS APIs are outside DevSpace core runtime.
+DevSpace core is deployable on any Docker-capable system and does not require a particular outer
+ingress provider, domain, administrator UID/GID, or host runtime directory. The fixed internal
+socket and container paths are the deployment contract; provider-specific routing and
+authentication configuration belongs in integration documentation.
 
 ### SQLite
 
@@ -82,6 +86,8 @@ Predefined tasks use structured executable and argument arrays. Project Options 
   or another compatible reverse proxy;
 - only the reserved preview suffix namespace is forwarded to the connector, with the original
   `Host` preserved;
+- the selected outer ingress must support the exact administrator-reserved namespace, WebSocket
+  upgrades, and authentication/access policy without capturing unrelated application hostnames;
 - the connector can see only `/run/devspace/gateway/ingress/preview-http.sock`, never Caddy Admin,
   probe, lease-resolver, Agent, or Docker sockets.
 

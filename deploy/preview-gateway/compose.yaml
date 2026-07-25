@@ -9,7 +9,7 @@ services:
     command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
     volumes:
       - type: bind
-        source: /srv/devspace/gateway
+        source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}
         target: /run/devspace/gateway
         bind:
           create_host_path: false
@@ -27,7 +27,7 @@ services:
       DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET: /run/devspace/gateway/lease-resolver.sock
     volumes:
       - type: bind
-        source: /srv/devspace/gateway
+        source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}
         target: /run/devspace/gateway
         bind:
           create_host_path: false
@@ -47,7 +47,7 @@ services:
       DEVSPACE_PREVIEW_HTTP_SOCKET: /run/devspace/gateway/ingress/preview-http.sock
     volumes:
       - type: bind
-        source: /srv/devspace/gateway/ingress
+        source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress
         target: /run/devspace/gateway/ingress
         read_only: true
         bind:

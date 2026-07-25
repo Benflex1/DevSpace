@@ -5,8 +5,64 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { validatePreviewGatewayDeployment } from "../check-preview-gateway-deployment.mjs";
 
+async function assertComposeMutationRejected(mutate, message) {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-preview-deployment-test-"));
+  try {
+    await cp(path.resolve("deploy/preview-gateway"), path.join(root, "deploy/preview-gateway"), { recursive: true });
+    const composePath = path.join(root, "deploy/preview-gateway/compose.yaml");
+    const compose = await readFile(composePath, "utf8");
+    await writeFile(composePath, mutate(compose));
+    await assert.rejects(() => validatePreviewGatewayDeployment(root), message);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 test("preview gateway deployment artifacts satisfy the repository contract", async () => {
   assert.equal(await validatePreviewGatewayDeployment(), true);
+});
+
+test("preview gateway deployment requires create_host_path false on every bind", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("create_host_path: false", "create_host_path: true"),
+    /create_host_path: false/u
+  );
+});
+
+test("preview gateway deployment keeps the connector on the ingress-only read-only mount", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace(
+      "source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}/ingress",
+      "source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}"
+    ),
+    /Connector bind source must append \/ingress|mount only the ingress directory/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("read_only: true", "read_only: false"),
+    /must be read-only/u
+  );
+});
+
+test("preview gateway deployment requires the portable host source contract", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("source: ${DEVSPACE_GATEWAY_HOST_DIR:-/srv/devspace/gateway}", "source: /srv/devspace/gateway"),
+    /configurable gateway host root|DEVSPACE_GATEWAY_HOST_DIR/u
+  );
+});
+
+test("preview gateway deployment keeps host-network and restart invariants", async () => {
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("network_mode: host", "network_mode: bridge"),
+    /must use host networking/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("restart: unless-stopped", "restart: always"),
+    /unless-stopped restart policy/u
+  );
+  await assertComposeMutationRejected(
+    (compose) => compose.replace("expose:", "ports:"),
+    /must not publish host ports/u
+  );
 });
 
 test("preview gateway deployment rejects the native JSON adapter form", async () => {

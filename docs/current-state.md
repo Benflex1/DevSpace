@@ -11,6 +11,11 @@ to service stderr/stdout only; persistent retention, a diagnostics UI, and exter
 future work. A separate Semgrep Community Edition static-analysis workflow now scans pull requests,
 pushes to `main`, and manual runs in monitoring mode, retaining the complete JSON report as the
 `semgrep-results` artifact for AI-assisted review without uploading source or findings to Semgrep.
+The Semgrep foundation and first contextual triage remain complete. Local preview lifecycle
+validation is complete, including Vite readiness, stop/restart, runtime stop/start, fail-closed
+route removal, stable hostname restoration, Agent restart reconciliation, and HMR. Terminal
+lost-session retirement and warning UX are complete for M1. Production preview deployment remains
+the principal M1 blocker.
 
 ## Implemented product path
 
@@ -167,6 +172,10 @@ pushes to `main`, and manual runs in monitoring mode, retaining the complete JSO
   exact one-label namespace ownership, Caddy's loopback listener plus private
   `ingress/preview-http.sock`, and a byte-transparent isolated connector. Coolify/Traefik and other
   outer-ingress APIs remain optional deployment concerns documented outside core runtime.
+- The gateway Compose host runtime root is configurable through the deployment-level
+  `DEVSPACE_GATEWAY_HOST_DIR` variable. The current validated home-server target uses
+  `/srv/devspace/gateway`, UID/GID `1000`, Coolify, Traefik, Cloudflare, and `benflex.dev`.
+  These deployment-specific values are not universal DevSpace core requirements.
 
 ## Still absent
 

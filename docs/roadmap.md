@@ -40,7 +40,7 @@ Completed:
 
 # Milestone 1 — Usable Primary Workspace
 
-**Status: 🟡 Final stretch — roughly 90–95% complete**
+**Status: 🟡 Final stretch — roughly 95% complete; production preview deployment remains**
 
 ## Definition of done
 
@@ -56,7 +56,7 @@ A user can:
 8. stop/restart the workspace through the normal ownership-checked lifecycle;
 9. recover cleanly enough from normal Agent/Web restarts for daily use.
 
-The full core path now works locally. Remaining work is mostly final lifecycle/UI polish, hardening, and production deployment.
+The full core path now works locally. Remaining work is focused hardening and production preview deployment.
 
 ## Slice 1 — Project onboarding
 
@@ -105,7 +105,7 @@ Deferred hardening:
 
 ## Slice 4 — Terminal and task path
 
-**Status: ✅ Core complete / 🟡 UX follow-up remains**
+**Status: ✅ Complete for M1**
 
 - ✅ Browser terminal works
 - ✅ Agent PTY connection works
@@ -119,22 +119,25 @@ Current limitation:
 
 - 🧊 True terminal reattachment is not possible with the current Docker exec/PTTY model
 
-Planned follow-up:
+Deferred beyond M1:
 
-- ⏳ Persistent terminal/session ownership layer
-- ⏳ Attach/detach semantics
-- ⏳ Better long-lived terminal recovery for shells, Vite, Codex, and other processes
+- 🧊 Persistent terminal/session ownership layer
+- 🧊 Attach/detach semantics
+- 🧊 Better long-lived terminal recovery for shells, Vite, Codex, and other processes
 
-Completed Workbench polish in PR #22:
+Completed terminal lifecycle and Workbench polish:
 
 - ✅ Lost terminal rows automatically disappear from the sidebar after a short grace period
 - ✅ Lost-terminal recovery action is **Restart workspace**
-- ✅ Lost-terminal dialog button hierarchy makes Dismiss smaller/secondary and Restart workspace prominent
+- ✅ Lost-terminal dialog button hierarchy keeps Dismiss secondary and Restart workspace prominent
+- ✅ Two-step warning/confirmation dismissal flow
+- ✅ Lost terminals retire on accepted workspace stop/restart and do not reappear after refresh,
+  restart, or later Agent snapshots
 - ✅ Workbench metadata order is branch, repository, runtime state, and runtime control
 
 ## Slice 5 — Preview path
 
-**Status: 🟢 Core implementation complete / 🟡 final polish and deployment pending**
+**Status: 🟢 Local implementation and lifecycle validation complete / 🟡 production deployment pending**
 
 Working locally:
 
@@ -185,25 +188,34 @@ Security and deployment support completed:
 - ✅ Real Caddy CI smoke test
 - ✅ Shared-ingress connector with reserved preview hostname namespace
 
-Remaining before Slice 5 is fully closed:
+Repository-side readiness:
 
-- 🟡 Re-run final local lifecycle checklist
+- ✅ Shared-ingress connector and reserved `labelSuffix` hostname namespace
+- ✅ Portable gateway Compose contract with configurable host runtime directory
+- ✅ Checked-in Caddy configuration, deployment validation, and real-Caddy smoke coverage
+- ✅ Local lifecycle coverage: Vite `Waiting → Ready`, Vite stop/restart, runtime stop/start,
+  fail-closed route removal, stable hostname restoration, Agent restart reconciliation, and HMR
+
+Production deployment remains pending:
+
+- ⏳ Provision the selected gateway host runtime root and its private `ingress` subdirectory
 - ⏳ Deploy the preview gateway stack on the home server
 - ⏳ Mount the shared gateway runtime directory into code-server/DevSpace
 - ⏳ Configure the production preview environment
 - ⏳ Configure one permanent reserved-namespace rule in the selected outer ingress
 - ⏳ Verify real production preview traffic and HMR through the selected ingress
 
-Final local checklist:
+Current deployment target and production checklist:
 
-- 🟢 Vite running → Preview `Ready`
-- 🟢 Stop Vite → Preview `Waiting`
-- 🟢 Restart Vite → Preview `Ready`
-- 🟢 Stop runtime becomes available after restart/remount recovery
-- 🟢 Runtime Stop uses the normal ownership-checked path
-- 🟢 Agent restart detects lost terminals
-- 🟡 Lost-terminal UI polish still being finalized
-- ⏳ Final production server validation
+- ⏳ Provision the configured gateway host root and ingress subdirectory with the selected UID/GID and mode `0700`
+- ⏳ Deploy the gateway stack in Coolify production and verify four Unix sockets plus `127.0.0.1:18080`
+- ⏳ Add the shared gateway and dedicated rootless-Docker mounts to code-server without exposing a host/Coolify Docker socket
+- ⏳ Configure the authenticated reserved `*-preview.benflex.dev` namespace router for the current deployment
+- ⏳ Validate external Vite/HMR, stop/restart, fail-closed route removal, stable hostname restoration, and Agent health
+
+The `*-preview.benflex.dev`, Coolify, and Traefik values describe the current home-server
+deployment target, not a universal DevSpace core requirement. Generic deployments may use another
+Docker-capable host, directory, UID/GID, domain, authentication layer, or outer ingress.
 
 ## Slice 6 — M1 hardening and diagnostics
 
@@ -245,12 +257,13 @@ Later operational UX:
 
 ### Static-analysis hardening
 
-- 🟢 Add a separate, accountless Semgrep Community Edition workflow for pull requests, pushes to
-  `main`, and manual runs using the curated `p/default` ruleset.
-- 🟢 Retain complete JSON findings and publish a deterministic, source-snippet-free job summary;
-  findings are monitoring-only while scanner and report failures remain blocking.
-- ⏳ Tune the curated ruleset through AI-assisted contextual review before making high-confidence
-  security or correctness findings blocking.
+- ✅ Semgrep CE foundation and first contextual triage
+- ✅ Complete JSON artifact and deterministic source-snippet-free job summary
+- ✅ Scanner/report failures blocking while findings remain monitoring-only
+- ✅ All current GitHub Actions references pinned to immutable full SHAs
+- 🧊 pnpm dependency-policy review deferred for a separate compatibility task
+- ⏳ Tune the curated ruleset through further contextual review before making selected findings
+  blocking.
 - ⏳ Evaluate additional free options later, including self-hosted SonarQube Community, CodeScene
   through eligible GitHub Student benefits, and any GitHub Student Pack security tooling that is
   genuinely free for this private repository. These options have not been adopted.
@@ -266,13 +279,14 @@ Later operational UX:
 
 # Immediate next steps
 
-1. ⏳ Run the final local Slice 5 lifecycle checklist
-2. ⏳ Deploy the preview gateway stack to the home server
-3. ⏳ Configure production reserved-namespace preview routing
-4. ⏳ Validate production previews/HMR
-5. ⏳ Complete focused M1 Slice 6 hardening
-6. ⏳ Evaluate/adopt TypeScript 7 without breaking tooling compatibility
-7. ✅ Close Milestone 1
+1. ⏳ Merge the production-preview repository-readiness fixes.
+2. ⏳ Provision the selected gateway host runtime root and private ingress subdirectory.
+3. ⏳ Deploy the gateway stack in the current Coolify production environment using the staged validation runbook.
+4. ⏳ Add code-server’s shared gateway and dedicated rootless-Docker mounts plus the production preview environment.
+5. ⏳ Configure and validate the authenticated `*-preview.benflex.dev` reserved namespace through the current Traefik integration.
+6. ⏳ Validate external preview traffic and HMR through the complete production path.
+7. ⏳ Complete the remaining focused M1 Slice 6 hardening.
+8. ⏳ Close Milestone 1 only after production preview validation succeeds.
 
 ---
 
