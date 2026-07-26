@@ -244,6 +244,17 @@ is available to the cross-origin iframe.
 
 ## Still absent
 
+AI Session Foundation Slice 1A has a committed, explicitly opt-in supervisor capability harness
+and a hands-on **conditional pass** against the dedicated rootless Docker environment. The proof
+demonstrates authenticated reconnect after the original exec attachment is gone, stable
+`/proc` process-start identity, a provider-owned child/grandchild process-group boundary, scoped
+graceful/forced termination with an unrelated sentinel surviving, fail-closed stale identity and
+container replacement handling, secret-leak inspection, and daemon-verified cleanup. This is
+capability evidence only: production AI provider execution, supervisor integration, durable
+ownership, credentials, F11 handlers, event persistence, Web routes, SQLite data, and UI remain
+absent. AI-capable images must later enforce the prerequisites listed in
+`docs/research/ai-session-supervisor-capability-proof.md`.
+
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
 editing, rebuild, and AI sessions remain intentionally unimplemented. Preview service-target

@@ -28,7 +28,8 @@
     "preview-gateway:coolify-generate": "node tooling/generate-preview-gateway-coolify-compose.mjs --write",
     "preview-gateway:coolify-materialization-check": "node tooling/check-preview-gateway-coolify-materialization.mjs",
     "preview-gateway:caddy-smoke": "node tooling/preview-gateway-caddy-smoke.mjs",
-    "preview-gateway:coolify-smoke": "node tooling/preview-gateway-coolify-smoke.mjs"
+    "preview-gateway:coolify-smoke": "node tooling/preview-gateway-coolify-smoke.mjs",
+    "ai-supervisor:proof": "node tooling/ai-supervisor-proof/run-proof.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

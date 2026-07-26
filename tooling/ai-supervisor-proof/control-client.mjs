@@ -1,0 +1,14 @@
+import net from "node:net";
+import { createInterface } from "node:readline";
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const { value: input, done } = await lines[Symbol.asyncIterator]().next();
+lines.close();
+if (done || input.length > 65_536) throw new Error("invalid-helper-bootstrap");
+const request = JSON.parse(input);
+const { socketPath, ...controlRequest } = request;
+const socket = net.createConnection(socketPath);
+socket.setEncoding("utf8"); let output = "";
+socket.on("connect", () => socket.end(`${JSON.stringify(controlRequest)}\n`));
+socket.on("data", (chunk) => { output += chunk; });
+socket.on("end", () => { process.stdout.write(output); });
+socket.on("error", () => { process.stderr.write("control-transport-failure\n"); process.exitCode = 1; });
