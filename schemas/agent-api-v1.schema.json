@@ -3,7 +3,7 @@
   "$id": "https://devspace.local/schemas/agent-api-v1.schema.json",
   "title": "DevSpace Agent API v1 executable contracts",
   "description": "Structural JSON Schema projection of the complete DevSpace Agent API v1 non-AI F09, F10, and AI Session F11 wire contracts.",
-  "$comment": "Authoritative runtime Zod validation additionally enforces semantic refinements including cursor/event equality, snapshot boot/cursor equality, resource and operation uniqueness, lifecycle structural edges, process observation semantics, and project Git-scope consistency. EventCursor's exact maximum 9007199254740991 is enforced by runtime parseEventCursor; its portable decimal string pattern does not fully encode that upper bound. The preview.state.changed event schema validates all invariants available from the wire object, but retained-observation transition semantics require validatePreviewObservationChange with the prior full preview observation; standalone JSON Schema and standalone agentEventSchema cannot prove those absent-context invariants. JSON Schema does not prove event-stream continuity, replay availability, snapshot atomicity, or retention behavior; see packages/contracts/README.md.",
+  "$comment": "Authoritative runtime Zod validation and Agent-private algorithms additionally enforce semantic refinements including cursor/event equality, snapshot boot/cursor equality, resource and operation uniqueness, lifecycle structural edges, process observation semantics, project Git-scope consistency, AI profile authority canonicalization/hashing, and dual event sequence/global-ID lookups. EventCursor's exact maximum 9007199254740991 is enforced by runtime parseEventCursor; its portable decimal string pattern does not fully encode that upper bound. The preview.state.changed event schema validates all invariants available from the wire object, but retained-observation transition semantics require validatePreviewObservationChange with the prior full preview observation; standalone JSON Schema and standalone agentEventSchema cannot prove those absent-context invariants. JSON Schema does not prove event-stream continuity, replay availability, snapshot atomicity, private AI intent durability, or retention behavior; see packages/contracts/README.md.",
   "$defs": {
     "error.PROTOCOL_VERSION_UNSUPPORTED.details": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7445,7 +7445,7 @@
         },
         "profileRevision": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
         },
         "provider": {
           "type": "string",
@@ -7628,6 +7628,10 @@
               "minLength": 1,
               "maxLength": 64,
               "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "profileRevision": {
+              "type": "string",
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             }
           },
           "required": [
@@ -7638,7 +7642,8 @@
             "revisionId",
             "runtimePlanHash",
             "runtimeGeneration",
-            "profileId"
+            "profileId",
+            "profileRevision"
           ],
           "additionalProperties": false
         },
@@ -7679,6 +7684,10 @@
               "minLength": 1,
               "maxLength": 64,
               "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "profileRevision": {
+              "type": "string",
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             }
           },
           "required": [
@@ -7689,7 +7698,8 @@
             "revisionId",
             "runtimePlanHash",
             "runtimeGeneration",
-            "profileId"
+            "profileId",
+            "profileRevision"
           ],
           "additionalProperties": false
         },
@@ -7720,7 +7730,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -7789,7 +7799,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -7840,7 +7850,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -7906,7 +7916,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -8023,7 +8033,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -8069,7 +8079,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -8105,6 +8115,7 @@
           "enum": [
             "AI_PROFILE_NOT_FOUND",
             "AI_PROFILE_UNAVAILABLE",
+            "AI_PROFILE_REVISION_CONFLICT",
             "AI_CAPABILITY_UNSUPPORTED",
             "AI_SESSION_STATE_CONFLICT",
             "AI_TURN_STATE_CONFLICT",
@@ -8186,7 +8197,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8278,7 +8289,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8361,7 +8372,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8456,7 +8467,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8552,7 +8563,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8647,7 +8658,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8743,7 +8754,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8848,7 +8859,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -8932,7 +8943,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9028,7 +9039,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9124,7 +9135,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9309,7 +9320,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9410,7 +9421,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9589,7 +9600,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9691,7 +9702,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -9853,7 +9864,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10006,7 +10017,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10090,7 +10101,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10186,7 +10197,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10282,7 +10293,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10378,7 +10389,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10418,6 +10429,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -10517,7 +10529,7 @@
                 },
                 "profileRevision": {
                   "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                 },
                 "provider": {
                   "type": "string",
@@ -10621,7 +10633,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -10713,7 +10725,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -10796,7 +10808,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -10891,7 +10903,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -10987,7 +10999,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11082,7 +11094,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11178,7 +11190,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11283,7 +11295,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11367,7 +11379,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11463,7 +11475,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11559,7 +11571,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11744,7 +11756,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -11845,7 +11857,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12024,7 +12036,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12126,7 +12138,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12288,7 +12300,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12441,7 +12453,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12525,7 +12537,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12621,7 +12633,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12717,7 +12729,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12813,7 +12825,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -12853,6 +12865,7 @@
                           "enum": [
                             "AI_PROFILE_NOT_FOUND",
                             "AI_PROFILE_UNAVAILABLE",
+                            "AI_PROFILE_REVISION_CONFLICT",
                             "AI_CAPABILITY_UNSUPPORTED",
                             "AI_SESSION_STATE_CONFLICT",
                             "AI_TURN_STATE_CONFLICT",
@@ -12952,7 +12965,7 @@
                     },
                     "profileRevision": {
                       "type": "string",
-                      "pattern": "^sha256:[0-9a-f]{64}$"
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
                     },
                     "provider": {
                       "type": "string",
@@ -36187,6 +36200,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -36295,6 +36309,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -36429,7 +36444,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "provider": {
               "type": "string",
@@ -37039,6 +37054,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -37147,6 +37163,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -37255,6 +37381,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -37363,6 +37490,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -37471,6 +37599,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -37569,6 +37698,10 @@
               "minLength": 1,
               "maxLength": 64,
               "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "profileRevision": {
+              "type": "string",
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             }
           },
           "required": [
@@ -37578,7 +37711,8 @@
             "revisionId",
             "runtimePlanHash",
             "runtimeGeneration",
-            "profileId"
+            "profileId",
+            "profileRevision"
           ],
           "additionalProperties": false
         }
@@ -38125,6 +38259,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -38233,6 +38368,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -38341,6 +38586,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -38449,6 +38695,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -38557,6 +38804,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -38665,6 +38913,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -38763,6 +39012,10 @@
               "minLength": 1,
               "maxLength": 64,
               "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            },
+            "profileRevision": {
+              "type": "string",
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             }
           },
           "required": [
@@ -38772,7 +39025,8 @@
             "revisionId",
             "runtimePlanHash",
             "runtimeGeneration",
-            "profileId"
+            "profileId",
+            "profileRevision"
           ],
           "additionalProperties": false
         }
@@ -39319,6 +39573,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -39427,6 +39682,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -39535,6 +39900,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -39643,6 +40009,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -39751,6 +40118,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -39859,6 +40227,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -39947,7 +40316,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -40531,6 +40900,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -40639,6 +41009,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -40747,6 +41227,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -40855,6 +41336,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -40963,6 +41445,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -41071,6 +41554,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -41179,6 +41663,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -41267,7 +41752,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -41833,6 +42318,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -41941,6 +42427,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42049,6 +42645,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42157,6 +42754,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42265,6 +42863,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42373,6 +42972,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42481,6 +43081,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42589,6 +43190,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -42677,7 +43279,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -43258,6 +43860,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -43366,6 +43969,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -43474,6 +44187,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -43582,6 +44296,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -43690,6 +44405,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -43798,6 +44514,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -43906,6 +44623,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -44014,6 +44732,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -44102,7 +44821,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -44734,6 +45453,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -44842,6 +45562,116 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
+                        "AI_CAPABILITY_UNSUPPORTED",
+                        "AI_SESSION_STATE_CONFLICT",
+                        "AI_TURN_STATE_CONFLICT",
+                        "AI_INTERACTION_STATE_CONFLICT",
+                        "AI_IDENTITY_MISMATCH",
+                        "AI_EVENT_SEQUENCE_CONFLICT",
+                        "AI_EVENT_GAP",
+                        "AI_OUTBOX_UNAVAILABLE",
+                        "AI_PROVIDER_TRANSPORT_FAILURE",
+                        "AI_PROVIDER_PROTOCOL_FAILURE",
+                        "AI_INTERNAL_FAILURE"
+                      ]
+                    },
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "user-error",
+                        "state-conflict",
+                        "dependency-unavailable",
+                        "transport-failure",
+                        "protocol-failure",
+                        "internal-failure"
+                      ]
+                    },
+                    "incidentId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "category",
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "failure"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AI_PROFILE_REVISION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "failure": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "AI_PROFILE_NOT_FOUND",
+                        "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -44950,6 +45780,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -45058,6 +45889,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -45166,6 +45998,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -45254,7 +46087,7 @@
             },
             "profileRevision": {
               "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
+              "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
             },
             "processGeneration": {
               "type": "integer",
@@ -45681,6 +46514,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -45789,6 +46623,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -45897,6 +46732,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -46005,6 +46841,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -46400,6 +47237,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -46508,6 +47346,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -46616,6 +47455,7 @@
                       "enum": [
                         "AI_PROFILE_NOT_FOUND",
                         "AI_PROFILE_UNAVAILABLE",
+                        "AI_PROFILE_REVISION_CONFLICT",
                         "AI_CAPABILITY_UNSUPPORTED",
                         "AI_SESSION_STATE_CONFLICT",
                         "AI_TURN_STATE_CONFLICT",
@@ -46797,6 +47637,7 @@
       "method": "GET",
       "path": "/v1/health",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -46846,6 +47687,7 @@
       "method": "GET",
       "path": "/v1/capabilities",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -46895,6 +47737,7 @@
       "method": "GET",
       "path": "/v1/runtime/status",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -46944,6 +47787,7 @@
       "method": "POST",
       "path": "/v1/configuration-revisions/validate",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47001,6 +47845,7 @@
       "method": "POST",
       "path": "/v1/configuration-revisions/register",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47071,6 +47916,7 @@
       "method": "POST",
       "path": "/v1/configuration-revisions/register-runtime-plan",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47153,6 +47999,7 @@
       "method": "POST",
       "path": "/v1/projects/inspect-source",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47222,6 +48069,7 @@
       "method": "POST",
       "path": "/v1/projects/create-managed-store",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47316,6 +48164,7 @@
       "method": "POST",
       "path": "/v1/projects/fetch",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47392,6 +48241,7 @@
       "method": "POST",
       "path": "/v1/projects/inspect-git",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47461,6 +48311,7 @@
       "method": "POST",
       "path": "/v1/workspaces/create",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47555,6 +48406,7 @@
       "method": "POST",
       "path": "/v1/workspaces/inspect",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47624,6 +48476,7 @@
       "method": "POST",
       "path": "/v1/workspaces/start",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47724,6 +48577,7 @@
       "method": "POST",
       "path": "/v1/workspaces/stop",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47812,6 +48666,7 @@
       "method": "POST",
       "path": "/v1/workspaces/rebuild",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -47912,6 +48767,7 @@
       "method": "POST",
       "path": "/v1/workspaces/archive",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48012,6 +48868,7 @@
       "method": "POST",
       "path": "/v1/workspaces/remove",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48112,6 +48969,7 @@
       "method": "POST",
       "path": "/v1/tasks/start",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48224,6 +49082,7 @@
       "method": "POST",
       "path": "/v1/processes/stop",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48318,6 +49177,7 @@
       "method": "POST",
       "path": "/v1/processes/inspect",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48393,6 +49253,7 @@
       "method": "POST",
       "path": "/v1/terminals/create",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48499,6 +49360,7 @@
       "method": "POST",
       "path": "/v1/terminals/close",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48587,6 +49449,7 @@
       "method": "GET",
       "path": "/v1/terminals/{terminalId}/stream",
       "classification": "websocket-upgrade",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48652,6 +49515,7 @@
       "method": "POST",
       "path": "/v1/previews/activate",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48776,6 +49640,7 @@
       "method": "POST",
       "path": "/v1/previews/deactivate",
       "classification": "mutation",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48870,6 +49735,7 @@
       "method": "POST",
       "path": "/v1/previews/inspect",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48939,6 +49805,7 @@
       "method": "GET",
       "path": "/v1/snapshot",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -48988,6 +49855,7 @@
       "method": "GET",
       "path": "/v1/events",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49049,6 +49917,7 @@
       "method": "POST",
       "path": "/v1/ai-profiles/inspect",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49112,6 +49981,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/start",
       "classification": "mutation",
+      "operationJournalPolicy": "generic-request",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49183,6 +50053,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49206,6 +50082,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/resume",
       "classification": "mutation",
+      "operationJournalPolicy": "generic-request",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49277,6 +50154,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49306,6 +50189,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/send-turn",
       "classification": "mutation",
+      "operationJournalPolicy": "ai-private-intent-reference",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49377,6 +50261,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49406,6 +50296,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/interrupt",
       "classification": "mutation",
+      "operationJournalPolicy": "generic-request",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49477,6 +50368,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49512,6 +50409,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/respond-approval",
       "classification": "mutation",
+      "operationJournalPolicy": "generic-request",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49583,6 +50481,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49624,6 +50528,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/respond-input",
       "classification": "mutation",
+      "operationJournalPolicy": "ai-private-intent-reference",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49695,6 +50600,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49736,6 +50647,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/stop",
       "classification": "mutation",
+      "operationJournalPolicy": "generic-request",
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49807,6 +50719,12 @@
           ]
         },
         {
+          "code": "AI_PROFILE_REVISION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
           "code": "AI_IDENTITY_MISMATCH",
           "statuses": [
             409
@@ -49830,6 +50748,7 @@
       "method": "GET",
       "path": "/v1/ai-sessions/{aiSessionId}/events",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",
@@ -49903,6 +50822,7 @@
       "method": "POST",
       "path": "/v1/ai-sessions/acknowledge-events",
       "classification": "non-mutating",
+      "operationJournalPolicy": null,
       "requiredDevSpaceHeaders": [
         "X-DevSpace-Protocol-Version",
         "X-DevSpace-Request-Id",

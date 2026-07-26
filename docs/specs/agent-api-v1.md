@@ -133,7 +133,10 @@ SQLite operation row. The Agent never creates or writes that row. The operation 
 public idempotency identity.
 
 The first durably accepted mutation for an operation ID binds that ID immutably to the stable
-operation name and the complete validated request data. An exact replay may return the previously
+operation name and the complete validated request semantics. F09 stores the complete validated
+request data in its private journal. F11 content-bearing operations use the dedicated private
+AI-intent-reference policy defined below so content is not copied into that generic record. An
+exact replay may return the previously
 durable F09 response without repeating side effects. Reuse of the same ID for another operation
 name or different validated request data returns `OPERATION_CONFLICT`. The Agent may compare a
 private deterministic fingerprint in its durable journal; its format, canonicalization, and hash
@@ -1527,7 +1530,8 @@ inspection/stream/acknowledgement controls.
 | `ai-session.events.acknowledge` | POST | `/v1/ai-sessions/acknowledge-events` | `AcknowledgeAiEventsData` | `200` echo |
 
 The seven lifecycle/content mutations use the existing common mutation headers, durable operation
-journal, replay/conflict rules, and `MutationReceipt`. Inspection, stream, and acknowledgement
+journal acceptance boundary, replay/conflict rules, and `MutationReceipt`, with the explicit
+content-bearing private-intent policy below. Inspection, stream, and acknowledgement
 forbid the operation-ID header. Event acknowledgement may advance only private outbox retention;
 it is idempotent, has no provider/workspace side effect, and is not a Web SQLite operation.
 
@@ -1546,7 +1550,8 @@ RuntimeBinding = {
   revisionId: UuidV7,
   runtimePlanHash: ProjectOptionsRevisionHash,
   runtimeGeneration: 1..9007199254740991,
-  profileId: ConfigurationKey
+  profileId: ConfigurationKey,
+  profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>"
 }
 
 ProcessBinding = {
@@ -1554,7 +1559,7 @@ ProcessBinding = {
   workspaceId: UuidV7,
   aiSessionId: UuidV7,
   profileId: ConfigurationKey,
-  profileRevision: "sha256:<64 lowercase hex>",
+  profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>",
   processGeneration: 1..9007199254740991
 }
 ```
@@ -1599,10 +1604,33 @@ AcknowledgeAiEventsData = {
 }
 ```
 
-Start/resume deliberately carry only `profileId`; Agent resolves the immutable deployment profile
-again. Later commands carry the inspected safe revision to fence replacement. No request contains
-native provider identity, Docker/process identity, executable, argument, environment, cwd,
-credential, sandbox, or permission value.
+Browser selection still carries only `profileId`. Web inspects the safe projection and sends both
+`profileId` and the resulting `profileRevision` in start/resume. Agent independently resolves and
+hashes the deployed authority document and requires an exact match before durable acceptance or
+execution. Every later command carries the same revision. No request contains native provider
+identity, Docker/process identity, executable, argument, environment, cwd, credential, sandbox,
+or permission value.
+
+The profile revision uses the exact versioned domain-separated JCS algorithm in
+`ai-sessions-v1.md`. It binds every executable-authority field but exposes only the safe digest.
+
+### F11 operation journal policies
+
+Every F11 mutation descriptor has an executable `operationJournalPolicy`:
+
+| Policy | Operations | Private durable representation |
+| --- | --- | --- |
+| `generic-request` | start, resume, interrupt, approval response, stop | existing complete bounded validated request |
+| `ai-private-intent-reference` | send turn, structured-input response; mandatory for future content-bearing mutations | generic journal identity/name plus keyed fingerprint and reference; complete request only in dedicated private AI intent |
+
+For private intents, the Agent must durably and atomically establish the strict referenced record
+before accepting the generic journal entry or performing side effects. The intent binds operation,
+resource, profile revision, and process generation identities. Replay re-reads it and verifies a
+versioned keyed HMAC-SHA-256 fingerprint. Missing, corrupt, replaced, mismatched, or prematurely
+retired intent is journal/private-state unavailability and fails closed. The record has restrictive
+permissions and bounded retention, and neither its content nor reference enters public operation
+observations, logs, diagnostics, audits, generic errors, or browser data. Slice 0 defines but does
+not implement this storage.
 
 ### Profile response and capability advertisement
 
@@ -1642,6 +1670,7 @@ Journaled mutations additionally reuse `OPERATION_CONFLICT` and
 | --- | ---: | --- | --- | --- |
 | `AI_PROFILE_NOT_FOUND` | 404 | false | user-error | no |
 | `AI_PROFILE_UNAVAILABLE` | 503 | true | dependency-unavailable | no |
+| `AI_PROFILE_REVISION_CONFLICT` | 409 | false | state-conflict | no |
 | `AI_CAPABILITY_UNSUPPORTED` | 422 | false | user-error | no |
 | `AI_SESSION_STATE_CONFLICT` | 409 | false | state-conflict | no |
 | `AI_TURN_STATE_CONFLICT` | 409 | false | state-conflict | no |
@@ -1782,8 +1811,9 @@ new protocol decision:
 
 1. F11 contains exactly ten unique operations: seven journaled mutations and three non-journaled
    controls; active complete v1 contains no superseded F09 AI descriptor.
-2. Every start/resume request carries only safe runtime identity plus `profileId`; every subsequent
-   mutation fences profile revision and provider-process generation.
+2. Every start/resume request carries safe runtime identity plus exact `profileId` and
+   `profileRevision`; Agent re-hashes the deployed profile before acceptance, and every subsequent
+   mutation fences the same revision and provider-process generation.
 3. The command union contains exactly the nine provider-neutral capabilities and no executable,
    argument, environment, cwd, container, native-provider, or credential authority.
 4. Required capability flags are literals `true`; the four optional flags are closed booleans and
@@ -1792,16 +1822,19 @@ new protocol decision:
    presentations and command text grants no authority.
 6. The canonical event union contains exactly 22 discriminators, recursively rejects unknown
    fields, requires null/non-null turn identity by family, and contains no raw JSON-RPC/native ID.
-7. Append classification accepts only the next sequence or an exact duplicate and distinguishes
-   conflicts from gaps without timestamps.
+7. Append classification receives both the sequence lookup and global event-ID lookup, accepts
+   only the next sequence or an exact semantic duplicate, rejects event-ID reuse at another
+   sequence, and distinguishes conflicts from gaps without timestamps.
 8. Agent sequence/outbox continuity crosses boots and process generations; Web commit precedes
    browser delivery and exact Web acknowledgement precedes Agent retention removal.
 9. Replay emits persisted events then one synchronization frame under a gap-free replay/live
    handoff; slow consumers and exhausted durable bounds fail closed.
 10. F11 failures have exact category/incident policy and never project raw provider errors or
     content-plane values.
-11. The Codex adapter fixture identifies CLI 0.145.0, stable-default generated-schema hashes,
-    non-TTY stdio JSONL, private stderr, stable method mappings, and optional experimental
-    structured input.
-12. Slice 0 adds no route handlers, provider runtime, supervisor, persistence, credentials,
+11. The Codex adapter tests read, byte-hash, parse, and inspect actual CLI 0.145.0 generated
+    stable-default component fixtures plus the separately generated optional experimental
+    structured-input component, without network access.
+12. Content-bearing F11 mutations declare private-intent-reference journaling and never place
+    prompts or answers in generic journal records or public operation observations.
+13. Slice 0 adds no route handlers, provider runtime, supervisor, persistence, credentials,
     browser stream, or UI.

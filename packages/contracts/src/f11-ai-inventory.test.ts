@@ -45,7 +45,37 @@ describe("F11 AI Session Agent API extension", () => {
     expect(f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"].journaledMutation).toBe(false);
     expect(f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"].journaledMutation)
       .toBe(false);
+    expect(f11AiAgentApiV1EndpointByOperation["ai-session.turn.send"]!.operationJournalPolicy)
+      .toBe("ai-private-intent-reference");
+    expect(f11AiAgentApiV1EndpointByOperation["ai-session.input.respond"]!.operationJournalPolicy)
+      .toBe("ai-private-intent-reference");
+    expect(f11AiAgentApiV1EndpointByOperation["ai-session.start"]!.operationJournalPolicy)
+      .toBe("generic-request");
   });
+
+  test.each(["ai-session.start", "ai-session.resume"] as const)(
+    "%s fences the exact inspected profile revision",
+    (operation) => {
+      const schema = f11AiAgentApiV1EndpointByOperation[operation]!.requestDataSchema;
+      const request = {
+        projectId: "018f1f34-7000-7000-8000-000000000001",
+        workspaceId: "018f1f34-7000-7000-8000-000000000002",
+        aiSessionId: "018f1f34-7000-7000-8000-000000000003",
+        revisionId: "018f1f34-7000-7000-8000-000000000004",
+        runtimePlanHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+        runtimeGeneration: 1,
+        profileId: "codex",
+        profileRevision: `sha256-ai-profile-v1:${"b".repeat(64)}`
+      };
+      expect(schema.safeParse(request).success).toBe(true);
+      const { profileRevision: _missing, ...withoutRevision } = request;
+      expect(schema.safeParse(withoutRevision).success).toBe(false);
+      expect(schema.safeParse({
+        ...request,
+        profileRevision: `sha256:${"b".repeat(64)}`
+      }).success).toBe(false);
+    }
+  );
 
   test("uses a dedicated bounded NDJSON stream and decimal afterSequence", () => {
     const stream = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];

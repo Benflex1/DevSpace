@@ -199,7 +199,9 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
   container; stderr remains private;
 - only that worktree and declared volumes are mounted;
 - browser sends only an approved profile ID; Agent independently resolves the immutable
-  deployment-owned profile and exact workspace/runtime identity;
+  deployment-owned profile and exact workspace/runtime identity; Web-to-Agent start/resume bind
+  the inspected versioned profile digest and Agent re-hashes the complete private authority
+  document before acceptance;
 - Project Options v1 `fixedArgs` and `credentialSecretIds` remain dormant and cannot authorize an
   AI Session v1 process;
 - AI provider credentials are delivered only from an Agent-owned credential-source handle to the
@@ -211,7 +213,11 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - approval views are bounded typed redacted presentations; only proven paths below the exact
   workspace root become workspace-relative presentations;
 - Agent assigns a durable per-session canonical-event sequence and retains an acknowledged private
-  outbox; Web validates and commits each event before browser delivery;
+  outbox; Web checks both sequence and global event-ID ownership, validates, and commits each event
+  before browser delivery;
+- prompts and structured-input answers are durably fenced only through referenced, restrictive
+  Agent-private AI intent records; the generic operation journal retains a keyed fingerprint and
+  opaque reference, never the content;
 - an authenticated in-container supervisor/control channel must bind the exact project, workspace,
   revision, runtime plan/generation, container, session, profile revision, process generation,
   operation, Docker exec, and process-start identity before interrupt/Stop;

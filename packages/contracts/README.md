@@ -11,7 +11,9 @@ union, two F10-only errors, two F10 endpoint descriptors, complete-v1 inventory/
 the NDJSON content-type/framing metadata. F11 supersedes F09's four never-implemented AI
 descriptors, adds ten AI profile/session operations, strict provider-neutral commands, safe profile
 and interaction projections, the 22-event canonical AI union, append/duplicate/gap classification,
-and a dedicated replay/synchronization stream.
+and a dedicated replay/synchronization stream. Start/resume fence the exact inspected
+`sha256-ai-profile-v1` revision, and the append classifier checks both sequence ownership and
+global event-ID ownership.
 
 The F09 inventory remains the historical authority for its accepted non-AI operations. Its four
 dormant AI descriptors are retained only for compatibility evidence and are excluded from the
@@ -50,7 +52,10 @@ the runtime Zod contracts. Important runtime-only validation includes:
   requires the Agent's retained prior full observation is performed only by
   `validatePreviewObservationChange` with that retained context.
 - AI content UTF-8 bounds, workspace-relative presentation paths, immutable profile capability
-  requirements, closed failure category/incident policy, and exact event append decisions.
+  requirements, closed failure category/incident policy, profile-revision representation, and
+  exact event append decisions. The Agent-private provider-adapter module owns executable
+  profile-authority canonicalization and hashing tests without exporting the private document as
+  an Agent/Web contract.
 
 Portable types, required properties, closed objects, discriminators, numeric bounds, literal
 values, and representable string patterns remain in the generated JSON Schema. Its deterministic
@@ -65,8 +70,12 @@ The generated schema does not prove snapshot atomicity, per-boot stream continui
 availability, retained-history integrity, or retention policy. F10 implements no snapshot
 collection, event production/storage, replay, HTTP streaming, NDJSON codec, or runtime recovery.
 
+F11 mutation descriptors distinguish existing bounded generic-request journaling from the future
+dedicated private-AI-intent-reference policy required by prompts and structured-input answers.
 The package contains no runtime plan implementation, reconciliation, mutation journal,
 provider-process runtime, credential delivery, second idempotency identity, or public request hash.
 The Codex 0.145.0 raw-protocol pin is an internal fixture boundary and is not exported as the
-Agent/Web contract. Among production workspace packages, contracts depends only on
+Agent/Web contract. Its offline tests hash and parse the actual checked generated stable-default
+components and separately classified experimental structured-input component. Among production
+workspace packages, contracts depends only on
 `@devspace/domain`. It does not depend on security, Project Options, database, Agent, or Web.

@@ -101,18 +101,27 @@ The Agent-private definition may contain the fixed executable identity, fixed ap
 mode/arguments, adapter version, required runtime identity/capabilities, credential-source handle,
 and availability inspection policy.
 
+Agent derives `profileRevision` with the domain-separated, RFC 8785/JCS-based
+`sha256-ai-profile-v1` algorithm defined by AI Sessions v1. The complete strict authority document
+binds profile/provider identity, provider and adapter versions, executable identity, launch mode
+and ordered arguments, runtime identity/capabilities, credential-source handle identity,
+capability declaration, and executable availability-inspection policy. Credential values, host
+paths, and display name are excluded; display name is cosmetic and cannot affect execution.
+
 Ambient host credential mounts are rejected. An existing host Codex login may be a deployment
 credential source only when Agent projects minimum process-scoped values into the exact exec
 without publishing the host path. Credentials never enter Project Options, SQLite, arguments,
 labels, logs, safe failures, or browser data. If the pin cannot authenticate without a broad mount,
 the profile is unavailable and runtime implementation is blocked.
 
-The browser supplies only `profileId`. Web may retain a safe inspected projection; Agent resolves
-the profile again and requires the same immutable revision before execution. The existing Project
-Options v1 `aiProfile` shape remains dormant and non-executable. In particular, its `fixedArgs` and
-`credentialSecretIds` are not runtime authority for this milestone. No dedicated provider user is
-assumed to exist in every image. Missing executable/version/runtime identity/credential source is a
-truthful `unavailable` observation.
+The browser supplies only `profileId`. Web inspects and may retain the safe projection, then sends
+both `profileId` and the inspected `profileRevision` on Agent start/resume. Agent independently
+resolves and hashes the deployed definition and rejects a mismatch before durable acceptance or
+execution. The operation fingerprint binds that revision, so replay cannot select a replacement
+under the same ID. The existing Project Options v1 `aiProfile` shape remains dormant and
+non-executable. In particular, its `fixedArgs` and `credentialSecretIds` are not runtime authority
+for this milestone. No dedicated provider user is assumed to exist in every image. Missing
+executable/version/runtime identity/credential source is a truthful `unavailable` observation.
 
 ### Safe process stop prerequisite
 
@@ -164,6 +173,20 @@ This is a bounded event stream for AI sessions only. Existing project, workspace
 terminal, preview, operation, and audit persistence remains state-based and is not migrated to
 event sourcing.
 
+### Content-bearing operation fencing
+
+F11 content-bearing mutations do not place prompts or structured-input answers in the generic
+operation journal. The future Agent implementation first durably writes the strict full request
+to a dedicated private AI-intent record, then records only operation identity/name, a keyed
+content-safe fingerprint, and the private record reference in the generic journal. Durable
+acceptance occurs only after both records and their directory metadata are durable. Replay loads
+the exact referenced intent and revalidates its identity, schema, and fingerprint. Missing,
+replaced, corrupt, or mismatched intent fails closed. Private intent retention is bounded but lasts
+at least until the operation and associated session/turn/request can be retired consistently.
+Content never enters public operation observations, logs, diagnostics, audits, or generic errors.
+Non-content F11 mutations may retain their complete bounded validated request under the existing
+generic policy.
+
 ## Alternatives considered
 
 ### Web-assigned committed sequence plus Agent delivery IDs
@@ -199,7 +222,7 @@ available inside the exact container.
 ## Consequences
 
 - Slice 0 adds durable documentation, domain graphs, strict contracts, generated schema, and pinned
-  adapter evidence only.
+  adapter component fixtures with offline byte-hash verification only.
 - Provider execution, supervisor implementation, SQLite migrations, credentials, Web/Agent route
   handlers, browser streaming, and UI remain later slices.
 - The first implementation supports one approved Codex profile. Provider-neutral capability

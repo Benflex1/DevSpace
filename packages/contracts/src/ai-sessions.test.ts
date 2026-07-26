@@ -27,7 +27,7 @@ const requestId = "018f1f34-7000-7000-8000-000000000006";
 const incidentId = "018f1f34-7000-7000-8000-000000000007";
 const timestamp = "2026-07-26T05:00:00.000Z";
 const runtimePlanHash = `sha256-jcs-v1:${"a".repeat(64)}`;
-const profileRevision = `sha256:${"b".repeat(64)}`;
+const profileRevision = `sha256-ai-profile-v1:${"b".repeat(64)}`;
 const profile = { profileId: "codex", profileRevision, provider: "codex" };
 
 function event(input: Record<string, unknown>): CanonicalAiEvent {
@@ -80,11 +80,13 @@ describe("deployment-owned provider projections and commands", () => {
       { command: "inspect", projectId, workspaceId, profileId: "codex" },
       {
         command: "start", projectId, workspaceId, aiSessionId: sessionId,
-        revisionId: requestId, runtimePlanHash, runtimeGeneration: 1, profileId: "codex"
+        revisionId: requestId, runtimePlanHash, runtimeGeneration: 1,
+        profileId: "codex", profileRevision
       },
       {
         command: "resume", projectId, workspaceId, aiSessionId: sessionId,
-        revisionId: requestId, runtimePlanHash, runtimeGeneration: 1, profileId: "codex"
+        revisionId: requestId, runtimePlanHash, runtimeGeneration: 1,
+        profileId: "codex", profileRevision
       },
       {
         command: "sendTurn", projectId, workspaceId, aiSessionId: sessionId, turnId,
@@ -126,6 +128,22 @@ describe("deployment-owned provider projections and commands", () => {
       "streamEvents"
     ]);
   });
+
+  test.each(["start", "resume"] as const)(
+    "requires the inspected profile revision on %s",
+    (command) => {
+      expect(aiProviderCommandSchema.safeParse({
+        command,
+        projectId,
+        workspaceId,
+        aiSessionId: sessionId,
+        revisionId: requestId,
+        runtimePlanHash,
+        runtimeGeneration: 1,
+        profileId: "codex"
+      }).success).toBe(false);
+    }
+  );
 
   test.each(["executable", "args", "environment", "cwd", "containerId", "providerThreadId"])(
     "turn content cannot add %s authority",
@@ -315,22 +333,73 @@ describe("canonical event envelope and append decisions", () => {
     expect(classifyAiEventAppend({
       durableThroughSequence: 0,
       existingAtSequence: null,
+      existingByEventId: null,
       incoming: first
     })).toEqual({ kind: "append", sequence: 1 });
     expect(classifyAiEventAppend({
       durableThroughSequence: 1,
       existingAtSequence: first,
+      existingByEventId: first,
       incoming: first
+    })).toEqual({ kind: "exact-duplicate", sequence: 1 });
+    const reorderedFirst = {
+      payload: first.payload,
+      eventType: first.eventType,
+      processGeneration: first.processGeneration,
+      profile: first.profile,
+      observedAt: first.observedAt,
+      sequence: first.sequence,
+      turnId: first.turnId,
+      sessionId: first.sessionId,
+      eventId: first.eventId,
+      schemaVersion: first.schemaVersion
+    } as CanonicalAiEvent;
+    expect(classifyAiEventAppend({
+      durableThroughSequence: 1,
+      existingAtSequence: first,
+      existingByEventId: first,
+      incoming: reorderedFirst
     })).toEqual({ kind: "exact-duplicate", sequence: 1 });
     expect(classifyAiEventAppend({
       durableThroughSequence: 1,
       existingAtSequence: null,
+      existingByEventId: null,
       incoming: { ...first, eventId: requestId, sequence: 3 }
     })).toEqual({ kind: "gap", expectedSequence: 2, receivedSequence: 3 });
+    const gapped = canonicalAiEventSchema.parse({
+      ...first,
+      eventId: requestId,
+      sequence: 3
+    });
+    const foreignSameNumericSequence = canonicalAiEventSchema.parse({
+      ...gapped,
+      sessionId: workspaceId
+    });
+    expect(classifyAiEventAppend({
+      durableThroughSequence: 1,
+      existingAtSequence: null,
+      existingByEventId: foreignSameNumericSequence,
+      incoming: gapped
+    })).toEqual({ kind: "conflict", sequence: 3 });
     expect(classifyAiEventAppend({
       durableThroughSequence: 1,
       existingAtSequence: first,
+      existingByEventId: null,
       incoming: event({ eventType: "turn.interrupt.requested", payload: {} })
+    })).toEqual({ kind: "conflict", sequence: 1 });
+
+    expect(classifyAiEventAppend({
+      durableThroughSequence: 1,
+      existingAtSequence: null,
+      existingByEventId: first,
+      incoming: { ...first, sequence: 2 }
+    })).toEqual({ kind: "conflict", sequence: 2 });
+
+    expect(classifyAiEventAppend({
+      durableThroughSequence: 1,
+      existingAtSequence: null,
+      existingByEventId: null,
+      incoming: first
     })).toEqual({ kind: "conflict", sequence: 1 });
   });
 
@@ -355,6 +424,7 @@ describe("closed failure policy", () => {
   test.each([
     ["AI_PROFILE_NOT_FOUND", "user-error", null],
     ["AI_PROFILE_UNAVAILABLE", "dependency-unavailable", null],
+    ["AI_PROFILE_REVISION_CONFLICT", "state-conflict", null],
     ["AI_SESSION_STATE_CONFLICT", "state-conflict", null],
     ["AI_PROVIDER_TRANSPORT_FAILURE", "transport-failure", incidentId],
     ["AI_PROVIDER_PROTOCOL_FAILURE", "protocol-failure", incidentId],

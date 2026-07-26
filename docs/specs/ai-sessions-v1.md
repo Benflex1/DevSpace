@@ -90,7 +90,7 @@ The initial registry is deployment-owned and immutable. Browser-visible projecti
 ```text
 {
   profileId: ConfigurationKey,
-  profileRevision: "sha256:<64 lowercase hex>",
+  profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>",
   provider: ConfigurationKey,
   displayName: bounded content,
   capabilities: {
@@ -114,13 +114,88 @@ The Agent-private definition may contain only administrator-deployed values: fix
 identity, fixed `app-server --stdio` launch mode/arguments, adapter and CLI version, required
 container identity/capabilities, credential-source handle, and availability inspection policy.
 
+#### Profile revision algorithm
+
+`profileRevision` is the Agent-calculated identity of one strict
+`devspace.ai-provider-profile-authority/v1` document. Every field is required, unknown fields are
+invalid, and v1 has no implicit defaults:
+
+```text
+{
+  format: "devspace.ai-provider-profile-authority/v1",
+  profileId,
+  provider,
+  providerVersion,
+  adapterVersion,
+  executableIdentity,
+  launchMode,
+  fixedArguments,
+  runtimeIdentity,
+  requiredRuntimeCapabilities,
+  credentialSourceHandle,
+  capabilities,
+  availabilityInspectionPolicy: {
+    executableProbe,
+    expectedVersionOutput,
+    credentialProbe,
+    runtimeProbe: "required-before-acceptance"
+  }
+}
+```
+
+`profileId`, `provider`, `adapterVersion`, `executableIdentity`, `launchMode`,
+`credentialSourceHandle`, each runtime-capability entry, and
+`availabilityInspectionPolicy.executableProbe` are `ConfigurationKey` values.
+`providerVersion`, each fixed argument, an exact container-user name, and expected version output
+are non-empty, NUL-free strings of at most 4,096 code units. `fixedArguments` has at most 64
+ordered entries. `runtimeIdentity` is exactly either
+`{ kind: "workspace-default-user" }` or
+`{ kind: "exact-container-user", user: <bounded string> }`.
+`requiredRuntimeCapabilities` has at most 64 unique entries.
+`availabilityInspectionPolicy.credentialProbe` is exactly `required | not-required`, and
+`runtimeProbe` is the literal `required-before-acceptance`. `capabilities` is the complete strict
+public capability declaration; no capability is omitted.
+
+`fixedArguments` is ordered and order affects authority.
+`requiredRuntimeCapabilities` is a unique semantic set and is sorted by Unicode code point before
+hashing. All other arrays retain their order. The normalized document is serialized using RFC
+8785/JCS. Agent calculates:
+
+```text
+digest = SHA-256(
+  UTF8("devspace.ai-provider-profile-revision/v1")
+  || 0x00
+  || UTF8(JCS(normalizedAuthorityDocument))
+)
+profileRevision = "sha256-ai-profile-v1:" || lowercaseHex(digest)
+```
+
+This is a separate semantic namespace from Project Options revision hashing. Object insertion
+order cannot affect it. Changing any execution-authority field changes the digest. A replacement
+under one `profileId` therefore has a new revision.
+
+`displayName` is intentionally excluded because it is cosmetic and is forbidden from affecting
+launch or inspection. Transient availability observations are excluded, while the policy that
+produces them is bound. Credential/secret values, host paths, executable paths, and raw environment
+values are prohibited; fixed non-host argument strings remain private authority and are bound.
+Only opaque deployed identities such as `executableIdentity` and `credentialSourceHandle` cross
+those boundaries. The public projection exposes only the digest, never this private authority
+document. Agent owns calculation and verification.
+
 Required enabled-v1 capabilities are `inspect`, `start`, `sendTurn`, `stop`, and `streamEvents`.
 `resume`, `interrupt`, `approvals`, and `structuredInput` are optional. Unsupported optional work
 returns `AI_CAPABILITY_UNSUPPORTED` with the capability name. No browser branch depends on the
 provider key.
 
-The Agent resolves `profileId`, verifies the immutable revision, and checks the exact workspace
-runtime independently. Availability codes are closed:
+Browser selection contains only `profileId`. Web obtains the safe inspection projection and sends
+its `profileId` plus `profileRevision` on Web-to-Agent start/resume. Before durable operation
+acceptance or execution, Agent independently resolves and hashes the current deployment profile
+and requires exact equality. `AI_PROFILE_REVISION_CONFLICT` is an expected non-incident
+state-conflict when the ID now resolves to another revision. The operation journal fingerprint
+includes the requested revision, so replay never resolves a newer replacement silently.
+Subsequent commands continue to bind the same exact revision.
+
+Agent also checks the exact workspace runtime independently. Availability codes are closed:
 
 ```text
 PROFILE_DISABLED
@@ -310,7 +385,8 @@ stop
 streamEvents
 ```
 
-All commands after start bind the exact safe profile revision and provider-process generation.
+Start and resume bind the exact inspected safe profile revision. All commands after start bind
+that same revision and the exact provider-process generation.
 `sendTurn` additionally carries one bounded `{ kind: "text", text }` content value. That content is
 the sole intentional exception to identifier-only lifecycle commands. It cannot select executable,
 arguments, environment, cwd, runtime identity, container, sandbox/permission policy, or
@@ -333,7 +409,7 @@ Every event is one strict discriminated object:
   observedAt: UtcTimestampMs,
   profile: {
     profileId: ConfigurationKey,
-    profileRevision: "sha256:<64 lowercase hex>",
+    profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>",
     provider: ConfigurationKey
   },
   processGeneration: 1..9007199254740991,
@@ -390,13 +466,20 @@ delivery. Provider event order is serialized by the one adapter reader for that 
 canonical events are appended in that order.
 
 Web maintains unique constraints on `(session_id, sequence)` and `event_id` in the later SQLite
-schema. It accepts:
+schema. Before classifying an incoming event, Web reads both the event at its
+`(sessionId, sequence)` and the event, if any, with its global `eventId`. It accepts:
 
 - `sequence = committedThrough + 1`: validate and commit;
 - `sequence <= committedThrough` with an exact semantic event match: duplicate replay, acknowledge;
 - the same sequence/event ID with different content, or one event ID at another sequence:
   `AI_EVENT_SEQUENCE_CONFLICT`;
 - `sequence > committedThrough + 1`: `AI_EVENT_GAP`.
+
+The executable classifier receives both lookups. An event ID already bound to another canonical
+event—including another session at the same numeric sequence—or to any other sequence is always a
+sequence conflict, including when the incoming sequence would otherwise be next or a gap. Semantic
+duplicate equality is RFC 8785/JCS equality after strict canonical schema parsing, not input
+object-key order or timestamps.
 
 Web delivers only committed events to the browser. After commit it acknowledges exact
 `(sessionId, throughSequence, throughEventId)`. A Web restart before commit causes replay from the
@@ -493,10 +576,35 @@ Mutation success is the existing `202 MutationReceipt`; it means durable operati
 Profile inspection returns the safe projection. Acknowledgement echoes the exact acknowledged
 identity. All F11 objects are strict. Route handlers are absent in Slice 0.
 
-The Agent operation journal binds the operation ID, new F11 operation name, and complete validated
-request before any side effect. Process creation follows the additional phased private record
-above. Exact replay returns the retained receipt/result. A different operation/request under the
-same operation ID is `OPERATION_CONFLICT`.
+F11 endpoint descriptors declare one of two operation-journal policies:
+
+- `generic-request` applies to bounded non-content mutations and may retain the complete validated
+  request under the existing private generic journal rules.
+- `ai-private-intent-reference` is mandatory for `ai-session.turn.send` and
+  `ai-session.input.respond`, and for any future content-bearing mutation.
+
+For the second policy, the generic journal retains only operation ID, operation name, a versioned
+keyed HMAC-SHA-256 request fingerprint, and an opaque reference to one dedicated Agent-private AI
+intent record. The full strict content-bearing request is stored only in that intent area, bound
+to operation ID, operation name, project/workspace/session, turn/request when applicable, profile
+ID/revision, and process generation. The durable Agent-private HMAC key and its non-secret key
+version are deployment state; raw unkeyed content digests are prohibited because low-entropy
+answers could be guessed.
+
+Intent writes use restrictive private-state permissions, strict schemas and existing byte bounds,
+temporary-file write plus file sync, atomic rename, and parent-directory sync. The generic journal
+reference is persisted only after the intent is durable; acceptance is not returned and side
+effects do not begin until both are durable. A crash before the journal reference may leave an
+unreferenced intent eligible for bounded cleanup, never an accepted operation.
+
+Exact replay loads the referenced intent, validates every binding and schema, and recomputes the
+fingerprint before returning the retained receipt or continuing. A missing, replaced, corrupt, or
+mismatched record fails closed as journal/private-state unavailability and receives no side
+effect. Intent retention is bounded, but a referenced record cannot be removed until both the
+operation replay window and associated AI session/turn/request retention are retired atomically.
+No content or intent reference appears in public operation observations, logs, diagnostics, audit
+summaries, generic errors, or browser payloads. Process creation additionally follows the phased
+private ownership record above.
 
 F10 no longer carries the dormant `ai-session.state.changed` event or AI snapshot member. AI
 session recovery uses F11's dedicated stream plus the later Web-owned session snapshot/read model.
@@ -508,6 +616,7 @@ No competing AI event contract remains.
 | --- | --- | --- |
 | `AI_PROFILE_NOT_FOUND` | `user-error` | no |
 | `AI_PROFILE_UNAVAILABLE` | `dependency-unavailable` | no |
+| `AI_PROFILE_REVISION_CONFLICT` | `state-conflict` | no |
 | `AI_CAPABILITY_UNSUPPORTED` | `user-error` | no |
 | `AI_SESSION_STATE_CONFLICT` | `state-conflict` | no |
 | `AI_TURN_STATE_CONFLICT` | `state-conflict` | no |
@@ -529,19 +638,33 @@ generic errors and diagnostics.
 
 ## Codex app-server adapter v0.145.0
 
-The exact pin is `codex-cli 0.145.0`. The stable-default schema evidence was generated with:
+The exact pin is `codex-cli 0.145.0`; the captured CLI binary SHA-256 is
+`a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14`.
+Stable-default component evidence was generated with:
 
 ```text
 codex app-server generate-json-schema --out <directory>
 ```
 
-without `--experimental`. The aggregate v2 schema is 491,906 bytes with SHA-256:
+The separately classified structured-input component was generated with:
 
 ```text
-eaf8f9774dbad397818fa64241b9fcd4f894bde3d852d3c8948c68f07975b6ff
+codex app-server generate-json-schema --experimental --out <directory>
 ```
 
-The checked fixture manifest records exact component hashes and methods. The adapter mapping is:
+The repository checks the actual generated bytes:
+
+| Scope | Fixture | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| stable default | `stable/ClientRequest.json` | 172,676 | `44615d6348466a48c05228d99eb555d1d655aaffc1474fb0abdd7f4945502e35` |
+| stable default | `stable/ClientNotification.json` | 431 | `a30b3041578845b11add3d07d5a63cd3a12d5d126e87b8c591862b4aeb68d97c` |
+| stable default | `stable/ServerRequest.json` | 49,058 | `177f8b7de9dd8ce2055c56a5fd22dbc6ec24e2a4d706d08fef9f5ad4effe71f6` |
+| stable default | `stable/ServerNotification.json` | 173,163 | `0c7b42c4e2cffc419bf753ea5a34a56b2965219c2087304993bce97cf978f915` |
+| experimental | `experimental/ToolRequestUserInputParams.json` | 1,977 | `21e569e32c05d51c1ee5e587730c182b911ede97a4df267f6e4ef24e1717f34e` |
+
+Offline tests read, hash, parse, and derive the required method inventory from these fixtures.
+`UPSTREAM-NOTICE.md` records OpenAI Codex provenance and Apache-2.0 licensing. The adapter mapping
+is:
 
 | Codex native method | DevSpace behavior |
 | --- | --- |

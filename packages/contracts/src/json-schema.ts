@@ -69,6 +69,9 @@ export function generateAgentApiV1JsonSchema(): AgentApiV1JsonSchema {
         method: endpoint.method,
         path: endpoint.path,
         classification: endpoint.classification,
+        operationJournalPolicy: "operationJournalPolicy" in endpoint
+          ? endpoint.operationJournalPolicy
+          : null,
         requiredDevSpaceHeaders: endpoint.requiredDevSpaceHeaders,
         successStatus: endpoint.successStatus,
         successContentType,
@@ -95,7 +98,7 @@ export function generateAgentApiV1JsonSchema(): AgentApiV1JsonSchema {
     $id: "https://devspace.local/schemas/agent-api-v1.schema.json",
     title: "DevSpace Agent API v1 executable contracts",
     description: "Structural JSON Schema projection of the complete DevSpace Agent API v1 non-AI F09, F10, and AI Session F11 wire contracts.",
-    $comment: "Authoritative runtime Zod validation additionally enforces semantic refinements including cursor/event equality, snapshot boot/cursor equality, resource and operation uniqueness, lifecycle structural edges, process observation semantics, and project Git-scope consistency. EventCursor's exact maximum 9007199254740991 is enforced by runtime parseEventCursor; its portable decimal string pattern does not fully encode that upper bound. The preview.state.changed event schema validates all invariants available from the wire object, but retained-observation transition semantics require validatePreviewObservationChange with the prior full preview observation; standalone JSON Schema and standalone agentEventSchema cannot prove those absent-context invariants. JSON Schema does not prove event-stream continuity, replay availability, snapshot atomicity, or retention behavior; see packages/contracts/README.md.",
+    $comment: "Authoritative runtime Zod validation and Agent-private algorithms additionally enforce semantic refinements including cursor/event equality, snapshot boot/cursor equality, resource and operation uniqueness, lifecycle structural edges, process observation semantics, project Git-scope consistency, AI profile authority canonicalization/hashing, and dual event sequence/global-ID lookups. EventCursor's exact maximum 9007199254740991 is enforced by runtime parseEventCursor; its portable decimal string pattern does not fully encode that upper bound. The preview.state.changed event schema validates all invariants available from the wire object, but retained-observation transition semantics require validatePreviewObservationChange with the prior full preview observation; standalone JSON Schema and standalone agentEventSchema cannot prove those absent-context invariants. JSON Schema does not prove event-stream continuity, replay availability, snapshot atomicity, private AI intent durability, or retention behavior; see packages/contracts/README.md.",
     $defs: definitions,
     "x-devspace-protocol-version": 1,
     "x-devspace-endpoint-count": completeAgentApiV1Endpoints.length,

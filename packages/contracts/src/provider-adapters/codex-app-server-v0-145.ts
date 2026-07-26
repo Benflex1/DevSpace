@@ -2,8 +2,6 @@ import * as z from "zod";
 
 export const CODEX_APP_SERVER_CLI_VERSION = "0.145.0" as const;
 export const CODEX_APP_SERVER_VERSION_OUTPUT = "codex-cli 0.145.0" as const;
-export const CODEX_APP_SERVER_SCHEMA_SHA256 =
-  "eaf8f9774dbad397818fa64241b9fcd4f894bde3d852d3c8948c68f07975b6ff" as const;
 
 export const codexAppServerProtocolMethods = Object.freeze({
   clientRequests: Object.freeze([
@@ -34,9 +32,14 @@ export const codexAppServerProtocolMethods = Object.freeze({
 export const codexAppServerFixtureManifestSchema = z.strictObject({
   cliVersion: z.literal(CODEX_APP_SERVER_CLI_VERSION),
   versionOutput: z.literal(CODEX_APP_SERVER_VERSION_OUTPUT),
+  cliBinarySha256: z.string().regex(/^[0-9a-f]{64}$/u),
   generatedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
-  generator: z.literal("codex app-server generate-json-schema --out <directory>"),
-  generatorExperimentalFlag: z.literal(false),
+  stableGenerationCommand: z.literal(
+    "codex app-server generate-json-schema --out <directory>"
+  ),
+  experimentalGenerationCommand: z.literal(
+    "codex app-server generate-json-schema --experimental --out <directory>"
+  ),
   transport: z.strictObject({
     mode: z.literal("stdio-jsonl"),
     tty: z.literal(false),
@@ -44,18 +47,13 @@ export const codexAppServerFixtureManifestSchema = z.strictObject({
     stderr: z.literal("private-diagnostics")
   }),
   officialSource: z.string().url(),
-  aggregateV2Schema: z.strictObject({
-    file: z.literal("codex_app_server_protocol.v2.schemas.json"),
-    bytes: z.literal(491_906),
-    sha256: z.literal(CODEX_APP_SERVER_SCHEMA_SHA256)
-  }),
-  componentHashes: z.strictObject({
-    ClientRequest: z.literal("44615d6348466a48c05228d99eb555d1d655aaffc1474fb0abdd7f4945502e35"),
-    ClientNotification: z.literal("a30b3041578845b11add3d07d5a63cd3a12d5d126e87b8c591862b4aeb68d97c"),
-    ServerRequest: z.literal("177f8b7de9dd8ce2055c56a5fd22dbc6ec24e2a4d706d08fef9f5ad4effe71f6"),
-    ServerNotification: z.literal("0c7b42c4e2cffc419bf753ea5a34a56b2965219c2087304993bce97cf978f915"),
-    ToolRequestUserInputParams: z.literal("21e569e32c05d51c1ee5e587730c182b911ede97a4df267f6e4ef24e1717f34e")
-  }),
+  upstreamLicense: z.literal("Apache-2.0"),
+  fixtures: z.array(z.strictObject({
+    scope: z.enum(["stable-default", "experimental"]),
+    file: z.string().regex(/^(?:stable|experimental)\/[A-Za-z0-9]+\.json$/u),
+    bytes: z.number().int().positive(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/u)
+  })).length(5),
   methods: z.strictObject({
     clientRequests: z.tuple([
       z.literal("initialize"),

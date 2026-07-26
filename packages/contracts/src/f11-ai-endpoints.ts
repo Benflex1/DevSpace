@@ -52,6 +52,7 @@ const afterSequenceQuerySchema = z.strictObject({
 const f11ErrorPolicy = {
   AI_PROFILE_NOT_FOUND: { status: 404, retryable: false, incident: false },
   AI_PROFILE_UNAVAILABLE: { status: 503, retryable: true, incident: false },
+  AI_PROFILE_REVISION_CONFLICT: { status: 409, retryable: false, incident: false },
   AI_CAPABILITY_UNSUPPORTED: { status: 422, retryable: false, incident: false },
   AI_SESSION_STATE_CONFLICT: { status: 409, retryable: false, incident: false },
   AI_TURN_STATE_CONFLICT: { status: 409, retryable: false, incident: false },
@@ -135,6 +136,7 @@ function mutationEndpoint(input: {
   readonly path: `/v1/${string}`;
   readonly requestDataSchema: z.ZodType;
   readonly errorCodes: readonly AiErrorCode[];
+  readonly operationJournalPolicy: "generic-request" | "ai-private-intent-reference";
 }) {
   const errors = routeErrors(input.errorCodes, true);
   return Object.freeze({
@@ -143,6 +145,7 @@ function mutationEndpoint(input: {
     path: input.path,
     classification: "mutation" as const,
     journaledMutation: true,
+    operationJournalPolicy: input.operationJournalPolicy,
     requiredDevSpaceHeaders: Object.freeze([
       "X-DevSpace-Protocol-Version",
       "X-DevSpace-Request-Id",
@@ -168,6 +171,7 @@ function mutationEndpoint(input: {
 const identityErrors = [
   "AI_PROFILE_NOT_FOUND",
   "AI_PROFILE_UNAVAILABLE",
+  "AI_PROFILE_REVISION_CONFLICT",
   "AI_IDENTITY_MISMATCH",
   "AI_SESSION_STATE_CONFLICT"
 ] as const;
@@ -213,19 +217,22 @@ export const f11AiAgentApiV1Endpoints = Object.freeze([
     operation: "ai-session.start",
     path: "/v1/ai-sessions/start",
     requestDataSchema: startDataSchema,
-    errorCodes: [...identityErrors, "AI_OUTBOX_UNAVAILABLE"]
+    errorCodes: [...identityErrors, "AI_OUTBOX_UNAVAILABLE"],
+    operationJournalPolicy: "generic-request"
   }),
   mutationEndpoint({
     operation: "ai-session.resume",
     path: "/v1/ai-sessions/resume",
     requestDataSchema: resumeDataSchema,
-    errorCodes: [...identityErrors, "AI_CAPABILITY_UNSUPPORTED", "AI_OUTBOX_UNAVAILABLE"]
+    errorCodes: [...identityErrors, "AI_CAPABILITY_UNSUPPORTED", "AI_OUTBOX_UNAVAILABLE"],
+    operationJournalPolicy: "generic-request"
   }),
   mutationEndpoint({
     operation: "ai-session.turn.send",
     path: "/v1/ai-sessions/send-turn",
     requestDataSchema: sendTurnDataSchema,
-    errorCodes: [...identityErrors, "AI_TURN_STATE_CONFLICT", "AI_OUTBOX_UNAVAILABLE"]
+    errorCodes: [...identityErrors, "AI_TURN_STATE_CONFLICT", "AI_OUTBOX_UNAVAILABLE"],
+    operationJournalPolicy: "ai-private-intent-reference"
   }),
   mutationEndpoint({
     operation: "ai-session.turn.interrupt",
@@ -236,7 +243,8 @@ export const f11AiAgentApiV1Endpoints = Object.freeze([
       "AI_CAPABILITY_UNSUPPORTED",
       "AI_TURN_STATE_CONFLICT",
       "AI_OUTBOX_UNAVAILABLE"
-    ]
+    ],
+    operationJournalPolicy: "generic-request"
   }),
   mutationEndpoint({
     operation: "ai-session.approval.respond",
@@ -248,7 +256,8 @@ export const f11AiAgentApiV1Endpoints = Object.freeze([
       "AI_TURN_STATE_CONFLICT",
       "AI_INTERACTION_STATE_CONFLICT",
       "AI_OUTBOX_UNAVAILABLE"
-    ]
+    ],
+    operationJournalPolicy: "generic-request"
   }),
   mutationEndpoint({
     operation: "ai-session.input.respond",
@@ -260,13 +269,15 @@ export const f11AiAgentApiV1Endpoints = Object.freeze([
       "AI_TURN_STATE_CONFLICT",
       "AI_INTERACTION_STATE_CONFLICT",
       "AI_OUTBOX_UNAVAILABLE"
-    ]
+    ],
+    operationJournalPolicy: "ai-private-intent-reference"
   }),
   mutationEndpoint({
     operation: "ai-session.stop",
     path: "/v1/ai-sessions/stop",
     requestDataSchema: stopDataSchema,
-    errorCodes: [...identityErrors, "AI_OUTBOX_UNAVAILABLE"]
+    errorCodes: [...identityErrors, "AI_OUTBOX_UNAVAILABLE"],
+    operationJournalPolicy: "generic-request"
   }),
   Object.freeze({
     operation: "ai-session.events.stream",

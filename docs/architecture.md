@@ -94,6 +94,11 @@ numbers continue across Agent boots and process generations; Web commits in orde
 delivery and then acknowledges the exact event. No existing lifecycle state is converted to event
 sourcing.
 
+Web sends the exact inspected `sha256-ai-profile-v1` revision on start/resume; Agent re-hashes the
+deployment-owned authority document before acceptance. Content-bearing mutations use referenced
+Agent-private AI intent records rather than copying prompts or answers into the generic operation
+journal.
+
 The later runtime requires an in-container Agent-controlled supervisor with a private authenticated
 control channel and exact generation/process-start binding. Docker exec ID or a numeric PID alone
 cannot authorize Stop. Until restart recovery re-proves every identity, the provider process and

@@ -1,10 +1,11 @@
-import * as z from "zod";
 import {
   aiInteractionRequestStates,
   aiProviderProcessStates,
   aiSessionV1States,
   aiTurnStates
 } from "@devspace/domain";
+import canonicalize from "canonicalize";
+import * as z from "zod";
 import {
   configurationKeySchema,
   projectOptionsRevisionHashSchema,
@@ -47,7 +48,8 @@ function boundedContent(maxBytes: number, allowEmpty = false) {
     .refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, `Must be at most ${maxBytes} UTF-8 bytes`);
 }
 
-export const aiProfileRevisionSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
+export const aiProfileRevisionSchema = z.string()
+  .regex(/^sha256-ai-profile-v1:[0-9a-f]{64}$/u);
 export const aiProviderKeySchema = configurationKeySchema;
 export const aiProviderAvailabilitySchema = z.discriminatedUnion("state", [
   z.strictObject({ state: z.literal("available") }),
@@ -217,7 +219,8 @@ export const startAiProviderCommandSchema = z.strictObject({
   revisionId: uuidV7Schema,
   runtimePlanHash: projectOptionsRevisionHashSchema,
   runtimeGeneration: runtimeGenerationSchema,
-  profileId: configurationKeySchema
+  profileId: configurationKeySchema,
+  profileRevision: aiProfileRevisionSchema
 });
 export const resumeAiProviderCommandSchema = z.strictObject({
   command: z.literal("resume"),
@@ -225,7 +228,8 @@ export const resumeAiProviderCommandSchema = z.strictObject({
   revisionId: uuidV7Schema,
   runtimePlanHash: projectOptionsRevisionHashSchema,
   runtimeGeneration: runtimeGenerationSchema,
-  profileId: configurationKeySchema
+  profileId: configurationKeySchema,
+  profileRevision: aiProfileRevisionSchema
 });
 export const sendAiTurnCommandSchema = z.strictObject({
   command: z.literal("sendTurn"),
@@ -289,6 +293,7 @@ export const aiFailureCategorySchema = z.enum([
 export const aiFailureCodes = [
   "AI_PROFILE_NOT_FOUND",
   "AI_PROFILE_UNAVAILABLE",
+  "AI_PROFILE_REVISION_CONFLICT",
   "AI_CAPABILITY_UNSUPPORTED",
   "AI_SESSION_STATE_CONFLICT",
   "AI_TURN_STATE_CONFLICT",
@@ -309,6 +314,7 @@ const aiFailurePolicy: Readonly<Record<AiFailureCode, {
 }>> = {
   AI_PROFILE_NOT_FOUND: { category: "user-error", incident: false },
   AI_PROFILE_UNAVAILABLE: { category: "dependency-unavailable", incident: false },
+  AI_PROFILE_REVISION_CONFLICT: { category: "state-conflict", incident: false },
   AI_CAPABILITY_UNSUPPORTED: { category: "user-error", incident: false },
   AI_SESSION_STATE_CONFLICT: { category: "state-conflict", incident: false },
   AI_TURN_STATE_CONFLICT: { category: "state-conflict", incident: false },
@@ -490,24 +496,47 @@ export type AiEventAppendDecision =
   | { readonly kind: "gap"; readonly expectedSequence: number; readonly receivedSequence: number }
   | { readonly kind: "conflict"; readonly sequence: number };
 
+function canonicalAiEventsEqual(
+  left: CanonicalAiEvent,
+  right: CanonicalAiEvent
+): boolean {
+  return canonicalize(left) === canonicalize(right);
+}
+
 export function classifyAiEventAppend(input: {
   readonly durableThroughSequence: number;
   readonly existingAtSequence: CanonicalAiEvent | null;
+  readonly existingByEventId: CanonicalAiEvent | null;
   readonly incoming: CanonicalAiEvent;
 }): AiEventAppendDecision {
   const through = aiAfterSequenceSchema.parse(input.durableThroughSequence);
   const incoming = canonicalAiEventSchema.parse(input.incoming);
+  const existingAtSequence = input.existingAtSequence === null
+    ? null
+    : canonicalAiEventSchema.parse(input.existingAtSequence);
+  const existingByEventId = input.existingByEventId === null
+    ? null
+    : canonicalAiEventSchema.parse(input.existingByEventId);
   const expected = through + 1;
+
+  if (existingByEventId !== null
+    && !canonicalAiEventsEqual(existingByEventId, incoming)) {
+    return { kind: "conflict", sequence: incoming.sequence };
+  }
   if (incoming.sequence === expected) {
-    if (input.existingAtSequence !== null) return { kind: "conflict", sequence: incoming.sequence };
+    if (existingAtSequence !== null || existingByEventId !== null) {
+      return { kind: "conflict", sequence: incoming.sequence };
+    }
     return { kind: "append", sequence: incoming.sequence };
   }
   if (incoming.sequence > expected) {
     return { kind: "gap", expectedSequence: expected, receivedSequence: incoming.sequence };
   }
-  if (input.existingAtSequence === null) return { kind: "conflict", sequence: incoming.sequence };
-  const existing = canonicalAiEventSchema.parse(input.existingAtSequence);
-  return JSON.stringify(existing) === JSON.stringify(incoming)
+  if (existingAtSequence === null || existingByEventId === null) {
+    return { kind: "conflict", sequence: incoming.sequence };
+  }
+  return canonicalAiEventsEqual(existingAtSequence, incoming)
+    && canonicalAiEventsEqual(existingByEventId, incoming)
     ? { kind: "exact-duplicate", sequence: incoming.sequence }
     : { kind: "conflict", sequence: incoming.sequence };
 }

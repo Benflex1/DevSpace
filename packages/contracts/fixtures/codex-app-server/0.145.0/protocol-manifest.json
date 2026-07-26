@@ -1,9 +1,10 @@
 {
   "cliVersion": "0.145.0",
   "versionOutput": "codex-cli 0.145.0",
+  "cliBinarySha256": "a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14",
   "generatedAt": "2026-07-26",
-  "generator": "codex app-server generate-json-schema --out <directory>",
-  "generatorExperimentalFlag": false,
+  "stableGenerationCommand": "codex app-server generate-json-schema --out <directory>",
+  "experimentalGenerationCommand": "codex app-server generate-json-schema --experimental --out <directory>",
   "transport": {
     "mode": "stdio-jsonl",
     "tty": false,
@@ -11,18 +12,39 @@
     "stderr": "private-diagnostics"
   },
   "officialSource": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
-  "aggregateV2Schema": {
-    "file": "codex_app_server_protocol.v2.schemas.json",
-    "bytes": 491906,
-    "sha256": "eaf8f9774dbad397818fa64241b9fcd4f894bde3d852d3c8948c68f07975b6ff"
-  },
-  "componentHashes": {
-    "ClientRequest": "44615d6348466a48c05228d99eb555d1d655aaffc1474fb0abdd7f4945502e35",
-    "ClientNotification": "a30b3041578845b11add3d07d5a63cd3a12d5d126e87b8c591862b4aeb68d97c",
-    "ServerRequest": "177f8b7de9dd8ce2055c56a5fd22dbc6ec24e2a4d706d08fef9f5ad4effe71f6",
-    "ServerNotification": "0c7b42c4e2cffc419bf753ea5a34a56b2965219c2087304993bce97cf978f915",
-    "ToolRequestUserInputParams": "21e569e32c05d51c1ee5e587730c182b911ede97a4df267f6e4ef24e1717f34e"
-  },
+  "upstreamLicense": "Apache-2.0",
+  "fixtures": [
+    {
+      "scope": "stable-default",
+      "file": "stable/ClientRequest.json",
+      "bytes": 172676,
+      "sha256": "44615d6348466a48c05228d99eb555d1d655aaffc1474fb0abdd7f4945502e35"
+    },
+    {
+      "scope": "stable-default",
+      "file": "stable/ClientNotification.json",
+      "bytes": 431,
+      "sha256": "a30b3041578845b11add3d07d5a63cd3a12d5d126e87b8c591862b4aeb68d97c"
+    },
+    {
+      "scope": "stable-default",
+      "file": "stable/ServerRequest.json",
+      "bytes": 49058,
+      "sha256": "177f8b7de9dd8ce2055c56a5fd22dbc6ec24e2a4d706d08fef9f5ad4effe71f6"
+    },
+    {
+      "scope": "stable-default",
+      "file": "stable/ServerNotification.json",
+      "bytes": 173163,
+      "sha256": "0c7b42c4e2cffc419bf753ea5a34a56b2965219c2087304993bce97cf978f915"
+    },
+    {
+      "scope": "experimental",
+      "file": "experimental/ToolRequestUserInputParams.json",
+      "bytes": 1977,
+      "sha256": "21e569e32c05d51c1ee5e587730c182b911ede97a4df267f6e4ef24e1717f34e"
+    }
+  ],
   "methods": {
     "clientRequests": [
       "initialize",
