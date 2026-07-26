@@ -78,6 +78,8 @@ button { justify-self: start; border: 0; border-radius: 9px; padding: 12px 18px;
 .workbench-message.success { border-color: #2a7650; color: #8cdaad; }
 .workbench-message.error { border-color: #744246; color: #e6a5a5; }
 .workbench-message.pending { border-color: #77603a; color: #e5c386; }
+.incident-reference { display: block; font-size: .68rem; margin-top: 3px; opacity: .72; }
+.incident-reference code { color: inherit; user-select: all; }
 
 /* Lost-terminal recovery keeps the consequence prominent and the optional confirmation quieter. */
 .lost-terminal-dialog.warning { border-color: #9b5d45; }

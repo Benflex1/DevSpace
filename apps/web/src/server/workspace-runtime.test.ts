@@ -78,7 +78,7 @@ test("lazily compiles an old null-plan revision and persists desired state befor
   await expect(mutatePrimaryWorkspaceRuntime("start", project.id, "actor", { database, agent: runtimeAgent }))
     .rejects.toMatchObject({ code: "AGENT_INTERNAL_ERROR" });
   expect(database.listManagedProjects()[0]).toMatchObject({ runtime: {
-    errorMessage: "Container creation failed safely."
+    errorMessage: "The DevSpace Agent encountered an unexpected error."
   } });
   await mutatePrimaryWorkspaceRuntime("start", project.id, "actor", { database, agent: runtimeAgent });
   await mutatePrimaryWorkspaceRuntime("stop", project.id, "actor", { database, agent: runtimeAgent });

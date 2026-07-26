@@ -1,5 +1,58 @@
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+/**
+ * Closed failure classification shared by Web and Agent-facing diagnostics.
+ *
+ * Mapping rules:
+ * - user-error: invalid input, unsupported configuration, policy, or missing resources.
+ * - state-conflict: expected lifecycle, concurrency, or identity conflicts.
+ * - dependency-unavailable: the Agent or a required runtime/gateway dependency is unavailable.
+ * - transport-failure: a request timed out, was truncated, or could not be delivered.
+ * - protocol-failure: a version, serialization, or validated response contract failed.
+ * - internal-failure: an unexpected implementation or invariant failure.
+ */
+export const failureCategories = [
+  "user-error",
+  "state-conflict",
+  "dependency-unavailable",
+  "transport-failure",
+  "protocol-failure",
+  "internal-failure"
+] as const;
+export type FailureCategory = (typeof failureCategories)[number];
+
+const userErrorCodes = new Set([
+  "REQUEST_INVALID", "CONFIGURATION_INVALID", "CONFIGURATION_NOT_REGISTERED", "RUNTIME_POLICY_VIOLATION",
+  "PROJECT_NOT_FOUND", "RESOURCE_NOT_FOUND", "SOURCE_NOT_FOUND", "SOURCE_INVALID", "TASK_NOT_DEFINED",
+  "PREVIEW_NOT_DEFINED", "AI_NOT_CONFIGURED", "PREVIEW_DOMAIN_NOT_APPROVED", "RUNTIME_PLAN_UNSUPPORTED",
+  "RUNTIME_PLAN_INVALID", "PREVIEW_NOT_FOUND", "EVENT_CURSOR_INVALID"
+]);
+const conflictCodes = new Set([
+  "OPERATION_CONFLICT", "WORKSPACE_STATE_CONFLICT", "RESOURCE_STATE_CONFLICT", "DIRTY_WORKSPACE_REQUIRES_ACTION",
+  "PROCESS_IDENTITY_MISMATCH", "RUNTIME_ACTION_IN_PROGRESS", "RUNTIME_ACTION_NOT_AUTHORIZED",
+  "EXECUTION_ACTION_IN_PROGRESS", "SETUP_IN_PROGRESS", "PREVIEW_ACTION_NOT_AUTHORIZED", "EVENT_SNAPSHOT_REQUIRED"
+]);
+const dependencyCodes = new Set([
+  "AGENT_UNAVAILABLE", "SOURCE_UNAVAILABLE", "OPERATION_JOURNAL_UNAVAILABLE", "ROOTLESS_RUNTIME_UNAVAILABLE",
+  "GATEWAY_UPDATE_FAILED"
+]);
+const transportCodes = new Set([
+  "AGENT_REQUEST_TIMEOUT", "AGENT_RESPONSE_TOO_LARGE", "AGENT_TRANSPORT_FAILURE"
+]);
+const protocolCodes = new Set([
+  "PROTOCOL_VERSION_UNSUPPORTED", "REQUEST_SERIALIZATION_FAILED", "MALFORMED_RESPONSE", "INVALID_RESPONSE_CONTRACT"
+]);
+
+/** Classifies only stable error codes; unknown codes fail closed as internal failures. */
+export function classifyFailureCode(code: string): FailureCategory {
+  if (userErrorCodes.has(code)) return "user-error";
+  if (conflictCodes.has(code)) return "state-conflict";
+  if (dependencyCodes.has(code)) return "dependency-unavailable";
+  if (transportCodes.has(code)) return "transport-failure";
+  if (protocolCodes.has(code)) return "protocol-failure";
+  return "internal-failure";
+}
+
 const logLevelRank: Readonly<Record<LogLevel, number>> = { debug: 10, info: 20, warn: 30, error: 40 };
 
 export function resolveLogLevel(environment: Readonly<Record<string, string | undefined>> = process.env): LogLevel {
@@ -31,7 +84,9 @@ export interface LogFields extends LogContext {
   readonly statusCode?: number;
   readonly pending?: boolean;
   readonly errorCategory?: string;
+  readonly failureCategory?: FailureCategory;
   readonly errorCode?: string;
+  readonly incidentId?: string;
   readonly retryable?: boolean;
   readonly healthBreakdown?: Readonly<Record<string, string>>;
   readonly [key: string]: unknown;
@@ -59,7 +114,9 @@ export interface LogRecord extends LogContext {
   readonly statusCode?: number;
   readonly pending?: boolean;
   readonly errorCategory?: string;
+  readonly failureCategory?: FailureCategory;
   readonly errorCode?: string;
+  readonly incidentId?: string;
   readonly retryable?: boolean;
   readonly healthBreakdown?: Readonly<Record<string, string>>;
 }
@@ -70,7 +127,7 @@ const safeKeys = new Set([
   "requestId", "operationId", "projectId", "workspaceId", "previewId", "durationMs", "mode", "reason", "action",
   "operationName", "operationState", "observedState", "previousState", "currentState", "desiredState", "routePresent",
   "routeStatus", "statusCode", "pending", "errorCategory", "errorCode", "retryable", "healthBreakdown", "endpoint",
-  "incidentId", "detailKeys"
+  "failureCategory", "incidentId", "detailKeys"
 ]);
 const sensitiveKey = /(?:authorization|cookie|credential|environment|password|secret|token|body|header|content|file|path|url|command|output)/iu;
 const sensitiveText = /(?:bearer\s+|(?:authorization|cookie|password|secret|token|credential|api[_-]?key)\s*[:=]\s*)[^\s,;]+/giu;
@@ -81,6 +138,9 @@ function safeText(value: string): string {
 
 function safeValue(key: string, value: unknown): unknown {
   if (sensitiveKey.test(key)) return undefined;
+  if (key === "failureCategory") {
+    return typeof value === "string" && failureCategories.includes(value as FailureCategory) ? value : undefined;
+  }
   if (typeof value === "string") return safeText(value.slice(0, 512));
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value === "boolean" || value === null) return value;

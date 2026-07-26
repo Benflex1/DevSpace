@@ -1,6 +1,7 @@
 import type { AgentOperationObservation, AgentSnapshotData, WorkspaceInspectionData } from "@devspace/contracts";
 import type { WorkspaceAgentClient } from "./agent-client.js";
 import type { ProjectDatabase } from "./database.js";
+import { persistedFailureMessage } from "./failure-policy.js";
 
 export type RuntimeAction = "start" | "stop";
 export type RuntimeActionBlockingReason =
@@ -72,7 +73,7 @@ export async function reconcilePrimaryWorkspaceRuntimeOperation(projectId: strin
       case "failed":
         dependencies.database.finishRuntimeMutation({ operationId: nonterminal.operationId, projectId,
           workspaceId: context.workspace.id, outcome: { state: "failed", code: observation.failure.code,
-            message: observation.failure.message } });
+            message: persistedFailureMessage(observation.failure.code) } });
         reconciledTerminal = { action, state: "failed" };
         break;
       case "succeeded":

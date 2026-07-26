@@ -5,11 +5,28 @@ import {
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { AgentResponseError, type WorkspaceAgentClient } from "./agent-client.js";
 import type { ProjectDatabase } from "./database.js";
+import { persistedFailureMessage } from "./failure-policy.js";
 import { reconcileWorkspacePreviews, type PreviewOrchestrationAgent } from "./preview-orchestration.js";
 import { reconcilePrimaryWorkspaceRuntimeOperation } from "./runtime-operation-reconciliation.js";
+import { SafeWebFailure, type SafeFailureMetadata } from "./user-facing-failure.js";
 
-export class WorkspaceRuntimeExecutionError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = "WorkspaceRuntimeExecutionError"; }
+export class WorkspaceRuntimeExecutionError extends SafeWebFailure {
+  constructor(code: string, message: string, metadata: SafeFailureMetadata = {}) {
+    super(code, message, metadata);
+    this.name = "WorkspaceRuntimeExecutionError";
+  }
+}
+
+function agentRuntimeError(error: AgentResponseError): WorkspaceRuntimeExecutionError {
+  return new WorkspaceRuntimeExecutionError(error.code, persistedFailureMessage(error.code), {
+    failureCategory: error.failureCategory,
+    retryable: error.retryable,
+    incidentId: error.incidentId,
+    requestId: error.requestId,
+    operationId: error.operationId,
+    diagnosticContext: error.diagnosticContext,
+    messageOwnership: "agent-code"
+  });
 }
 type WorkspaceRuntimeAgent = Pick<WorkspaceAgentClient,
   "snapshot" | "runtimeStatus" | "inspectWorkspace" | "registerRuntimePlan" | "startWorkspace" | "stopWorkspace">;
@@ -43,7 +60,16 @@ async function pollMutation(input: {
   while (input.now() < input.deadline) {
     const observation = (await input.agent.snapshot()).operationObservations.find((item) => item.operationId === input.operationId);
     if (observation?.state === "succeeded") return;
-    if (observation?.state === "failed") throw new WorkspaceRuntimeExecutionError(observation.failure.code, observation.failure.message);
+    if (observation?.state === "failed") {
+      const details = observation.failure.details;
+      const incidentId = "incidentId" in details ? details.incidentId : undefined;
+      throw new WorkspaceRuntimeExecutionError(observation.failure.code, persistedFailureMessage(observation.failure.code), {
+        retryable: observation.failure.retryable,
+        operationId: input.operationId,
+        messageOwnership: "agent-code",
+        ...(incidentId === undefined ? {} : { incidentId })
+      });
+    }
     const remaining = input.deadline - input.now();
     if (remaining <= 0) break;
     await input.sleep(Math.min(delay, remaining));
@@ -97,7 +123,7 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
       dependencies.database.finishOperation(registration.operationId, { state: "succeeded" });
     } catch (error) {
       const failure = error instanceof WorkspaceRuntimeExecutionError ? error
-        : error instanceof AgentResponseError ? new WorkspaceRuntimeExecutionError(error.code, error.message)
+        : error instanceof AgentResponseError ? agentRuntimeError(error)
         : new WorkspaceRuntimeExecutionError("AGENT_UNAVAILABLE", "The DevSpace Agent is unavailable.");
       dependencies.database.finishOperation(registration.operationId, { state: "failed", code: failure.code, message: failure.message });
       throw failure;
@@ -125,7 +151,11 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
           : reconciliation.blockingReason === "inspection-unavailable"
             ? "The live workspace runtime inspection is unavailable."
             : "The requested runtime action is not valid for the authoritative current state.";
-    throw new WorkspaceRuntimeExecutionError("RUNTIME_ACTION_NOT_AUTHORIZED", message);
+    const subsystemUnavailable = reconciliation.blockingReason === "agent-snapshot-unavailable"
+      || reconciliation.blockingReason === "runtime-unavailable"
+      || reconciliation.blockingReason === "inspection-unavailable";
+    throw new WorkspaceRuntimeExecutionError("RUNTIME_ACTION_NOT_AUTHORIZED", message,
+      subsystemUnavailable ? { failureCategory: "dependency-unavailable", retryable: true } : {});
   }
   const operation = dependencies.database.prepareRuntimeMutation({ projectId, workspaceId: context.workspace.id, actor, action,
     runtimePlanHash: planHash, imageReference: plan.developmentContainer.source.imageReference });
@@ -154,7 +184,7 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
     const deliveryOutcomeUnknown = !(error instanceof WorkspaceRuntimeExecutionError)
       && !(error instanceof AgentResponseError);
     const failure = error instanceof WorkspaceRuntimeExecutionError ? error
-      : error instanceof AgentResponseError ? new WorkspaceRuntimeExecutionError(error.code, error.message)
+      : error instanceof AgentResponseError ? agentRuntimeError(error)
       : new WorkspaceRuntimeExecutionError("AGENT_UNAVAILABLE", "The DevSpace Agent is unavailable.");
     if (failure.code !== "RUNTIME_ACTION_IN_PROGRESS" && !deliveryOutcomeUnknown) {
       dependencies.database.finishRuntimeMutation({ operationId: operation.operationId, projectId, workspaceId: context.workspace.id,

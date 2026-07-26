@@ -4,7 +4,7 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
-import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
+import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
 
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
@@ -189,9 +189,11 @@ export class OperationExecutor {
       };
       await this.journal.fail(operationId, failure);
       this.events.failed(operationId, resource, failure);
+      const incidentId = "incidentId" in failure.details ? failure.details.incidentId : undefined;
       this.logger.error("agent.operation.failed", "Agent operation failed", {
         operationId, operationName: record.operationName, operationState: "failed", errorCategory: "operation",
-        errorCode: failure.code, retryable: failure.retryable, ...resourceFields
+        failureCategory: classifyFailureCode(failure.code), errorCode: failure.code, retryable: failure.retryable,
+        ...(incidentId === undefined ? {} : { incidentId }), ...resourceFields
       });
     }
   }

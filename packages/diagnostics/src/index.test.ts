@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { createLogger, resolveLogLevel, sanitizeLogFields, serializeLogRecord, type LogRecord } from "./index.js";
+import {
+  classifyFailureCode, createLogger, failureCategories, resolveLogLevel, sanitizeLogFields, serializeLogRecord, type LogRecord
+} from "./index.js";
 
 describe("structured diagnostics logging", () => {
   test("serializes stable JSON records with correlation and timing fields", () => {
@@ -34,5 +36,18 @@ describe("structured diagnostics logging", () => {
     const debugLines: string[] = [];
     createLogger({ component: "web", sink: (line) => debugLines.push(line), environment: { DEVSPACE_LOG_LEVEL: "debug" } }).debug("debug.detail", "visible");
     expect(debugLines).toHaveLength(1);
+  });
+
+  test("provides a closed stable mapping covering every failure category", () => {
+    expect([
+      classifyFailureCode("REQUEST_INVALID"),
+      classifyFailureCode("WORKSPACE_STATE_CONFLICT"),
+      classifyFailureCode("AGENT_UNAVAILABLE"),
+      classifyFailureCode("AGENT_REQUEST_TIMEOUT"),
+      classifyFailureCode("INVALID_RESPONSE_CONTRACT"),
+      classifyFailureCode("UNKNOWN_PRIVATE_FAILURE")
+    ]).toEqual(failureCategories);
+    expect(sanitizeLogFields({ failureCategory: "not-a-category" as never, errorCode: "SAFE" }))
+      .toEqual({ errorCode: "SAFE" });
   });
 });

@@ -15,12 +15,17 @@ import {
 } from "@devspace/security";
 import type { WorkspaceAgentClient } from "./agent-client.js";
 import type { ManagedProjectView, ProjectDatabase } from "./database.js";
+import { persistedFailureMessage } from "./failure-policy.js";
+import { SafeWebFailure, type SafeFailureMetadata } from "./user-facing-failure.js";
 
 export class WorkspaceSetupValidationError extends Error {
   constructor(message: string) { super(message); this.name = "WorkspaceSetupValidationError"; }
 }
-export class WorkspaceSetupExecutionError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = "WorkspaceSetupExecutionError"; }
+export class WorkspaceSetupExecutionError extends SafeWebFailure {
+  constructor(code: string, message: string, metadata: SafeFailureMetadata = {}) {
+    super(code, message, metadata);
+    this.name = "WorkspaceSetupExecutionError";
+  }
 }
 
 export interface WorkspaceSetupInput {
@@ -131,7 +136,8 @@ async function completeMutation(
 ): Promise<void> {
   if (operation.state === "succeeded") return;
   if (operation.state === "failed") {
-    throw new WorkspaceSetupExecutionError(operation.errorCode ?? "SETUP_FAILED", operation.errorMessage ?? "Workspace setup failed.");
+    const code = operation.errorCode ?? "SETUP_FAILED";
+    throw new WorkspaceSetupExecutionError(code, persistedFailureMessage(code), { messageOwnership: "agent-code" });
   }
   await execute();
   let delayMs = 25;
@@ -139,9 +145,16 @@ async function completeMutation(
     const observation = (await agent.snapshot()).operationObservations.find((item) => item.operationId === operation.operationId);
     if (observation?.state === "failed") {
       database.finishOperation(operation.operationId, {
-        state: "failed", code: observation.failure.code, message: observation.failure.message
+        state: "failed", code: observation.failure.code, message: persistedFailureMessage(observation.failure.code)
       });
-      throw new WorkspaceSetupExecutionError(observation.failure.code, observation.failure.message);
+      const details = observation.failure.details;
+      const incidentId = "incidentId" in details ? details.incidentId : undefined;
+      throw new WorkspaceSetupExecutionError(observation.failure.code, persistedFailureMessage(observation.failure.code), {
+        retryable: observation.failure.retryable,
+        operationId: operation.operationId,
+        messageOwnership: "agent-code",
+        ...(incidentId === undefined ? {} : { incidentId })
+      });
     }
     if (observation?.state === "succeeded") {
       database.finishOperation(operation.operationId, { state: "succeeded" });

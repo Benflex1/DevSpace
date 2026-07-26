@@ -9,6 +9,7 @@ import {
   extractDevSpaceProtocolHeaders,
   f10AgentApiV1EndpointByOperation,
   parseEventCursor,
+  type AgentExecutionFailure,
   type SourceInspectionData
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
@@ -21,7 +22,7 @@ import { OperationConflictError, OperationJournal } from "./operation-journal.js
 import { ExecutionManager } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
-import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
+import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
 import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./preview-runtime.js";
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
@@ -513,20 +514,25 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         });
         return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: toPublicPreviewInspectionData(data) }));
       } catch (error) {
-        const errorCode = error instanceof AgentExecutionError ? error.failure.code : "AGENT_INTERNAL_ERROR";
-        logger.warn("agent.preview.inspection.failed", "Preview inspection failed", {
-          requestId, durationMs: Math.max(0, now().valueOf() - startedAt), errorCategory: "preview-inspection", errorCode, ...resourceFields
-        });
+        const failure: AgentExecutionFailure = error instanceof AgentExecutionError ? error.failure : {
+          code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely.", retryable: true,
+          details: { incidentId: createId() }
+        };
+        const incidentId = "incidentId" in failure.details ? failure.details.incidentId : undefined;
+        const fields = {
+          requestId, durationMs: Math.max(0, now().valueOf() - startedAt), errorCategory: "preview-inspection",
+          failureCategory: classifyFailureCode(failure.code), errorCode: failure.code,
+          ...(incidentId === undefined ? {} : { incidentId }), ...resourceFields
+        };
+        if (incidentId === undefined) logger.warn("agent.preview.inspection.failed", "Preview inspection failed", fields);
+        else logger.error("agent.preview.inspection.failed", "Preview inspection failed", fields);
         if (error instanceof AgentExecutionError) {
           const status = error.failure.code === "RESOURCE_NOT_FOUND" ? 404
             : error.failure.code === "ROOTLESS_RUNTIME_UNAVAILABLE" ? 503 : 500;
-          sendEndpointErrorResponse(endpoint, response, status, requestId, now, error.failure, error, createId, logger);
+          sendEndpointErrorResponse(endpoint, response, status, requestId, now, failure, error, createId, logger);
           return;
         }
-        sendEndpointErrorResponse(endpoint, response, 500, requestId, now, {
-          code: "AGENT_INTERNAL_ERROR", message: "The preview could not be inspected safely.", retryable: true,
-          details: { incidentId: createId() }
-        }, error, createId, logger);
+        sendEndpointErrorResponse(endpoint, response, 500, requestId, now, failure, error, createId, logger);
         return;
       }
     }

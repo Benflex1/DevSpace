@@ -18,22 +18,54 @@ import {
   type ProcessInspectionData,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
-import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
+import {
+  classifyFailureCode, createLogger, type FailureCategory, type LogContext, type StructuredLogger
+} from "@devspace/diagnostics";
 import { v7 as uuidv7 } from "uuid";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 export class AgentUnavailableError extends Error {
-  constructor() { super("The DevSpace Agent is unavailable."); this.name = "AgentUnavailableError"; }
+  readonly retryable = true;
+  readonly incidentId: string | undefined = undefined;
+  constructor(
+    readonly code = "AGENT_UNAVAILABLE",
+    readonly failureCategory: FailureCategory = "dependency-unavailable",
+    readonly requestId?: string,
+    readonly operationId?: string,
+    readonly diagnosticContext: LogContext = {}
+  ) {
+    super(code === "AGENT_REQUEST_TIMEOUT"
+      ? "The DevSpace Agent request timed out."
+      : code === "INVALID_RESPONSE_CONTRACT" || code === "MALFORMED_RESPONSE"
+        ? "The DevSpace Agent returned an invalid response."
+        : "The DevSpace Agent is unavailable.");
+    this.name = "AgentUnavailableError";
+  }
 }
 export class AgentResponseError extends Error {
-  readonly code: string;
-  constructor(code: string, message = "The Agent could not complete the requested operation.") { super(message); this.name = "AgentResponseError"; this.code = code; }
+  readonly incidentId: string | undefined;
+  /** Validated Agent text retained for server-private diagnostics only; never project this message. */
+  constructor(
+    readonly code: string,
+    message = "The Agent could not complete the requested operation.",
+    readonly retryable = false,
+    incidentId?: string,
+    readonly failureCategory: FailureCategory = classifyFailureCode(code),
+    readonly requestId?: string,
+    readonly operationId?: string,
+    readonly diagnosticContext: LogContext = {}
+  ) {
+    super(message);
+    this.name = "AgentResponseError";
+    this.incidentId = incidentId;
+  }
 }
 
 export function createAgentClient(socketPath: string, options: {
   timeoutMs?: number; mutationReceiptTimeoutMs?: number; observationTimeoutMs?: number;
   createId?: () => string; now?: () => Date;
   logger?: StructuredLogger;
+  previewFailureDiagnostics?: "terminal" | "deferred";
 } = {}) {
   const defaultTimeoutMs = options.timeoutMs ?? 5_000;
   const mutationReceiptTimeoutMs = options.mutationReceiptTimeoutMs ?? defaultTimeoutMs;
@@ -47,7 +79,12 @@ export function createAgentClient(socketPath: string, options: {
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
     | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get";
 
-  async function call(operation: SupportedOperation, data?: unknown, operationId?: string): Promise<unknown> {
+  async function call(
+    operation: SupportedOperation,
+    data?: unknown,
+    operationId?: string,
+    diagnosticOperationId = operationId
+  ): Promise<unknown> {
     const endpoint = operation === "snapshot.get"
       ? f10AgentApiV1EndpointByOperation["snapshot.get"]
       : agentApiV1EndpointByOperation[operation];
@@ -59,18 +96,26 @@ export function createAgentClient(socketPath: string, options: {
       ...(typeof resource.workspaceId === "string" ? { workspaceId: resource.workspaceId } : {}),
       ...(typeof resource.previewId === "string" ? { previewId: resource.previewId } : {})
     };
+    const diagnosticContext = {
+      requestId,
+      ...(diagnosticOperationId === undefined ? {} : { operationId: diagnosticOperationId }),
+      ...resourceFields
+    };
     const diagnosticPreviewCall = operation === "preview.activate" || operation === "preview.deactivate" || operation === "preview.inspect";
     let terminalLogged = false;
     if (diagnosticPreviewCall) logger.debug("web.agent_request.started", "Preview Agent request started", {
       requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation, ...resourceFields
     });
-    const logFailure = (errorCategory: string, errorCode: string, statusCode?: number): void => {
+    const logFailure = (errorCategory: string, errorCode: string, statusCode?: number, incidentId?: string): void => {
       if (!diagnosticPreviewCall || terminalLogged) return;
       terminalLogged = true;
+      if (options.previewFailureDiagnostics === "deferred") return;
       logger.warn("web.agent_request.failed", "Preview Agent request failed", {
         requestId, ...(operationId === undefined ? {} : { operationId }), operationName: operation,
         durationMs: Date.now() - callStartedAt, errorCategory, errorCode,
-        ...(statusCode === undefined ? {} : { statusCode }), ...resourceFields
+        failureCategory: classifyFailureCode(errorCode),
+        ...(statusCode === undefined ? {} : { statusCode }),
+        ...(incidentId === undefined ? {} : { incidentId }), ...resourceFields
       });
     };
     const logCompleted = (statusCode: number): void => {
@@ -111,7 +156,7 @@ export function createAgentClient(socketPath: string, options: {
           bytes += chunk.length;
           if (bytes > MAX_RESPONSE_BYTES) {
             logFailure("agent-transport", "AGENT_RESPONSE_TOO_LARGE");
-            request.destroy(new AgentUnavailableError());
+            request.destroy(new AgentUnavailableError("AGENT_RESPONSE_TOO_LARGE", "transport-failure", requestId, operationId, diagnosticContext));
           }
           else chunks.push(chunk);
         });
@@ -121,7 +166,7 @@ export function createAgentClient(socketPath: string, options: {
           try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
           catch {
             logFailure("agent-protocol", "MALFORMED_RESPONSE", statusCode);
-            return reject(new AgentUnavailableError());
+            return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId, operationId, diagnosticContext));
           }
           if (statusCode === endpoint.successStatus) {
             try {
@@ -130,26 +175,43 @@ export function createAgentClient(socketPath: string, options: {
               return resolve(data);
             } catch {
               logFailure("agent-protocol", "INVALID_RESPONSE_CONTRACT", statusCode);
-              return reject(new AgentUnavailableError());
+              return reject(new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId, operationId, diagnosticContext));
             }
           }
           try {
-            const error = endpoint.errorSchema.parse(parsed) as { error: { code: string; message: string } };
-            logFailure("agent-response", error.error.code, statusCode);
-            return reject(new AgentResponseError(error.error.code, error.error.message));
+            const envelope = endpoint.errorSchema.parse(parsed) as {
+              error: { code: string; message: string; retryable: boolean; details: unknown };
+            };
+            const details = envelope.error.details;
+            const incidentId = details !== null && typeof details === "object" && !Array.isArray(details)
+              && typeof (details as { incidentId?: unknown }).incidentId === "string"
+              ? (details as { incidentId: string }).incidentId
+              : undefined;
+            logFailure("agent-response", envelope.error.code, statusCode, incidentId);
+            return reject(new AgentResponseError(
+              envelope.error.code,
+              envelope.error.message,
+              envelope.error.retryable,
+              incidentId,
+              classifyFailureCode(envelope.error.code),
+              requestId,
+              operationId,
+              diagnosticContext
+            ));
           } catch {
             logFailure("agent-protocol", "INVALID_RESPONSE_CONTRACT", statusCode);
-            return reject(new AgentUnavailableError());
+            return reject(new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId, operationId, diagnosticContext));
           }
         });
       });
       request.setTimeout(timeoutMs, () => {
         logFailure("agent-transport", "AGENT_REQUEST_TIMEOUT");
-        request.destroy(new AgentUnavailableError());
+        request.destroy(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure", requestId, operationId, diagnosticContext));
       });
       request.on("error", (error) => {
         if (!(error instanceof AgentUnavailableError)) logFailure("agent-transport", "AGENT_UNAVAILABLE");
-        reject(error instanceof AgentUnavailableError ? error : new AgentUnavailableError());
+        reject(error instanceof AgentUnavailableError ? error
+          : new AgentUnavailableError("AGENT_UNAVAILABLE", "dependency-unavailable", requestId, operationId, diagnosticContext));
       });
       if (body !== undefined) request.write(body);
       request.end();
@@ -207,8 +269,14 @@ export function createAgentClient(socketPath: string, options: {
     deactivatePreview: async (operationId: string, projectId: string, workspaceId: string, revisionId: string, previewId: string): Promise<MutationReceipt> => {
       return await call("preview.deactivate", { projectId, workspaceId, revisionId, previewId }, operationId) as MutationReceipt;
     },
-    inspectPreview: async (projectId: string, workspaceId: string, revisionId: string, previewId: string): Promise<PreviewInspectionData> =>
-      await call("preview.inspect", { projectId, workspaceId, revisionId, previewId }) as PreviewInspectionData,
+    inspectPreview: async (
+      projectId: string,
+      workspaceId: string,
+      revisionId: string,
+      previewId: string,
+      diagnosticOperationId?: string
+    ): Promise<PreviewInspectionData> =>
+      await call("preview.inspect", { projectId, workspaceId, revisionId, previewId }, undefined, diagnosticOperationId) as PreviewInspectionData,
     snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
   };
 }

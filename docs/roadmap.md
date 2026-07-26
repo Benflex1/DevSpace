@@ -237,11 +237,11 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
 - ✅ Structured Web and Agent JSON logs (bounded preview lifecycle foundation)
 - ✅ Request/operation/resource correlation IDs on the instrumented preview path
 - ✅ Lifecycle stage and timing information for preview reconciliation and Agent operations
-- ⏳ Stable failure categories with safe underlying cause details
+- ✅ Stable failure categories with safe underlying cause details
 - ✅ Better internal health breakdown instead of only `Agent degraded`
 - ✅ Explicit reconciliation decision logging
 - ✅ Safe secret/path redaction policy
-- ⏳ Incident/error IDs that connect UI errors to service logs
+- ✅ Incident/error IDs that connect UI errors to service logs
 
 ### Authentication hardening
 
