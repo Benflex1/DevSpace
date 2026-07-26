@@ -8,6 +8,7 @@ import {
   TERMINAL_PROTOCOL_ERROR_CLOSE_CODE,
   decodeTerminalClientFrame,
   encodeTerminalAgentFrame,
+  f10ProcessInspectionDataSchema,
   processInspectionDataSchema,
   uuidV7Schema,
   type AgentExecutionFailure,
@@ -606,7 +607,7 @@ export class ExecutionManager {
   snapshotResources(): AgentSnapshotResource[] {
     const resources: AgentSnapshotResource[] = [];
     for (const live of this.executions.values()) {
-      resources.push({ type: "process", observation: processInspectionDataSchema.parse({
+      resources.push({ type: "process", observation: f10ProcessInspectionDataSchema.parse({
         projectId: live.record.projectId, workspaceId: live.record.workspaceId, processId: live.record.processId,
         kind: live.record.kind, desiredState: live.record.desiredState, observedState: live.record.observedState,
         exitCode: live.record.exitCode, startedAt: live.record.startedAt, finishedAt: live.record.finishedAt

@@ -237,9 +237,22 @@ describe("F10 process observation event", () => {
   test("accepts first observation and structural observed-state transition", () => {
     expect(agentEventSchema.safeParse(processEvent(null, processObservation)).success).toBe(true);
     expect(agentEventSchema.safeParse(processEvent(
+      null,
+      { ...processObservation, kind: "terminal" }
+    )).success).toBe(true);
+    expect(agentEventSchema.safeParse(processEvent(
       processObservation,
       { ...processObservation, observedState: "starting" }
     )).success).toBe(true);
+  });
+
+  test("rejects first-class AI processes in current and non-null previous observations", () => {
+    const aiProcess = { ...processObservation, kind: "ai-session" };
+    expect(agentEventSchema.safeParse(processEvent(null, aiProcess)).success).toBe(false);
+    expect(agentEventSchema.safeParse(processEvent(
+      aiProcess,
+      { ...processObservation, observedState: "starting" }
+    )).success).toBe(false);
   });
 
   test("accepts structural desired-state transition and starting timestamp enrichment", () => {

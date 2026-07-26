@@ -90,6 +90,22 @@ describe("F10 Agent snapshot contract", () => {
     expect(agentSnapshotDataSchema.safeParse(fullSnapshot()).success).toBe(true);
   });
 
+  test("accepts task and terminal process observations but rejects first-class AI processes", () => {
+    const terminal = fullSnapshot();
+    terminal.resources[4] = {
+      type: "process",
+      observation: { ...processObservation, kind: "terminal" }
+    };
+    expect(agentSnapshotDataSchema.safeParse(terminal).success).toBe(true);
+
+    const aiSession = fullSnapshot();
+    aiSession.resources[4] = {
+      type: "process",
+      observation: { ...processObservation, kind: "ai-session" }
+    };
+    expect(agentSnapshotDataSchema.safeParse(aiSession).success).toBe(false);
+  });
+
   test("accepts empty resources and operation observations at cursor zero", () => {
     expect(agentSnapshotDataSchema.safeParse({
       agentBootId: bootId,

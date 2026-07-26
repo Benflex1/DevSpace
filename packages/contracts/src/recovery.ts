@@ -81,6 +81,15 @@ export const workspaceServiceObservationSchema = z.strictObject({
   }
 });
 
+export const f10ProcessInspectionDataSchema = processInspectionDataSchema
+  .safeExtend({
+    kind: z.enum(["task", "terminal"])
+  })
+  .describe(
+    "F10 process observation for task and terminal processes; first-class AI provider processes are excluded"
+  );
+export type F10ProcessInspectionData = z.infer<typeof f10ProcessInspectionDataSchema>;
+
 const projectSnapshotResourceSchema = z.strictObject({
   type: z.literal("project"),
   projectId: uuidV7Schema,
@@ -116,7 +125,7 @@ const serviceSnapshotResourceSchema = z.strictObject({
   observation: workspaceServiceObservationSchema
 });
 const processSnapshotResourceSchema = z.strictObject({
-  type: z.literal("process"), observation: processInspectionDataSchema
+  type: z.literal("process"), observation: f10ProcessInspectionDataSchema
 });
 const terminalSnapshotResourceSchema = z.strictObject({
   type: z.literal("terminal"), identity: terminalIdentityDataSchema, state: terminalStateSchema

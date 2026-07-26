@@ -583,13 +583,66 @@ F11 endpoint descriptors declare one of two operation-journal policies:
 - `ai-private-intent-reference` is mandatory for `ai-session.turn.send` and
   `ai-session.input.respond`, and for any future content-bearing mutation.
 
-For the second policy, the generic journal retains only operation ID, operation name, a versioned
-keyed HMAC-SHA-256 request fingerprint, and an opaque reference to one dedicated Agent-private AI
-intent record. The full strict content-bearing request is stored only in that intent area, bound
-to operation ID, operation name, project/workspace/session, turn/request when applicable, profile
-ID/revision, and process generation. The durable Agent-private HMAC key and its non-secret key
-version are deployment state; raw unkeyed content digests are prohibited because low-entropy
-answers could be guessed.
+For the second policy, the generic journal retains only operation ID, operation name, the following
+strict fingerprint identity, and an opaque reference to one dedicated Agent-private AI intent
+record:
+
+```text
+PrivateIntentFingerprintIdentityV1 = {
+  algorithm: "hmac-sha256-ai-private-intent-v1",
+  keyVersion: ConfigurationKey,
+  digest: 64 lowercase hexadecimal characters
+}
+```
+
+The referenced private intent retains the identical `algorithm`, `keyVersion`, and `digest`.
+`keyVersion` is a bounded deployment-owned identifier, not key material. The HMAC is SHA-256 with
+the selected key version over UTF-8:
+
+```text
+"devspace.ai-private-intent-fingerprint/v1" || 0x00 ||
+JCS(PrivateIntentFingerprintInputV1)
+```
+
+JCS is RFC 8785 canonicalization after strict schema parsing. The input document is:
+
+```text
+PrivateIntentFingerprintInputV1 = {
+  format: "devspace.ai-private-intent-fingerprint-input/v1",
+  intentRecordSchemaVersion: "devspace.ai-private-intent/v1",
+  intentRecordId: UuidV7,
+  operationId: UuidV7,
+  operationName: "ai-session.turn.send" | "ai-session.input.respond",
+  keyVersion: ConfigurationKey,
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  aiSessionId: UuidV7,
+  turnId: UuidV7,
+  interactionRequestId: UuidV7 | null,
+  profileId: ConfigurationKey,
+  profileRevision: AiProfileRevision,
+  processGeneration: positive safe integer,
+  request: the complete strict content-bearing F11 command
+}
+```
+
+For send-turn, `interactionRequestId` is null. For structured-input response it equals the exact
+request ID. Every repeated identity in `request` must equal the outer binding. No defaulted or
+omitted field exists, object-key order has no effect, and changing any bound identity, generation,
+authority revision, content, answer, or intent schema version changes the digest. Raw unkeyed
+content digests are prohibited because low-entropy answers could be guessed.
+
+Exactly one installed key version is active for new intent writes. Rotation installs a new active
+version and demotes older installed versions to verification-only; existing references and intents
+are not rewritten. Replay resolves exactly the recorded key version. It never falls back to the
+active version and never recomputes with another key. A verification-only key remains installed
+while any non-retired journal reference or intent depends on it. Removal is prohibited until an
+atomic retirement step proves that every dependent operation replay window and associated
+session/turn/request retention has retired. A missing, unknown, replaced, or corrupt required key
+version causes fail-closed journal/private-state unavailability. Key values never enter SQLite,
+browser contracts, public observations, repository fixtures, logs, diagnostics, audits, or generic
+errors. The non-secret key-version identifier is retained only in Agent-private journal/intent
+records; v1 does not allow it in structured diagnostics.
 
 Intent writes use restrictive private-state permissions, strict schemas and existing byte bounds,
 temporary-file write plus file sync, atomic rename, and parent-directory sync. The generic journal
@@ -606,9 +659,10 @@ No content or intent reference appears in public operation observations, logs, d
 summaries, generic errors, or browser payloads. Process creation additionally follows the phased
 private ownership record above.
 
-F10 no longer carries the dormant `ai-session.state.changed` event or AI snapshot member. AI
-session recovery uses F11's dedicated stream plus the later Web-owned session snapshot/read model.
-No competing AI event contract remains.
+F10 process snapshots and events accept only `task | terminal`; they exclude first-class AI
+provider processes. F10 also no longer carries the dormant `ai-session.state.changed` event or an
+AI snapshot member. AI session recovery uses F11's dedicated stream plus the later Web-owned
+session snapshot/read model. No competing AI observation contract remains.
 
 ## Failure contract
 

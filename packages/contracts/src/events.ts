@@ -20,6 +20,7 @@ import {
 } from "./primitives.js";
 import {
   agentResourceReferenceSchema,
+  f10ProcessInspectionDataSchema,
   previewResourceReferenceSchema,
   processResourceReferenceSchema,
   projectGitInspectionObservationSchema,
@@ -30,16 +31,15 @@ import {
   terminalStateSchema,
   workspaceResourceReferenceSchema,
   workspaceServiceHealthStateSchema,
-  workspaceServiceObservedStateSchema
+  workspaceServiceObservedStateSchema,
+  type F10ProcessInspectionData
 } from "./recovery.js";
 import {
   previewInspectionDataSchema,
   previewObservedStateSchema,
-  processInspectionDataSchema,
   runtimeStackObservedStateSchema,
   workspaceObservedStateSchema,
-  type PreviewInspectionData,
-  type ProcessInspectionData
+  type PreviewInspectionData
 } from "./shapes.js";
 
 export const AGENT_EVENT_NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8" as const;
@@ -135,8 +135,8 @@ const rawProcessObservationChangedEventSchema = z.strictObject({
   resource: processResourceReferenceSchema,
   type: z.literal("process.observation.changed"),
   payload: z.strictObject({
-    previous: processInspectionDataSchema.nullable(),
-    current: processInspectionDataSchema
+    previous: f10ProcessInspectionDataSchema.nullable(),
+    current: f10ProcessInspectionDataSchema
   })
 });
 const rawTerminalStateChangedEventSchema = z.strictObject({
@@ -190,8 +190,8 @@ function addEdgeIssue(context: z.core.$RefinementCtx<unknown>, path: PropertyKey
 }
 
 function validateProcessChange(
-  previous: ProcessInspectionData | null,
-  current: ProcessInspectionData,
+  previous: F10ProcessInspectionData | null,
+  current: F10ProcessInspectionData,
   context: z.core.$RefinementCtx<unknown>
 ): void {
   if (previous === null) return;
@@ -223,7 +223,10 @@ function validateProcessChange(
     }
     const allowed = new Set(["desiredState", "startedAt", "exitCode"]);
     const changed = Object.keys(previous).filter((key) =>
-      !equalJson(previous[key as keyof ProcessInspectionData], current[key as keyof ProcessInspectionData])
+      !equalJson(
+        previous[key as keyof F10ProcessInspectionData],
+        current[key as keyof F10ProcessInspectionData]
+      )
     );
     if (changed.some((key) => !allowed.has(key))) {
       context.addIssue({ code: "custom", path: ["payload"], message: "Arbitrary same-state process mutation" });

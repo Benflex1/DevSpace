@@ -10,7 +10,8 @@ import {
   agentOperationObservationSchema,
   agentResourceReferenceSchema,
   agentSnapshotDataSchema,
-  agentSnapshotResourceSchema
+  agentSnapshotResourceSchema,
+  f10ProcessInspectionDataSchema
 } from "./recovery.js";
 import { agentExecutionFailureSchema } from "./execution-failures.js";
 import {
@@ -40,6 +41,7 @@ export function generateAgentApiV1JsonSchema(): AgentApiV1JsonSchema {
     AgentResourceReference: jsonSchema(agentResourceReferenceSchema),
     AgentExecutionFailure: jsonSchema(agentExecutionFailureSchema),
     AgentOperationObservation: jsonSchema(agentOperationObservationSchema),
+    F10ProcessInspectionData: jsonSchema(f10ProcessInspectionDataSchema),
     AgentSnapshotResource: jsonSchema(agentSnapshotResourceSchema),
     AgentSnapshotData: jsonSchema(agentSnapshotDataSchema),
     AgentEvent: jsonSchema(agentEventSchema),

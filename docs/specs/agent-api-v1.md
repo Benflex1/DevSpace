@@ -139,10 +139,11 @@ AI-intent-reference policy defined below so content is not copied into that gene
 exact replay may return the previously
 durable F09 response without repeating side effects. Reuse of the same ID for another operation
 name or different validated request data returns `OPERATION_CONFLICT`. The Agent may compare a
-private deterministic fingerprint in its durable journal; its format, canonicalization, and hash
-algorithm are private implementation details and are not Agent API fields or
-`@devspace/contracts` responsibilities. F09 exposes no idempotency key, request hash, expiry, or
-reuse-after-expiry behavior. Journal compaction must preserve operation-ID reuse safety.
+private deterministic fingerprint in its durable journal. For F09 `generic-request` records its
+format remains a private implementation detail; the F11 private-intent fingerprint is instead the
+exact deep Agent-private contract defined below and is not a public Agent API field. F09 exposes no
+idempotency key, request hash, expiry, or reuse-after-expiry behavior. Journal compaction must
+preserve operation-ID reuse safety.
 
 The Agent must durably record the immutable operation/request identity and acceptance before any
 side effect. If the journal is unavailable or corrupt, a mutation fails with HTTP `503` and
@@ -978,7 +979,7 @@ AgentSnapshotResource =
     }
   | {
       type: "process",
-      observation: ProcessInspectionData
+      observation: F10ProcessInspectionData
     }
   | {
       type: "terminal",
@@ -991,9 +992,12 @@ AgentSnapshotResource =
     }
 ```
 
-`WorkspaceInspectionData`, `ProcessInspectionData`, `PreviewInspectionData`, and
-`TerminalIdentityData` are embedded exactly as accepted by F09, with
-all nested strictness and refinements unchanged. `WorkspaceInspectionData["runtimeStack"]` means
+`WorkspaceInspectionData`, `PreviewInspectionData`, and `TerminalIdentityData` are embedded
+exactly as accepted by F09, with all nested strictness and refinements unchanged.
+`F10ProcessInspectionData` is structurally the exact F09 `ProcessInspectionData`, including all
+state/timestamp/exit-code refinements, except that its `kind` is narrowed to `"task" | "terminal"`.
+The historical F09 `"ai-session"` vocabulary remains compatibility evidence only and is rejected
+by F10 snapshots and events. `WorkspaceInspectionData["runtimeStack"]` means
 the exact strict nested runtime-stack observation already defined by that F09 shape; F10 extracts
 and reuses it rather than duplicating its fields. A workspace has at most one runtime stack, so
 `workspaceId` is its identity and no stack UUID exists.
@@ -1011,7 +1015,7 @@ The observation authority for each snapshot category is therefore exact:
 | `workspace` | `observation.workspaceId` | exact F09 `WorkspaceInspectionData` |
 | `runtime-stack` | `workspaceId` | exact extracted `WorkspaceInspectionData["runtimeStack"]` |
 | `service` | (`workspaceId`, `serviceKey`) | F10 `WorkspaceServiceObservation` from authoritative domain values |
-| `process` | `observation.processId` | exact F09 `ProcessInspectionData` |
+| `process` | `observation.processId` | F10 `F10ProcessInspectionData` (`task | terminal` only) |
 | `terminal` | `identity.terminalId` | exact F09 `TerminalIdentityData` plus domain `TerminalState` |
 | `preview` | `observation.previewId` | exact F09 `PreviewInspectionData` |
 
@@ -1223,7 +1227,7 @@ operation-ID rule, and payload in the table below. `ProjectRef`, `WorkspaceRef`,
 | `runtime-stack.observed-state.changed` | `UuidV7` or `null` | required `RuntimeStackRef` | `{ previous: nullable RuntimeStackObservedState, current: RuntimeStackObservedState }` |
 | `service.observed-state.changed` | `UuidV7` or `null` | required `ServiceRef` | `{ previous: nullable WorkspaceServiceObservedState, current: WorkspaceServiceObservedState }` |
 | `service.health.changed` | `UuidV7` or `null` | required `ServiceRef` | `{ previous: nullable WorkspaceServiceHealthState, current: WorkspaceServiceHealthState }` |
-| `process.observation.changed` | `UuidV7` or `null` | required `ProcessRef` | `{ previous: nullable ProcessInspectionData, current: ProcessInspectionData }` |
+| `process.observation.changed` | `UuidV7` or `null` | required `ProcessRef` | `{ previous: nullable F10ProcessInspectionData, current: F10ProcessInspectionData }` |
 | `terminal.state.changed` | `UuidV7` or `null` | required `TerminalRef` | `{ previous: nullable TerminalState, current: TerminalState }` |
 | `preview.state.changed` | `UuidV7` or `null` | required `PreviewRef` | `{ previousState: nullable PreviewObservedState, observation: PreviewInspectionData }` |
 
@@ -1244,8 +1248,10 @@ project snapshot view.
 
 #### Process observation events
 
-`process.observation.changed` carries the exact accepted F09 `ProcessInspectionData` as both its
-nullable prior observation and required current observation. The event resource's `projectId`,
+`process.observation.changed` carries `F10ProcessInspectionData` as both its nullable prior
+observation and required current observation. It preserves all historical F09 process refinements
+while permitting only `task | terminal`; `ai-session` is invalid in either non-null position. The
+event resource's `projectId`,
 `workspaceId`, and `processId` must equal `current`; when `previous` is non-null, its identity and
 `kind` must equal `current`. Both values independently satisfy every F09 process
 state/timestamp/exit-code refinement, and `previous`/`current` must not be deeply equal.
@@ -1350,7 +1356,7 @@ operation association never relaxes resource identity.
 | `runtime-stack.observed-state.changed` | extracted `WorkspaceInspectionData["runtimeStack"].observedState` and matching runtime-stack member |
 | `service.observed-state.changed` | `WorkspaceServiceObservation.observedState` |
 | `service.health.changed` | `WorkspaceServiceObservation.health` |
-| `process.observation.changed` | complete current `ProcessInspectionData` |
+| `process.observation.changed` | complete current `F10ProcessInspectionData` |
 | `terminal.state.changed` | terminal snapshot member `state` |
 | `preview.state.changed` | complete current `PreviewInspectionData`, including hostname and route presence |
 
@@ -1625,12 +1631,24 @@ Every F11 mutation descriptor has an executable `operationJournalPolicy`:
 
 For private intents, the Agent must durably and atomically establish the strict referenced record
 before accepting the generic journal entry or performing side effects. The intent binds operation,
-resource, profile revision, and process generation identities. Replay re-reads it and verifies a
-versioned keyed HMAC-SHA-256 fingerprint. Missing, corrupt, replaced, mismatched, or prematurely
-retired intent is journal/private-state unavailability and fails closed. The record has restrictive
-permissions and bounded retention, and neither its content nor reference enters public operation
-observations, logs, diagnostics, audits, generic errors, or browser data. Slice 0 defines but does
-not implement this storage.
+resource, profile revision, and process generation identities. Both the generic journal reference
+and private record retain the same strict fingerprint identity:
+
+```text
+{
+  algorithm: "hmac-sha256-ai-private-intent-v1",
+  keyVersion: ConfigurationKey,
+  digest: 64 lowercase hexadecimal characters
+}
+```
+
+The HMAC input, key lifecycle, replay rules, and domain-separated canonical document are normative
+in `ai-sessions-v1.md`. Replay uses the recorded key version only; it never substitutes the active
+key. Missing, unknown, corrupt, or prematurely retired key material or intent state is
+journal/private-state unavailability and fails closed. The record has restrictive permissions and
+bounded retention, and neither its content, reference, fingerprint identity, nor key version
+enters public operation observations, logs, diagnostics, audits, generic errors, or browser data.
+Slice 0 defines but does not implement this storage.
 
 ### Profile response and capability advertisement
 
@@ -1721,8 +1739,9 @@ outbox.
 Web commits in sequence before browser publication, acknowledges exact
 `(sessionId, sequence, eventId)`, accepts only exact duplicate replay, and treats conflict/gap as
 incident-bearing protocol failures. The general F10 snapshot contains no AI-session member and
-F10 has no `ai-session.state.changed` event. Later Web recovery obtains current AI state from its
-SQLite read model and reconnects F11 from the greatest committed session sequence.
+accepts process kinds `task | terminal` only; F10 has no first-class AI provider-process member or
+`ai-session.state.changed` event. Later Web recovery obtains current AI state from its SQLite read
+model and reconnects F11 from the greatest committed session sequence.
 
 No browser route or stream is implemented here. Its later contract must reuse application
 authentication, Origin checks, and exact project/workspace/session authorization and may emit only
@@ -1806,6 +1825,9 @@ new protocol decision:
 21. No F10 fixture, export, schema, or inventory entry introduces source-inspection ownership,
     reconciliation, a public streaming codec, terminal/output bytes, output retention, persistence,
     replay execution, or F11 behavior.
+22. F10 process snapshots and both non-null event observations accept only `task | terminal`;
+    historical F09 `ai-session` process vocabulary never becomes a second first-class AI
+    observation path.
 
 ### F11 implementation-readiness invariants
 

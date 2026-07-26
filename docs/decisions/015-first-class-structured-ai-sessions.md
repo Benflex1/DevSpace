@@ -67,6 +67,11 @@ approval, structured-input, canonical-event, and private resume-metadata models.
 Session waiting states are projections of the one active turn and its one pending interaction.
 They do not create a second independently writable waiting-state authority.
 
+F11 canonical AI-session events are the sole first-class provider-process observation contract.
+F10 generic process snapshots/events are restricted to the implemented `task | terminal` kinds;
+the historical F09 `ai-session` process vocabulary remains compatibility evidence and cannot
+publish first-class AI lifecycle through F10.
+
 ### Data classification
 
 AI data uses three explicit planes.
@@ -186,6 +191,18 @@ at least until the operation and associated session/turn/request can be retired 
 Content never enters public operation observations, logs, diagnostics, audits, or generic errors.
 Non-content F11 mutations may retain their complete bounded validated request under the existing
 generic policy.
+
+The fingerprint identity is
+`hmac-sha256-ai-private-intent-v1` plus a bounded deployment key-version identifier and lowercase
+SHA-256 digest. Its domain-separated RFC 8785/JCS input binds the key-version identifier, intent
+schema and record IDs, operation ID/name, project/workspace/session, turn and optional interaction
+request, profile ID/revision, process generation, and complete strict content-bearing request. One
+key version is active for new writes; rotated versions remain verification-only until every
+dependent operation replay window and AI intent/session retention is atomically retired. Replay
+uses only the recorded version, never the current active key. Missing or corrupt required key state
+fails closed. Secret keys and even the non-secret key-version identifier are excluded from public
+data and structured diagnostics. The executable private schemas/helpers are deliberately absent
+from the contracts package-root export.
 
 ## Alternatives considered
 

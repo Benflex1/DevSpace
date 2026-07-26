@@ -218,6 +218,13 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - prompts and structured-input answers are durably fenced only through referenced, restrictive
   Agent-private AI intent records; the generic operation journal retains a keyed fingerprint and
   opaque reference, never the content;
+- private-intent fingerprints use the exact domain-separated
+  `hmac-sha256-ai-private-intent-v1` identity and recorded deployment key version; rotation keeps
+  referenced old versions verification-only, replay never falls back to another key, and removal
+  is prohibited until all dependent operation and AI retention is atomically retired;
+- private-intent key values never enter SQLite, browser/public contracts, fixtures, logs,
+  diagnostics, audits, or generic errors; the non-secret key-version identifier remains confined
+  to Agent-private journal and intent records;
 - an authenticated in-container supervisor/control channel must bind the exact project, workspace,
   revision, runtime plan/generation, container, session, profile revision, process generation,
   operation, Docker exec, and process-start identity before interrupt/Stop;

@@ -248,19 +248,29 @@ forward migration to the hybrid model in `ai-sessions-v1.md`; Slice 0 changes no
 The web creates `operation_id` and inserts this SQLite row before sending a mutating request to the
 Agent. That same ID is the sole public idempotency identity and is sent only through
 `X-DevSpace-Operation-Id`. There is no second public idempotency key or public request hash.
-`operation_name` is the stable F09 mutation operation name. `project_id` makes the row
-project-owned; `workspace_id` is nullable because some project operations have no workspace and
-because retained project operation history may survive deletion of an individual workspace. The
-workspace Agent never creates or writes this row.
+`operation_name` is a stable active journaled mutation name from the applicable Agent API
+extension, including active F09 and F11 journaled mutations. F10 snapshot/event controls and
+non-journaled F11 inspection, event-stream, and acknowledgement operations do not create ordinary
+journaled mutation rows merely because they exist. `project_id` makes the row project-owned;
+`workspace_id` is nullable because some project operations have no workspace and because retained
+project operation history may survive deletion of an individual workspace. The workspace Agent
+never creates or writes this row.
 
 This row is the Web control-plane and audit source of truth for operation lifecycle, progress, and
-outcome. The Agent's separate narrow durable execution/idempotency journal is not SQLite and is
-not a second control-plane database; it exists only to make acceptance, execution, and transport
-retries safe. That journal may bind an operation ID to an operation name, complete validated
-request, and private deterministic fingerprint. The fingerprint is private Agent implementation
-state, is not a protocol value, and is not persisted in this SQLite model. F10 Agent execution
-observations describe recoverable Agent state and do not create another SQLite table. Reuse or
-replay semantics are defined by the Agent protocol.
+outcome. It is control-plane only: prompts, structured-input answers, provider-native data,
+private-intent references, and their fingerprints or key-version identifiers never enter the Web
+operation row.
+
+The Agent's separate narrow durable execution/idempotency journal is not SQLite and is not a
+second control-plane database; it exists only to make acceptance, execution, and transport retries
+safe. It may retain the complete validated request only when the endpoint descriptor policy is
+`generic-request`. For `ai-private-intent-reference`, the generic journal retains only the approved
+operation identity/name and Agent-private intent reference/fingerprint material. The complete
+prompt or structured-input answer exists exclusively in a dedicated Agent-private AI intent
+record, outside SQLite and the Web control-plane database. F10 Agent execution observations
+describe recoverable Agent state and do not create another SQLite table. F11 operation-name
+support does not make Web or SQLite authoritative for provider execution. Reuse and replay
+semantics are defined by the applicable Agent API extension and `ai-sessions-v1.md`.
 
 ## audit_events
 

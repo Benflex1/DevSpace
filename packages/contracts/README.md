@@ -5,13 +5,14 @@ provides strict Zod schemas and inferred types for shared wire primitives, reque
 envelopes, configuration revision documents, endpoint data, lifecycle-dependent inspections, the
 unchanged F09-only 23-code executable error registry, the historical 30-endpoint F09 inventory,
 mutation headers, and the pure terminal binary-frame codec. F10 adds the textual boot-scoped
-cursor, recovery snapshot and seven-resource union, three-state Agent operation observations,
+cursor, recovery snapshot and seven-resource union, four-state Agent operation observations,
 18-code asynchronous execution failures with exact 20-mutation applicability, the strict 11-event
 union, two F10-only errors, two F10 endpoint descriptors, complete-v1 inventory/error views, and
-the NDJSON content-type/framing metadata. F11 supersedes F09's four never-implemented AI
-descriptors, adds ten AI profile/session operations, strict provider-neutral commands, safe profile
-and interaction projections, the 22-event canonical AI union, append/duplicate/gap classification,
-and a dedicated replay/synchronization stream. Start/resume fence the exact inspected
+the NDJSON content-type/framing metadata. F10 process observations are restricted to
+`task | terminal` and exclude first-class AI processes. F11 supersedes F09's four never-implemented
+AI descriptors, adds ten AI profile/session operations, strict provider-neutral commands, safe
+profile and interaction projections, the 22-event canonical AI union, append/duplicate/gap
+classification, and a dedicated replay/synchronization stream. Start/resume fence the exact inspected
 `sha256-ai-profile-v1` revision, and the append classifier checks both sequence ownership and
 global event-ID ownership.
 
@@ -72,6 +73,9 @@ collection, event production/storage, replay, HTTP streaming, NDJSON codec, or r
 
 F11 mutation descriptors distinguish existing bounded generic-request journaling from the future
 dedicated private-AI-intent-reference policy required by prompts and structured-input answers.
+The deep Agent-private fingerprint helper fixes the domain-separated
+`hmac-sha256-ai-private-intent-v1` canonical document and key-rotation policy without exporting
+either helper or private schema from the package root.
 The package contains no runtime plan implementation, reconciliation, mutation journal,
 provider-process runtime, credential delivery, second idempotency identity, or public request hash.
 The Codex 0.145.0 raw-protocol pin is an internal fixture boundary and is not exported as the
