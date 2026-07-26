@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import {
-  aiSessionStateChangedEventSchema,
   agentEventSchema,
   agentEventTypes,
   operationFailedEventSchema,
@@ -23,7 +22,6 @@ const workspaceId = "018f1f34-7000-7000-8000-000000000002";
 const processId = "018f1f34-7000-7000-8000-000000000003";
 const terminalId = "018f1f34-7000-7000-8000-000000000004";
 const previewId = "018f1f34-7000-7000-8000-000000000005";
-const aiSessionId = "018f1f34-7000-7000-8000-000000000006";
 const operationId = "018f1f34-7000-7000-8000-000000000007";
 const bootId = "018f1f34-7000-7000-8000-000000000008";
 const timestamp = "2026-07-16T12:34:56.789Z";
@@ -43,7 +41,6 @@ const serviceResource = { type: "service", projectId, workspaceId, serviceKey: "
 const processResource = { type: "process", projectId, workspaceId, processId };
 const terminalResource = { type: "terminal", projectId, workspaceId, terminalId };
 const previewResource = { type: "preview", projectId, workspaceId, previewId };
-const aiResource = { type: "ai-session", projectId, workspaceId, aiSessionId };
 const processObservation = {
   projectId, workspaceId, processId, kind: "task", desiredState: "running",
   observedState: "queued", exitCode: null, startedAt: null, finishedAt: null
@@ -97,16 +94,12 @@ const representativeEvents = [
   {
     ...common, operationId: null, resource: previewResource,
     type: "preview.state.changed", payload: { previousState: null, observation: previewObservation }
-  },
-  {
-    ...common, operationId, resource: aiResource,
-    type: "ai-session.state.changed", payload: { previous: "creating", current: "active" }
   }
 ] as const;
 
 describe("F10 exact event union", () => {
-  test("contains exactly 12 accepted discriminators and representative valid events", () => {
-    expect(agentEventTypes).toHaveLength(12);
+  test("contains exactly 11 accepted discriminators and representative valid events", () => {
+    expect(agentEventTypes).toHaveLength(11);
     expect(representativeEvents.map((event) => event.type)).toEqual(agentEventTypes);
     for (const event of representativeEvents) {
       expect(agentEventSchema.safeParse(event).success, event.type).toBe(true);
@@ -167,8 +160,7 @@ describe("F10 exact event union", () => {
       serviceHealthChangedEventSchema,
       processObservationChangedEventSchema,
       terminalStateChangedEventSchema,
-      previewStateChangedEventSchema,
-      aiSessionStateChangedEventSchema
+      previewStateChangedEventSchema
     ];
     for (const [index, event] of representativeEvents.entries()) {
       expect(schemas[index]!.safeParse(event).success, event.type).toBe(true);
@@ -245,9 +237,22 @@ describe("F10 process observation event", () => {
   test("accepts first observation and structural observed-state transition", () => {
     expect(agentEventSchema.safeParse(processEvent(null, processObservation)).success).toBe(true);
     expect(agentEventSchema.safeParse(processEvent(
+      null,
+      { ...processObservation, kind: "terminal" }
+    )).success).toBe(true);
+    expect(agentEventSchema.safeParse(processEvent(
       processObservation,
       { ...processObservation, observedState: "starting" }
     )).success).toBe(true);
+  });
+
+  test("rejects first-class AI processes in current and non-null previous observations", () => {
+    const aiProcess = { ...processObservation, kind: "ai-session" };
+    expect(agentEventSchema.safeParse(processEvent(null, aiProcess)).success).toBe(false);
+    expect(agentEventSchema.safeParse(processEvent(
+      aiProcess,
+      { ...processObservation, observedState: "starting" }
+    )).success).toBe(false);
   });
 
   test("accepts structural desired-state transition and starting timestamp enrichment", () => {

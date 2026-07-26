@@ -186,13 +186,52 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - source or secrets leave the host through the provider;
 - provider credentials leak to other projects;
 - AI output proposes unsafe Project Options changes.
+- raw provider payloads, errors, paths, or native IDs leak into browser history or diagnostics;
+- stale/reused PIDs or Docker exec IDs terminate a foreign process;
+- Web/Agent restart creates gaps, conflicting duplicates, or falsely completed turns;
+- browser content is confused with executable/runtime authority.
 
 ### Controls
 
-- AI CLI runs inside exactly one workspace container;
+- first-class AI uses a separate Agent-owned structured provider process, not a generic terminal
+  session or PTY;
+- Codex app-server runs with TTY disabled over stdin/stdout JSONL inside exactly one workspace
+  container; stderr remains private;
 - only that worktree and declared volumes are mounted;
-- AI provider credentials are injected only into the AI process/profile that needs them;
+- browser sends only an approved profile ID; Agent independently resolves the immutable
+  deployment-owned profile and exact workspace/runtime identity; Web-to-Agent start/resume bind
+  the inspected versioned profile digest and Agent re-hashes the complete private authority
+  document before acceptance;
+- Project Options v1 `fixedArgs` and `credentialSecretIds` remain dormant and cannot authorize an
+  AI Session v1 process;
+- AI provider credentials are delivered only from an Agent-owned credential-source handle to the
+  exact provider process/profile that needs them;
 - secrets are never included in generic environment dumps or audit payloads;
+- content, control, and private data planes are enforced; raw native messages, credentials,
+  environment, host/private paths, provider IDs, complete launch commands, and ownership records
+  never enter browser payloads, SQLite public content, URLs, generic errors, or logs;
+- approval views are bounded typed redacted presentations; only proven paths below the exact
+  workspace root become workspace-relative presentations;
+- Agent assigns a durable per-session canonical-event sequence and retains an acknowledged private
+  outbox; Web checks both sequence and global event-ID ownership, validates, and commits each event
+  before browser delivery;
+- prompts and structured-input answers are durably fenced only through referenced, restrictive
+  Agent-private AI intent records; the generic operation journal retains a keyed fingerprint and
+  opaque reference, never the content;
+- private-intent fingerprints use the exact domain-separated
+  `hmac-sha256-ai-private-intent-v1` identity and recorded deployment key version; rotation keeps
+  referenced old versions verification-only, replay never falls back to another key, and removal
+  is prohibited until all dependent operation and AI retention is atomically retired;
+- private-intent key values never enter SQLite, browser/public contracts, fixtures, logs,
+  diagnostics, audits, or generic errors; the non-secret key-version identifier remains confined
+  to Agent-private journal and intent records;
+- an authenticated in-container supervisor/control channel must bind the exact project, workspace,
+  revision, runtime plan/generation, container, session, profile revision, process generation,
+  operation, Docker exec, and process-start identity before interrupt/Stop;
+- Docker exec ID or numeric PID alone never authorizes a signal; ambiguous/reused/foreign process
+  or descendant identity fails closed;
+- Agent restart reports the provider process and active turn `lost` unless the complete supervisor
+  and ownership proof is re-established;
 - remote-provider disclosure is an accepted consequence of using that provider and is shown in settings;
 - AI may propose configuration changes but cannot activate Project Options revisions;
 - destructive Git/publish actions remain explicit user operations.

@@ -7,7 +7,10 @@ import {
   f10AgentApiV1EndpointByOperation,
   f10AgentApiV1Endpoints,
   f10ExecutableAgentErrorCodes,
-  executableAgentErrorCodes
+  executableAgentErrorCodes,
+  f10ProcessInspectionDataSchema,
+  generateAgentApiV1JsonSchema,
+  processInspectionDataSchema
 } from "@devspace/contracts";
 
 const acceptedF10 = [
@@ -56,11 +59,11 @@ describe("F09, F10, and complete Agent API v1 inventory composition", () => {
   });
 
   test("composes the exact complete v1 counts", () => {
-    expect(completeAgentApiV1Endpoints).toHaveLength(32);
-    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(20);
-    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(11);
+    expect(completeAgentApiV1Endpoints).toHaveLength(38);
+    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(23);
+    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(14);
     expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
-    expect(new Set(completeAgentApiV1Endpoints.map((endpoint) => endpoint.operation)).size).toBe(32);
+    expect(new Set(completeAgentApiV1Endpoints.map((endpoint) => endpoint.operation)).size).toBe(38);
   });
 
   test("keeps error registry views exactly separated", () => {
@@ -70,5 +73,41 @@ describe("F09, F10, and complete Agent API v1 inventory composition", () => {
     expect(new Set(completeAgentApiV1ErrorCodes).size).toBe(25);
     expect(executableAgentErrorCodes).not.toContain("EVENT_CURSOR_INVALID");
     expect(executableAgentErrorCodes).not.toContain("EVENT_SNAPSHOT_REQUIRED");
+  });
+
+  test("narrows F10 process observations without changing historical F09 vocabulary", () => {
+    const observation = {
+      projectId: "018f1f34-7000-7000-8000-000000000001",
+      workspaceId: "018f1f34-7000-7000-8000-000000000002",
+      processId: "018f1f34-7000-7000-8000-000000000003",
+      desiredState: "running",
+      observedState: "queued",
+      exitCode: null,
+      startedAt: null,
+      finishedAt: null
+    };
+    for (const kind of ["task", "terminal"] as const) {
+      expect(f10ProcessInspectionDataSchema.safeParse({
+        ...observation,
+        kind
+      }).success).toBe(true);
+    }
+    expect(f10ProcessInspectionDataSchema.safeParse({
+      ...observation,
+      kind: "ai-session"
+    }).success).toBe(false);
+    expect(processInspectionDataSchema.safeParse({
+      ...observation,
+      kind: "ai-session"
+    }).success).toBe(true);
+
+    const schema = generateAgentApiV1JsonSchema();
+    expect(schema.$defs).toMatchObject({
+      F10ProcessInspectionData: {
+        properties: {
+          kind: { enum: ["task", "terminal"] }
+        }
+      }
+    });
   });
 });

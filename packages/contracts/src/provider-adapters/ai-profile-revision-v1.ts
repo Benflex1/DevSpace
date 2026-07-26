@@ -1,0 +1,102 @@
+import { createHash } from "node:crypto";
+import canonicalize from "canonicalize";
+import * as z from "zod";
+import {
+  aiProviderCapabilitiesSchema,
+  aiProfileRevisionSchema
+} from "../ai-sessions.js";
+import { configurationKeySchema } from "../primitives.js";
+
+export const AI_PROFILE_AUTHORITY_FORMAT =
+  "devspace.ai-provider-profile-authority/v1" as const;
+const AI_PROFILE_REVISION_DOMAIN = "devspace.ai-provider-profile-revision/v1";
+
+function isUnicodeScalarString(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const privateBoundedString = z.string()
+  .min(1)
+  .max(4_096)
+  .refine(
+    (value) => !value.includes("\0") && isUnicodeScalarString(value),
+    "Must contain Unicode scalar values and no NUL"
+  );
+
+const exactRuntimeIdentitySchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("workspace-default-user") }),
+  z.strictObject({
+    kind: z.literal("exact-container-user"),
+    user: privateBoundedString
+  })
+]);
+
+const requiredRuntimeCapabilitiesSchema = z.array(configurationKeySchema)
+  .max(64)
+  .refine(
+    (capabilities) => new Set(capabilities).size === capabilities.length,
+    "Runtime capabilities must be unique"
+  );
+
+export const aiProviderAuthorityDocumentV1Schema = z.strictObject({
+  format: z.literal(AI_PROFILE_AUTHORITY_FORMAT),
+  profileId: configurationKeySchema,
+  provider: configurationKeySchema,
+  providerVersion: privateBoundedString,
+  adapterVersion: configurationKeySchema,
+  executableIdentity: configurationKeySchema,
+  launchMode: configurationKeySchema,
+  fixedArguments: z.array(privateBoundedString).max(64),
+  runtimeIdentity: exactRuntimeIdentitySchema,
+  requiredRuntimeCapabilities: requiredRuntimeCapabilitiesSchema,
+  credentialSourceHandle: configurationKeySchema,
+  capabilities: aiProviderCapabilitiesSchema,
+  availabilityInspectionPolicy: z.strictObject({
+    executableProbe: configurationKeySchema,
+    expectedVersionOutput: privateBoundedString,
+    credentialProbe: z.enum(["required", "not-required"]),
+    runtimeProbe: z.literal("required-before-acceptance")
+  })
+});
+
+export type AiProviderAuthorityDocumentV1 = z.infer<
+  typeof aiProviderAuthorityDocumentV1Schema
+>;
+
+function normalizedAuthorityDocument(
+  input: unknown
+): AiProviderAuthorityDocumentV1 {
+  const parsed = aiProviderAuthorityDocumentV1Schema.parse(input);
+  return {
+    ...parsed,
+    requiredRuntimeCapabilities: [...parsed.requiredRuntimeCapabilities].sort()
+  };
+}
+
+export function canonicalizeAiProviderAuthorityV1(input: unknown): string {
+  const canonical = canonicalize(normalizedAuthorityDocument(input));
+  if (canonical === undefined) {
+    throw new TypeError("AI provider authority is not a JSON value");
+  }
+  return canonical;
+}
+
+export function hashAiProviderAuthorityV1(input: unknown): string {
+  const hash = createHash("sha256");
+  hash.update(AI_PROFILE_REVISION_DOMAIN, "utf8");
+  hash.update(Uint8Array.of(0));
+  hash.update(canonicalizeAiProviderAuthorityV1(input), "utf8");
+  return aiProfileRevisionSchema.parse(
+    `sha256-ai-profile-v1:${hash.digest("hex")}`
+  );
+}

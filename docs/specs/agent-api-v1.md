@@ -16,10 +16,13 @@ arbitrary process arguments, a PID, a Docker identifier, a host path, a bind mou
 gateway upstream, or a Caddy configuration fragment. That document cannot bypass independent
 Agent validation or the host boundary.
 
-F09 owns the 30 endpoints in the F09 inventory and their ordinary request, response, error, and
-terminal-stream wire contracts. F10 owns the two snapshot/event endpoints and their cursor,
-snapshot, event, error, and NDJSON wire contracts. The F10 section is normative but remains
-separate from F09's endpoint count and F09-only executable registries.
+F09 historically declared 30 endpoints. Its 26 non-AI endpoints and all implemented behavior
+remain unchanged. Its four never-implemented AI declarations are retained as historical
+compatibility evidence but are formally superseded and must not be routed. F10 owns the two
+general snapshot/event endpoints. F11 owns the ten first-class AI profile/session operations and
+is the sole executable AI authority. The active complete inventory is therefore 38 endpoints:
+26 non-AI F09, two F10, and ten F11. Historical F09, F10, and F11 registries remain separately
+inspectable.
 
 ## Transport
 
@@ -130,13 +133,17 @@ SQLite operation row. The Agent never creates or writes that row. The operation 
 public idempotency identity.
 
 The first durably accepted mutation for an operation ID binds that ID immutably to the stable
-operation name and the complete validated request data. An exact replay may return the previously
+operation name and the complete validated request semantics. F09 stores the complete validated
+request data in its private journal. F11 content-bearing operations use the dedicated private
+AI-intent-reference policy defined below so content is not copied into that generic record. An
+exact replay may return the previously
 durable F09 response without repeating side effects. Reuse of the same ID for another operation
 name or different validated request data returns `OPERATION_CONFLICT`. The Agent may compare a
-private deterministic fingerprint in its durable journal; its format, canonicalization, and hash
-algorithm are private implementation details and are not Agent API fields or
-`@devspace/contracts` responsibilities. F09 exposes no idempotency key, request hash, expiry, or
-reuse-after-expiry behavior. Journal compaction must preserve operation-ID reuse safety.
+private deterministic fingerprint in its durable journal. For F09 `generic-request` records its
+format remains a private implementation detail; the F11 private-intent fingerprint is instead the
+exact deep Agent-private contract defined below and is not a public Agent API field. F09 exposes no
+idempotency key, request hash, expiry, or reuse-after-expiry behavior. Journal compaction must
+preserve operation-ID reuse safety.
 
 The Agent must durably record the immutable operation/request identity and acceptance before any
 side effect. If the journal is unavailable or corrupt, a mutation fails with HTTP `503` and
@@ -199,9 +206,9 @@ may vary without changing semantics. Stack traces, raw exceptions, secret values
 host paths, repository URLs, commands, Docker data, PIDs, and gateway configuration are forbidden
 in both `message` and `details`.
 
-## F09 endpoint inventory
+## Historical F09 endpoint inventory
 
-The exact F09 count is **30**: 20 journaled mutations, nine ordinary non-mutating HTTP operations,
+The exact historical F09 count is **30**: 20 journaled mutations, nine ordinary non-mutating HTTP operations,
 and one non-mutating WebSocket upgrade. `none` in the Query column means no query parameters are
 accepted. `none` in the Body column means no HTTP request body is permitted. `mutation` means the
 operation-ID header is required; `non-mutating` means it is forbidden.
@@ -238,6 +245,10 @@ operation-ID header is required; `non-mutating` means it is forbidden.
 | `ai-session.interrupt` | POST | `/v1/ai-sessions/interrupt` | none | `AiSessionIdentityData` | mutation | `202 MutationReceipt` |
 | `ai-session.stop` | POST | `/v1/ai-sessions/stop` | none | `AiSessionIdentityData` | mutation | `202 MutationReceipt` |
 | `ai-session.resume` | POST | `/v1/ai-sessions/resume` | none | `ResumeAiSessionData` | mutation | `202 MutationReceipt` |
+
+The four `ai-session.*` rows above were never implemented. ADR 015 and F11 supersede their shapes,
+errors, lifecycle assumptions, and operation applicability. They are excluded from the active
+complete-v1 endpoint composition. The remaining 26 rows are unchanged and authoritative.
 
 The only F09 path parameter is `terminalId`. It is one decoded path segment and must be a `UuidV7`;
 percent-encoded or non-canonical UUID spellings are rejected.
@@ -448,7 +459,7 @@ Only activation carries the configuration key. Subsequent actions use the stable
 the owning workspace identity. The Agent retains the accepted key/revision association and derives
 service, target port, hostname, and route.
 
-### AI-session shapes
+### Historical superseded AI-session shapes
 
 ```text
 StartAiSessionData = {
@@ -471,7 +482,7 @@ ResumeAiSessionData = {
 }
 ```
 
-No request accepts provider credentials, an executable, arguments, prompt text, environment
+These shapes document the dormant F09 declaration only and must not be accepted by a route. No request accepts provider credentials, an executable, arguments, prompt text, environment
 overrides, or terminal bytes. Start uses the singular `aiProfile` in the workspace's registered
 Project Options revision; it carries no profile key and duplicates none of the profile fields. A
 null `aiProfile` fails with `AI_NOT_CONFIGURED`. Resume requires a retained source session in
@@ -821,8 +832,8 @@ body.
 
 No query parameter is accepted by `snapshot.get`. `event.stream` accepts exactly one decoded query
 parameter named `cursor`; an unknown or duplicate query parameter is invalid. The F10 route error
-table below is exhaustive. F09 is exactly 30 endpoints; complete Agent API v1 is therefore 32
-endpoints: 20 mutations, 11 non-mutating HTTP operations, and one WebSocket upgrade.
+table below is exhaustive. F10 composes with the 26 active non-AI F09 endpoints and F11, not the
+four superseded historical AI rows.
 
 ### Event sequence and cursor primitives
 
@@ -865,7 +876,6 @@ AgentResourceReference =
   | { type: "process", projectId: UuidV7, workspaceId: UuidV7, processId: UuidV7 }
   | { type: "terminal", projectId: UuidV7, workspaceId: UuidV7, terminalId: UuidV7 }
   | { type: "preview", projectId: UuidV7, workspaceId: UuidV7, previewId: UuidV7 }
-  | { type: "ai-session", projectId: UuidV7, workspaceId: UuidV7, aiSessionId: UuidV7 }
 ```
 
 This F10 union is distinct from the narrower F09 error `ResourceReference`: F10 adds
@@ -932,8 +942,6 @@ WorkspaceServiceObservedState = RuntimeStackObservedState
 WorkspaceServiceHealthState = "unknown" | "starting" | "healthy" | "unhealthy"
 TerminalState = "creating" | "active" | "disconnected" | "closing" |
   "closed" | "failed" | "lost"
-AiSessionState = "creating" | "active" | "waiting_for_input" | "interrupted" |
-  "stopped" | "failed" | "lost"
 
 WorkspaceServiceObservation = {
   desiredState: WorkspaceServiceDesiredState,
@@ -971,7 +979,7 @@ AgentSnapshotResource =
     }
   | {
       type: "process",
-      observation: ProcessInspectionData
+      observation: F10ProcessInspectionData
     }
   | {
       type: "terminal",
@@ -982,16 +990,14 @@ AgentSnapshotResource =
       type: "preview",
       observation: PreviewInspectionData
     }
-  | {
-      type: "ai-session",
-      identity: AiSessionIdentityData,
-      state: AiSessionState
-    }
 ```
 
-`WorkspaceInspectionData`, `ProcessInspectionData`, `PreviewInspectionData`,
-`TerminalIdentityData`, and `AiSessionIdentityData` are embedded exactly as accepted by F09, with
-all nested strictness and refinements unchanged. `WorkspaceInspectionData["runtimeStack"]` means
+`WorkspaceInspectionData`, `PreviewInspectionData`, and `TerminalIdentityData` are embedded
+exactly as accepted by F09, with all nested strictness and refinements unchanged.
+`F10ProcessInspectionData` is structurally the exact F09 `ProcessInspectionData`, including all
+state/timestamp/exit-code refinements, except that its `kind` is narrowed to `"task" | "terminal"`.
+The historical F09 `"ai-session"` vocabulary remains compatibility evidence only and is rejected
+by F10 snapshots and events. `WorkspaceInspectionData["runtimeStack"]` means
 the exact strict nested runtime-stack observation already defined by that F09 shape; F10 extracts
 and reuses it rather than duplicating its fields. A workspace has at most one runtime stack, so
 `workspaceId` is its identity and no stack UUID exists.
@@ -1009,10 +1015,9 @@ The observation authority for each snapshot category is therefore exact:
 | `workspace` | `observation.workspaceId` | exact F09 `WorkspaceInspectionData` |
 | `runtime-stack` | `workspaceId` | exact extracted `WorkspaceInspectionData["runtimeStack"]` |
 | `service` | (`workspaceId`, `serviceKey`) | F10 `WorkspaceServiceObservation` from authoritative domain values |
-| `process` | `observation.processId` | exact F09 `ProcessInspectionData` |
+| `process` | `observation.processId` | F10 `F10ProcessInspectionData` (`task | terminal` only) |
 | `terminal` | `identity.terminalId` | exact F09 `TerminalIdentityData` plus domain `TerminalState` |
 | `preview` | `observation.previewId` | exact F09 `PreviewInspectionData` |
-| `ai-session` | `identity.aiSessionId` | exact F09 `AiSessionIdentityData` plus domain `AiSessionState` |
 
 `resources` may contain zero or more items and is the complete Agent-observed resource set visible
 to Web at the boundary. No two items of one type may share that type's exact identity key from the
@@ -1222,12 +1227,11 @@ operation-ID rule, and payload in the table below. `ProjectRef`, `WorkspaceRef`,
 | `runtime-stack.observed-state.changed` | `UuidV7` or `null` | required `RuntimeStackRef` | `{ previous: nullable RuntimeStackObservedState, current: RuntimeStackObservedState }` |
 | `service.observed-state.changed` | `UuidV7` or `null` | required `ServiceRef` | `{ previous: nullable WorkspaceServiceObservedState, current: WorkspaceServiceObservedState }` |
 | `service.health.changed` | `UuidV7` or `null` | required `ServiceRef` | `{ previous: nullable WorkspaceServiceHealthState, current: WorkspaceServiceHealthState }` |
-| `process.observation.changed` | `UuidV7` or `null` | required `ProcessRef` | `{ previous: nullable ProcessInspectionData, current: ProcessInspectionData }` |
+| `process.observation.changed` | `UuidV7` or `null` | required `ProcessRef` | `{ previous: nullable F10ProcessInspectionData, current: F10ProcessInspectionData }` |
 | `terminal.state.changed` | `UuidV7` or `null` | required `TerminalRef` | `{ previous: nullable TerminalState, current: TerminalState }` |
 | `preview.state.changed` | `UuidV7` or `null` | required `PreviewRef` | `{ previousState: nullable PreviewObservedState, observation: PreviewInspectionData }` |
-| `ai-session.state.changed` | `UuidV7` or `null` | required `AiSessionRef` | `{ previous: nullable AiSessionState, current: AiSessionState }` |
 
-There are exactly **12** executable F10 event discriminators. Generic operation-cancellation,
+There are exactly **11** executable F10 event discriminators. Generic operation-cancellation,
 process-output-availability, and special process-start/process-exit events are not executable F10
 events. Process observation changes use the one complete observation event above. No
 reconciliation event exists.
@@ -1244,8 +1248,10 @@ project snapshot view.
 
 #### Process observation events
 
-`process.observation.changed` carries the exact accepted F09 `ProcessInspectionData` as both its
-nullable prior observation and required current observation. The event resource's `projectId`,
+`process.observation.changed` carries `F10ProcessInspectionData` as both its nullable prior
+observation and required current observation. It preserves all historical F09 process refinements
+while permitting only `task | terminal`; `ai-session` is invalid in either non-null position. The
+event resource's `projectId`,
 `workspaceId`, and `processId` must equal `current`; when `previous` is non-null, its identity and
 `kind` must equal `current`. Both values independently satisfy every F09 process
 state/timestamp/exit-code refinement, and `previous`/`current` must not be deeply equal.
@@ -1322,7 +1328,6 @@ The exact graph mapping is:
 | `runtime-stack.observed-state.changed` | runtime-stack-observed graph |
 | `service.observed-state.changed` | workspace-service-observed graph |
 | `terminal.state.changed` | terminal graph |
-| `ai-session.state.changed` | AI-session graph |
 
 The full-observation events consume the same domain authority: process-observed and
 process-desired structural predicates for `process.observation.changed`, and preview-observed and
@@ -1351,10 +1356,9 @@ operation association never relaxes resource identity.
 | `runtime-stack.observed-state.changed` | extracted `WorkspaceInspectionData["runtimeStack"].observedState` and matching runtime-stack member |
 | `service.observed-state.changed` | `WorkspaceServiceObservation.observedState` |
 | `service.health.changed` | `WorkspaceServiceObservation.health` |
-| `process.observation.changed` | complete current `ProcessInspectionData` |
+| `process.observation.changed` | complete current `F10ProcessInspectionData` |
 | `terminal.state.changed` | terminal snapshot member `state` |
 | `preview.state.changed` | complete current `PreviewInspectionData`, including hostname and route presence |
-| `ai-session.state.changed` | AI-session snapshot member `state` |
 
 When applying a runtime-stack state event, Web updates both the matching runtime-stack member and
 the equal nested `WorkspaceInspectionData.runtimeStack.observedState` in its Agent-observed view so
@@ -1379,10 +1383,11 @@ from the unchanged 23-code F09 executable registry:
 | `EVENT_CURSOR_INVALID` | `400` | false | `{ reason: one of ("missing", "malformed", "unsupported_version", "invalid_agent_boot_id", "invalid_sequence", "sequence_out_of_range") }` |
 | `EVENT_SNAPSHOT_REQUIRED` | `409` | false | `{ reason: one of ("boot_mismatch", "cursor_expired", "history_unavailable"), currentAgentBootId: UuidV7, snapshotPath: "/v1/snapshot" }` |
 
-The useful executable registry views are: unchanged F09-only (23), F10-only (2), and complete
-Agent API v1 (25). Existing F09-only public exports retain their meaning and exclude both F10
-codes. `AgentExecutionFailure` is a separate 18-code post-acceptance value union and does not
-change these route-error code counts.
+The useful F09/F10 registry views are: unchanged F09-only (23), F10-only (2), and their combined
+non-AI route-error view (25). F11 has a separate closed AI failure registry and reuses selected
+F09 common/journal errors; it is not folded into this 25-code view. Existing F09-only public
+exports retain their meaning and exclude both F10 and F11 codes. `AgentExecutionFailure` is a
+separate 18-code post-acceptance value union and does not change these route-error code counts.
 
 Cursor-invalid reason selection is deterministic and uses this precedence after query-collection
 validation:
@@ -1502,13 +1507,254 @@ retained. A wrong boot, expired cursor, or unavailable required history produces
 resubscribes from `throughCursor`. No F10 schema calculates retention, stores history, performs
 replay, or implements snapshot collection.
 
+## F11 AI Session extension
+
+F11 is normative contract infrastructure only. Slice 0 adds descriptors, schemas, fixtures, and
+generated JSON Schema; it does not add Agent route handlers, an outbox implementation, provider
+execution, or Web/browser transport.
+
+The complete AI domain, data-plane rules, event payload table, provider adapter, sequence/outbox
+proof, and replay semantics are authoritative in `ai-sessions-v1.md`. This section fixes their
+placement in Agent API v1.
+
+### F11 inventory
+
+There are exactly **10** F11 operations: seven journaled mutations and three non-journaled
+inspection/stream/acknowledgement controls.
+
+| Stable operation | Method | Exact path/query | Request data | Success |
+| --- | --- | --- | --- | --- |
+| `ai-provider.inspect` | POST | `/v1/ai-profiles/inspect` | `InspectAiProviderData` | `200 AiProviderProfileProjection` |
+| `ai-session.start` | POST | `/v1/ai-sessions/start` | `StartAiProviderData` | `202 MutationReceipt` |
+| `ai-session.resume` | POST | `/v1/ai-sessions/resume` | `ResumeAiProviderData` | `202 MutationReceipt` |
+| `ai-session.turn.send` | POST | `/v1/ai-sessions/send-turn` | `SendAiTurnData` | `202 MutationReceipt` |
+| `ai-session.turn.interrupt` | POST | `/v1/ai-sessions/interrupt` | `InterruptAiTurnData` | `202 MutationReceipt` |
+| `ai-session.approval.respond` | POST | `/v1/ai-sessions/respond-approval` | `RespondAiApprovalData` | `202 MutationReceipt` |
+| `ai-session.input.respond` | POST | `/v1/ai-sessions/respond-input` | `RespondAiInputData` | `202 MutationReceipt` |
+| `ai-session.stop` | POST | `/v1/ai-sessions/stop` | `StopAiProviderData` | `202 MutationReceipt` |
+| `ai-session.events.stream` | GET | `/v1/ai-sessions/{aiSessionId}/events?afterSequence=<decimal>` | none | `200` AI NDJSON |
+| `ai-session.events.acknowledge` | POST | `/v1/ai-sessions/acknowledge-events` | `AcknowledgeAiEventsData` | `200` echo |
+
+The seven lifecycle/content mutations use the existing common mutation headers, durable operation
+journal acceptance boundary, replay/conflict rules, and `MutationReceipt`, with the explicit
+content-bearing private-intent policy below. Inspection, stream, and acknowledgement
+forbid the operation-ID header. Event acknowledgement may advance only private outbox retention;
+it is idempotent, has no provider/workspace side effect, and is not a Web SQLite operation.
+
+F11 path parameter `aiSessionId` is one canonical UUIDv7 segment. `afterSequence` is one required
+canonical unsigned decimal from `0` through `9007199254740991`, with no sign or leading zero.
+
+### F11 request shapes
+
+Every object is strict. `RuntimeBinding` and `ProcessBinding` are:
+
+```text
+RuntimeBinding = {
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  aiSessionId: UuidV7,
+  revisionId: UuidV7,
+  runtimePlanHash: ProjectOptionsRevisionHash,
+  runtimeGeneration: 1..9007199254740991,
+  profileId: ConfigurationKey,
+  profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>"
+}
+
+ProcessBinding = {
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  aiSessionId: UuidV7,
+  profileId: ConfigurationKey,
+  profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>",
+  processGeneration: 1..9007199254740991
+}
+```
+
+```text
+InspectAiProviderData = {
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  profileId: ConfigurationKey
+}
+
+StartAiProviderData = RuntimeBinding
+ResumeAiProviderData = RuntimeBinding
+
+SendAiTurnData = ProcessBinding & {
+  turnId: UuidV7,
+  content: { kind: "text", text: bounded content }
+}
+
+InterruptAiTurnData = ProcessBinding & { turnId: UuidV7 }
+
+RespondAiApprovalData = ProcessBinding & {
+  turnId: UuidV7,
+  requestId: UuidV7,
+  decision: "approve-once" | "approve-for-session" | "deny" | "cancel"
+}
+
+RespondAiInputData = ProcessBinding & {
+  turnId: UuidV7,
+  requestId: UuidV7,
+  answers: bounded structured answers
+}
+
+StopAiProviderData = ProcessBinding
+
+AcknowledgeAiEventsData = {
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  aiSessionId: UuidV7,
+  throughSequence: 1..9007199254740991,
+  throughEventId: UuidV7
+}
+```
+
+Browser selection still carries only `profileId`. Web inspects the safe projection and sends both
+`profileId` and the resulting `profileRevision` in start/resume. Agent independently resolves and
+hashes the deployed authority document and requires an exact match before durable acceptance or
+execution. Every later command carries the same revision. No request contains native provider
+identity, Docker/process identity, executable, argument, environment, cwd, credential, sandbox,
+or permission value.
+
+The profile revision uses the exact versioned domain-separated JCS algorithm in
+`ai-sessions-v1.md`. It binds every executable-authority field but exposes only the safe digest.
+
+### F11 operation journal policies
+
+Every F11 mutation descriptor has an executable `operationJournalPolicy`:
+
+| Policy | Operations | Private durable representation |
+| --- | --- | --- |
+| `generic-request` | start, resume, interrupt, approval response, stop | existing complete bounded validated request |
+| `ai-private-intent-reference` | send turn, structured-input response; mandatory for future content-bearing mutations | generic journal identity/name plus keyed fingerprint and reference; complete request only in dedicated private AI intent |
+
+For private intents, the Agent must durably and atomically establish the strict referenced record
+before accepting the generic journal entry or performing side effects. The intent binds operation,
+resource, profile revision, and process generation identities. Both the generic journal reference
+and private record retain the same strict fingerprint identity:
+
+```text
+{
+  algorithm: "hmac-sha256-ai-private-intent-v1",
+  keyVersion: ConfigurationKey,
+  digest: 64 lowercase hexadecimal characters
+}
+```
+
+The HMAC input, key lifecycle, replay rules, and domain-separated canonical document are normative
+in `ai-sessions-v1.md`. Replay uses the recorded key version only; it never substitutes the active
+key. Missing, unknown, corrupt, or prematurely retired key material or intent state is
+journal/private-state unavailability and fails closed. The record has restrictive permissions and
+bounded retention, and neither its content, reference, fingerprint identity, nor key version
+enters public operation observations, logs, diagnostics, audits, generic errors, or browser data.
+Slice 0 defines but does not implement this storage.
+
+### Profile response and capability advertisement
+
+`ai-provider.inspect` returns only:
+
+```text
+{
+  profileId,
+  profileRevision,
+  provider,
+  displayName,
+  capabilities: {
+    inspect: true,
+    start: true,
+    resume: boolean,
+    sendTurn: true,
+    interrupt: boolean,
+    approvals: boolean,
+    structuredInput: boolean,
+    stop: true,
+    streamEvents: true
+  },
+  availability
+}
+```
+
+This is the F11 capability advertisement. The existing implemented F09 `/v1/capabilities` response
+is unchanged in Slice 0. Provider-specific browser branching is forbidden.
+
+### F11 errors
+
+F11 routes reuse `PROTOCOL_VERSION_UNSUPPORTED`, `REQUEST_INVALID`, and `AGENT_INTERNAL_ERROR`.
+Journaled mutations additionally reuse `OPERATION_CONFLICT` and
+`OPERATION_JOURNAL_UNAVAILABLE`. F11 adds this separate closed registry:
+
+| Code | HTTP | Retryable | Category | Incident |
+| --- | ---: | --- | --- | --- |
+| `AI_PROFILE_NOT_FOUND` | 404 | false | user-error | no |
+| `AI_PROFILE_UNAVAILABLE` | 503 | true | dependency-unavailable | no |
+| `AI_PROFILE_REVISION_CONFLICT` | 409 | false | state-conflict | no |
+| `AI_CAPABILITY_UNSUPPORTED` | 422 | false | user-error | no |
+| `AI_SESSION_STATE_CONFLICT` | 409 | false | state-conflict | no |
+| `AI_TURN_STATE_CONFLICT` | 409 | false | state-conflict | no |
+| `AI_INTERACTION_STATE_CONFLICT` | 409 | false | state-conflict | no |
+| `AI_IDENTITY_MISMATCH` | 409 | false | internal-failure | yes |
+| `AI_EVENT_SEQUENCE_CONFLICT` | 409 | false | protocol-failure | yes |
+| `AI_EVENT_GAP` | 409 | false | protocol-failure | yes |
+| `AI_OUTBOX_UNAVAILABLE` | 503 | true | dependency-unavailable | yes |
+| `AI_PROVIDER_TRANSPORT_FAILURE` | 502 | true | transport-failure | yes |
+| `AI_PROVIDER_PROTOCOL_FAILURE` | 502 | false | protocol-failure | yes |
+| `AI_INTERNAL_FAILURE` | 500 | true | internal-failure | yes |
+
+The executable F11 envelope contains common response metadata and:
+
+```text
+error: {
+  code,
+  message: ErrorMessage,
+  retryable: literal policy value,
+  failure: { code, category, incidentId }
+}
+```
+
+The nested code must equal the envelope code. Incident presence must match the table. The message
+is a bounded safe projection and never includes content/private-plane values. Expected profile
+unavailability and lifecycle conflicts have no incident.
+
+Route applicability is closed:
+
+- inspect: profile-not-found or internal;
+- start: profile/identity/session/outbox;
+- resume: start set plus capability unsupported;
+- send: profile/identity/session/turn/outbox;
+- interrupt: send set plus capability unsupported;
+- approval/input response: send set plus capability and interaction conflict;
+- stop: profile/identity/session/outbox;
+- stream: identity, sequence conflict, gap, or outbox unavailable;
+- acknowledge: identity, sequence conflict, or outbox unavailable.
+
+### Event stream, acknowledgement, and recovery
+
+F11 NDJSON carries strict `CanonicalAiEvent` lines followed at replay/live handoff by the strict
+`stream.synchronized` control frame. It is separate from F10's boot-scoped Agent event stream and
+the terminal WebSocket. AI sequence is per DevSpace session, persistent across Agent boots and
+process generations, and assigned before delivery by the Agent-private durable acknowledged
+outbox.
+
+Web commits in sequence before browser publication, acknowledges exact
+`(sessionId, sequence, eventId)`, accepts only exact duplicate replay, and treats conflict/gap as
+incident-bearing protocol failures. The general F10 snapshot contains no AI-session member and
+accepts process kinds `task | terminal` only; F10 has no first-class AI provider-process member or
+`ai-session.state.changed` event. Later Web recovery obtains current AI state from its SQLite read
+model and reconnects F11 from the greatest committed session sequence.
+
+No browser route or stream is implemented here. Its later contract must reuse application
+authentication, Origin checks, and exact project/workspace/session authorization and may emit only
+Web-committed events.
+
 ## Implementation-readiness invariants
 
 An F09 implementation and its invariant tests must establish all of the following from this
 document without another protocol decision:
 
-1. The endpoint registry contains exactly 30 unique stable operation names and 30 unique
-   method/path pairs; the terminal upgrade's transport method is HTTP GET.
+1. The historical F09 endpoint registry contains exactly 30 unique stable operation names and 30
+   unique method/path pairs; its four AI entries are excluded from active complete composition,
+   and the terminal upgrade's transport method is HTTP GET.
 2. Every F09 path begins with `/v1`; only terminal stream has a path parameter; no F09 endpoint has
    query parameters.
 3. Exactly the 20 mutation rows require only the caller-supplied operation-ID header. No parser
@@ -1526,7 +1772,7 @@ document without another protocol decision:
    the security public branch validator delegates without F06 behavior changes.
 10. The contracts package depends on `@devspace/domain` only among production workspace packages;
     it does not import Project Options, database, Agent, or Web implementation.
-11. No schema accepts executable commands, arbitrary arguments, host paths, Docker identifiers,
+11. No F09 schema accepts executable commands, arbitrary arguments, host paths, Docker identifiers,
     PIDs, mounts, host ports, gateway targets, Caddy fragments, secret values, or open metadata.
 12. F09 exports no event, cursor, sequence, snapshot, replay, NDJSON success, F10 error, runtime
     plan, or reconciliation schema.
@@ -1536,13 +1782,13 @@ document without another protocol decision:
 An F10 implementation and its independent fixtures must establish all of the following without a
 new protocol decision:
 
-1. The F10 inventory contains exactly the two named GET routes, and the complete v1 inventory is
-   exactly 31 routes without reconciliation.
+1. The F10 inventory contains exactly the two named GET routes; active complete v1 is 26 non-AI
+   F09 routes plus two F10 routes plus ten F11 routes, exactly 38 without reconciliation.
 2. `EventSequence` accepts exactly safe integers 1..9007199254740991; zero is rejected.
 3. `EventCursor` accepts exactly the specified ASCII grammar and range, including `.0`.
 4. Snapshot `agentBootId` equals the boot component of `throughCursor`.
 5. Snapshot data contains exactly the four named fields and both arrays may be empty.
-6. The snapshot resource union contains exactly eight members, uses the exact type-specific
+6. The snapshot resource union contains exactly seven members, uses the exact type-specific
    identity keys, supports all project Git scopes, and contains no source inspection.
 7. Snapshot resources, project Git scopes, and operation observations enforce their exact
    uniqueness rules without imposing array order.
@@ -1552,7 +1798,7 @@ new protocol decision:
 9. `AgentExecutionFailure` contains exactly the 18 enumerated post-acceptance-capable codes, all 23
    F09 codes have one explicit classification, all 20 mutations have exact applicability, and
    retryability never re-executes the same operation ID.
-10. The event union contains exactly the 12 table discriminators, each with one exact resource,
+10. The event union contains exactly the 11 table discriminators, each with one exact resource,
     operation-ID, and payload contract; no second UUID event identity, cancellation event,
     process-output event, or special process start/exit event exists.
 11. An event cursor equals that event's boot ID and sequence; a cursor ending in `.0` cannot appear
@@ -1572,10 +1818,45 @@ new protocol decision:
 18. NDJSON fixtures prove ordinary non-JCS JSON semantics, one LF-terminated event per line, no
     blanks, no CRLF, property-order independence, and rejection of an incomplete final line for
     cursor advancement.
-19. The recovery matrix accounts for every current-state effect of the 12 events, treats progress
+19. The recovery matrix accounts for every current-state effect of the 11 events, treats progress
     messages as transient, guarantees all current nonterminal observations, and marks
     terminal operation recovery as best-available.
 20. Generated schema comments distinguish object-level refinements from stream/history guarantees.
-21. No fixture, export, schema, or inventory entry introduces source-inspection ownership,
+21. No F10 fixture, export, schema, or inventory entry introduces source-inspection ownership,
     reconciliation, a public streaming codec, terminal/output bytes, output retention, persistence,
-    replay execution, or F11+ behavior.
+    replay execution, or F11 behavior.
+22. F10 process snapshots and both non-null event observations accept only `task | terminal`;
+    historical F09 `ai-session` process vocabulary never becomes a second first-class AI
+    observation path.
+
+### F11 implementation-readiness invariants
+
+1. F11 contains exactly ten unique operations: seven journaled mutations and three non-journaled
+   controls; active complete v1 contains no superseded F09 AI descriptor.
+2. Every start/resume request carries safe runtime identity plus exact `profileId` and
+   `profileRevision`; Agent re-hashes the deployed profile before acceptance, and every subsequent
+   mutation fences the same revision and provider-process generation.
+3. The command union contains exactly the nine provider-neutral capabilities and no executable,
+   argument, environment, cwd, container, native-provider, or credential authority.
+4. Required capability flags are literals `true`; the four optional flags are closed booleans and
+   unsupported behavior is `AI_CAPABILITY_UNSUPPORTED`.
+5. Content and presentation fields enforce exact UTF-8 bounds; paths are safe workspace-relative
+   presentations and command text grants no authority.
+6. The canonical event union contains exactly 22 discriminators, recursively rejects unknown
+   fields, requires null/non-null turn identity by family, and contains no raw JSON-RPC/native ID.
+7. Append classification receives both the sequence lookup and global event-ID lookup, accepts
+   only the next sequence or an exact semantic duplicate, rejects event-ID reuse at another
+   sequence, and distinguishes conflicts from gaps without timestamps.
+8. Agent sequence/outbox continuity crosses boots and process generations; Web commit precedes
+   browser delivery and exact Web acknowledgement precedes Agent retention removal.
+9. Replay emits persisted events then one synchronization frame under a gap-free replay/live
+   handoff; slow consumers and exhausted durable bounds fail closed.
+10. F11 failures have exact category/incident policy and never project raw provider errors or
+    content-plane values.
+11. The Codex adapter tests read, byte-hash, parse, and inspect actual CLI 0.145.0 generated
+    stable-default component fixtures plus the separately generated optional experimental
+    structured-input component, without network access.
+12. Content-bearing F11 mutations declare private-intent-reference journaling and never place
+    prompts or answers in generic journal records or public operation observations.
+13. Slice 0 adds no route handlers, provider runtime, supervisor, persistence, credentials,
+    browser stream, or UI.

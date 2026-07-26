@@ -1,5 +1,4 @@
 import {
-  aiSessionStates,
   terminalStates,
   workspaceServiceDesiredStates,
   workspaceServiceHealthStates,
@@ -14,7 +13,6 @@ import {
   uuidV7Schema
 } from "./primitives.js";
 import {
-  aiSessionIdentityDataSchema,
   gitInspectionDataSchema,
   previewInspectionDataSchema,
   processInspectionDataSchema,
@@ -44,9 +42,6 @@ export const terminalResourceReferenceSchema = z.strictObject({
 export const previewResourceReferenceSchema = z.strictObject({
   type: z.literal("preview"), projectId: uuidV7Schema, workspaceId: uuidV7Schema, previewId: uuidV7Schema
 });
-export const aiSessionResourceReferenceSchema = z.strictObject({
-  type: z.literal("ai-session"), projectId: uuidV7Schema, workspaceId: uuidV7Schema, aiSessionId: uuidV7Schema
-});
 export const agentResourceReferenceSchema = z.discriminatedUnion("type", [
   projectResourceReferenceSchema,
   workspaceResourceReferenceSchema,
@@ -54,8 +49,7 @@ export const agentResourceReferenceSchema = z.discriminatedUnion("type", [
   serviceResourceReferenceSchema,
   processResourceReferenceSchema,
   terminalResourceReferenceSchema,
-  previewResourceReferenceSchema,
-  aiSessionResourceReferenceSchema
+  previewResourceReferenceSchema
 ]);
 export type AgentResourceReference = z.infer<typeof agentResourceReferenceSchema>;
 
@@ -77,7 +71,6 @@ export const workspaceServiceDesiredStateSchema = z.enum(workspaceServiceDesired
 export const workspaceServiceObservedStateSchema = z.enum(workspaceServiceObservedStates);
 export const workspaceServiceHealthStateSchema = z.enum(workspaceServiceHealthStates);
 export const terminalStateSchema = z.enum(terminalStates);
-export const aiSessionStateSchema = z.enum(aiSessionStates);
 export const workspaceServiceObservationSchema = z.strictObject({
   desiredState: workspaceServiceDesiredStateSchema,
   observedState: workspaceServiceObservedStateSchema,
@@ -87,6 +80,15 @@ export const workspaceServiceObservationSchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["health"], message: "Non-running services have unknown health" });
   }
 });
+
+export const f10ProcessInspectionDataSchema = processInspectionDataSchema
+  .safeExtend({
+    kind: z.enum(["task", "terminal"])
+  })
+  .describe(
+    "F10 process observation for task and terminal processes; first-class AI provider processes are excluded"
+  );
+export type F10ProcessInspectionData = z.infer<typeof f10ProcessInspectionDataSchema>;
 
 const projectSnapshotResourceSchema = z.strictObject({
   type: z.literal("project"),
@@ -123,7 +125,7 @@ const serviceSnapshotResourceSchema = z.strictObject({
   observation: workspaceServiceObservationSchema
 });
 const processSnapshotResourceSchema = z.strictObject({
-  type: z.literal("process"), observation: processInspectionDataSchema
+  type: z.literal("process"), observation: f10ProcessInspectionDataSchema
 });
 const terminalSnapshotResourceSchema = z.strictObject({
   type: z.literal("terminal"), identity: terminalIdentityDataSchema, state: terminalStateSchema
@@ -131,10 +133,6 @@ const terminalSnapshotResourceSchema = z.strictObject({
 const previewSnapshotResourceSchema = z.strictObject({
   type: z.literal("preview"), observation: previewInspectionDataSchema
 });
-const aiSessionSnapshotResourceSchema = z.strictObject({
-  type: z.literal("ai-session"), identity: aiSessionIdentityDataSchema, state: aiSessionStateSchema
-});
-
 export const agentSnapshotResourceSchema = z.discriminatedUnion("type", [
   projectSnapshotResourceSchema,
   workspaceSnapshotResourceSchema,
@@ -142,8 +140,7 @@ export const agentSnapshotResourceSchema = z.discriminatedUnion("type", [
   serviceSnapshotResourceSchema,
   processSnapshotResourceSchema,
   terminalSnapshotResourceSchema,
-  previewSnapshotResourceSchema,
-  aiSessionSnapshotResourceSchema
+  previewSnapshotResourceSchema
 ]);
 export type AgentSnapshotResource = z.infer<typeof agentSnapshotResourceSchema>;
 
@@ -173,7 +170,6 @@ function resourceIdentity(resource: AgentSnapshotResource): string {
     case "process": return resource.observation.processId;
     case "terminal": return resource.identity.terminalId;
     case "preview": return resource.observation.previewId;
-    case "ai-session": return resource.identity.aiSessionId;
   }
 }
 

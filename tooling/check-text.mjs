@@ -6,6 +6,11 @@ const ignoredDirectories = new Set([
   '.devspace-local', '.git', '.next', 'blob-report', 'coverage', 'dist', 'node_modules', 'playwright-report',
   'test-results'
 ]);
+// These byte-hashed upstream fixtures intentionally preserve generator output, including EOF.
+const verbatimGeneratedPrefixes = [
+  join('packages', 'contracts', 'fixtures', 'codex-app-server', '0.145.0', 'stable'),
+  join('packages', 'contracts', 'fixtures', 'codex-app-server', '0.145.0', 'experimental')
+];
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -22,6 +27,7 @@ async function walk(directory) {
 let failures = 0;
 for (const file of await walk('.')) {
   if (!checkedExtensions.has(extname(file))) continue;
+  if (verbatimGeneratedPrefixes.some((prefix) => file.startsWith(`${prefix}/`))) continue;
   const content = await readFile(file, 'utf8');
   if (!content.endsWith('\n')) {
     console.error(`${file}: missing final newline`);

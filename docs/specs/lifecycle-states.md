@@ -183,16 +183,36 @@ lost -> starting | inactive
 
 Recovery from `lost` requires snapshot/reconciliation confirmation and route recreation. No route may exist in `inactive`, `failed`, or `lost`.
 
-## AI session
+## Dormant database-v1 AI session
+
+The historical `creating | active | waiting_for_input | interrupted | stopped | failed | lost`
+vocabulary remains only because the unimplemented database-v1 table has not yet received its
+forward migration. It is not the lifecycle authority for AI Session Foundation and F10 no longer
+publishes its dormant snapshot/event projection.
+
+## Structured AI session v1
+
+The authoritative complete session, provider-process, turn, and interaction graphs are defined in
+`ai-sessions-v1.md` and executable in `@devspace/domain`. They are intentionally separate:
 
 ```text
-creating -> active
-active <-> waiting_for_input
-active | waiting_for_input -> interrupted -> active | stopped
-creating | active | waiting_for_input | interrupted -> stopped | failed | lost
+session: creating | ready | running | waiting-for-approval | waiting-for-input |
+         interrupting | stopping | stopped | unavailable | lost
+
+provider process: creating | exec-created | identity-confirming | running |
+                  stopping | exited | failed | lost
+
+turn: accepted | starting | running | waiting-for-approval | waiting-for-input |
+      interrupting | provider-completed | quiesced | completed | interrupted |
+      failed | lost
+
+interaction request: pending | responded | cancelled | expired | lost
 ```
 
-`stopped`, `failed`, and `lost` are terminal. Resume creates or attaches through an explicitly supported provider flow; it does not transition a lost in-container process back to active.
+Only one nonterminal turn exists per session. Session waiting states are derived projections of
+that turn and its exact pending interaction, not a second independently writable authority.
+`provider-completed` is not final. `turn.quiesced` is committed only after all prior canonical
+events and interactions are durable, and is the turn's deterministic final receipt.
 
 ## Task run
 

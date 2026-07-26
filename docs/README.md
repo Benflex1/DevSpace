@@ -9,6 +9,9 @@
 - `specs/` — versioned implementation contracts.
 - `decisions/` — durable accepted ADRs.
 
+Current AI-session authorities are ADR 015 and `specs/ai-sessions-v1.md`; ADR 009 remains the
+authority for ordinary user-operated terminal/PTY AI CLI workflows.
+
 ## Status
 
 `current-state.md` is the concise factual status of the repository. It is not an authority for

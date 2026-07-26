@@ -18,6 +18,10 @@ The web application authenticates Cloudflare Access users, owns browser-facing A
 
 The agent is a private execution service under the dedicated `devspace` Unix account. It manages repository stores, Git worktrees, the dedicated rootless Docker daemon, PTY streams, process observation, health checks, and gateway routes. M1 does not provide individual task or terminal process termination or descendant supervision.
 
+For first-class AI Sessions v1, the Agent additionally owns the future approved-provider registry,
+structured provider-process lifecycle, native-protocol adapter, Agent-private acknowledged event
+outbox, and exact supervisor ownership record. This contract foundation adds no runtime handler.
+
 ### Rootless Docker runtime
 
 A separate rootless daemon owned by `devspace` manages only DevSpace resources. Coolify and production containers are outside its authority. The agent may access this dedicated socket; no workspace container and no web process may access it.
@@ -75,6 +79,31 @@ Supported M1 tasks and terminals execute inside the development container. The a
 
 Predefined tasks use structured executable and argument arrays. Project Options v1 can represent interactive, long-running, timeout, and replacement policies, but the M1 task runtime accepts only `interactive: false`, `longRunning: false`, `timeoutSeconds: null`, and `concurrencyPolicy: "reject" | "allow"`; other valid combinations are rejected before Docker side effects. Interactive browser terminals are the supported elevated shell capability in M1; AI sessions are future work.
 
+## Structured AI-session model
+
+ADR 015 refines ADR 009. Ordinary user-operated provider CLIs may continue to run in generic
+terminal PTYs. A first-class AI session is separate: Agent starts the pinned approved provider
+inside the exact managed development container using Docker exec with TTY disabled, structured
+JSONL on stdin/stdout, and a private stderr diagnostic channel. It is never backed by
+`terminal_sessions`.
+
+Web owns committed public session/turn/interaction history and remains the sole SQLite writer.
+Agent owns the provider process, native identifiers, exact container/supervisor/process-generation
+proof, and a durable acknowledged canonical-event outbox. Agent-assigned per-session sequence
+numbers continue across Agent boots and process generations; Web commits in order before browser
+delivery and then acknowledges the exact event. No existing lifecycle state is converted to event
+sourcing.
+
+Web sends the exact inspected `sha256-ai-profile-v1` revision on start/resume; Agent re-hashes the
+deployment-owned authority document before acceptance. Content-bearing mutations use referenced
+Agent-private AI intent records rather than copying prompts or answers into the generic operation
+journal.
+
+The later runtime requires an in-container Agent-controlled supervisor with a private authenticated
+control channel and exact generation/process-start binding. Docker exec ID or a numeric PID alone
+cannot authorize Stop. Until restart recovery re-proves every identity, the provider process and
+active turn are reported `lost`.
+
 ## Network model
 
 - each workspace has a private network;
@@ -111,4 +140,6 @@ desired=stopped, observed=stopping
 desired=running, observed=lost
 ```
 
-All mutating operations are idempotent and carry operation IDs. Events are ordered per agent connection and include a cursor for reconnect.
+All mutating operations are idempotent and carry operation IDs. General Agent observations remain
+ordered per Agent boot and use F10 cursors. AI-session canonical events use the separate durable
+per-session F11 sequence/outbox contract in `specs/ai-sessions-v1.md`.

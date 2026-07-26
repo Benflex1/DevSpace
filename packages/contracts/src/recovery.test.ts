@@ -9,7 +9,6 @@ const workspaceId = "018f1f34-7000-7000-8000-000000000002";
 const processId = "018f1f34-7000-7000-8000-000000000003";
 const terminalId = "018f1f34-7000-7000-8000-000000000004";
 const previewId = "018f1f34-7000-7000-8000-000000000005";
-const aiSessionId = "018f1f34-7000-7000-8000-000000000006";
 const operationId = "018f1f34-7000-7000-8000-000000000007";
 const bootId = "018f1f34-7000-7000-8000-000000000008";
 const revisionId = "018f1f34-7000-7000-8000-000000000009";
@@ -78,8 +77,7 @@ function fullSnapshot() {
           projectId, workspaceId, previewId, previewKey: "app", desiredState: "active",
           observedState: "healthy", routePresent: true, hostname: "app.example.com"
         }
-      },
-      { type: "ai-session", identity: { projectId, workspaceId, aiSessionId }, state: "active" }
+      }
     ],
     operationObservations: [
       { operationId, state: "accepted", updatedAt: timestamp, failure: null }
@@ -88,8 +86,24 @@ function fullSnapshot() {
 }
 
 describe("F10 Agent snapshot contract", () => {
-  test("accepts a complete eight-resource snapshot with multiple project Git scopes", () => {
+  test("accepts a complete seven-resource snapshot with multiple project Git scopes", () => {
     expect(agentSnapshotDataSchema.safeParse(fullSnapshot()).success).toBe(true);
+  });
+
+  test("accepts task and terminal process observations but rejects first-class AI processes", () => {
+    const terminal = fullSnapshot();
+    terminal.resources[4] = {
+      type: "process",
+      observation: { ...processObservation, kind: "terminal" }
+    };
+    expect(agentSnapshotDataSchema.safeParse(terminal).success).toBe(true);
+
+    const aiSession = fullSnapshot();
+    aiSession.resources[4] = {
+      type: "process",
+      observation: { ...processObservation, kind: "ai-session" }
+    };
+    expect(agentSnapshotDataSchema.safeParse(aiSession).success).toBe(false);
   });
 
   test("accepts empty resources and operation observations at cursor zero", () => {
@@ -114,8 +128,7 @@ describe("F10 Agent snapshot contract", () => {
     ["service", (snapshot: ReturnType<typeof fullSnapshot>) => snapshot.resources.push(snapshot.resources[3]!)],
     ["process", (snapshot: ReturnType<typeof fullSnapshot>) => snapshot.resources.push(snapshot.resources[4]!)],
     ["terminal", (snapshot: ReturnType<typeof fullSnapshot>) => snapshot.resources.push(snapshot.resources[5]!)],
-    ["preview", (snapshot: ReturnType<typeof fullSnapshot>) => snapshot.resources.push(snapshot.resources[6]!)],
-    ["ai-session", (snapshot: ReturnType<typeof fullSnapshot>) => snapshot.resources.push(snapshot.resources[7]!)]
+    ["preview", (snapshot: ReturnType<typeof fullSnapshot>) => snapshot.resources.push(snapshot.resources[6]!)]
   ] as const)("rejects duplicate %s identity", (_type, mutate) => {
     const snapshot = fullSnapshot();
     mutate(snapshot);
