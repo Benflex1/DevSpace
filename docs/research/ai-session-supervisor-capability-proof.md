@@ -2,161 +2,123 @@
 
 ## Result
 
-**CONDITIONAL PASS.** On 2026-07-26 the proof completed every scenario A–M against the dedicated
-DevSpace rootless Docker daemon. This is capability evidence only. No production AI-session
-runtime, F11 handler, provider adapter, credential source, persistence, Web route, SQLite schema,
-or UI is implemented.
+**BLOCKED — authenticated supervisor recovery is feasible, but production-safe descendant
+termination remains unproven.**
 
-The condition is enforceable image/profile preparation: every AI-capable workspace image must
-contain the fixed reviewed supervisor and helper plus Node.js 24, Linux `/proc`, Unix-domain
-sockets, and the demonstrated POSIX process-group/session behavior. Agent must reject a profile
-before launch when any prerequisite probe fails.
+The corrected proof ran on 2026-07-26 in `/workspace/DevSpace` as UID/GID `1000:1000`, using Docker
+29.6.2/API 1.55 through only the dedicated rootless socket
+`/run/devspace-docker/docker.sock`. It used the already-local `node:24-bookworm` image with no
+network, mounts, privilege, added capabilities, image pull, real provider, credentials, SQLite, or
+production resource.
 
-## Tested environment
+This is proof tooling, not production AI-session runtime.
 
-- repository: `/workspace/DevSpace`
-- execution identity: UID/GID `1000:1000`
-- Engine: Docker 29.6.2, API 1.55, rootless Linux amd64
-- dedicated container socket: `/run/devspace-docker/docker.sock`
-- corresponding deployment class: the dedicated rootless daemon; never `/var/run/docker.sock`
-- disposable image: the already-local `node:24-bookworm`
-- container policy: no network, no ports, no privilege, no added capabilities, no devices, no
-  mounts, `no-new-privileges`, private IPC/cgroup namespace, bounded PIDs
+## Stronger-boundary investigation
 
-The runner uploads the committed fixture archive through the Engine archive API before container
-start. It does not pull an image or expose the repository as a container mount.
+Inside a standard disposable container the probe observed:
 
-## Prototype architecture
+- cgroup v2 and a private cgroup namespace;
+- current namespace path `0::/`;
+- `cpu memory pids` controllers available, with no subtree controllers enabled;
+- a read-only cgroup filesystem, so an unprivileged child cgroup could not be created;
+- `cgroup.kill` present but not writable;
+- Docker's narrow `writable-cgroups=true` option accepted at create time but rejected at start
+  because writable cgroups conflict with user namespaces/rootless mode.
+
+No privileged container, host cgroup mount, extra capability, rootful socket, or host configuration
+change was attempted. The actual deployment class therefore supplies no delegated cgroup or
+equivalent atomic descendant-tree boundary.
+
+Pidfds could strengthen a single-process identity, but cannot contain a dynamic descendant tree.
+A POSIX process group worked for the cooperative fixture, but its numeric ID is reusable and
+membership can escape or churn between `/proc` validation and `kill(-pgid, ...)`. `/proc` scans are
+not atomic snapshots. The harness uses two bounded observations and rejects mutation, foreign group
+members, descendants outside the group, and unstable topology; this detects fixture escape/churn,
+but cannot make scan-to-signal atomic. PGID signaling remains a fixture experiment only.
+
+## Architecture and identity
 
 ```text
-proof runner
-  -> dedicated rootless Docker Unix socket
+host proof runner
+  -> dedicated rootless Docker HTTP API
   -> exact disposable container ID
-  -> exact non-TTY Docker exec ID
-  -> fixed Node supervisor
-  -> detached provider process group/session
-  -> fixture provider
-     -> child
-        -> grandchild
+  -> exact non-TTY supervisor exec ID
+  -> authenticated supervisor Unix socket
+  -> fixture provider -> child -> grandchild
 
-new host process
-  -> reload mode-0600 private record
-  -> new fixed helper Docker exec
-  -> authenticated private Unix socket
-  -> existing supervisor
+separate host process
+  -> strict private ownership record
+  -> exact container and supervisor-exec inspection
+  -> new fixed helper exec
+  -> existing authenticated supervisor
 ```
 
-Container PID 1 is an unrelated sentinel outside the provider process group. Graceful and forced
-Stop leave that sentinel and the container running.
+The original Docker attachment is destroyed after one exact
+`{"type":"supervisor-ready"}` JSONL frame. Raw exec stdio is never reattached. Recovery verifies
+the exact container before creating a helper, then verifies the exact running supervisor exec and
+outer PID before socket access.
 
-## Bootstrap, authentication, and binding
+The binding includes schema version, realistic UUIDv7 project/workspace/configuration/session
+identities, profile key/revision, runtime-plan hash/generation, process generation, operation ID,
+64-hex container ID, and 64-hex exec ID. Stable inner identities bind PID, PPID, PGID, SID,
+`/proc/<pid>/stat` start-time ticks, PID namespace inode, and the exact bounded `NSpid` array.
+Transient process run/sleep state is observed but is not identity. The provider must be the direct
+child of the authenticated supervisor.
 
-The runner generates 32 random bytes per process generation and encodes them as 64 lowercase hex
-characters. The credential and strict bootstrap document are written as one bounded line to the
-exact supervisor exec stdin. Helper requests receive the credential the same way. The value never
-appears in command arguments, environment values, Docker labels, or the control-socket pathname.
+Proof records have an exact v2 shape, reject unknown/missing/unsafe fields, and enforce
+container/binding and exec/binding cross-field equality. The proof-local schema demonstrates
+binding behavior; it is not production request authority.
 
-Every connection uses constant-time padded comparison and an exact strict binding containing:
+## Authentication, protocol, and control
 
-- proof schema version;
-- project, workspace, configuration revision, AI session, operation, and profile IDs;
-- runtime-plan hash, runtime generation, profile revision, and process generation;
-- exact container ID and exact Docker exec ID.
+Each run creates 32 random bytes. The lowercase-hex credential reaches the supervisor and every
+helper only through stdin, and comparisons are constant-time shaped. It is absent from args,
+environment overrides, labels, socket names, and normal output.
 
-Unknown, missing, foreign, stale, and mutated fields are rejected. The Agent-private-style record
-lives outside the repository in a mode-`0700` temporary directory and is mode `0600`. Recovery
-strictly parses it before any Docker helper or signal path.
+The supervisor owns provider stdin/stdout/stderr. Provider JSONL is correlated by a unique request
+ID and monotonic event sequence after a per-request baseline. State-changing operations are
+serialized. Exact duplicates return one idempotent result; conflicting request-ID reuse is rejected.
+Interrupt remains protocol-level and distinct from `fixture-stop`.
 
-## Process and exec identity
+Docker multiplex parsing is incremental and rejects unknown stream kinds, nonzero reserved bytes,
+truncated headers/payloads, partial trailing bytes, and excessive frames/streams. Helper exec
+lifetime, Docker response size, helper/control bytes, socket connect/idle time, response size, and
+active clients are bounded. Public errors are categorical and do not copy request bodies, Docker
+bodies, credentials, or private diagnostics.
 
-The supervisor reads `/proc/<pid>/stat`, `/proc/<pid>/status`, and `/proc/<pid>/ns/pid`. Its stable
-identity is:
+## Corrected executable scenario matrix
 
-```text
-inner PID + PPID + PGID + SID + start-time ticks + PID namespace inode + NSpid sequence
-```
+| Scenario | Result | Action and evidence | Limitation |
+| --- | --- | --- | --- |
+| A Normal launch | PASS | Exact container/exec, authenticated supervisor/provider identity, stable direct child/tree, and correlated JSONL round trip. | Bounded coherent `/proc` observations are not atomic. |
+| B Reconnect | PASS | Launch attachment destroyed; separate host process loaded the record; exact container/exec re-inspected before a new helper; proof continued. | Uses proof-local record persistence. |
+| C Wrong credential | PASS | Real helper connection rejected; event sequence unchanged. | — |
+| D Wrong session/generation | PASS | Both real socket mutations rejected without fallback or provider effect. | — |
+| E Mutated binding | PASS | Container, workspace, profile revision, runtime generation, and exec mutations rejected; event sequence unchanged. | — |
+| F Cooperative interrupt | PASS | Post-baseline request ID matched; duplicate was idempotent; provider remained live. | Fixture protocol only. |
+| G Graceful Stop | PARTIAL | Cooperative fixture group received SIGTERM and exited while PID 1 sentinel/container survived. | Numeric PGID is not production authority. |
+| H Forced escalation | BLOCKED | Ignore-TERM fixture demonstrated bounded PGID escalation; cgroup probe and setsid/double-fork/churn fixtures invalidated the proposed boundary. | No atomic descendant-tree primitive. |
+| I Already exited | PASS | Exited provider caused no later signal; mutated start time rejected. | Deterministic PID reuse was not forced. |
+| J Replaced container | PASS | A was removed, B reused A's name, real recovery and signal-capable entry used A's record, and rejected on exact A ID before helper creation; B's helper counter and sentinel were unchanged. | Instrumentation is proof-runner-local plus Docker state. |
+| K Missing/corrupt record | PASS | Real recovery and signal-capable entries rejected 12 missing/empty/truncated/unknown/version/crossed/malformed/stale/copied cases before helper creation; exact exec count was unchanged. | Production needs its own durable authenticated record schema. |
+| L Leak inspection | PARTIAL | Live runner and relevant in-container args/environments, Docker container/supervisor/helper configs, labels, outputs, repository, and 0700/0600 state permissions were checked. | The short-lived separate reconnect host process and exhaustive failure paths were not captured live; no universal absence claim is made. |
+| M Cleanup | PASS | Registration occurs immediately after create; idempotent serialized cleanup passed injected failures after create, during upload, after start, during bootstrap, after record write, during reconnect, and independent SIGINT/SIGTERM child-runner tests; daemon label and `/tmp` audits were empty. | Exact tracked resources only. |
 
-The provider must be the direct child of that supervisor. It must be session and process-group
-leader (`PID == PGID == SID`). At least one provider child and one grandchild must have the same
-PGID, SID, and PID namespace. A complete `/proc` scan must also show that every member of the
-target process group is the provider or one of those descendants; a foreign group member rejects
-Stop.
+Unit tests separately cover realistic strict identifiers, record cross-fields, exact `NSpid`,
+proc-stat numeric rejection, escaped/foreign/churning topology, multiplex framing/readiness,
+request duplicate/conflict/serialization behavior, event-boundary helpers, nested redaction, and
+cleanup planning.
 
-The Engine reports an outer exec PID that code-server cannot read through host `/proc`. This
-deployment's host `ps` also lacks Docker top's optional `NSPID` formatter. Cross-namespace numeric
-PID equality is therefore not used as authority. Instead, the exact exec-to-supervisor link is:
+## Security disposition and next prerequisite
 
-1. reserve the full binding including exact container and exec IDs;
-2. create the fixed supervisor exec with no TTY, arguments containing no secret, and empty exec
-   environment overrides;
-3. inspect that exact exec as running in the exact container and retain its outer PID;
-4. deliver the one-generation credential and binding only through that exact exec stdin;
-5. destroy the original attachment;
-6. accept only an authenticated handshake reporting the stable inner supervisor identity;
-7. on recovery, re-inspect the same exec ID/container ID/running state/outer PID and require the
-   same authenticated binding and inner start identity.
+Useful evidence remains: the supervisor survives attachment loss, authenticated reconnection works,
+container/exec/process-start identity can be re-proven, negative-PGID signaling affects only the
+cooperative fixture group, stale identities fail closed, and cleanup is reproducible.
 
-PID reuse alone cannot satisfy this chain. A later process lacks the exact running exec record,
-credential, generation binding, and original `/proc` start identity. Process names are never
-consulted.
-
-## Protocol and termination
-
-Provider stdin/stdout/stderr are owned exclusively by the supervisor. Public fixture output is
-single-line JSON. Provider stderr is consumed into private categorical diagnostics. Malformed
-stdout becomes a protocol-error event and never silently enters the JSONL stream.
-
-Interrupt is a JSONL provider command and leaves the provider alive. Stop first re-proves the
-supervisor, provider, direct-child relationship, and complete descendant boundary. It sends
-`SIGTERM` only to the negative proven PGID, waits 300 ms, re-proves identity if still live, and
-then sends `SIGKILL` to that same PGID. It never signals one unproved PID and never kills the
-container.
-
-## Hands-on scenario matrix
-
-| Scenario | Result | Sanitized evidence |
-| --- | --- | --- |
-| A Normal launch | PASS | Exact container/exec and authenticated bootstrap established; stable supervisor/provider identity, direct child, child/grandchild boundary, and JSONL round trip proved. |
-| B Reconnect | PASS | Original attachment was destroyed; a separate host process loaded the record, created a new helper exec, re-proved identity, and continued JSONL. |
-| C Wrong credential | PASS | Rejected before provider forwarding or signalling. |
-| D Wrong session/generation | PASS | Both mutations rejected with no fallback. |
-| E Mutated binding | PASS | Container, workspace, profile revision, runtime generation, and exec mutations independently rejected. |
-| F Cooperative interrupt | PASS | Fixture acknowledged interrupt; provider stayed running and reconnectable. |
-| G Graceful Stop | PASS | Proven provider group and descendants exited on SIGTERM; sentinel survived. |
-| H Forced escalation | PASS | Ignore-TERM fixture exceeded grace bound, then the same proven group was killed; sentinel survived. |
-| I Already exited | PASS | Stop returned without a signal; a mutated start-time claim was rejected. |
-| J Replaced container | PASS | Retained A ID returned missing; distinct B was neither contacted for recovery nor signalled. |
-| K Missing/corrupt record | PASS | Strict record load failed before any helper, PID search, or signal path. |
-| L Leak inspection | PASS | Secret absent from host/container cmdline and environment, Docker configuration/labels/exec arguments, normal output, categorical diagnostics, and repository files. |
-| M Cleanup | PASS | Dedicated-daemon label query returned no proof containers; temporary private root and records were absent. |
-
-Unit tests are separate evidence. They cover strict bootstrap/control/record parsing, full binding
-comparison, constant-time credential behavior, proc-stat parsing, start-identity comparison,
-descendant topology, escalation decisions, redaction, and cleanup planning.
-
-## Security analysis and limitations
-
-- Socket mode `0600` and directory mode `0700` are defense in depth; authentication and complete
-  generation binding remain mandatory.
-- The proof assumes trusted owner-controlled code inside one workspace, consistent with the
-  project threat model. Same-user hostile-process resistance is not claimed.
-- The supervisor/helper are proof scripts uploaded at run time. Production must install pinned,
-  reviewed artifacts in every enabled image and verify their byte/executable identity.
-- Production must durably reserve and update ownership phases before Docker side effects, not use
-  this temporary proof record implementation.
-- Grace timings are deliberately short fixture bounds, not production policy.
-- The proof does not implement real Codex authentication or test provider credential projection.
-- Docker exec stdio is not reattached. Recovery works only through the authenticated helper path.
-
-## Slice 1 prerequisites
-
-Before production provider launch, Agent must enforce:
-
-1. the exact dedicated rootless daemon and owned container identity;
-2. installed, pinned supervisor/helper artifacts and Node.js 24;
-3. readable Linux `/proc` with stat start time, status/NSpid, and PID namespace links;
-4. Unix-domain socket creation and restrictive permissions;
-5. detached process groups/sessions with negative-PGID signalling;
-6. a durable phased private ownership record and cleanup/reconciliation policy;
-7. fixed bootstrap/control schemas, credential generation, redaction, and bounded timeouts;
-8. profile availability probes that fail closed when any prerequisite is absent.
+Slice 1 provider launch remains blocked. The next production slice requires an enforceable
+race-safe descendant boundary available without privilege or host mounts—such as a genuinely
+delegated writable cgroup whose identity and membership are verified and whose forced termination
+uses writable `cgroup.kill`—plus an image/runtime preflight that rejects launch when delegation,
+placement, population events, and atomic kill are unavailable. It also still requires pinned
+supervisor/helper artifacts, durable authenticated Agent-private ownership state, production
+contract validators, and production timeout/reconciliation policy.
