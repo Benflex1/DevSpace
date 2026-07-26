@@ -15,6 +15,10 @@ export const lifecycleNames = [
   "preview-desired",
   "preview-observed",
   "ai-session",
+  "ai-session-v1",
+  "ai-provider-process",
+  "ai-turn",
+  "ai-interaction-request",
   "task-run"
 ] as const;
 

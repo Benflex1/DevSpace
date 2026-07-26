@@ -1,6 +1,7 @@
 import * as z from "zod";
 import { eventCursorSchema } from "./cursor.js";
-import { agentApiV1Endpoints } from "./endpoints.js";
+import { nonAiAgentApiV1Endpoints } from "./endpoints.js";
+import { f11AiAgentApiV1Endpoints } from "./f11-ai-endpoints.js";
 import {
   buildAgentErrorEnvelopeSchema,
   completeAgentApiV1ErrorRegistry,
@@ -95,8 +96,9 @@ export const f10AgentApiV1EndpointByOperation = Object.freeze(Object.fromEntries
 ) as { readonly [Endpoint in F10AgentApiV1Endpoint as Endpoint["operation"]]: Endpoint });
 
 export const completeAgentApiV1Endpoints = Object.freeze([
-  ...agentApiV1Endpoints,
-  ...f10AgentApiV1Endpoints
+  ...nonAiAgentApiV1Endpoints,
+  ...f10AgentApiV1Endpoints,
+  ...f11AiAgentApiV1Endpoints
 ]);
 export type CompleteAgentApiV1Endpoint = (typeof completeAgentApiV1Endpoints)[number];
 export const completeAgentApiV1EndpointByOperation = Object.freeze(Object.fromEntries(

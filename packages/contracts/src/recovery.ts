@@ -1,5 +1,4 @@
 import {
-  aiSessionStates,
   terminalStates,
   workspaceServiceDesiredStates,
   workspaceServiceHealthStates,
@@ -14,7 +13,6 @@ import {
   uuidV7Schema
 } from "./primitives.js";
 import {
-  aiSessionIdentityDataSchema,
   gitInspectionDataSchema,
   previewInspectionDataSchema,
   processInspectionDataSchema,
@@ -44,9 +42,6 @@ export const terminalResourceReferenceSchema = z.strictObject({
 export const previewResourceReferenceSchema = z.strictObject({
   type: z.literal("preview"), projectId: uuidV7Schema, workspaceId: uuidV7Schema, previewId: uuidV7Schema
 });
-export const aiSessionResourceReferenceSchema = z.strictObject({
-  type: z.literal("ai-session"), projectId: uuidV7Schema, workspaceId: uuidV7Schema, aiSessionId: uuidV7Schema
-});
 export const agentResourceReferenceSchema = z.discriminatedUnion("type", [
   projectResourceReferenceSchema,
   workspaceResourceReferenceSchema,
@@ -54,8 +49,7 @@ export const agentResourceReferenceSchema = z.discriminatedUnion("type", [
   serviceResourceReferenceSchema,
   processResourceReferenceSchema,
   terminalResourceReferenceSchema,
-  previewResourceReferenceSchema,
-  aiSessionResourceReferenceSchema
+  previewResourceReferenceSchema
 ]);
 export type AgentResourceReference = z.infer<typeof agentResourceReferenceSchema>;
 
@@ -77,7 +71,6 @@ export const workspaceServiceDesiredStateSchema = z.enum(workspaceServiceDesired
 export const workspaceServiceObservedStateSchema = z.enum(workspaceServiceObservedStates);
 export const workspaceServiceHealthStateSchema = z.enum(workspaceServiceHealthStates);
 export const terminalStateSchema = z.enum(terminalStates);
-export const aiSessionStateSchema = z.enum(aiSessionStates);
 export const workspaceServiceObservationSchema = z.strictObject({
   desiredState: workspaceServiceDesiredStateSchema,
   observedState: workspaceServiceObservedStateSchema,
@@ -131,10 +124,6 @@ const terminalSnapshotResourceSchema = z.strictObject({
 const previewSnapshotResourceSchema = z.strictObject({
   type: z.literal("preview"), observation: previewInspectionDataSchema
 });
-const aiSessionSnapshotResourceSchema = z.strictObject({
-  type: z.literal("ai-session"), identity: aiSessionIdentityDataSchema, state: aiSessionStateSchema
-});
-
 export const agentSnapshotResourceSchema = z.discriminatedUnion("type", [
   projectSnapshotResourceSchema,
   workspaceSnapshotResourceSchema,
@@ -142,8 +131,7 @@ export const agentSnapshotResourceSchema = z.discriminatedUnion("type", [
   serviceSnapshotResourceSchema,
   processSnapshotResourceSchema,
   terminalSnapshotResourceSchema,
-  previewSnapshotResourceSchema,
-  aiSessionSnapshotResourceSchema
+  previewSnapshotResourceSchema
 ]);
 export type AgentSnapshotResource = z.infer<typeof agentSnapshotResourceSchema>;
 
@@ -173,7 +161,6 @@ function resourceIdentity(resource: AgentSnapshotResource): string {
     case "process": return resource.observation.processId;
     case "terminal": return resource.identity.terminalId;
     case "preview": return resource.observation.previewId;
-    case "ai-session": return resource.identity.aiSessionId;
   }
 }
 

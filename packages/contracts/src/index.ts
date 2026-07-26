@@ -61,12 +61,21 @@ export {
 export {
   agentApiV1EndpointByOperation,
   agentApiV1Endpoints,
+  f09HistoricalAgentApiV1Endpoints,
+  nonAiAgentApiV1Endpoints,
   type AgentApiV1Endpoint,
   type AgentApiV1EndpointByOperation,
   type AgentApiV1Operation,
   type AgentEndpointClass,
-  type AgentHttpMethod
+  type AgentHttpMethod,
+  type NonAiAgentApiV1Endpoint
 } from "./endpoints.js";
+export {
+  f11AiAgentApiV1EndpointByOperation,
+  f11AiAgentApiV1Endpoints,
+  type F11AiAgentApiV1Endpoint,
+  type F11AiAgentApiV1Operation
+} from "./f11-ai-endpoints.js";
 export * from "./cursor.js";
 export * from "./execution-failures.js";
 export * from "./recovery.js";
@@ -81,4 +90,5 @@ export {
   type F10AgentApiV1Operation
 } from "./f10-endpoints.js";
 export * from "./terminal.js";
+export * from "./ai-sessions.js";
 export { generateAgentApiV1JsonSchema, type AgentApiV1JsonSchema } from "./json-schema.js";

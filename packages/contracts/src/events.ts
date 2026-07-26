@@ -1,5 +1,4 @@
 import {
-  isAiSessionStructuralEdge,
   isPreviewDesiredStructuralEdge,
   isPreviewObservedStructuralEdge,
   isProcessDesiredStructuralEdge,
@@ -21,8 +20,6 @@ import {
 } from "./primitives.js";
 import {
   agentResourceReferenceSchema,
-  aiSessionResourceReferenceSchema,
-  aiSessionStateSchema,
   previewResourceReferenceSchema,
   processResourceReferenceSchema,
   projectGitInspectionObservationSchema,
@@ -159,14 +156,6 @@ const rawPreviewStateChangedEventSchema = z.strictObject({
     observation: previewInspectionDataSchema
   })
 });
-const rawAiSessionStateChangedEventSchema = z.strictObject({
-  ...common,
-  operationId: nullableOperationId,
-  resource: aiSessionResourceReferenceSchema,
-  type: z.literal("ai-session.state.changed"),
-  payload: lifecyclePayload(aiSessionStateSchema)
-});
-
 export const agentEventTypes = [
   "operation.progressed",
   "operation.succeeded",
@@ -178,8 +167,7 @@ export const agentEventTypes = [
   "service.health.changed",
   "process.observation.changed",
   "terminal.state.changed",
-  "preview.state.changed",
-  "ai-session.state.changed"
+  "preview.state.changed"
 ] as const;
 
 function equalJson(left: unknown, right: unknown): boolean {
@@ -286,8 +274,7 @@ const rawAgentEventSchema = z.discriminatedUnion("type", [
   rawServiceHealthChangedEventSchema,
   rawProcessObservationChangedEventSchema,
   rawTerminalStateChangedEventSchema,
-  rawPreviewStateChangedEventSchema,
-  rawAiSessionStateChangedEventSchema
+  rawPreviewStateChangedEventSchema
 ]);
 type RawAgentEvent = z.infer<typeof rawAgentEventSchema>;
 
@@ -329,12 +316,6 @@ function validateEventObject(event: RawAgentEvent, context: z.core.$RefinementCt
     case "terminal.state.changed":
       if (event.payload.previous !== null
         && !isTerminalStructuralEdge(event.payload.previous, event.payload.current)) {
-        addEdgeIssue(context, ["payload"]);
-      }
-      break;
-    case "ai-session.state.changed":
-      if (event.payload.previous !== null
-        && !isAiSessionStructuralEdge(event.payload.previous, event.payload.current)) {
         addEdgeIssue(context, ["payload"]);
       }
       break;
@@ -381,7 +362,6 @@ export const serviceHealthChangedEventSchema = refinedEventSchema(rawServiceHeal
 export const processObservationChangedEventSchema = refinedEventSchema(rawProcessObservationChangedEventSchema);
 export const terminalStateChangedEventSchema = refinedEventSchema(rawTerminalStateChangedEventSchema);
 export const previewStateChangedEventSchema = refinedEventSchema(rawPreviewStateChangedEventSchema);
-export const aiSessionStateChangedEventSchema = refinedEventSchema(rawAiSessionStateChangedEventSchema);
 
 export const agentEventSchema = rawAgentEventSchema.superRefine(validateEventObject);
 export type AgentEvent = z.infer<typeof agentEventSchema>;

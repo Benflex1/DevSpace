@@ -196,6 +196,11 @@ A partial unique index on `(bind_address, port) WHERE state IN ('reserved', 'act
 
 ## ai_sessions
 
+This is a dormant Milestone-0 placeholder and is not the persistence contract for structured AI
+Sessions v1. ADR 015 explicitly forbids using `terminal_session_id`, `external_session_id`, or this
+state vocabulary as first-class runtime authority. A later persistence slice requires a tested
+forward migration to the hybrid model in `ai-sessions-v1.md`; Slice 0 changes no table or migration.
+
 - `id` primary key
 - `workspace_id` foreign key
 - `terminal_session_id` nullable foreign key

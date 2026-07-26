@@ -4,6 +4,13 @@
 
 Milestone 1 — complete.
 
+AI Session Foundation Slice 0 now defines the accepted post-M1 architecture and executable
+contracts only: ADR 015, AI Sessions v1, separate structured session/process/turn/interaction
+graphs, the F11 Agent API extension, canonical per-session events, a durable acknowledged Agent
+outbox decision, and a Codex app-server 0.145.0 non-TTY stdio adapter pin. Provider execution,
+supervisor/Stop, SQLite migration, credentials, Agent/Web handlers, browser streaming, and
+Workbench UI remain unimplemented.
+
 Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
 SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and
 primary-workspace creation, immutable Project Options v1, deterministic runtime-plan compilation,

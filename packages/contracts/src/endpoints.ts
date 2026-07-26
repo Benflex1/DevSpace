@@ -229,3 +229,28 @@ export type AgentApiV1EndpointByOperation = {
 export const agentApiV1EndpointByOperation = Object.freeze(Object.fromEntries(
   agentApiV1Endpoints.map((descriptor) => [descriptor.operation, descriptor])
 ) as AgentApiV1EndpointByOperation);
+
+/**
+ * F09's four AI descriptors were never implemented and are retained only as a
+ * historical compatibility inventory. F11 is the sole executable AI authority.
+ */
+export const f09HistoricalAgentApiV1Endpoints = agentApiV1Endpoints;
+const supersededF09AiOperations = [
+  "ai-session.start",
+  "ai-session.interrupt",
+  "ai-session.stop",
+  "ai-session.resume"
+] as const;
+type SupersededF09AiOperation = (typeof supersededF09AiOperations)[number];
+export type NonAiAgentApiV1Endpoint = Exclude<
+  AgentApiV1Endpoint,
+  { readonly operation: SupersededF09AiOperation }
+>;
+function isNonAiAgentApiV1Endpoint(
+  endpoint: AgentApiV1Endpoint
+): endpoint is NonAiAgentApiV1Endpoint {
+  return !(supersededF09AiOperations as readonly string[]).includes(endpoint.operation);
+}
+export const nonAiAgentApiV1Endpoints = Object.freeze(
+  agentApiV1Endpoints.filter(isNonAiAgentApiV1Endpoint)
+);

@@ -153,6 +153,12 @@ Secret values never appear in configuration JSON and are never returned to the b
 
 ### AI profile
 
+> **AI Session Foundation v1 status:** this Project Options shape remains dormant and
+> non-executable. AI Sessions v1 uses the deployment-owned immutable registry defined by ADR 015.
+> `fixedArgs` and `credentialSecretIds` below are configuration data only and are not accepted by
+> Agent as runtime authority. This specification's wire shape, canonicalization, and revision hash
+> remain unchanged.
+
 When non-null, `aiProfile` requires:
 
 - `providerKey` and `executableProfileKey`, both registry keys;

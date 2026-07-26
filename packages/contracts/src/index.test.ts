@@ -14,11 +14,12 @@ test("@devspace/contracts is consumable from its package root without prior buil
   const obsoleteErrorBuilderIsNotPublic: AssertFalse<ObsoleteErrorBuilderIsPublic> = false;
   expect(packageEntry.agentApiV1Endpoints).toHaveLength(30);
   expect(packageEntry.f10AgentApiV1Endpoints).toHaveLength(2);
-  expect(packageEntry.completeAgentApiV1Endpoints).toHaveLength(32);
+  expect(packageEntry.completeAgentApiV1Endpoints).toHaveLength(38);
+  expect(packageEntry.f11AiAgentApiV1Endpoints).toHaveLength(10);
   expect(packageEntry.executableAgentErrorCodes).toHaveLength(23);
   expect(packageEntry.f10ExecutableAgentErrorCodes).toHaveLength(2);
   expect(packageEntry.completeAgentApiV1ErrorCodes).toHaveLength(25);
-  expect(packageEntry.agentEventTypes).toHaveLength(12);
+  expect(packageEntry.agentEventTypes).toHaveLength(11);
   expect(packageEntry.agentExecutionFailureCodes).toHaveLength(18);
   expect(packageEntry.agentSnapshotDataSchema).toBeDefined();
   expect(packageEntry.eventCursorSchema).toBeDefined();
