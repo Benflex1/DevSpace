@@ -40,7 +40,7 @@ Completed:
 
 # Milestone 1 — Usable Primary Workspace
 
-**Status: 🟡 Final stretch — Slice 5 is complete; focused M1 Slice 6 hardening remains**
+**Status: ✅ Complete**
 
 ## Definition of done
 
@@ -56,8 +56,9 @@ A user can:
 8. stop/restart the workspace through the normal ownership-checked lifecycle;
 9. recover cleanly enough from normal Agent/Web restarts for daily use.
 
-The full core path now works locally and the production preview path is validated. Remaining work is
-the focused M1 Slice 6 hardening described below.
+The full core path works locally and the production preview path is validated. Milestone 1 is
+closed after PR #38. Deferred authentication, operational UX, lifecycle hardening, static-analysis
+tuning, and toolchain maintenance are post-M1 work.
 
 ## Slice 1 — Project onboarding
 
@@ -230,7 +231,7 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
 
 ## Slice 6 — M1 hardening and diagnostics
 
-**Status: 🟡 In progress**
+**Status: ✅ Complete for the bounded M1 scope**
 
 ### Diagnostics and logging
 
@@ -243,55 +244,56 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
 - ✅ Safe secret/path redaction policy
 - ✅ Incident/error IDs that connect UI errors to service logs
 
-### Authentication hardening
+### Authentication hardening (post-M1)
 
-- ⏳ Add provider-neutral production authentication (OIDC or another standards-based mode); this
-  is separate future work and does not block completion of the M1 preview slice.
+- 🧊 Add provider-neutral production authentication (OIDC or another standards-based mode). The
+  current owner-only Cloudflare Access JWT mode remains the validated production authentication
+  for this installation; generic production authentication is not implemented.
 
-Later operational UX:
+### Operational diagnostics UX (post-M1)
 
-- ⏳ Persistent rotated service logs
-- ⏳ Search/filter diagnostics UI
-- ⏳ Per-operation timelines
-- ⏳ Health subsystem details
-- ⏳ Log export and retention controls
-- ⏳ Dedicated Diagnostics view
+- 🧊 Persistent rotated service logs
+- 🧊 Search/filter diagnostics UI
+- 🧊 Per-operation timelines
+- 🧊 Public health subsystem details
+- 🧊 Log export and retention controls
+- 🧊 Dedicated Diagnostics view
 
-### Lifecycle hardening
+### Lifecycle hardening (post-M1)
 
-- ⏳ Creation-record recovery across reboot/remount/device renumbering
-- ⏳ Better stale-state cleanup
-- ⏳ More explicit degraded-subsystem reporting
-- ⏳ Additional restart/reconciliation regression coverage
-- ⏳ Local development launcher should use a short Unix socket path automatically
-- ⏳ Eliminate the current manual `/run/user/.../devspace` socket workaround
+- 🧊 Creation-record recovery beyond the implemented exact-operation, ownership, restart, and
+  narrow device-remount recovery
+- 🧊 Better stale-state cleanup
+- 🧊 More explicit degraded-subsystem reporting
+- 🧊 Additional restart/reconciliation regression coverage
+- 🧊 Local development launcher should use a short Unix socket path automatically
+- 🧊 Eliminate the current manual `/run/user/.../devspace` socket workaround
 
-### Static-analysis hardening
+### Static-analysis hardening (post-M1 maintenance)
 
 - ✅ Semgrep CE foundation and first contextual triage
 - ✅ Complete JSON artifact and deterministic source-snippet-free job summary
 - ✅ Scanner/report failures blocking while findings remain monitoring-only
 - ✅ All current GitHub Actions references pinned to immutable full SHAs
-- 🧊 pnpm dependency-policy review deferred for a separate compatibility task
-- ⏳ Tune the curated ruleset through further contextual review before making selected findings
+- 🧊 pnpm dependency-policy compatibility work deferred for a separate task
+- 🧊 Tune the curated ruleset through further contextual review before making selected findings
   blocking.
-- ⏳ Evaluate additional free options later, including self-hosted SonarQube Community, CodeScene
+- 🧊 Evaluate additional free options later, including self-hosted SonarQube Community, CodeScene
   through eligible GitHub Student benefits, and any GitHub Student Pack security tooling that is
   genuinely free for this private repository. These options have not been adopted.
 
-### Toolchain maintenance
+### Toolchain maintenance (post-M1)
 
-- ⏳ Evaluate and adopt TypeScript 7 for faster typechecking where compatible
-- ⏳ Keep a compatibility TypeScript toolchain only where ecosystem tools still require the legacy compiler API
-- ⏳ Benchmark DevSpace typecheck/CI before and after migration
-- ⏳ Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, and the monorepo tsconfig hierarchy
+- 🧊 Evaluate and adopt TypeScript 7 for faster typechecking where compatible
+- 🧊 Keep a compatibility TypeScript toolchain only where ecosystem tools still require the legacy compiler API
+- 🧊 Benchmark DevSpace typecheck/CI before and after migration
+- 🧊 Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, and the monorepo tsconfig hierarchy
 
 ---
 
 # Immediate next steps
 
-1. ⏳ Complete the remaining focused M1 Slice 6 hardening.
-2. ⏳ Close Milestone 1 after that bounded hardening checkpoint.
+1. ⏳ Select and define the next post-M1 product milestone from the existing roadmap.
 
 ---
 

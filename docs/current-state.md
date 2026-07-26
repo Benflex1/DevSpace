@@ -2,7 +2,16 @@
 
 ## Current milestone
 
-Milestone 1 — in progress.
+Milestone 1 — complete.
+
+Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
+SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and
+primary-workspace creation, immutable Project Options v1, deterministic runtime-plan compilation,
+rootless Docker lifecycle, browser terminal and lost-session handling, structured foreground tasks,
+workspace-target previews, the private Preview Gateway, the current Coolify Traefik/Cloudflare
+Access production path, real HTTP and WebSocket/HMR validation, bounded restart/reconciliation
+recovery, and correlated safe diagnostics. CI and Semgrep passed on the final PR #38 head before
+merge, and the complete test suite passed with 1,825 tests before merge.
 
 The focused M1 Slice 6 diagnostics checkpoint is implemented: Web and Agent share allowlisted
 machine-readable JSON logging, a closed safe failure classification, and incident IDs that connect
@@ -18,7 +27,8 @@ The Semgrep foundation and first contextual triage remain complete. Local previe
 validation is complete, including Vite readiness, stop/restart, runtime stop/start, fail-closed
 route removal, stable hostname restoration, Agent restart reconciliation, and HMR. Terminal
 lost-session retirement and warning UX are complete for M1. The production Preview Gateway path is
-now deployed and manually validated; the remaining M1 work is the bounded Slice 6 hardening below.
+now deployed and manually validated. The bounded Slice 6 scope is complete; the capabilities below
+are post-M1 work and do not block this milestone closure.
 
 Normal Coolify Compose mode is invalid for the Preview Gateway because it rewrites the external
 volume service mounts. Raw Compose Deployment preserves the two administrator-created external
@@ -239,7 +249,7 @@ long-running task supervision, runtime timeout enforcement, `replace` concurrenc
 interactive tasks are deferred execution-supervision work for M2. M1's `foreground one-shot`
 description does not imply runtime timeout enforcement.
 
-## M1 Slice 6 hardening status
+## M1 Slice 6 closure and post-M1 work
 
 - Stable failure classification now distinguishes `user-error`, `state-conflict`,
   `dependency-unavailable`, `transport-failure`, `protocol-failure`, and `internal-failure`.
@@ -268,4 +278,30 @@ description does not imply runtime timeout enforcement.
   ruleset is tuned and the initial finding history is reviewed.
 - Additional free hardening options remain unevaluated: self-hosted SonarQube Community, CodeScene
   through eligible GitHub Student benefits, and any GitHub Student Pack security tooling that is
-  genuinely free for this private repository. None of these tools is adopted.
+  genuinely free for this private repository. None of these tools is adopted; evaluation remains
+  post-M1 maintenance.
+
+The following are explicitly deferred post-M1, not M1 blockers:
+
+- Authentication: provider-neutral OIDC or another standards-based production mode. The current
+  owner-only Cloudflare Access JWT mode remains the validated production authentication for this
+  installation; generic production authentication is not implemented.
+- Operational diagnostics UX: persistent rotated service logs, search/filter diagnostics UI,
+  per-operation timelines, public health subsystem details, log export and retention controls, and
+  a dedicated Diagnostics view.
+- Broader lifecycle hardening: creation-record recovery beyond the implemented exact-operation,
+  ownership, restart, and narrow device-remount recovery; additional stale-state cleanup; broader
+  degraded-subsystem reporting; additional restart/reconciliation regression coverage; automatic
+  short Unix-socket selection for local development; and removal of the manual local
+  `/run/user/.../devspace` socket workaround.
+- Static-analysis and toolchain maintenance: further Semgrep ruleset tuning before selected
+  findings become blocking, evaluation of additional optional free analysis tools, pnpm
+  dependency-policy compatibility work, and TypeScript 7 evaluation, migration, compatibility
+  checks, and benchmarking.
+
+DevSpace is not feature-complete or generally production-ready for arbitrary multi-user
+deployments. Multiple workspaces, AI sessions, rebuild, long-running task supervision, task Stop,
+forceful terminal Close, service-target previews, and public preview sharing remain absent or
+deferred. Coolify, Traefik, Cloudflare, `benflex.dev`, UID/GID `1000`, and `/srv/devspace` are
+deployment-specific choices; Coolify Traefik remains the outer ingress and Caddy is not the public
+entrypoint.

@@ -3,12 +3,13 @@
 DevSpace is a self-hosted, single-user, AI-first development control plane. Each project is
 intended to have a managed primary workspace in an isolated development environment.
 
-Milestone 1 is in progress. The first product slice now provides browser onboarding backed by real
-SQLite persistence and real Agent inspection over a Unix socket. Registered projects remain in a
-workspace-setup-pending state until the managed primary workspace slice.
+Milestone 1 is complete after PR #38. The validated owner-only product path covers browser
+onboarding, managed primary workspaces, isolated rootless-Docker runtime lifecycle, terminals,
+structured foreground tasks, workspace-target previews, the private Preview Gateway, and bounded
+restart/reconciliation recovery. DevSpace as a whole is not feature-complete or generally
+production-ready for arbitrary multi-user deployments.
 
-Development now proceeds through vertical slices toward a usable primary workspace: browser
-onboarding, a managed worktree, an isolated runtime, terminal/tasks, and previews. See
+Post-M1 development proceeds through vertical slices toward the remaining product roadmap. See
 [`docs/roadmap.md`](docs/roadmap.md) for the current delivery direction.
 
 The accepted boundaries remain: the browser talks only to the web application; the web application
