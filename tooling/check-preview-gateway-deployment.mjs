@@ -174,7 +174,7 @@ export async function validatePreviewGatewayDeployment(repositoryRoot = path.res
   requireCondition(!/\n {4}ports:/u.test(compose), "The gateway stack must not publish host ports.");
   requireCondition(caddyService.includes("build:\n      context: ../..\n      dockerfile: deploy/preview-gateway/Caddy.Dockerfile"), "Caddy must use the self-contained deployment image build.");
   requireCondition(caddyDockerfile.includes("FROM caddy:2.11.3"), "Caddy deployment image must be based on caddy:2.11.3.");
-  requireCondition(caddyDockerfile.includes("COPY deploy/preview-gateway/caddy.json /etc/caddy/caddy.json"), "Caddy deployment image must bake in caddy.json.");
+  requireCondition(caddyDockerfile.includes("COPY --chmod=0444 deploy/preview-gateway/caddy.json /etc/caddy/caddy.json"), "Caddy deployment image must bake in caddy.json with deterministic read-only permissions.");
   requireCondition(!caddyService.includes("source: ./caddy.json") && !caddyService.includes("target: /etc/caddy/caddy.json"), "Caddy must not use a repository-relative caddy.json bind mount.");
   requireCondition(!caddyService.includes("--adapter"), "Native Caddy JSON configuration must not use the json adapter.");
   requireHostServiceBasics(caddyService, "caddy");
