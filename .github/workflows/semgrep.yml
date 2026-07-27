@@ -17,7 +17,7 @@ concurrency:
 jobs:
   semgrep:
     name: Static analysis
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, devspace-ci]
     timeout-minutes: 15
     env:
       SEMGREP_IMAGE: semgrep/semgrep:1.171.0@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
