@@ -14,12 +14,20 @@ equivalent explicit relative path aliases, and WebSocket terminal frames now cop
 18.19/18.56/18.41 seconds (TypeScript 7.0.2); default native parallelism was retained rather than
 pinning checker/builder counts. No product or runtime authority boundary changed.
 
-AI Session Foundation Slice 0 now defines the accepted post-M1 architecture and executable
-contracts only: ADR 015, AI Sessions v1, separate structured session/process/turn/interaction
-graphs, the F11 Agent API extension, canonical per-session events, a durable acknowledged Agent
-outbox decision, and a Codex app-server 0.145.0 non-TTY stdio adapter pin. Provider execution,
-supervisor/Stop, SQLite migration, credentials, Agent/Web handlers, browser streaming, and
-Workbench UI remain unimplemented.
+AI Session Foundation Slice 0 established the accepted post-M1 architecture and executable
+contracts. Checkpoint 1 of AI Session Beta Slice B is now implemented as a browser-usable
+Codex-first vertical slice: one deployment-owned Codex 0.145.0 profile runs through the Agent in
+the exact managed workspace container, with a deterministic fake provider for tests; Web remains
+the sole SQLite writer and commits canonical events before browser publication. The Workbench AI
+tab supports availability, session creation, streamed text/activity, cooperative interruption,
+new turns, refresh recovery, bounded changed-file summaries, stop, and truthful `lost` recovery
+through **Restart workspace**. The live attachment binds project, workspace, configuration
+revision, runtime plan/generation, container identity, profile revision, session, and process
+generation. Credentials are copied from one Agent-private deployment login into a mode-restricted,
+session-scoped ephemeral in-container `CODEX_HOME`; the host Codex directory is never mounted and
+credential values are not persisted or projected. This is intentionally one live session per
+workspace, and the beta makes no claim of hostile descendant containment. Approvals and structured
+questions remain explicitly in progress for Checkpoint 2.
 
 Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
 SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and

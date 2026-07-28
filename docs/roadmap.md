@@ -388,14 +388,15 @@ Stop rule:
 
 # Immediate next steps
 
-1. ⏳ **AI Session Beta Slice B — Codex first**
-   - create and persist a workspace-scoped AI session;
-   - send prompts and stream turns/activity;
-   - support interrupt and resume/new-turn behavior;
-   - support approvals and structured questions;
-   - show a changed-files summary;
-   - retain conversation/session metadata after refresh;
-   - use T3 Code aggressively for UX and suitable MIT-licensed implementation details.
+1. 🟢 **AI Session Beta Slice B — Checkpoint 1 complete**
+   - ✅ create and persist one workspace-scoped Codex session;
+   - ✅ send prompts and stream assistant text/activity;
+   - ✅ cooperatively interrupt and send another turn;
+   - ✅ show bounded changed-files summaries and retain history after refresh;
+   - ✅ stop the live session and recover truthful lost/degraded state with **Restart workspace**;
+   - 🟡 approvals and structured questions remain Checkpoint 2;
+   - ✅ use T3 Code-informed UX patterns with attribution; no host/process/persistence assumptions
+     were copied.
 
 2. ⏳ **Private GitHub repository access**
    - make real private repositories usable through onboarding, clone/fetch, and push;
@@ -556,16 +557,17 @@ Foundation completed:
 - ✅ Authenticated supervisor recovery capability research
 - ✅ Explicitly documented production termination blocker and owner-only beta fallback
 
-AI Session Beta Slice B:
+AI Session Beta Slice B — Checkpoint 1:
 
-- ⏳ Codex-first AI session tab
-- ⏳ Approved Codex CLI profile and workspace-scoped credential path
-- ⏳ Create, prompt, stream, interrupt, and resume/new-turn controls
-- ⏳ Persistent public session/turn metadata and refresh recovery
-- ⏳ Streaming assistant text and activity/tool events
-- ⏳ Approvals and structured questions
-- ⏳ Changed-files summary after turns
-- ⏳ Clear degraded-session and restart-workspace fallback
+- ✅ Codex-first AI session tab
+- ✅ Approved Codex CLI profile and exact-container credential path
+- ✅ Create, prompt, stream, interrupt, stop, and new-turn controls
+- ✅ Persistent public session/turn metadata and refresh recovery
+- ✅ Streaming assistant text and useful activity events
+- 🟡 Approvals and structured questions — Checkpoint 2
+- ✅ Bounded changed-files summary after terminal turns
+- ✅ Clear degraded-session and restart-workspace fallback
+- 🟡 One live session per workspace remains the beta limitation
 
 Deferred until later:
 
