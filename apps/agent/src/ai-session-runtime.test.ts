@@ -84,7 +84,9 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
     close: () => provider?.destroy(),
     docker: {
     createExec: (_containerId: string, input: DockerExecInput) => {
-      const id = `${Array.isArray(input.command) && input.command[0] === "sh" ? "upload" : "provider"}-${++sequence}`;
+      const command = Array.isArray(input.command) ? input.command.join(" ") : "";
+      const kind = command.includes("cat >") ? "upload" : command.includes("rm -rf") ? "cleanup" : "provider";
+      const id = `${kind}-${++sequence}`;
       captured.push({ id, input });
       return Promise.resolve(id);
     },
@@ -92,6 +94,11 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
       if (execId.startsWith("upload-")) {
         const stream = new Duplex({ read() { /* upload output is not consumed */ }, write(_chunk, _encoding, callback) { callback(); } });
         stream.end = function end() { process.nextTick(() => stream.emit("close")); return stream; } as typeof stream.end;
+        return Promise.resolve(stream);
+      }
+      if (execId.startsWith("cleanup-")) {
+        const stream = new Duplex({ read() { /* cleanup output is not consumed */ }, write(_chunk, _encoding, callback) { callback(); } });
+        process.nextTick(() => stream.emit("close"));
         return Promise.resolve(stream);
       }
       let lineBuffer = "";
@@ -200,6 +207,11 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
+      expect(captured.some((entry) => {
+        const input = entry.input as DockerExecInput | undefined;
+        return Array.isArray(input?.command) && input.command.join(" ").includes("rm -rf");
+      })).toBe(true);
       const requests = captured.flatMap((entry) => {
         const request = entry.jsonRpc;
         return request !== undefined ? [request as { method?: string; params?: unknown }] : [];

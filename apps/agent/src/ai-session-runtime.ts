@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/no-unused-vars, @typescript-eslint/require-await */
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -393,8 +393,19 @@ class CodexProvider implements ProviderAdapter {
   async stop(): Promise<void> {
     await this.interrupt().catch(() => undefined);
     this.stream?.destroy(); this.stream = null;
-    if (this.containerDir !== null) await rm(this.containerDir, { recursive: true, force: true }).catch(() => undefined);
+    if (this.containerDir !== null) await this.removeContainerDir(this.containerDir);
     this.containerDir = null;
+  }
+  private async removeContainerDir(directory: string): Promise<void> {
+    try {
+      const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
+        command: ["sh", "-c", 'rm -rf -- "$DEVSPACE_TARGET_DIR"'], workingDirectory: "/workspace",
+        environment: { DEVSPACE_TARGET_DIR: directory }, attachStdin: false, tty: false
+      });
+      const stream = await this.input.docker.startExecAttached(execId, false);
+      stream.resume();
+      await new Promise<void>((resolve) => stream.once("close", () => resolve()));
+    } catch { /* cleanup is best effort after the provider attachment is gone */ }
   }
   private async runUpload(directory: string, data: Buffer, name: string, environment: Record<string, string> = {}): Promise<void> {
     const mode = name === "auth.json" ? "600" : "700";

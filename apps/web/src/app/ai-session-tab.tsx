@@ -2,6 +2,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { replayAiEvents } from "./ai-session-replay.js";
 
 type Profile = { profileId: string; profileRevision: string; displayName: string; availability: { state: "available" | "unavailable"; code?: string }; capabilities: { interrupt: boolean } };
 type FileSummary = { files: Array<{ path: string; change: string; oldPath: string | null }>; truncated: boolean };
@@ -56,8 +57,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
       setProfile(body.profile);
       if (body.session !== null && body.session !== undefined) {
         setSession(body.session.session); lastSequence.current = body.session.session.lastSequence;
-        setTurns(body.session.turns.map((turn) => ({ ...turn, activities: [] })));
-        for (const event of body.session.events) applyEvent(event);
+        setTurns(replayAiEvents(body.session.turns.map((turn) => ({ ...turn, activities: [] })), body.session.events));
       } else { setSession(null); setTurns([]); lastSequence.current = 0; }
     } catch (error) { setMessage(error instanceof Error ? error.message : "AI session unavailable."); }
     finally { setLoading(false); }
