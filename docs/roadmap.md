@@ -62,14 +62,14 @@ Agent-managed workspace; and no host/Coolify Docker socket is exposed.
 
 The next product target is a coherent semi-finished beta, not another foundation-only milestone.
 
-The beta path prioritizes:
+TypeScript 7 acceleration is complete. The active next product slice is AI Session Beta Slice B;
+the remaining beta path prioritizes:
 
-1. a bounded TypeScript 7 toolchain migration to shorten local and CI feedback loops;
-2. a browser-usable Codex-first AI session flow;
-3. private GitHub repository access;
-4. project creation from scratch;
-5. essential files, Git, task, Project Options, and Workbench UX;
-6. focused stabilization and visual polish based on real use.
+1. a browser-usable Codex-first AI session flow;
+2. private GitHub repository access;
+3. project creation from scratch;
+4. essential files, Git, task, Project Options, and Workbench UX;
+5. focused stabilization and visual polish based on real use.
 
 AI-session contracts and capability research are complete. Production-safe termination of arbitrary
 hostile descendant processes remains deliberately unclaimed; the owner-only beta may use cooperative
@@ -345,8 +345,9 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
 
 **Status: ✅ Complete — July 28, 2026**
 
-TypeScript 7 is now stable and is a high-leverage delivery accelerator. DevSpace currently uses
-TypeScript 5.9.3, so this migration should happen before the next large product slice.
+TypeScript 7 is now stable and is a high-leverage delivery accelerator. The TypeScript 7 migration
+is complete and has shortened DevSpace's normal typecheck feedback loop before the next product
+slice.
 
 Measured on the current development server with `/usr/bin/time` after a clean locked install:
 
@@ -360,19 +361,19 @@ TypeScript 7 is the native `tsc` CLI for all repository typecheck and build comm
 `typescript` dependency remains a narrow `@typescript/typescript6` alias because the workspace
 graph checker and `typescript-eslint` require the legacy programmatic API; its `tsc6` command is
 also checked in CI. The sole required configuration change removed the obsolete `baseUrl` and made
-the existing path aliases explicitly relative. Default TypeScript 7 parallelism was retained: the
-measured path is already materially faster without fixed worker contention on the 4-core CI host.
+the existing path aliases explicitly relative. Default TypeScript 7 parallelism was retained: a
+conservative `--checkers 2` experiment produced no material benefit, and no fixed checker or builder
+counts were selected.
 
 Completed migration scope:
 
-- ✅ Record reproducible baselines for `pnpm typecheck`, TypeScript build steps, `pnpm test`, and CI
+- ✅ Benchmark `pnpm typecheck` before and after the migration
 - ✅ Adopt TypeScript 7 for command-line typechecking and project builds where compatible
 - ✅ Keep TypeScript 6 side-by-side only for tooling that still needs the legacy compiler API
 - ✅ Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, Playwright, declaration
   output, and the monorepo tsconfig/project-reference hierarchy
 - ✅ Fix TypeScript 6/7 configuration changes that are directly required by DevSpace
-- ✅ Benchmark the final local and self-hosted CI results and select conservative fixed
-  `--checkers`/`--builders` values for the available CPU/RAM
+- ✅ Compare a conservative `--checkers 2` experiment and retain the faster default parallelism
 - ✅ Document the compatibility arrangement and rollback path
 
 Stop rule:
@@ -387,13 +388,7 @@ Stop rule:
 
 # Immediate next steps
 
-1. ⏳ **TypeScript 7 acceleration slice**
-   - benchmark the current TypeScript 5.9.3 path;
-   - adopt TypeScript 7 for supported CLI typecheck/build work;
-   - retain a narrow TypeScript 6 compatibility path only where required;
-   - stop once the faster stable feedback loop is validated.
-
-2. ⏳ **AI Session Beta Slice B — Codex first**
+1. ⏳ **AI Session Beta Slice B — Codex first**
    - create and persist a workspace-scoped AI session;
    - send prompts and stream turns/activity;
    - support interrupt and resume/new-turn behavior;
@@ -402,28 +397,28 @@ Stop rule:
    - retain conversation/session metadata after refresh;
    - use T3 Code aggressively for UX and suitable MIT-licensed implementation details.
 
-3. ⏳ **Private GitHub repository access**
+2. ⏳ **Private GitHub repository access**
    - make real private repositories usable through onboarding, clone/fetch, and push;
    - keep credentials Agent-private, redacted, revocable, and out of repository URLs/logs;
    - prefer a GitHub App when its setup remains bounded, with a fine-grained-token fallback for the
      owner-only beta;
    - support one GitHub account/install first rather than designing a generic provider platform.
 
-4. ⏳ **Create a project from scratch**
+3. ⏳ **Create a project from scratch**
    - create a local managed Git repository and primary workspace without a remote;
    - support an initial commit and normal terminal/preview/AI workflows;
    - optionally create/publish/connect a private GitHub repository using the credential path from
-     step 3;
+     step 2;
    - defer template marketplaces and broad scaffolding catalogs.
 
-5. ⏳ **Workbench beta completion**
+4. ⏳ **Workbench beta completion**
    - basic file tree/editing;
    - practical Git status/diff/stage/commit/push;
    - better task/process output and controls;
    - essential Project Options editing;
    - cohesive T3 Code-inspired Workbench navigation and visual polish.
 
-6. ⏳ **Focused beta stabilization**
+5. ⏳ **Focused beta stabilization**
    - fix P0 defects and high-frequency P1 defects found through real use;
    - document P2 limitations;
    - avoid another broad proof/hardening phase before the beta is usable end-to-end.
@@ -524,13 +519,16 @@ Not required for this milestone:
 
 ## Delivery order
 
-1. TypeScript 7 acceleration
-2. AI Session Beta Slice B
-3. Private GitHub repository access
-4. Create project from scratch
-5. Files and Git essentials
-6. Tasks, Project Options, Workbench integration, and beta polish
-7. Focused real-use stabilization
+Completed: TypeScript 7 acceleration.
+
+Remaining delivery order:
+
+1. AI Session Beta Slice B
+2. Private GitHub repository access
+3. Create project from scratch
+4. Files and Git essentials
+5. Tasks, Project Options, Workbench integration, and beta polish
+6. Focused real-use stabilization
 
 ## Files and editor
 
