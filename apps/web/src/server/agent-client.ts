@@ -3,6 +3,10 @@ import {
   AGENT_API_VERSION,
   agentApiV1EndpointByOperation,
   f10AgentApiV1EndpointByOperation,
+  f11AiAgentApiV1EndpointByOperation,
+  aiEventStreamFrameSchema,
+  type AiEventStreamFrame,
+  type AiProviderProfileProjection,
   type AgentSnapshotData,
   type ActivatePreviewData,
   type ConfigurationRevisionData,
@@ -77,7 +81,9 @@ export function createAgentClient(socketPath: string, options: {
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
-    | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get";
+    | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
+    | "ai-provider.inspect" | "ai-session.start" | "ai-session.resume" | "ai-session.turn.send" | "ai-session.turn.interrupt"
+    | "ai-session.approval.respond" | "ai-session.input.respond" | "ai-session.stop" | "ai-session.events.acknowledge";
 
   async function call(
     operation: SupportedOperation,
@@ -85,9 +91,11 @@ export function createAgentClient(socketPath: string, options: {
     operationId?: string,
     diagnosticOperationId = operationId
   ): Promise<unknown> {
-    const endpoint = operation === "snapshot.get"
-      ? f10AgentApiV1EndpointByOperation["snapshot.get"]
-      : agentApiV1EndpointByOperation[operation];
+    const endpoint = operation === "snapshot.get" ? f10AgentApiV1EndpointByOperation["snapshot.get"]
+      : operation.startsWith("ai-") ? f11AiAgentApiV1EndpointByOperation[operation as keyof typeof f11AiAgentApiV1EndpointByOperation]
+      : agentApiV1EndpointByOperation[operation as keyof typeof agentApiV1EndpointByOperation];
+    if (endpoint === undefined) throw new Error("agent-operation-endpoint-missing");
+    if (endpoint.successBodySchema === null) throw new Error("stream-operation-requires-stream-client");
     const requestId = createId();
     const callStartedAt = Date.now();
     const resource = data !== null && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
@@ -278,6 +286,40 @@ export function createAgentClient(socketPath: string, options: {
     ): Promise<PreviewInspectionData> =>
       await call("preview.inspect", { projectId, workspaceId, revisionId, previewId }, undefined, diagnosticOperationId) as PreviewInspectionData,
     snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
+    ,inspectAiProvider: async (projectId: string, workspaceId: string, profileId = "codex"): Promise<AiProviderProfileProjection> =>
+      await call("ai-provider.inspect", { projectId, workspaceId, profileId }) as AiProviderProfileProjection,
+    startAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.start", data, operationId) as MutationReceipt,
+    sendAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.send", data, operationId) as MutationReceipt,
+    interruptAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.interrupt", data, operationId) as MutationReceipt,
+    stopAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.stop", data, operationId) as MutationReceipt,
+    acknowledgeAiEvents: async (data: unknown): Promise<unknown> => await call("ai-session.events.acknowledge", data),
+    streamAiEvents: async function* (sessionId: string, afterSequence: number): AsyncGenerator<AiEventStreamFrame> {
+      const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
+      const requestId = createId();
+      const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
+        const request = http.request({ socketPath, path: endpoint.path.replace("{aiSessionId}", encodeURIComponent(sessionId)) + `?afterSequence=${afterSequence}`,
+          method: "GET", headers: { "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION), "X-DevSpace-Request-Id": requestId,
+            "X-DevSpace-Sent-At": now().toISOString(), Accept: endpoint.successContentType } }, resolve);
+        request.setTimeout(observationTimeoutMs, () => request.destroy(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure", requestId)));
+        request.once("error", reject); request.end();
+      });
+      if (response.statusCode !== endpoint.successStatus) {
+        const chunks: Buffer[] = []; for await (const chunk of response) chunks.push(Buffer.from(chunk as Uint8Array));
+        try {
+          const parsed = endpoint.errorSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8"))) as { error: { code: string; message: string; retryable: boolean } };
+          throw new AgentResponseError(parsed.error.code, parsed.error.message, parsed.error.retryable, undefined, classifyFailureCode(parsed.error.code), requestId);
+        } catch (error) { if (error instanceof AgentResponseError) throw error; throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId); }
+      }
+      let buffer = "";
+      for await (const chunk of response) {
+        buffer += Buffer.from(chunk as Uint8Array).toString("utf8");
+        let newline = buffer.indexOf("\n");
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n");
+          if (line.length > 0) yield aiEventStreamFrameSchema.parse(JSON.parse(line));
+        }
+      }
+    }
   };
 }
 
