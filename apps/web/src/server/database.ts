@@ -1,10 +1,16 @@
 import BetterSqlite3 from "better-sqlite3";
-import type { AgentSnapshotData, WorkspaceInspectionData } from "@devspace/contracts";
+import {
+  canonicalAiEventSchema,
+  classifyAiEventAppend,
+  type AgentSnapshotData,
+  type CanonicalAiEvent,
+  type WorkspaceInspectionData
+} from "@devspace/contracts";
 import { mkdirSync } from "node:fs";
 import pathModule from "node:path";
 import {
   auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
-  previews, workspaceServices, workspaces,
+  previews, workspaceServices, workspaces, aiSessions, aiTurns, aiEvents,
   type Operation, type Preview, type Project, type ProjectConfigRevision
 } from "@devspace/database";
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
@@ -13,6 +19,8 @@ import { v7 as uuidv7 } from "uuid";
 import { parseProjectOptionsV1 } from "@devspace/project-options";
 import { persistedFailureMessage } from "./failure-policy.js";
 import { materializePreviews as materializePreviewRows } from "./preview-persistence.js";
+
+function parseJsonValue(value: string): unknown { return JSON.parse(value) as unknown; }
 
 export interface ProjectView {
   readonly id: string;
@@ -554,6 +562,94 @@ export function openProjectDatabase(path: string, options: {
         throw new ProjectSetupConflictError("The primary workspace configuration is inconsistent.");
       }
       return { project, workspace, revision };
+    },
+    getAiSession(projectId: string, workspaceId: string) {
+      const context = this.getRuntimeContext(projectId);
+      if (context.workspace.id !== workspaceId) throw new ProjectSetupConflictError("The AI session workspace is not owned by this project.");
+      const session = db.select().from(aiSessions).where(and(eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.providerKey, "codex")))
+        .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).get();
+      if (session === undefined) return null;
+      const turns = db.select().from(aiTurns).where(eq(aiTurns.sessionId, session.id)).orderBy(aiTurns.createdAt, aiTurns.id).all();
+      const events = db.select().from(aiEvents).where(eq(aiEvents.sessionId, session.id)).orderBy(aiEvents.sequence).all()
+        .map((row) => canonicalAiEventSchema.parse(parseJsonValue(row.eventJson)));
+      return {
+        session: { id: session.id, workspaceId: session.workspaceId, title: session.title, state: session.state,
+          profileId: session.profileKey, profileRevision: session.profileRevision, revisionId: session.revisionId,
+          runtimePlanHash: session.runtimePlanHash, runtimeGeneration: session.runtimeGeneration, processGeneration: session.processGeneration,
+          lastSequence: session.lastSequence,
+          failureCode: session.failureCode, createdAt: session.createdAt, updatedAt: session.updatedAt },
+        turns: turns.map((turn) => ({ id: turn.id, state: turn.state, content: parseJsonValue(turn.contentJson), outputText: turn.outputText,
+          changedFiles: parseJsonValue(turn.changedFilesJson), failure: turn.failureJson === null ? null : parseJsonValue(turn.failureJson),
+          createdAt: turn.createdAt, updatedAt: turn.updatedAt, completedAt: turn.completedAt })), events
+      };
+    },
+    createAiSession(input: { projectId: string; workspaceId: string; profileId: string; profileRevision: string; title?: string }) {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        if (context.workspace.id !== input.workspaceId) throw new ProjectSetupConflictError("The AI session workspace is not owned by this project.");
+        const existing = db.select().from(aiSessions).where(and(eq(aiSessions.workspaceId, input.workspaceId), eq(aiSessions.providerKey, "codex")))
+          .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).get();
+        if (existing !== undefined) return existing;
+        if (input.profileId !== "codex" || context.revision.runtimePlanHash === null) throw new ProjectSetupConflictError("AI is not configured for this workspace.");
+        const timestamp = now().toISOString();
+        const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
+        const session = {
+          id: createId(), workspaceId: input.workspaceId, terminalSessionId: null, processId: null, providerKey: "codex", profileKey: input.profileId,
+          profileRevision: input.profileRevision, revisionId: context.revision.id, runtimePlanHash: context.revision.runtimePlanHash,
+          runtimeGeneration: Math.max(1, runtime?.runtimeGeneration ?? 1), processGeneration: 1, lastSequence: 0, failureCode: null, failureJson: null,
+          externalSessionId: null, title: input.title?.trim().slice(0, 128) || "Codex session", state: "creating" as const,
+          createdAt: timestamp, updatedAt: timestamp, lastActivityAt: null, stoppedAt: null
+        };
+        db.insert(aiSessions).values(session).run(); return session;
+      }).immediate();
+    },
+    createAiTurn(input: { projectId: string; workspaceId: string; sessionId: string; turnId: string; content: unknown }) {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        const session = db.select().from(aiSessions).where(and(eq(aiSessions.id, input.sessionId), eq(aiSessions.workspaceId, input.workspaceId))).get();
+        if (context.workspace.id !== input.workspaceId || session === undefined) throw new ProjectSetupConflictError("The AI session identity is not owned by this workspace.");
+        const existing = db.select().from(aiTurns).where(and(eq(aiTurns.id, input.turnId), eq(aiTurns.sessionId, input.sessionId))).get();
+        if (existing !== undefined) return existing;
+        const timestamp = now().toISOString();
+        const turn = { id: input.turnId, sessionId: input.sessionId, state: "accepted" as const, contentJson: JSON.stringify(input.content), outputText: "",
+          changedFilesJson: JSON.stringify({ files: [], truncated: false }), failureJson: null, createdAt: timestamp, updatedAt: timestamp, completedAt: null };
+        db.insert(aiTurns).values(turn).run(); return turn;
+      }).immediate();
+    },
+    commitAiEvent(input: { projectId: string; workspaceId: string; event: CanonicalAiEvent }): "appended" | "duplicate" {
+      return client.transaction(() => {
+        const event = canonicalAiEventSchema.parse(input.event);
+        const context = this.getRuntimeContext(input.projectId);
+        const session = db.select().from(aiSessions).where(and(eq(aiSessions.id, event.sessionId), eq(aiSessions.workspaceId, input.workspaceId))).get();
+        if (context.workspace.id !== input.workspaceId || session === undefined) throw new ProjectSetupConflictError("The AI event identity is not owned by this workspace.");
+        const existingAtSequence = db.select().from(aiEvents).where(and(eq(aiEvents.sessionId, event.sessionId), eq(aiEvents.sequence, event.sequence))).get();
+        const existingById = db.select().from(aiEvents).where(eq(aiEvents.eventId, event.eventId)).get();
+        const parseExisting = (row: typeof existingAtSequence) => row === undefined ? null : canonicalAiEventSchema.parse(JSON.parse(row.eventJson));
+        const decision = classifyAiEventAppend({ durableThroughSequence: session.lastSequence, existingAtSequence: parseExisting(existingAtSequence), existingByEventId: parseExisting(existingById), incoming: event });
+        if (decision.kind === "exact-duplicate") return "duplicate";
+        if (decision.kind !== "append") throw new ProjectSetupConflictError(decision.kind === "gap" ? "The AI event stream has a sequence gap." : "The AI event stream has a conflicting sequence.");
+        const timestamp = now().toISOString();
+        db.insert(aiEvents).values({ eventId: event.eventId, sessionId: event.sessionId, turnId: event.turnId, sequence: event.sequence,
+          eventType: event.eventType, eventJson: JSON.stringify(event), observedAt: event.observedAt }).run();
+        const sessionState = event.eventType === "session.stopped" ? "stopped" : event.eventType === "session.lost" ? "lost"
+          : event.eventType === "session.stopping" ? "active" : "active";
+        db.update(aiSessions).set({ state: sessionState, lastSequence: event.sequence, updatedAt: timestamp,
+          lastActivityAt: timestamp, stoppedAt: event.eventType === "session.stopped" ? timestamp : session.stoppedAt }).where(eq(aiSessions.id, event.sessionId)).run();
+        if (event.turnId !== null) {
+          const turn = db.select().from(aiTurns).where(eq(aiTurns.id, event.turnId)).get();
+          if (turn !== undefined) {
+            let state = turn.state; let outputText = turn.outputText; let changedFilesJson = turn.changedFilesJson; let failureJson = turn.failureJson; let completedAt = turn.completedAt;
+            if (event.eventType === "turn.started") state = "running";
+            if (event.eventType === "turn.output.delta") outputText += event.payload.text;
+            if (event.eventType === "turn.files.changed") { changedFilesJson = JSON.stringify(event.payload); }
+            if (event.eventType === "turn.failed") { state = "failed"; failureJson = JSON.stringify(event.payload.failure); completedAt = timestamp; }
+            if (event.eventType === "turn.interrupted") { state = "interrupted"; completedAt = timestamp; }
+            if (event.eventType === "turn.quiesced") { state = event.payload.outcome === "completed" ? "completed" : event.payload.outcome === "interrupted" ? "interrupted" : "failed"; completedAt = timestamp; }
+            db.update(aiTurns).set({ state, outputText, changedFilesJson, failureJson, completedAt, updatedAt: timestamp }).where(eq(aiTurns.id, turn.id)).run();
+          }
+        }
+        return "appended";
+      }).immediate();
     },
     storeRuntimePlanPair(input: { projectId: string; revisionId: string; canonicalJson: string; hash: string }): void {
       client.transaction(() => {

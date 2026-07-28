@@ -113,6 +113,28 @@ export const aiTurnContentSchema = z.strictObject({
   text: boundedContent(AI_USER_CONTENT_MAX_BYTES)
 });
 
+export const aiChangedFileSchema = z.strictObject({
+  change: z.enum(["added", "modified", "deleted", "renamed", "untracked"]),
+  path: aiWorkspaceRelativePathPresentationSchema,
+  oldPath: aiWorkspaceRelativePathPresentationSchema.nullable()
+}).superRefine((file, context) => {
+  if (file.change === "renamed" && file.oldPath === null) {
+    context.addIssue({ code: "custom", path: ["oldPath"], message: "Renames require the previous path" });
+  }
+  if (file.change !== "renamed" && file.oldPath !== null) {
+    context.addIssue({ code: "custom", path: ["oldPath"], message: "Only renames may include a previous path" });
+  }
+});
+export const aiChangedFilesSummarySchema = z.strictObject({
+  files: z.array(aiChangedFileSchema).max(AI_MAX_PRESENTATION_PATHS),
+  truncated: z.boolean()
+}).superRefine((summary, context) => {
+  const paths = summary.files.map((file) => file.path);
+  if (new Set(paths).size !== paths.length) {
+    context.addIssue({ code: "custom", path: ["files"], message: "Changed file paths must be unique" });
+  }
+});
+
 export const aiCommandApprovalPresentationSchema = z.strictObject({
   kind: z.literal("command"),
   summary: boundedContent(4_096),
@@ -459,6 +481,7 @@ const canonicalAiEventSchemas = [
   turnEvent("turn.quiesced", z.strictObject({
     outcome: z.enum(["completed", "interrupted", "failed"])
   })),
+  turnEvent("turn.files.changed", aiChangedFilesSummarySchema),
   turnEvent("turn.failed", z.strictObject({ failure: aiFailureObservationSchema })),
   turnEvent("turn.lost", z.strictObject({ code: sessionLostCode }))
 ] as const;
@@ -482,6 +505,7 @@ export const aiEventStreamFrameSchema = z.union([
   canonicalAiEventSchema,
   aiStreamSynchronizedFrameSchema
 ]);
+export type AiEventStreamFrame = z.infer<typeof aiEventStreamFrameSchema>;
 export const acknowledgeAiEventsDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,

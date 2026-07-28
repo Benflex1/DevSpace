@@ -18,8 +18,8 @@ function rows<T>(database: Database.Database, sql: string): T[] {
 }
 
 describe("database schema metadata", () => {
-  test("exports exactly the accepted 13 application tables", () => {
-    expect(Object.keys(schema)).toHaveLength(13);
+  test("exports exactly the accepted AI session application tables", () => {
+    expect(Object.keys(schema)).toHaveLength(17);
     expect(Object.values(schema).map(getTableName)).toEqual(applicationTableNames);
   });
 
@@ -63,12 +63,12 @@ describe("database schema metadata", () => {
             childTable: tableName
           }))
         );
-        expect(foreignKeys).toHaveLength(26);
+        expect(foreignKeys).toHaveLength(33);
         expect(new Set(foreignKeys.map(({ on_update }) => on_update))).toEqual(new Set(["NO ACTION"]));
         expect(Object.fromEntries(["CASCADE", "RESTRICT", "SET NULL"].map((action) => [
           action,
           foreignKeys.filter(({ on_delete }) => on_delete === action).length
-        ]))).toEqual({ CASCADE: 11, RESTRICT: 8, "SET NULL": 7 });
+        ]))).toEqual({ CASCADE: 15, RESTRICT: 9, "SET NULL": 9 });
         for (const foreignKey of foreignKeys.filter(({ on_delete }) => on_delete === "SET NULL")) {
           const column = rows<{ name: string; notnull: number }>(
             database,

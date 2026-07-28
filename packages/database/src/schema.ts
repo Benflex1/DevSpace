@@ -1,5 +1,7 @@
 import {
   aiSessionStates,
+  aiInteractionRequestStates,
+  aiTurnStates,
   configurationRevisionStates,
   operationStates,
   previewDesiredStates,
@@ -461,6 +463,14 @@ export const aiSessions = sqliteTable("ai_sessions", {
   }),
   providerKey: text("provider_key").notNull(),
   profileKey: text("profile_key").notNull(),
+  profileRevision: text("profile_revision").notNull().default(`sha256-ai-profile-v1:${"0".repeat(64)}`),
+  revisionId: text("revision_id").notNull().references(() => projectConfigRevisions.id, { onDelete: "restrict", onUpdate: "no action" }),
+  runtimePlanHash: text("runtime_plan_hash").notNull(),
+  runtimeGeneration: integer("runtime_generation").notNull(),
+  processGeneration: integer("process_generation").notNull(),
+  lastSequence: integer("last_sequence").notNull().default(0),
+  failureCode: text("failure_code"),
+  failureJson: text("failure_json"),
   externalSessionId: text("external_session_id"),
   title: text("title").notNull(),
   state: text("state", { enum: aiSessionStates }).notNull(),
@@ -472,15 +482,109 @@ export const aiSessions = sqliteTable("ai_sessions", {
   index("ai_sessions_workspace_id_idx").on(table.workspaceId),
   index("ai_sessions_terminal_session_id_idx").on(table.terminalSessionId),
   index("ai_sessions_process_id_idx").on(table.processId),
+  index("ai_sessions_revision_id_idx").on(table.revisionId),
   uuidV7Check("ai_sessions_id_uuid_v7_check", table.id),
   uuidV7Check("ai_sessions_workspace_id_uuid_v7_check", table.workspaceId),
   nullableUuidV7Check("ai_sessions_terminal_session_id_uuid_v7_check", table.terminalSessionId),
   nullableUuidV7Check("ai_sessions_process_id_uuid_v7_check", table.processId),
+  uuidV7Check("ai_sessions_revision_id_uuid_v7_check", table.revisionId),
+  check("ai_sessions_runtime_generation_check", sql`${table.runtimeGeneration} >= 1`),
+  check("ai_sessions_process_generation_check", sql`${table.processGeneration} >= 1`),
+  check("ai_sessions_last_sequence_check", sql`${table.lastSequence} >= 0`),
+  check("ai_sessions_profile_revision_check", sql`${table.profileRevision} glob 'sha256-ai-profile-v1:*'`),
+  check("ai_sessions_runtime_plan_hash_check", sql`${table.runtimePlanHash} glob 'sha256-jcs-v1:*'`),
+  jsonCheck("ai_sessions_failure_json_check", table.failureJson, true),
   enumCheck("ai_sessions_state_check", table.state, aiSessionStates),
   timestampCheck("ai_sessions_created_at_timestamp_check", table.createdAt),
   timestampCheck("ai_sessions_updated_at_timestamp_check", table.updatedAt),
   timestampCheck("ai_sessions_last_activity_at_timestamp_check", table.lastActivityAt, true),
   timestampCheck("ai_sessions_stopped_at_timestamp_check", table.stoppedAt, true)
+]);
+
+export const aiTurns = sqliteTable("ai_turns", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => aiSessions.id, { onDelete: "cascade", onUpdate: "no action" }),
+  state: text("state", { enum: aiTurnStates }).notNull(),
+  contentJson: text("content_json").notNull(),
+  outputText: text("output_text").notNull().default(""),
+  changedFilesJson: text("changed_files_json").notNull().default('{"files":[],"truncated":false}'),
+  failureJson: text("failure_json"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at")
+}, (table) => [
+  index("ai_turns_session_id_idx").on(table.sessionId),
+  uuidV7Check("ai_turns_id_uuid_v7_check", table.id),
+  uuidV7Check("ai_turns_session_id_uuid_v7_check", table.sessionId),
+  enumCheck("ai_turns_state_check", table.state, aiTurnStates),
+  jsonCheck("ai_turns_content_json_check", table.contentJson),
+  jsonCheck("ai_turns_changed_files_json_check", table.changedFilesJson),
+  jsonCheck("ai_turns_failure_json_check", table.failureJson, true),
+  timestampCheck("ai_turns_created_at_timestamp_check", table.createdAt),
+  timestampCheck("ai_turns_updated_at_timestamp_check", table.updatedAt),
+  timestampCheck("ai_turns_completed_at_timestamp_check", table.completedAt, true)
+]);
+
+export const aiEvents = sqliteTable("ai_events", {
+  eventId: text("event_id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => aiSessions.id, { onDelete: "cascade", onUpdate: "no action" }),
+  turnId: text("turn_id").references(() => aiTurns.id, { onDelete: "set null", onUpdate: "no action" }),
+  sequence: integer("sequence").notNull(),
+  eventType: text("event_type").notNull(),
+  eventJson: text("event_json").notNull(),
+  observedAt: text("observed_at").notNull()
+}, (table) => [
+  unique("ai_events_session_sequence_unique").on(table.sessionId, table.sequence),
+  index("ai_events_session_sequence_idx").on(table.sessionId, table.sequence),
+  uuidV7Check("ai_events_event_id_uuid_v7_check", table.eventId),
+  uuidV7Check("ai_events_session_id_uuid_v7_check", table.sessionId),
+  nullableUuidV7Check("ai_events_turn_id_uuid_v7_check", table.turnId),
+  check("ai_events_sequence_check", sql`${table.sequence} >= 1`),
+  jsonCheck("ai_events_event_json_check", table.eventJson),
+  timestampCheck("ai_events_observed_at_timestamp_check", table.observedAt)
+]);
+
+export const aiInteractionRequests = sqliteTable("ai_interaction_requests", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => aiSessions.id, { onDelete: "cascade", onUpdate: "no action" }),
+  turnId: text("turn_id").references(() => aiTurns.id, { onDelete: "set null", onUpdate: "no action" }),
+  kind: text("kind").notNull(),
+  state: text("state", { enum: aiInteractionRequestStates }).notNull(),
+  requestJson: text("request_json").notNull(),
+  responseJson: text("response_json"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  index("ai_interaction_requests_session_id_idx").on(table.sessionId),
+  uuidV7Check("ai_interaction_requests_id_uuid_v7_check", table.id),
+  uuidV7Check("ai_interaction_requests_session_id_uuid_v7_check", table.sessionId),
+  nullableUuidV7Check("ai_interaction_requests_turn_id_uuid_v7_check", table.turnId),
+  enumCheck("ai_interaction_requests_state_check", table.state, aiInteractionRequestStates),
+  jsonCheck("ai_interaction_requests_request_json_check", table.requestJson),
+  jsonCheck("ai_interaction_requests_response_json_check", table.responseJson, true),
+  timestampCheck("ai_interaction_requests_created_at_timestamp_check", table.createdAt),
+  timestampCheck("ai_interaction_requests_updated_at_timestamp_check", table.updatedAt)
+]);
+
+export const aiProviderResumeMetadata = sqliteTable("ai_provider_resume_metadata", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => aiSessions.id, { onDelete: "cascade", onUpdate: "no action" }),
+  profileRevision: text("profile_revision").notNull(),
+  runtimeGeneration: integer("runtime_generation").notNull(),
+  processGeneration: integer("process_generation").notNull(),
+  stateJson: text("state_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  uniqueIndex("ai_provider_resume_metadata_session_unique").on(table.sessionId),
+  uuidV7Check("ai_provider_resume_metadata_id_uuid_v7_check", table.id),
+  uuidV7Check("ai_provider_resume_metadata_session_id_uuid_v7_check", table.sessionId),
+  check("ai_provider_resume_metadata_runtime_generation_check", sql`${table.runtimeGeneration} >= 1`),
+  check("ai_provider_resume_metadata_process_generation_check", sql`${table.processGeneration} >= 1`),
+  check("ai_provider_resume_metadata_profile_revision_check", sql`${table.profileRevision} glob 'sha256-ai-profile-v1:*'`),
+  jsonCheck("ai_provider_resume_metadata_state_json_check", table.stateJson),
+  timestampCheck("ai_provider_resume_metadata_created_at_timestamp_check", table.createdAt),
+  timestampCheck("ai_provider_resume_metadata_updated_at_timestamp_check", table.updatedAt)
 ]);
 
 export const taskRuns = sqliteTable("task_runs", {
@@ -586,6 +690,10 @@ export const schema = {
   previews,
   portLeases,
   aiSessions,
+  aiTurns,
+  aiEvents,
+  aiInteractionRequests,
+  aiProviderResumeMetadata,
   taskRuns,
   operations,
   auditEvents
@@ -602,6 +710,10 @@ export const applicationTableNames = [
   "previews",
   "port_leases",
   "ai_sessions",
+  "ai_turns",
+  "ai_events",
+  "ai_interaction_requests",
+  "ai_provider_resume_metadata",
   "task_runs",
   "operations",
   "audit_events"
@@ -627,6 +739,12 @@ export type PortLease = typeof portLeases.$inferSelect;
 export type NewPortLease = typeof portLeases.$inferInsert;
 export type AiSession = typeof aiSessions.$inferSelect;
 export type NewAiSession = typeof aiSessions.$inferInsert;
+export type AiTurn = typeof aiTurns.$inferSelect;
+export type NewAiTurn = typeof aiTurns.$inferInsert;
+export type AiEvent = typeof aiEvents.$inferSelect;
+export type NewAiEvent = typeof aiEvents.$inferInsert;
+export type AiInteractionRequest = typeof aiInteractionRequests.$inferSelect;
+export type NewAiInteractionRequest = typeof aiInteractionRequests.$inferInsert;
 export type TaskRun = typeof taskRuns.$inferSelect;
 export type NewTaskRun = typeof taskRuns.$inferInsert;
 export type Operation = typeof operations.$inferSelect;

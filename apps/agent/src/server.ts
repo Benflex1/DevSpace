@@ -8,6 +8,8 @@ import {
   agentApiV1EndpointByOperation,
   extractDevSpaceProtocolHeaders,
   f10AgentApiV1EndpointByOperation,
+  f11AiAgentApiV1EndpointByOperation,
+  aiEventStreamFrameSchema,
   parseEventCursor,
   type AgentExecutionFailure,
   type SourceInspectionData
@@ -26,6 +28,7 @@ import { classifyFailureCode, createLogger, type StructuredLogger } from "@devsp
 import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./preview-runtime.js";
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
+import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -55,6 +58,7 @@ export interface AgentServerOptions {
   readonly now?: () => Date;
   readonly createId?: () => string;
   readonly logger?: StructuredLogger;
+  readonly aiRuntime?: AiSessionRuntime;
 }
 
 export interface AgentServer {
@@ -295,6 +299,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
+  const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
+    mode: process.env.DEVSPACE_AI_PROVIDER_MODE === "fake" ? "fake" : "codex" });
   const terminalWebSockets = new WebSocketServer({ noServer: true, clientTracking: false,
     maxPayload: 65_537, perMessageDeflate: false, handleProtocols: (protocols) => protocols.size === 1 && protocols.has("devspace.terminal.v1")
       ? "devspace.terminal.v1" : false });
@@ -310,6 +316,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const server = http.createServer(async (request, response) => {
     const fallbackRequestId = createId();
     const url = new URL(request.url ?? "/", "http://agent.local");
+    const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const)
+      .map((operation) => f11AiAgentApiV1EndpointByOperation[operation]!)
+      .find((endpoint) => url.pathname === endpoint.path);
     const selectedEndpoint = request.method === "GET" && url.pathname === healthEndpoint.path ? healthEndpoint
       : request.method === "GET" && url.pathname === runtimeStatusEndpoint.path ? runtimeStatusEndpoint
       : request.method === "POST" && url.pathname === inspectEndpoint.path ? inspectEndpoint
@@ -332,6 +341,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["preview.inspect"].path ? agentApiV1EndpointByOperation["preview.inspect"]
       : request.method === "GET" && url.pathname === snapshotEndpoint.path ? snapshotEndpoint
       : request.method === "GET" && url.pathname === eventEndpoint.path ? eventEndpoint
+      : request.method === "POST" && url.pathname === f11AiAgentApiV1EndpointByOperation["ai-provider.inspect"].path ? f11AiAgentApiV1EndpointByOperation["ai-provider.inspect"]
+      : request.method === "GET" && /^\/v1\/ai-sessions\/[0-9a-f-]+\/events$/u.test(url.pathname) ? f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"]
+      : request.method === "POST" && url.pathname === f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"].path ? f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"]
+      : request.method === "POST" && aiMutationEndpoint !== undefined ? aiMutationEndpoint
       : undefined;
     const projection = extractDevSpaceProtocolHeaders(request.rawHeaders.reduce<[string, string][]>((all, value, index, raw) => {
       if (index % 2 === 0) all.push([value, raw[index + 1] ?? ""]);
@@ -362,9 +375,97 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return requestError(response, requestId, now, { location: "headers", field: null, reason: "malformed" });
     }
 
-    if (url.pathname !== eventEndpoint.path && url.search !== "") return requestError(response, requestId, now, {
+    const isAiStreamPath = /^\/v1\/ai-sessions\/[0-9a-f-]+\/events$/u.test(url.pathname);
+    if (url.pathname !== eventEndpoint.path && !isAiStreamPath && url.search !== "") return requestError(response, requestId, now, {
       location: "query", field: null, reason: "unknown"
     });
+
+    const aiStreamMatch = /^\/v1\/ai-sessions\/([0-9a-f-]+)\/events$/u.exec(url.pathname);
+    if (request.method === "GET" && aiStreamMatch !== null) {
+      const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
+      if ((request.headers["content-length"] ?? "0") !== "0" || request.headers["transfer-encoding"] !== undefined) {
+        return requestError(response, requestId, now, { location: "body", field: null, reason: "inconsistent" });
+      }
+      const query = endpoint.querySchema.safeParse(Object.fromEntries(url.searchParams.entries()));
+      if (!query.success) return requestError(response, requestId, now, { location: "query", field: null, reason: "malformed" });
+      const afterSequence = Number(query.data.afterSequence);
+      const sessionId = aiStreamMatch[1]!;
+      const replay = await aiRuntime.replay(sessionId, afterSequence);
+      response.writeHead(200, { "content-type": endpoint.successContentType, "cache-control": "no-store", connection: "keep-alive" });
+      response.flushHeaders();
+      for (const event of replay) response.write(`${JSON.stringify(event)}\n`);
+      const throughSequence = replay.at(-1)?.sequence ?? afterSequence;
+      const synchronized = aiEventStreamFrameSchema.parse({ schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence });
+      response.write(`${JSON.stringify(synchronized)}\n`);
+      const unsubscribe = await aiRuntime.subscribe(sessionId, throughSequence, (event) => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); });
+      request.once("close", unsubscribe);
+      response.once("close", unsubscribe);
+      return;
+    }
+
+    const aiMutationOperations = ["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const;
+    for (const operation of aiMutationOperations) {
+      const endpoint = f11AiAgentApiV1EndpointByOperation[operation]!;
+      if (request.method !== endpoint.method || url.pathname !== endpoint.path) continue;
+      let body: { data: unknown };
+      try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      const operationId = projection.headers["X-DevSpace-Operation-Id"];
+      if (typeof operationId !== "string") return requestError(response, requestId, now, { location: "headers", field: "X-DevSpace-Operation-Id", reason: "missing" });
+      try {
+        if (operation === "ai-session.start") await aiRuntime.start(body.data as Parameters<AiSessionRuntime["start"]>[0]);
+        else if (operation === "ai-session.resume") throw new Error("ai-capability-unsupported");
+        else if (operation === "ai-session.turn.send") await aiRuntime.sendTurn(body.data as Parameters<AiSessionRuntime["sendTurn"]>[0]);
+        else if (operation === "ai-session.turn.interrupt") await aiRuntime.interrupt(body.data as Parameters<AiSessionRuntime["interrupt"]>[0]);
+        else await aiRuntime.stop(body.data as Parameters<AiSessionRuntime["stop"]>[0]);
+        return sendJson(response, endpoint.successStatus, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: { operationId } }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "ai-provider-failure";
+        const fallbackCode = operation === "ai-session.start" ? "AI_PROFILE_UNAVAILABLE" : "AI_OUTBOX_UNAVAILABLE";
+        const code = message === "ai-profile-unavailable" ? "AI_PROFILE_UNAVAILABLE"
+          : message === "ai-profile-not-found" ? "AI_PROFILE_NOT_FOUND"
+            : message === "ai-capability-unsupported" ? "AI_CAPABILITY_UNSUPPORTED"
+              : message === "ai-turn-state-conflict" ? "AI_TURN_STATE_CONFLICT"
+                : message === "ai-identity-mismatch" ? "AI_IDENTITY_MISMATCH" : fallbackCode;
+        const policy: Record<string, { status: number; retryable: boolean; category: string; incident: boolean }> = {
+          AI_PROFILE_UNAVAILABLE: { status: 503, retryable: true, category: "dependency-unavailable", incident: false },
+          AI_PROFILE_NOT_FOUND: { status: 404, retryable: false, category: "user-error", incident: false },
+          AI_CAPABILITY_UNSUPPORTED: { status: 422, retryable: false, category: "user-error", incident: false },
+          AI_TURN_STATE_CONFLICT: { status: 409, retryable: false, category: "state-conflict", incident: false },
+          AI_IDENTITY_MISMATCH: { status: 409, retryable: false, category: "internal-failure", incident: true },
+          AI_OUTBOX_UNAVAILABLE: { status: 503, retryable: true, category: "dependency-unavailable", incident: true },
+          AI_PROVIDER_TRANSPORT_FAILURE: { status: 502, retryable: true, category: "transport-failure", incident: true }
+        };
+        const selected = policy[code]!; const incidentId = selected.incident ? createId() : null;
+        return sendJson(response, selected.status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code, message: code === "AI_PROFILE_UNAVAILABLE" ? "Codex is unavailable for this workspace." : "The AI session action could not be completed.", retryable: selected.retryable,
+          failure: { code, category: selected.category, incidentId }
+        } }));
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === f11AiAgentApiV1EndpointByOperation["ai-provider.inspect"].path) {
+      const endpoint = f11AiAgentApiV1EndpointByOperation["ai-provider.inspect"];
+      let body: { data: { projectId: string; workspaceId: string; profileId: string } };
+      try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      try { return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: await aiRuntime.inspect(body.data) })); }
+      catch (error) {
+        const code = error instanceof Error && error.message === "ai-profile-not-found" ? "AI_PROFILE_NOT_FOUND" : "AI_INTERNAL_FAILURE";
+        return sendJson(response, code === "AI_PROFILE_NOT_FOUND" ? 404 : 500, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code, message: "The Codex profile could not be inspected.", retryable: code !== "AI_PROFILE_NOT_FOUND", failure: { code, category: code === "AI_PROFILE_NOT_FOUND" ? "user-error" : "internal-failure", incidentId: code === "AI_PROFILE_NOT_FOUND" ? null : createId() }
+        } }));
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"].path) {
+      const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"];
+      let body: { data: { aiSessionId: string; throughSequence: number } };
+      try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      await aiRuntime.acknowledge(body.data.aiSessionId, body.data.throughSequence);
+      return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: body.data }));
+    }
 
     if (request.method === "GET" && url.pathname === healthEndpoint.path) {
       if ((request.headers["content-length"] ?? "0") !== "0" || request.headers["transfer-encoding"] !== undefined) {
