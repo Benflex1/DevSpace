@@ -244,6 +244,19 @@ is available to the cross-origin iframe.
 
 ## Still absent
 
+AI Session Foundation Slice 1A has a committed, explicitly opt-in supervisor capability harness,
+but its corrected hands-on verdict is **blocked**. The proof demonstrates authenticated reconnect
+after the original exec attachment is gone and stable `/proc` process-start identity. It also
+demonstrates that process-group signalling works for a cooperative fixture but is not a race-safe
+production Stop authority: the dedicated rootless environment exposes no writable delegated
+cgroup or equivalent atomic descendant-tree boundary. Production provider launch therefore
+remains blocked pending the prerequisite described in
+`docs/research/ai-session-supervisor-capability-proof.md`. Production AI execution, supervisor
+integration, durable ownership, credentials, F11 handlers, event persistence, Web routes, SQLite
+data, and UI remain absent. The opt-in executable now conditions this blocked result on the
+reviewed cgroup probe tuple; a stronger or malformed future environment yields an explicit
+review-required or probe-failed result instead of replaying the static blocker matrix.
+
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
 editing, rebuild, and AI sessions remain intentionally unimplemented. Preview service-target
