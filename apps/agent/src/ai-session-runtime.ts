@@ -57,7 +57,32 @@ export interface AiSessionRuntimeOptions {
   readonly executablePath?: string;
   readonly now?: () => Date;
   readonly createId?: () => string;
+  /** Agent-private structured diagnostic hook. It never crosses the F11 boundary. */
+  readonly onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void;
 }
+
+export type CodexPrivateFailureObservation = Readonly<{
+  stage: "request" | "turn";
+  kind:
+    | "ContextWindowExceeded"
+    | "SessionBudgetExceeded"
+    | "UsageLimitExceeded"
+    | "ServerOverloaded"
+    | "CyberPolicy"
+    | "ThreadRollbackFailed"
+    | "HttpConnectionFailed"
+    | "ResponseStreamConnectionFailed"
+    | "ResponseStreamDisconnected"
+    | "ResponseTooManyFailedAttempts"
+    | "ActiveTurnNotSteerable"
+    | "BadRequest"
+    | "Unauthorized"
+    | "SandboxError"
+    | "InternalServerError"
+    | "Other"
+    | "Unknown";
+  httpStatusCode: number | null;
+}>;
 
 export interface AiSessionRuntime {
   inspect(input: { projectId: string; workspaceId: string; profileId: string }): Promise<AiProviderProfileProjection>;
@@ -77,6 +102,7 @@ interface SessionRecord {
   readonly events: CanonicalAiEvent[];
   readonly listeners: Set<(event: CanonicalAiEvent) => void>;
   readonly turnBaselines: Map<string, Set<string>>;
+  readonly privateFailures: Map<string, CodexPrivateFailureObservation>;
   adapter: ProviderAdapter | null;
   activeTurnId: string | null;
   nextSequence: number;
@@ -95,6 +121,8 @@ interface AdapterCallbacks {
   readonly outputDelta: (text: string) => Promise<void>;
   readonly activity: (summary: string) => Promise<void>;
   readonly completed: (outcome: "completed" | "interrupted" | "failed") => Promise<void>;
+  readonly privateFailure: (observation: CodexPrivateFailureObservation) => void;
+  readonly failed: (observation: CodexPrivateFailureObservation) => Promise<void>;
 }
 
 export interface CodexProfileRevisionAuthority {
@@ -184,8 +212,47 @@ async function readOutbox(root: string, sessionId: string): Promise<CanonicalAiE
   }
 }
 
+class CodexRequestFailure extends Error {
+  constructor(readonly observation: CodexPrivateFailureObservation) { super("codex-json-rpc-request-failed"); }
+}
+
+function privateHttpStatus(value: unknown): number | null {
+  if (value === null || typeof value !== "object") return null;
+  const candidate = (value as Record<string, unknown>).httpStatusCode;
+  return typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 && candidate <= 65_535 ? candidate : null;
+}
+
+function codexPrivateFailureObservation(stage: CodexPrivateFailureObservation["stage"], value: unknown): CodexPrivateFailureObservation {
+  const unknown = { stage, kind: "Unknown", httpStatusCode: null } as const;
+  if (typeof value === "string") {
+    const kind = ({
+      contextWindowExceeded: "ContextWindowExceeded", sessionBudgetExceeded: "SessionBudgetExceeded", usageLimitExceeded: "UsageLimitExceeded",
+      serverOverloaded: "ServerOverloaded", cyberPolicy: "CyberPolicy", internalServerError: "InternalServerError",
+      unauthorized: "Unauthorized", badRequest: "BadRequest", threadRollbackFailed: "ThreadRollbackFailed", sandboxError: "SandboxError", other: "Other"
+    } as const)[value];
+    return kind === undefined ? unknown : { stage, kind, httpStatusCode: null };
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return unknown;
+  const record = value as Record<string, unknown>;
+  const tagged = ([
+    ["httpConnectionFailed", "HttpConnectionFailed"],
+    ["responseStreamConnectionFailed", "ResponseStreamConnectionFailed"],
+    ["responseStreamDisconnected", "ResponseStreamDisconnected"],
+    ["responseTooManyFailedAttempts", "ResponseTooManyFailedAttempts"],
+    ["activeTurnNotSteerable", "ActiveTurnNotSteerable"]
+  ] as const).find(([key]) => key in record);
+  return tagged === undefined ? unknown : { stage, kind: tagged[1], httpStatusCode: privateHttpStatus(record[tagged[0]]) };
+}
+
+function privateFailureFromError(error: unknown): CodexPrivateFailureObservation | null {
+  return error instanceof CodexRequestFailure ? error.observation : null;
+}
+
 function safeErrorCode(error: unknown): "AI_PROVIDER_TRANSPORT_FAILURE" | "AI_PROVIDER_PROTOCOL_FAILURE" {
-  return error instanceof SyntaxError ? "AI_PROVIDER_PROTOCOL_FAILURE" : "AI_PROVIDER_TRANSPORT_FAILURE";
+  const observation = privateFailureFromError(error);
+  if (observation === null) return error instanceof SyntaxError ? "AI_PROVIDER_PROTOCOL_FAILURE" : "AI_PROVIDER_TRANSPORT_FAILURE";
+  return observation.kind === "HttpConnectionFailed" || observation.kind === "ResponseStreamConnectionFailed" || observation.kind === "ResponseStreamDisconnected"
+    ? "AI_PROVIDER_TRANSPORT_FAILURE" : "AI_PROVIDER_PROTOCOL_FAILURE";
 }
 
 function canonicalPath(value: string): string | null {
@@ -274,9 +341,10 @@ class CodexProvider implements ProviderAdapter {
   private threadId: string | null = null;
   private turnId: string | null = null;
   private buffer = "";
-  private pending = new Map<number, (value: unknown) => void>();
+  private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>();
   private containerDir: string | null = null;
   private dockerBuffer = Buffer.alloc(0);
+  private turnFailure: CodexPrivateFailureObservation | null = null;
   constructor(private readonly input: {
     readonly docker: DockerEngineClient;
     readonly ownership: WorkspaceExecutionContext;
@@ -298,7 +366,8 @@ class CodexProvider implements ProviderAdapter {
     });
     this.stream = await this.input.docker.startExecAttached(execId, false);
     this.stream.on("data", (chunk: Buffer) => this.readDockerFrames(chunk));
-    this.stream.on("error", () => undefined);
+    this.stream.on("error", () => this.rejectPending());
+    this.stream.on("close", () => this.rejectPending());
     await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
     this.write({ method: "initialized" });
     const thread = await this.request("thread/start", {
@@ -309,6 +378,7 @@ class CodexProvider implements ProviderAdapter {
   }
   async sendTurn(_turnId: string, text: string): Promise<void> {
     if (this.threadId === null) throw new Error("codex-thread-not-started");
+    this.turnFailure = null;
     const response = await this.request("turn/start", {
       threadId: this.threadId, input: [{ type: "text", text }],
       sandboxPolicy: { type: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS }
@@ -336,11 +406,23 @@ class CodexProvider implements ProviderAdapter {
   private write(value: unknown): void { this.stream?.write(`${JSON.stringify(value)}\n`); }
   private request(method: string, params: unknown): Promise<unknown> {
     const id = ++this.requestId;
-    this.write({ id, method, params });
     return new Promise((resolve, reject) => {
-      this.pending.set(id, resolve);
-      setTimeout(() => { if (this.pending.delete(id)) reject(new Error("codex-request-timeout")); }, 30_000);
+      const timeout = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (pending === undefined) return;
+        this.pending.delete(id); pending.reject(new Error("codex-request-timeout"));
+      }, 30_000);
+      this.pending.set(id, { resolve, reject, timeout });
+      this.write({ id, method, params });
     });
+  }
+  private rejectPending(): void {
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const request of pending) {
+      clearTimeout(request.timeout);
+      request.reject(new Error("codex-provider-stream-closed"));
+    }
   }
   private readDockerFrames(chunk: Buffer): void {
     this.dockerBuffer = Buffer.concat([this.dockerBuffer, chunk]);
@@ -361,16 +443,33 @@ class CodexProvider implements ProviderAdapter {
   }
   private handle(message: Record<string, unknown>): void {
     if (typeof message.id === "number" && ("result" in message || "error" in message)) {
-      const resolve = this.pending.get(message.id); if (resolve !== undefined) { this.pending.delete(message.id); resolve(message.result); } return;
+      const pending = this.pending.get(message.id);
+      if (pending !== undefined) {
+        this.pending.delete(message.id); clearTimeout(pending.timeout);
+        if ("error" in message) pending.reject(new CodexRequestFailure({ stage: "request", kind: "Unknown", httpStatusCode: null }));
+        else pending.resolve(message.result);
+      }
+      return;
     }
     if (typeof message.method !== "string" || message.params === null || typeof message.params !== "object") return;
     const method = message.method;
     const params = message.params as Record<string, unknown>;
-    if (method === "item/agentMessage/delta" && typeof params.delta === "string") void this.input.callbacks.outputDelta(params.delta);
+    if (method === "error") {
+      const error = params.error;
+      const detail = error !== null && typeof error === "object" ? (error as Record<string, unknown>).codexErrorInfo : null;
+      if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", detail);
+      this.input.callbacks.privateFailure(this.turnFailure);
+    }
+    else if (method === "item/agentMessage/delta" && typeof params.delta === "string") void this.input.callbacks.outputDelta(params.delta);
     else if (method === "item/started") void this.input.callbacks.activity("Provider activity started.");
     else if (method === "turn/completed") {
-      const turn = params.turn; const status = turn !== null && typeof turn === "object" ? (turn as Record<string, unknown>).status : null;
-      void this.input.callbacks.completed(status === "interrupted" ? "interrupted" : status === "failed" ? "failed" : "completed");
+      const turn = params.turn; const turnRecord = turn !== null && typeof turn === "object" ? turn as Record<string, unknown> : null;
+      const status = turnRecord?.status;
+      if (status === "failed") {
+        if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", (turnRecord?.error as Record<string, unknown> | undefined)?.codexErrorInfo);
+        void this.input.callbacks.failed(this.turnFailure);
+        this.turnFailure = null;
+      } else void this.input.callbacks.completed(status === "interrupted" ? "interrupted" : "completed");
     }
   }
 }
@@ -417,7 +516,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     if (!("revisionId" in binding)) throw new Error("ai-session-not-started");
     const events = await readOutbox(stateRoot, binding.aiSessionId);
     const record: SessionRecord = {
-      binding, processGeneration: 1, events, listeners: new Set(), turnBaselines: new Map(), adapter: null, activeTurnId: null,
+      binding, processGeneration: 1, events, listeners: new Set(), turnBaselines: new Map(), privateFailures: new Map(), adapter: null, activeTurnId: null,
       nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve()
     };
     sessions.set(binding.aiSessionId, record); return record;
@@ -442,6 +541,22 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     record.eventChain = current.then(() => undefined, () => undefined);
     await current;
     return event!;
+  }
+
+  function rememberPrivateFailure(record: SessionRecord, turnId: string, observation: CodexPrivateFailureObservation): CodexPrivateFailureObservation {
+    const existing = record.privateFailures.get(turnId);
+    if (existing !== undefined) return existing;
+    record.privateFailures.set(turnId, observation);
+    try { options.onPrivateFailureObservation?.(observation); } catch { /* diagnostics never alter provider lifecycle */ }
+    return observation;
+  }
+
+  async function failTurn(record: SessionRecord, turnId: string, observation: CodexPrivateFailureObservation): Promise<void> {
+    if (record.activeTurnId !== turnId) return;
+    const selected = rememberPrivateFailure(record, turnId, observation);
+    record.activeTurnId = null; record.turnBaselines.delete(turnId); record.privateFailures.delete(turnId);
+    const code = safeErrorCode(new CodexRequestFailure(selected));
+    await emit(record, turnId, "turn.failed", { failure: { code, category: code === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure", incidentId: createId() } });
   }
 
   const runtime: AiSessionRuntime = {
@@ -489,6 +604,12 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
             }
           } else await emit(record, turnId, "turn.files.changed", { files: [], truncated: false });
           await emit(record, turnId, "turn.quiesced", { outcome }); record.turnBaselines.delete(turnId); record.activeTurnId = null;
+        },
+        privateFailure: (observation) => {
+          if (record.activeTurnId !== null) rememberPrivateFailure(record, record.activeTurnId, observation);
+        },
+        failed: async (observation) => {
+          if (record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation);
         }
       };
       let adapter: ProviderAdapter;
@@ -512,8 +633,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       } else record.turnBaselines.set(input.turnId, new Set());
       record.activeTurnId = input.turnId; await emit(record, input.turnId, "turn.accepted", { content: input.content }); await emit(record, input.turnId, "turn.started", {});
       void record.adapter.sendTurn(input.turnId, input.content.text).catch(async (error) => {
-        await emit(record, input.turnId, "turn.failed", { failure: { code: safeErrorCode(error), category: safeErrorCode(error) === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure", incidentId: createId() } });
-        record.activeTurnId = null;
+        await failTurn(record, input.turnId, privateFailureFromError(error) ?? { stage: "request", kind: "Unknown", httpStatusCode: null });
       });
     },
     async interrupt(input) {
