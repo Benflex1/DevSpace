@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment,
   @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
@@ -129,6 +129,12 @@ function managedContext(stateRoot: string): WorkspaceExecutionContext {
   } as unknown as WorkspaceExecutionContext;
 }
 
+async function createCodexTestExecutable(stateRoot: string): Promise<string> {
+  const executablePath = join(stateRoot, "codex-fixture");
+  await writeFile(executablePath, "deterministic codex adapter fixture");
+  return executablePath;
+}
+
 async function pinnedServerNotificationSchema(): Promise<JsonSchema> {
   return JSON.parse(await readFile(new URL("../../../packages/contracts/fixtures/codex-app-server/0.145.0/stable/ServerNotification.json", import.meta.url), "utf8")) as JsonSchema;
 }
@@ -185,10 +191,11 @@ describe("AI session runtime", () => {
   test("Codex adapter sends the pinned managed-container permission policy", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-adapter-test-"));
     const captured: Array<Record<string, unknown>> = [];
-    const executablePath = "/home/benjamin/.local/bin/codex";
+    const executablePath = await createCodexTestExecutable(stateRoot);
     const context = managedContext(stateRoot);
     const managed = { executionContext: () => Promise.resolve(context) } as never;
-    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed, docker: createProtocolDocker(captured).docker, executablePath });
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed, docker: createProtocolDocker(captured).docker, executablePath,
+      codexPreflight: () => undefined } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
@@ -260,8 +267,10 @@ describe("AI session runtime", () => {
         : { id: request.id, result }));
     });
     const context = managedContext(stateRoot);
+    const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath: "/home/benjamin/.local/bin/codex", onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
@@ -291,8 +300,10 @@ describe("AI session runtime", () => {
       setImmediate(() => emit({ id: request.id, result }));
     });
     const context = managedContext(stateRoot);
+    const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath: "/home/benjamin/.local/bin/codex", onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
@@ -319,8 +330,10 @@ describe("AI session runtime", () => {
       setImmediate(() => emit({ id: request.id, result }));
     });
     const context = managedContext(stateRoot);
+    const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath: "/home/benjamin/.local/bin/codex", onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
@@ -346,8 +359,10 @@ describe("AI session runtime", () => {
       setImmediate(() => emit({ id: request.id, result }));
     });
     const context = managedContext(stateRoot);
+    const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath: "/home/benjamin/.local/bin/codex", onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
@@ -369,8 +384,9 @@ describe("AI session runtime", () => {
       if (request.method !== "turn/start") setImmediate(() => emit({ id: request.id, result: request.method === "thread/start" ? { thread: { id: "thread-1" } } : {} }));
     });
     const context = managedContext(stateRoot);
+    const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath: "/home/benjamin/.local/bin/codex" });
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });

@@ -59,6 +59,8 @@ export interface AiSessionRuntimeOptions {
   readonly createId?: () => string;
   /** Agent-private structured diagnostic hook. It never crosses the F11 boundary. */
   readonly onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void;
+  /** Deterministic adapter-test preflight; the server never supplies this hook. */
+  readonly codexPreflight?: () => void | Promise<void>;
 }
 
 export type CodexPrivateFailureObservation = Readonly<{
@@ -566,13 +568,16 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (options.managed === undefined) return publicProfile({ state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" });
       let authority = defaultProfileAuthority();
       try {
-        const executablePath = options.executablePath ?? "/home/benjamin/.local/bin/codex";
-        await verifyCodexExecutable(executablePath);
-        const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
-        if (result.stdout.trim() !== CODEX_APP_SERVER_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
         const context = await options.managed.executionContext(input.projectId, input.workspaceId);
         authority = profileAuthorityForContext(context);
-        await readMinimalCredential();
+        if (options.codexPreflight !== undefined) await options.codexPreflight();
+        else {
+          const executablePath = options.executablePath ?? "/home/benjamin/.local/bin/codex";
+          await verifyCodexExecutable(executablePath);
+          const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
+          if (result.stdout.trim() !== CODEX_APP_SERVER_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
+          await readMinimalCredential();
+        }
         return publicProfile({ state: "available" }, authority);
       } catch (error) {
         if (error instanceof Error && error.message.includes("credential")) return publicProfile({ state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" }, authority);
@@ -618,7 +623,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         adapter = new FakeProvider(callbacks, worktreePath);
       } else {
         if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
-        await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
+        if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
         const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
         adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, callbacks });
       }
