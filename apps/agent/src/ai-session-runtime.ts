@@ -61,6 +61,8 @@ export interface AiSessionRuntimeOptions {
   readonly onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void;
   /** Deterministic adapter-test preflight; the server never supplies this hook. */
   readonly codexPreflight?: () => void | Promise<void>;
+  /** Agent-internal deterministic credential seam; the server never supplies this reader. */
+  readonly codexCredentialReader?: () => Promise<string>;
 }
 
 export type CodexPrivateFailureObservation = Readonly<{
@@ -353,6 +355,7 @@ class CodexProvider implements ProviderAdapter {
     readonly executablePath: string;
     readonly sessionId: string;
     readonly callbacks: AdapterCallbacks;
+    readonly readCredential: () => Promise<string>;
   }) {}
   async start(): Promise<void> {
     const opaque = `${this.input.sessionId.replaceAll("-", "")}-${Date.now().toString(36)}`;
@@ -360,7 +363,7 @@ class CodexProvider implements ProviderAdapter {
     this.containerDir = containerDir;
     const executable = await readFile(this.input.executablePath);
     await this.runUpload(containerDir, executable, "codex");
-    const auth = await readMinimalCredential();
+    const auth = await this.input.readCredential();
     await this.runUpload(`${containerDir}/home`, Buffer.from(auth), "auth.json", { CODEX_HOME: `${containerDir}/home` });
     const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
       command: [`${containerDir}/codex`, "app-server", "--stdio"], workingDirectory: "/workspace",
@@ -517,6 +520,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   const createId = options.createId ?? uuidv7;
   const sessions = new Map<string, SessionRecord>();
   const docker = options.docker ?? new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
+  const readCredential = options.codexCredentialReader ?? readMinimalCredential;
 
   async function recordFor(binding: AiSessionBinding | AiProcessBinding): Promise<SessionRecord> {
     const existing = sessions.get(binding.aiSessionId);
@@ -636,7 +640,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
         if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
         const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
-        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, callbacks });
+        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, callbacks, readCredential });
       }
       record.adapter = adapter; await emit(record, null, "session.started", { processGeneration: record.processGeneration }); await adapter.start(); await emit(record, null, "session.ready", {});
     },
