@@ -84,8 +84,13 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
       terminalInstance.focus();
       xterm.current = terminalInstance;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const sendFrame = (socket: WebSocket, frame: ReturnType<typeof encodeTerminalClientFrame>) => {
+        const payload = new ArrayBuffer(frame.byteLength);
+        new Uint8Array(payload).set(frame);
+        socket.send(payload);
+      };
       const send = (frame: ReturnType<typeof encodeTerminalClientFrame>) => {
-        if (ready && currentSocket?.readyState === WebSocket.OPEN) currentSocket.send(frame);
+        if (ready && currentSocket?.readyState === WebSocket.OPEN) sendFrame(currentSocket, frame);
       };
       let lastColumns = 0;
       let lastRows = 0;
@@ -190,7 +195,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
         resize.disconnect();
         window.removeEventListener("resize", scheduleResize);
         if (ready && isTerminalAttachableState(authoritativeState.current) && currentSocket?.readyState === WebSocket.OPEN) {
-          currentSocket.send(encodeTerminalClientFrame({ type: "detach" }));
+          sendFrame(currentSocket, encodeTerminalClientFrame({ type: "detach" }));
         }
         if (currentSocket?.readyState !== WebSocket.CLOSED) currentSocket?.close();
         terminalInstance.dispose();

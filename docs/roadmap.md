@@ -343,22 +343,37 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
 
 ### Toolchain acceleration — TypeScript 7
 
-**Status: ⏳ Immediate next slice**
+**Status: ✅ Complete — July 28, 2026**
 
 TypeScript 7 is now stable and is a high-leverage delivery accelerator. DevSpace currently uses
 TypeScript 5.9.3, so this migration should happen before the next large product slice.
 
-Bounded migration scope:
+Measured on the current development server with `/usr/bin/time` after a clean locked install:
 
-- ⏳ Record reproducible baselines for `pnpm typecheck`, TypeScript build steps, `pnpm test`, and CI
-- ⏳ Adopt TypeScript 7 for command-line typechecking and project builds where compatible
-- ⏳ Keep TypeScript 6 side-by-side only for tooling that still needs the legacy compiler API
-- ⏳ Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, Playwright, declaration
+| `pnpm typecheck` | TypeScript 5.9.3 | TypeScript 7.0.2 |
+| --- | ---: | ---: |
+| warm 1 | 56.78 s / 552,656 KB | 18.19 s / 455,908 KB |
+| warm 2 | 46.38 s / 453,724 KB | 18.56 s / 453,412 KB |
+| warm 3 | 46.33 s / 455,496 KB | 18.41 s / 457,904 KB |
+
+TypeScript 7 is the native `tsc` CLI for all repository typecheck and build commands. The standard
+`typescript` dependency remains a narrow `@typescript/typescript6` alias because the workspace
+graph checker and `typescript-eslint` require the legacy programmatic API; its `tsc6` command is
+also checked in CI. The sole required configuration change removed the obsolete `baseUrl` and made
+the existing path aliases explicitly relative. Default TypeScript 7 parallelism was retained: the
+measured path is already materially faster without fixed worker contention on the 4-core CI host.
+
+Completed migration scope:
+
+- ✅ Record reproducible baselines for `pnpm typecheck`, TypeScript build steps, `pnpm test`, and CI
+- ✅ Adopt TypeScript 7 for command-line typechecking and project builds where compatible
+- ✅ Keep TypeScript 6 side-by-side only for tooling that still needs the legacy compiler API
+- ✅ Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, Playwright, declaration
   output, and the monorepo tsconfig/project-reference hierarchy
-- ⏳ Fix TypeScript 6/7 configuration changes that are directly required by DevSpace
-- ⏳ Benchmark the final local and self-hosted CI results and select conservative fixed
+- ✅ Fix TypeScript 6/7 configuration changes that are directly required by DevSpace
+- ✅ Benchmark the final local and self-hosted CI results and select conservative fixed
   `--checkers`/`--builders` values for the available CPU/RAM
-- ⏳ Document the compatibility arrangement and rollback path
+- ✅ Document the compatibility arrangement and rollback path
 
 Stop rule:
 
