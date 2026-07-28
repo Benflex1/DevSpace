@@ -16,7 +16,8 @@ const turnId = "018f1f34-7000-7000-8000-000000000004";
 const revisionId = "018f1f34-7000-7000-8000-000000000005";
 const profileRevision = `sha256-ai-profile-v1:${"b".repeat(64)}`;
 const runtimePlanHash = `sha256-project-options-v1:${"a".repeat(64)}`;
-const fixtureCredential = JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "fixture-access-token" } });
+const fixtureCredentialToken = "f".repeat(32);
+const fixtureCredential = JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: fixtureCredentialToken } });
 const fixtureCredentialReader = (): Promise<string> => Promise.resolve(fixtureCredential);
 
 const binding = {
@@ -249,8 +250,8 @@ describe("AI session runtime", () => {
       expect(threadStart?.params).toMatchObject({ approvalPolicy: "never", sandbox: "danger-full-access" });
       expect(turnStart?.params).toMatchObject({ sandboxPolicy: { type: "externalSandbox", networkAccess: "enabled" } });
       expect(requests.every((request) => request.method !== "thread/start" || request.params !== undefined)).toBe(true);
-      expect(JSON.stringify(captured)).not.toContain("fixture-access-token");
-      expect(JSON.stringify(await runtime.replay(sessionId, 0))).not.toContain("fixture-access-token");
+      expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);
+      expect(JSON.stringify(await runtime.replay(sessionId, 0))).not.toContain(fixtureCredentialToken);
       expect(CODEX_EXECUTABLE_SHA256).toHaveLength(64);
       expect((await runtime.replay(sessionId, 0)).every((event) => event.profile.profileRevision === profile.profileRevision)).toBe(true);
     } finally {
