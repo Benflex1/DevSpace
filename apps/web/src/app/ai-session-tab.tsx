@@ -35,6 +35,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
       const next = { ...existing };
       if (event.eventType === "turn.accepted") next.content = event.payload.content as Turn["content"];
       if (event.eventType === "turn.started") next.state = "running";
+      if (event.eventType === "turn.activity.started" || event.eventType === "turn.output.delta") next.state = "running";
       if (event.eventType === "turn.output.delta") next.outputText += String(event.payload.text ?? "");
       if (event.eventType === "turn.activity.started") next.activities = [...next.activities, String((event.payload.presentation as { summary?: unknown })?.summary ?? "Activity")];
       if (event.eventType === "turn.files.changed") next.changedFiles = event.payload as unknown as FileSummary;

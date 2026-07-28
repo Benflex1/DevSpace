@@ -24,6 +24,15 @@ const MAX_OUTBOX_EVENTS = 2048;
 const ACK_RETAINED_EVENTS = 512;
 const MAX_GIT_PATHS = 256;
 const PRIVATE_CONTAINER_ROOT = "/tmp/devspace-ai";
+const CODEX_APPROVAL_POLICY = "never" as const;
+const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
+const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
+const CODEX_NETWORK_ACCESS = "enabled" as const;
+const CODEX_CREDENTIAL_SOURCE_IDENTITY = "deployment-owned-codex-auth-v1" as const;
+const CODEX_CAPABILITIES = Object.freeze({
+  inspect: true, start: true, resume: false, sendTurn: true, interrupt: true,
+  approvals: false, structuredInput: false, stop: true, streamEvents: true
+});
 
 export interface AiSessionBinding {
   readonly projectId: string;
@@ -88,27 +97,75 @@ interface AdapterCallbacks {
   readonly completed: (outcome: "completed" | "interrupted" | "failed") => Promise<void>;
 }
 
-function profileRevision(): string {
+export interface CodexProfileRevisionAuthority {
+  readonly providerVersion: string;
+  readonly transport: string;
+  readonly threadSandbox: string;
+  readonly turnSandboxPolicy: string;
+  readonly networkAccess: string;
+  readonly approvalPolicy: string;
+  readonly declaredCapabilities: Readonly<Record<string, boolean>>;
+  readonly credentialSourceIdentity: string;
+  readonly runtimeIdentity: Readonly<{
+    projectId: string; workspaceId: string; revisionId: string; runtimePlanHash: string; runtimeGeneration: number;
+  }> | null;
+  readonly displayName?: string;
+}
+
+export function codexProfileRevisionForAuthority(input: CodexProfileRevisionAuthority): string {
   const identity = JSON.stringify({
     profileId: CODEX_PROFILE_ID,
     provider: CODEX_PROFILE_ID,
-    version: CODEX_APP_SERVER_CLI_VERSION,
-    transport: "stdio-jsonl",
-    capabilities: { resume: false, interrupt: true, approvals: false, structuredInput: false }
+    providerVersion: input.providerVersion,
+    transport: input.transport,
+    threadSandbox: input.threadSandbox,
+    turnSandboxPolicy: input.turnSandboxPolicy,
+    networkAccess: input.networkAccess,
+    approvalPolicy: input.approvalPolicy,
+    declaredCapabilities: input.declaredCapabilities,
+    credentialSourceIdentity: input.credentialSourceIdentity,
+    runtimeIdentity: input.runtimeIdentity
   });
   return `sha256-ai-profile-v1:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
-function publicProfile(availability: AiProviderProfileProjection["availability"]): AiProviderProfileProjection {
+function defaultProfileAuthority(): CodexProfileRevisionAuthority {
+  return {
+    providerVersion: CODEX_APP_SERVER_CLI_VERSION, transport: "stdio-jsonl", threadSandbox: CODEX_THREAD_SANDBOX,
+    turnSandboxPolicy: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS, approvalPolicy: CODEX_APPROVAL_POLICY,
+    declaredCapabilities: CODEX_CAPABILITIES, credentialSourceIdentity: CODEX_CREDENTIAL_SOURCE_IDENTITY, runtimeIdentity: null
+  };
+}
+
+function profileRevision(): string { return codexProfileRevisionForAuthority(defaultProfileAuthority()); }
+
+function profileAuthorityForContext(context: WorkspaceExecutionContext): CodexProfileRevisionAuthority {
+  return {
+    ...defaultProfileAuthority(),
+    runtimeIdentity: {
+      projectId: context.projectId, workspaceId: context.workspaceId, revisionId: context.revisionId,
+      runtimePlanHash: context.runtimePlanHash, runtimeGeneration: context.generation
+    }
+  };
+}
+
+function profileRevisionForBinding(binding: AiSessionBinding): string {
+  return codexProfileRevisionForAuthority({
+    ...defaultProfileAuthority(),
+    runtimeIdentity: {
+      projectId: binding.projectId, workspaceId: binding.workspaceId, revisionId: binding.revisionId,
+      runtimePlanHash: binding.runtimePlanHash, runtimeGeneration: binding.runtimeGeneration
+    }
+  });
+}
+
+function publicProfile(availability: AiProviderProfileProjection["availability"], authority = defaultProfileAuthority()): AiProviderProfileProjection {
   return aiProviderProfileProjectionSchema.parse({
     profileId: CODEX_PROFILE_ID,
-    profileRevision: profileRevision(),
+    profileRevision: codexProfileRevisionForAuthority(authority),
     provider: CODEX_PROFILE_ID,
     displayName: "Codex",
-    capabilities: {
-      inspect: true, start: true, resume: false, sendTurn: true, interrupt: true,
-      approvals: false, structuredInput: false, stop: true, streamEvents: true
-    },
+    capabilities: CODEX_CAPABILITIES,
     availability
   });
 }
@@ -176,6 +233,8 @@ async function gitBaseline(worktreePath: string): Promise<Set<string>> {
 class FakeProvider implements ProviderAdapter {
   private interrupted = false;
   private stopped = false;
+  private releaseLongTurn: (() => void) | null = null;
+  private longTurnTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(private readonly callbacks: AdapterCallbacks, private readonly worktreePath: string | null) {}
   async start(): Promise<void> { return; }
   async sendTurn(_turnId: string, text: string): Promise<void> {
@@ -184,16 +243,29 @@ class FakeProvider implements ProviderAdapter {
     if (text.includes("devspace-ai-beta-check.txt") && this.worktreePath !== null) {
       await writeFile(path.join(this.worktreePath, "devspace-ai-beta-check.txt"), "DevSpace AI beta check", { mode: 0o600 });
     }
-    const chunks = text === "long" ? ["I am ", "still ", "working ", "on it."] : ["Hello from the deterministic provider."];
+    if (text === "long") {
+      await this.callbacks.activity("Deterministic provider is inspecting the workspace.");
+      await this.callbacks.outputDelta("I am still working on it.");
+      await new Promise<void>((resolve) => {
+        this.releaseLongTurn = resolve;
+        this.longTurnTimer = setTimeout(resolve, 30_000);
+        if (this.interrupted || this.stopped) resolve();
+      });
+      if (this.longTurnTimer !== null) clearTimeout(this.longTurnTimer);
+      this.longTurnTimer = null; this.releaseLongTurn = null;
+      await this.callbacks.completed(this.interrupted || this.stopped ? "interrupted" : "completed");
+      return;
+    }
+    const chunks = ["Hello from the deterministic provider."];
     for (const chunk of chunks) {
-      await new Promise((resolve) => setTimeout(resolve, text === "long" ? 100 : 8));
+      await new Promise((resolve) => setTimeout(resolve, 8));
       if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
       await this.callbacks.outputDelta(chunk);
     }
     await this.callbacks.completed("completed");
   }
-  async interrupt(): Promise<void> { this.interrupted = true; }
-  async stop(): Promise<void> { this.stopped = true; }
+  async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); }
+  async stop(): Promise<void> { this.stopped = true; this.releaseLongTurn?.(); }
 }
 
 class CodexProvider implements ProviderAdapter {
@@ -229,13 +301,18 @@ class CodexProvider implements ProviderAdapter {
     this.stream.on("error", () => undefined);
     await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
     this.write({ method: "initialized" });
-    const thread = await this.request("thread/start", { cwd: "/workspace", approvalPolicy: "never", sandbox: "workspace-write" }) as { thread?: { id?: string } };
+    const thread = await this.request("thread/start", {
+      cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, sandbox: CODEX_THREAD_SANDBOX
+    }) as { thread?: { id?: string } };
     this.threadId = typeof thread.thread?.id === "string" ? thread.thread.id : null;
     if (this.threadId === null) throw new Error("codex-thread-id-missing");
   }
   async sendTurn(_turnId: string, text: string): Promise<void> {
     if (this.threadId === null) throw new Error("codex-thread-not-started");
-    const response = await this.request("turn/start", { threadId: this.threadId, input: [{ type: "text", text }] }) as { turn?: { id?: string } };
+    const response = await this.request("turn/start", {
+      threadId: this.threadId, input: [{ type: "text", text }],
+      sandboxPolicy: { type: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS }
+    }) as { turn?: { id?: string } };
     this.turnId = typeof response.turn?.id === "string" ? response.turn.id : this.turnId;
   }
   async interrupt(): Promise<void> {
@@ -351,7 +428,11 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const previous = record.eventChain;
     const current = previous.then(async () => {
       event = canonicalAiEventSchema.parse({ schemaVersion: "devspace.ai-event/v1", eventId: createId(), sessionId: record.binding.aiSessionId,
-        turnId, sequence: record.nextSequence++, observedAt: now().toISOString(), profile: { profileId: CODEX_PROFILE_ID, profileRevision: profileRevision(), provider: CODEX_PROFILE_ID },
+        turnId, sequence: record.nextSequence++, observedAt: now().toISOString(), profile: {
+          profileId: CODEX_PROFILE_ID,
+          profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
+          provider: CODEX_PROFILE_ID
+        },
         processGeneration: record.processGeneration, eventType, payload });
       await mkdir(path.dirname(outboxPath(stateRoot, record.binding.aiSessionId)), { recursive: true, mode: 0o700 });
       await appendFile(outboxPath(stateRoot, record.binding.aiSessionId), `${JSON.stringify(event)}\n`, { mode: 0o600 });
@@ -368,26 +449,29 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (input.profileId !== CODEX_PROFILE_ID) throw new Error("ai-profile-not-found");
       if (mode === "fake") return publicProfile({ state: "available" });
       if (options.managed === undefined) return publicProfile({ state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" });
+      let authority = defaultProfileAuthority();
       try {
         const executablePath = options.executablePath ?? "/home/benjamin/.local/bin/codex";
         await verifyCodexExecutable(executablePath);
         const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
         if (result.stdout.trim() !== CODEX_APP_SERVER_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
-        await options.managed.executionContext(input.projectId, input.workspaceId);
+        const context = await options.managed.executionContext(input.projectId, input.workspaceId);
+        authority = profileAuthorityForContext(context);
         await readMinimalCredential();
-        return publicProfile({ state: "available" });
+        return publicProfile({ state: "available" }, authority);
       } catch (error) {
-        if (error instanceof Error && error.message.includes("credential")) return publicProfile({ state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" });
-        if (error instanceof Error && error.message.includes("identity")) return publicProfile({ state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" });
-        if (error instanceof Error && error.message.includes("integrity")) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
-        return publicProfile({ state: "unavailable", code: "EXECUTABLE_MISSING" });
+        if (error instanceof Error && error.message.includes("credential")) return publicProfile({ state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" }, authority);
+        if (error instanceof Error && error.message.includes("identity")) return publicProfile({ state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" }, authority);
+        if (error instanceof Error && error.message.includes("integrity")) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" }, authority);
+        return publicProfile({ state: "unavailable", code: "EXECUTABLE_MISSING" }, authority);
       }
     },
     async start(binding) {
       const record = await recordFor(binding);
       if (record.adapter !== null) return;
+      if (mode === "codex" && binding.profileRevision !== profileRevisionForBinding(binding)) throw new Error("ai-profile-revision-mismatch");
       const profile = await runtime.inspect(binding);
-      if (profile.availability.state !== "available") throw new Error("ai-profile-unavailable");
+      if (profile.availability.state !== "available" || (mode === "codex" && profile.profileRevision !== binding.profileRevision)) throw new Error("ai-profile-unavailable");
       const callbacks: AdapterCallbacks = {
         outputDelta: async (text) => { await emit(record, record.activeTurnId, "turn.output.delta", { stream: "assistant", text }); },
         activity: async (summary) => { const activityId = createId(); await emit(record, record.activeTurnId, "turn.activity.started", { activityId, presentation: { kind: "analysis", summary } });
