@@ -413,6 +413,64 @@ export function spawnConfigurationContainsSecret(argv, environment, secret) {
       key.includes(secret) || String(item).includes(secret));
 }
 
+export class ProofOperationAbortedError extends Error {
+  constructor() {
+    super("proof-operation-aborted");
+    this.name = "ProofOperationAbortedError";
+    this.code = "PROOF_OPERATION_ABORTED";
+  }
+}
+
+export function isProofOperationAborted(error) {
+  return error instanceof ProofOperationAbortedError
+    || error?.code === "PROOF_OPERATION_ABORTED";
+}
+
+export class ProofOperationFence {
+  constructor(cleanup, signal, counters = null) {
+    if (cleanup === null || typeof cleanup !== "object"
+      || typeof cleanup.state !== "string"
+      || signal === null || typeof signal !== "object"
+      || typeof signal.aborted !== "boolean"
+      || (counters !== null && !(counters instanceof Map))) {
+      throw new Error("invalid-proof-operation-fence");
+    }
+    this.cleanup = cleanup;
+    this.signal = signal;
+    this.counters = counters;
+  }
+  assertOpen() {
+    if (this.signal.aborted || this.cleanup.state !== "open") {
+      throw new ProofOperationAbortedError();
+    }
+  }
+  mark(sideEffect) {
+    this.assertOpen();
+    if (this.counters !== null) {
+      this.counters.set(sideEffect, (this.counters.get(sideEffect) ?? 0) + 1);
+    }
+  }
+  async run(sideEffect, operation) {
+    if (typeof sideEffect !== "string" || sideEffect === ""
+      || typeof operation !== "function") throw new Error("invalid-proof-operation");
+    this.mark(sideEffect);
+    const result = await operation();
+    this.assertOpen();
+    return result;
+  }
+}
+
+export function beginProofShutdown(cleanup, controller) {
+  if (cleanup === null || typeof cleanup?.cleanup !== "function"
+    || controller === null || typeof controller?.abort !== "function"
+    || typeof controller.signal?.aborted !== "boolean") {
+    throw new Error("invalid-proof-shutdown");
+  }
+  const cleanupPromise = cleanup.cleanup();
+  if (!controller.signal.aborted) controller.abort(new ProofOperationAbortedError());
+  return cleanupPromise;
+}
+
 export class CleanupLifecycle {
   #containers = new Set();
   #roots = new Set();

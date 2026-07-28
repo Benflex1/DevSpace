@@ -8,8 +8,9 @@ import process from "node:process";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import {
-  classifyCgroupProbe, CleanupLifecycle, deriveSocketPath, DockerMultiplexParser, parseOwnershipRecord,
-  parseReadinessFrames, spawnConfigurationContainsSecret
+  beginProofShutdown, classifyCgroupProbe, CleanupLifecycle, deriveSocketPath,
+  DockerMultiplexParser, isProofOperationAborted, parseOwnershipRecord, parseReadinessFrames,
+  ProofOperationAbortedError, ProofOperationFence, spawnConfigurationContainsSecret
 } from "./core.mjs";
 
 const SOCKET = process.env.DEVSPACE_DOCKER_SOCKET_PATH;
@@ -21,7 +22,8 @@ if (SOCKET !== "/run/devspace-docker/docker.sock") {
   throw new Error("proof-requires-dedicated-container-socket");
 }
 
-function api(
+function dockerRequest(
+  operation,
   method,
   requestPath,
   body,
@@ -31,6 +33,7 @@ function api(
 ) {
   const encoded = body === undefined ? undefined
     : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
+  operation?.mark("docker-request");
   return new Promise((resolve, reject) => {
     const request = http.request({
       socketPath: SOCKET, method, path: requestPath,
@@ -48,6 +51,7 @@ function api(
       response.on("end", async () => {
         try {
           await startedGate;
+          operation?.assertOpen();
           if (accepted.includes(response.statusCode ?? 0)) resolve(Buffer.concat(chunks));
           else {
             const responseBody = Buffer.concat(chunks).toString("utf8");
@@ -62,20 +66,39 @@ function api(
         } catch (error) { reject(error); }
       });
     });
+    const abort = () => request.destroy(new ProofOperationAbortedError());
+    operation?.signal.addEventListener("abort", abort, { once: true });
     request.setTimeout(10_000, () => request.destroy(new Error("docker-api-timeout")));
     request.on("error", reject);
+    request.on("close", () => operation?.signal.removeEventListener("abort", abort));
+    operation?.assertOpen();
     if (encoded !== undefined) request.write(encoded);
     request.end();
     const startedGate = onStarted === null ? Promise.resolve() : Promise.resolve().then(onStarted);
     startedGate.catch((error) => request.destroy(error));
   });
 }
-async function json(method, requestPath, body, accepted) {
-  const text = (await api(method, requestPath, body, accepted)).toString("utf8");
+function api(operation, method, requestPath, body, accepted, contentType, onStarted) {
+  if (!(operation instanceof ProofOperationFence)) throw new Error("proof-operation-fence-required");
+  return dockerRequest(
+    operation, method, requestPath, body, accepted, contentType, onStarted
+  );
+}
+function cleanupApi(method, requestPath, body, accepted, contentType, onStarted) {
+  return dockerRequest(
+    null, method, requestPath, body, accepted, contentType, onStarted
+  );
+}
+async function json(operation, method, requestPath, body, accepted) {
+  const text = (await api(operation, method, requestPath, body, accepted)).toString("utf8");
+  try { return JSON.parse(text); } catch { throw new Error("docker-json-invalid"); }
+}
+async function cleanupJson(method, requestPath, body, accepted) {
+  const text = (await cleanupApi(method, requestPath, body, accepted)).toString("utf8");
   try { return JSON.parse(text); } catch { throw new Error("docker-json-invalid"); }
 }
 async function removeContainer(id) {
-  await api("DELETE", `/containers/${id}?force=1`, undefined, [204, 404]);
+  await cleanupApi("DELETE", `/containers/${id}?force=1`, undefined, [204, 404]);
 }
 
 function createCleanupCoordinator(runId) {
@@ -84,8 +107,8 @@ function createCleanupCoordinator(runId) {
     removeRoot: (root) => rm(root, { recursive: true, force: true }),
     audit: async () => {
       const filters = encodeURIComponent(JSON.stringify({ label: [`${LABEL}=${runId}`] }));
-      const remaining = await json("GET", `/containers/json?all=1&filters=${filters}`);
-      const named = (await json("GET", "/containers/json?all=1"))
+      const remaining = await cleanupJson("GET", `/containers/json?all=1&filters=${filters}`);
+      const named = (await cleanupJson("GET", "/containers/json?all=1"))
         .filter((item) => item.Names?.some((name) =>
           name.startsWith(`/devspace-ai-proof-${runId}`)));
       if (remaining.length > 0 || named.length > 0) throw new Error("proof-container-audit-failed");
@@ -112,16 +135,19 @@ function createLifecycleHooks({ failStage = null, pauseStage = null, signal = nu
   };
 }
 
-async function createExec(containerId, command, counter) {
+async function createExec(operation, containerId, command, counter) {
+  operation.assertOpen();
   counter?.set(containerId, (counter.get(containerId) ?? 0) + 1);
-  const response = await json("POST", `/containers/${containerId}/exec`, {
+  const response = await json(operation, "POST", `/containers/${containerId}/exec`, {
     AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: false,
     Cmd: command, WorkingDir: "/tooling/ai-supervisor-proof", Env: []
   });
+  operation.assertOpen();
   return response.Id;
 }
 
-function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) {
+function startExec(operation, execId, stdin, { readiness = false, onStarted = null } = {}) {
+  operation.mark("docker-exec-start");
   const encoded = Buffer.from('{"Detach":false,"Tty":false}');
   return new Promise((resolve, reject) => {
     const request = http.request({
@@ -138,9 +164,15 @@ function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) 
     let readinessObserved = false;
     let readinessTimer;
     let startGateReady = onStarted === null;
+    let upgradedSocket;
+    const abort = () => {
+      upgradedSocket?.destroy();
+      request.destroy(new ProofOperationAbortedError());
+    };
     function finish(socket, requireEnd) {
       if (settled) return;
       try {
+        operation.assertOpen();
         if (requireEnd) parser.finish(); else parser.assertBoundary();
         if (readiness && parser.frameCount !== 1) throw new Error("supervisor-readiness-frame-count");
         const streams = { stdout: [], stderr: [] };
@@ -152,6 +184,7 @@ function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) 
         if (readiness) parseReadinessFrames(frames);
         settled = true;
         clearTimeout(timer);
+        operation.signal.removeEventListener("abort", abort);
         if (readiness) socket.destroy();
         resolve({ ...output, socket });
       } catch (error) {
@@ -169,9 +202,16 @@ function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) 
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      operation.signal.removeEventListener("abort", abort);
       reject(error);
     }
     request.once("upgrade", (_response, socket, head) => {
+      upgradedSocket = socket;
+      try { operation.assertOpen(); } catch (error) {
+        socket.destroy();
+        fail(error);
+        return;
+      }
       const consume = (chunk) => {
         try {
           const parsed = parser.push(Buffer.from(chunk));
@@ -198,13 +238,26 @@ function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) 
       socket.on("data", consume);
       socket.once("end", () => finish(socket, true));
       socket.once("error", fail);
+      try {
+        operation.mark("control-input");
+      } catch (error) {
+        socket.destroy();
+        fail(error);
+        return;
+      }
       socket.write(Buffer.from(`${stdin}\n`));
       if (onStarted !== null) {
         Promise.resolve().then(onStarted).then(() => {
-          startGateReady = true;
-          if (readinessObserved) {
-            clearTimeout(readinessTimer);
-            readinessTimer = setTimeout(() => finish(socket, false), 20);
+          try {
+            operation.assertOpen();
+            startGateReady = true;
+            if (readinessObserved) {
+              clearTimeout(readinessTimer);
+              readinessTimer = setTimeout(() => finish(socket, false), 20);
+            }
+          } catch (error) {
+            socket.destroy();
+            fail(error);
           }
         }, (error) => {
           socket.destroy();
@@ -214,17 +267,22 @@ function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) 
     });
     request.once("response", (response) => fail(new Error(`exec-start-http-${response.statusCode}`)));
     request.once("error", fail);
+    operation.signal.addEventListener("abort", abort, { once: true });
+    operation.assertOpen();
     request.end(encoded);
   });
 }
 
-async function uploadTooling(containerId, hooks) {
+async function uploadTooling(operation, containerId, hooks) {
+  operation.mark("archive-create");
   const repositoryRoot = path.dirname(path.dirname(TOOL_ROOT));
   const archive = spawnSync("tar", ["-C", repositoryRoot, "-cf", "-", "tooling/ai-supervisor-proof"], {
     encoding: null, maxBuffer: 8 * 1024 * 1024
   });
   if (archive.status !== 0) throw new Error("proof-archive-failed");
+  operation.assertOpen();
   await api(
+    operation,
     "PUT",
     `/containers/${containerId}/archive?path=/`,
     archive.stdout,
@@ -232,12 +290,16 @@ async function uploadTooling(containerId, hooks) {
     "application/x-tar",
     () => hooks?.reached("during-archive-upload")
   );
+  operation.assertOpen();
 }
 
-async function createContainer(runId, suffix, cleanup, hooks = null, fixedName = null) {
-  cleanup.assertOpen();
+async function createContainer(
+  operation, runId, suffix, cleanup, hooks = null, fixedName = null
+) {
+  operation.assertOpen();
   const name = fixedName ?? `devspace-ai-proof-${runId}-${suffix}`;
-  const creation = json("POST", `/containers/create?name=${name}`, {
+  operation.mark("container-create");
+  const creation = cleanupJson("POST", `/containers/create?name=${name}`, {
     Image: IMAGE,
     Cmd: ["node", "-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
     WorkingDir: "/tmp",
@@ -250,14 +312,16 @@ async function createContainer(runId, suffix, cleanup, hooks = null, fixedName =
     }
   }).then((created) => created.Id);
   const id = await cleanup.trackCreation(creation);
-  cleanup.assertOpen();
+  operation.assertOpen();
   await hooks?.reached("after-container-create");
-  await uploadTooling(id, hooks);
-  cleanup.assertOpen();
-  await api("POST", `/containers/${id}/start`);
-  cleanup.assertOpen();
+  operation.assertOpen();
+  await uploadTooling(operation, id, hooks);
+  operation.assertOpen();
+  await api(operation, "POST", `/containers/${id}/start`);
+  operation.assertOpen();
   await hooks?.reached("after-start");
-  const inspected = await json("GET", `/containers/${id}/json`);
+  operation.assertOpen();
+  const inspected = await json(operation, "GET", `/containers/${id}/json`);
   if (inspected.Id !== id || inspected.State.Running !== true) throw new Error("container-identity-unproven");
   return { id, name };
 }
@@ -294,20 +358,27 @@ const request = (record, action, payload = null, requestId = randomUUID()) => ({
   requestId
 });
 
-async function helper(containerId, control, counter, hooks = null) {
-  const execId = await createExec(containerId, [
+async function helper(operation, containerId, control, counter, hooks = null) {
+  operation.assertOpen();
+  const execId = await createExec(operation, containerId, [
     "node", "/tooling/ai-supervisor-proof/control-client.mjs"
   ], counter);
-  const output = await startExec(execId, JSON.stringify(control), {
+  operation.assertOpen();
+  const output = await startExec(operation, execId, JSON.stringify(control), {
     onStarted: () => hooks?.reached("during-helper-reconnect")
   });
+  operation.assertOpen();
   if (output.stderr !== "") throw new Error("helper-private-diagnostic");
   let response;
   try { response = JSON.parse(output.stdout.trim()); } catch { throw new Error("helper-response-invalid"); }
-  return { execId, response, inspection: await json("GET", `/exec/${execId}/json`) };
+  operation.assertOpen();
+  const inspection = await json(operation, "GET", `/exec/${execId}/json`);
+  operation.assertOpen();
+  return { execId, response, inspection };
 }
 
 async function launch(
+  operation,
   runId,
   stateRoot,
   suffix,
@@ -317,10 +388,13 @@ async function launch(
   hooks = null,
   identity = {}
 ) {
-  const container = await createContainer(runId, suffix, cleanup, hooks);
-  const execId = await createExec(container.id, [
+  operation.assertOpen();
+  const container = await createContainer(operation, runId, suffix, cleanup, hooks);
+  operation.assertOpen();
+  const execId = await createExec(operation, container.id, [
     "node", "/tooling/ai-supervisor-proof/supervisor.mjs"
   ], counter);
+  operation.assertOpen();
   const bound = binding(
     container.id,
     execId,
@@ -333,18 +407,22 @@ async function launch(
     format: "devspace.ai-supervisor-proof-bootstrap/v2",
     credential, socketPath, binding: bound, fixtureMode
   };
-  const initial = await startExec(execId, JSON.stringify(bootstrap), {
+  const initial = await startExec(operation, execId, JSON.stringify(bootstrap), {
     readiness: true,
     onStarted: () => hooks?.reached("during-supervisor-bootstrap")
   });
-  cleanup.assertOpen();
-  const execInspection = await json("GET", `/exec/${execId}/json`);
+  operation.assertOpen();
+  const execInspection = await json(operation, "GET", `/exec/${execId}/json`);
   if (execInspection.ID !== execId || execInspection.ContainerID !== container.id
     || !execInspection.Running || !Number.isSafeInteger(execInspection.Pid)) {
     throw new Error("docker-exec-identity-unproven");
   }
   const provisional = { socketPath, credential, binding: bound, ownership: null };
-  const established = await helper(container.id, request(provisional, "establish"), counter);
+  operation.assertOpen();
+  const established = await helper(
+    operation, container.id, request(provisional, "establish"), counter
+  );
+  operation.assertOpen();
   if (!established.response.ok) throw new Error("supervisor-establish-rejected");
   const ownership = {
     ...established.response.result.ownership,
@@ -359,9 +437,13 @@ async function launch(
     credential, socketPath, binding: bound, ownership,
     containerId: container.id, supervisorExecId: execId
   };
+  operation.mark("ownership-record-write");
   await writeFile(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+  operation.assertOpen();
   await chmod(recordPath, 0o600);
+  operation.assertOpen();
   await hooks?.reached("after-ownership-record-write");
+  operation.assertOpen();
   if ((await stat(recordPath)).mode & 0o077) throw new Error("ownership-record-permissions");
   return { container, execId, execInspection, record, recordPath, initial };
 }
@@ -378,34 +460,55 @@ async function loadRecord(recordPath, expectedBinding, expectedOwnership = null)
 }
 
 async function recoveryEntry(
-  recordPath, expectedBinding, action, counter, hooks = null, expectedOwnership = null
+  operation, recordPath, expectedBinding, action, counter, hooks = null, expectedOwnership = null
 ) {
+  operation.assertOpen();
   const record = await loadRecord(recordPath, expectedBinding, expectedOwnership);
+  operation.assertOpen();
   let container;
-  try { container = await json("GET", `/containers/${record.containerId}/json`); } catch {
-    throw new Error("owned-container-unavailable");
+  try {
+    container = await json(operation, "GET", `/containers/${record.containerId}/json`);
+  } catch (error) {
+    if (isProofOperationAborted(error)) throw error;
+    throw new Error("owned-container-unavailable", { cause: error });
   }
+  operation.assertOpen();
   if (container.Id !== record.containerId || container.State.Running !== true) {
     throw new Error("owned-container-mismatch");
   }
-  const execInspection = await json("GET", `/exec/${record.supervisorExecId}/json`);
+  const execInspection = await json(operation, "GET", `/exec/${record.supervisorExecId}/json`);
+  operation.assertOpen();
   if (execInspection.ID !== record.supervisorExecId
     || execInspection.ContainerID !== record.containerId
     || execInspection.Pid !== record.ownership.dockerExecProcess.outerPid
     || !execInspection.Running) throw new Error("owned-exec-mismatch");
-  return helper(record.containerId, request(record, action), counter, hooks);
+  operation.assertOpen();
+  return helper(operation, record.containerId, request(record, action), counter, hooks);
 }
 
-async function separateHostReconnect(recordPath, expectedBinding, expectedOwnership, credential) {
+async function separateHostReconnect(
+  operation, recordPath, expectedBinding, expectedOwnership, credential
+) {
+  operation.assertOpen();
   const argv = [new URL(import.meta.url).pathname, "--reconnect-child"];
   const environment = { DEVSPACE_DOCKER_SOCKET_PATH: SOCKET };
   if (spawnConfigurationContainsSecret(argv, environment, credential)) {
     throw new Error("reconnect-spawn-credential-leak");
   }
+  operation.mark("reconnect-host-spawn");
   const child = spawn(process.execPath, argv, {
     stdio: ["pipe", "pipe", "pipe"],
     env: environment
   });
+  let rejectForAbort;
+  const aborted = new Promise((_resolve, reject) => { rejectForAbort = reject; });
+  const abort = () => {
+    child.kill("SIGTERM");
+    rejectForAbort(new ProofOperationAbortedError());
+  };
+  operation.signal.addEventListener("abort", abort, { once: true });
+  operation.assertOpen();
+  operation.mark("reconnect-input");
   child.stdin.write(`${JSON.stringify({ recordPath, expectedBinding, expectedOwnership })}\n`);
   let stdout = "";
   const stderr = [];
@@ -425,26 +528,39 @@ async function separateHostReconnect(recordPath, expectedBinding, expectedOwners
     if (bytes > 128 * 1024) child.kill("SIGKILL");
     stderr.push(Buffer.from(chunk));
   });
-  const encodedResponse = await responseLine;
-  const liveProcessData = Buffer.concat([
-    await readFile(`/proc/${child.pid}/cmdline`),
-    await readFile(`/proc/${child.pid}/environ`)
-  ]);
-  if (liveProcessData.includes(Buffer.from(credential))) {
-    throw new Error("reconnect-live-process-credential-leak");
+  try {
+    const encodedResponse = await Promise.race([responseLine, aborted]);
+    operation.assertOpen();
+    const liveProcessData = Buffer.concat([
+      await readFile(`/proc/${child.pid}/cmdline`),
+      await readFile(`/proc/${child.pid}/environ`)
+    ]);
+    operation.assertOpen();
+    if (liveProcessData.includes(Buffer.from(credential))) {
+      throw new Error("reconnect-live-process-credential-leak");
+    }
+    operation.mark("reconnect-release");
+    child.stdin.end("release\n");
+    const code = await new Promise((resolve) => child.once("exit", resolve));
+    operation.assertOpen();
+    if (code !== 0 || stderr.length > 0) throw new Error("reconnect-child-failed");
+    return { ...JSON.parse(encodedResponse), hostCredentialAbsent: true };
+  } finally {
+    operation.signal.removeEventListener("abort", abort);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   }
-  child.stdin.end("release\n");
-  const code = await new Promise((resolve) => child.once("exit", resolve));
-  if (code !== 0 || stderr.length > 0) throw new Error("reconnect-child-failed");
-  return { ...JSON.parse(encodedResponse), hostCredentialAbsent: true };
 }
 
-async function probeCgroups(runId, cleanup, counter) {
-  const container = await createContainer(runId, "cgroup", cleanup);
-  const execId = await createExec(container.id, [
+async function probeCgroups(operation, runId, cleanup, counter) {
+  operation.assertOpen();
+  const container = await createContainer(operation, runId, "cgroup", cleanup);
+  operation.assertOpen();
+  const execId = await createExec(operation, container.id, [
     "node", "/tooling/ai-supervisor-proof/cgroup-probe.mjs"
   ], counter);
-  const output = await startExec(execId, "");
+  operation.assertOpen();
+  const output = await startExec(operation, execId, "");
+  operation.assertOpen();
   if (output.stderr !== "") throw new Error("cgroup-probe-diagnostic");
   let probe;
   try { probe = JSON.parse(output.stdout.trim()); } catch {
@@ -455,7 +571,8 @@ async function probeCgroups(runId, cleanup, counter) {
   }
   const name = `devspace-ai-proof-${runId}-writable-cgroup`;
   let rootlessWritableCgroup = "started";
-  const creation = json("POST", `/containers/create?name=${name}`, {
+  operation.mark("container-create");
+  const creation = cleanupJson("POST", `/containers/create?name=${name}`, {
     Image: IMAGE, Cmd: ["node", "-e", "setInterval(()=>{},1000)"],
     Labels: { [LABEL]: runId },
     HostConfig: {
@@ -464,7 +581,9 @@ async function probeCgroups(runId, cleanup, counter) {
     }
   }).then((created) => created.Id);
   const candidate = await cleanup.trackCreation(creation);
-  try { await api("POST", `/containers/${candidate}/start`); } catch (error) {
+  operation.assertOpen();
+  try { await api(operation, "POST", `/containers/${candidate}/start`); } catch (error) {
+    if (isProofOperationAborted(error)) throw error;
     rootlessWritableCgroup = error.statusCode === 500
       && error.safeReason === "rootless-user-namespace-conflict"
       ? "rejected-by-rootless-user-namespace" : "docker-start-rejected";
@@ -478,7 +597,10 @@ async function probeCgroups(runId, cleanup, counter) {
 }
 
 async function expectReject(operation) {
-  try { await operation(); } catch { return; }
+  try { await operation(); } catch (error) {
+    if (isProofOperationAborted(error)) throw error;
+    return;
+  }
   throw new Error("expected-rejection-missing");
 }
 
@@ -529,8 +651,8 @@ async function repositoryContainsSecret(root, secret, {
 
 async function assertNoProofResources(stateRoot, runId) {
   const filters = encodeURIComponent(JSON.stringify({ label: [`${LABEL}=${runId}`] }));
-  const listed = await json("GET", `/containers/json?all=1&filters=${filters}`);
-  const named = (await json("GET", "/containers/json?all=1")).filter((item) =>
+  const listed = await cleanupJson("GET", `/containers/json?all=1&filters=${filters}`);
+  const named = (await cleanupJson("GET", "/containers/json?all=1")).filter((item) =>
     item.Names?.some((name) => name.startsWith(`/devspace-ai-proof-${runId}`)));
   const rootExists = await stat(stateRoot).then(() => true, () => false);
   if (listed.length !== 0 || named.length !== 0 || rootExists) {
@@ -538,37 +660,51 @@ async function assertNoProofResources(stateRoot, runId) {
   }
 }
 
-async function failureInjectionMatrix(runId) {
+async function failureInjectionMatrix(parentOperation, runId) {
   const stages = [
     "after-container-create", "during-archive-upload", "after-start",
     "during-supervisor-bootstrap", "after-ownership-record-write", "during-helper-reconnect"
   ];
   for (const stage of stages) {
+    parentOperation.assertOpen();
     const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-ai-proof-"));
-    await chmod(stateRoot, 0o700);
+    try {
+      parentOperation.assertOpen();
+      await chmod(stateRoot, 0o700);
+      parentOperation.assertOpen();
+    } catch (error) {
+      await rm(stateRoot, { recursive: true, force: true });
+      throw error;
+    }
     const stageRunId = `${runId}-${stages.indexOf(stage)}`;
     const cleanup = createCleanupCoordinator(stageRunId);
     cleanup.registerRoot(stateRoot);
+    const operation = new ProofOperationFence(cleanup, parentOperation.signal);
     const counter = new Map();
     const hooks = createLifecycleHooks({ failStage: stage });
     try {
       if (stage === "during-helper-reconnect") {
-        const launched = await launch(stageRunId, stateRoot, `inject-${stage}`, cleanup, counter);
+        const launched = await launch(
+          operation, stageRunId, stateRoot, `inject-${stage}`, cleanup, counter
+        );
         await recoveryEntry(
-          launched.recordPath, launched.record.binding, "proof", counter, hooks
+          operation, launched.recordPath, launched.record.binding, "proof", counter, hooks
         );
       } else {
         await launch(
-          stageRunId, stateRoot, `inject-${stage}`, cleanup, counter, "cooperative", hooks
+          operation, stageRunId, stateRoot, `inject-${stage}`,
+          cleanup, counter, "cooperative", hooks
         );
       }
       throw new Error("failure-injection-not-triggered");
     } catch (error) {
+      if (isProofOperationAborted(error)) throw error;
       if (error.message === "failure-injection-not-triggered") throw error;
     } finally {
       await cleanup.cleanup();
     }
     await assertNoProofResources(stateRoot, stageRunId);
+    parentOperation.assertOpen();
   }
   return stages;
 }
@@ -579,7 +715,12 @@ async function signalChild(runId, stage) {
   const cleanup = createCleanupCoordinator(runId);
   cleanup.registerRoot(stateRoot);
   const controller = new AbortController();
+  const effects = new Map();
+  const operation = new ProofOperationFence(cleanup, controller.signal, effects);
+  const execCounter = new Map();
   let readySent = false;
+  let shutdownPromise;
+  let betweenMutationEvidence = null;
   const hooks = createLifecycleHooks({
     pauseStage: stage,
     signal: controller.signal,
@@ -592,44 +733,83 @@ async function signalChild(runId, stage) {
   const keepAlive = setInterval(() => {}, 1_000);
   for (const signalName of ["SIGINT", "SIGTERM"]) {
     process.once(signalName, () => {
-      controller.abort(new Error(`proof-${signalName.toLowerCase()}`));
-      void cleanup.cleanup();
+      shutdownPromise ??= beginProofShutdown(cleanup, controller);
     });
   }
   try {
-    if (stage === "during-helper-reconnect") {
-      const launched = await launch(runId, stateRoot, "signal", cleanup, new Map());
+    if (stage === "between-mutations") {
+      const launched = await launch(
+        operation, runId, stateRoot, "signal", cleanup, execCounter
+      );
+      const first = await helper(operation, launched.container.id, request(
+        launched.record, "send", { operationId: "before-signal", value: "fixture" }
+      ), execCounter);
+      if (first.response.result?.type !== "echo") throw new Error("signal-first-mutation-failed");
+      await hooks.reached("between-mutations");
+      throw new Error("between-mutations-signal-missing");
+    } else if (stage === "during-helper-reconnect") {
+      const launched = await launch(
+        operation, runId, stateRoot, "signal", cleanup, execCounter
+      );
       await recoveryEntry(
-        launched.recordPath, launched.record.binding, "proof", new Map(), hooks
+        operation, launched.recordPath, launched.record.binding, "proof", execCounter, hooks
       );
     } else {
-      await launch(runId, stateRoot, "signal", cleanup, new Map(), "cooperative", hooks);
+      await launch(
+        operation, runId, stateRoot, "signal", cleanup, execCounter, "cooperative", hooks
+      );
     }
     throw new Error("signal-stage-not-reached");
   } catch (error) {
-    if (!controller.signal.aborted) throw error;
+    if (!isProofOperationAborted(error) || !controller.signal.aborted) throw error;
+    if (stage === "between-mutations") {
+      const before = new Map(effects);
+      let secondError;
+      try {
+        await helper(operation, "f".repeat(64), { action: "must-not-run" }, execCounter);
+      } catch (candidate) { secondError = candidate; }
+      betweenMutationEvidence = {
+        categoricalAbort: isProofOperationAborted(secondError),
+        dockerRequestsUnchanged: effects.get("docker-request") === before.get("docker-request"),
+        execStartsUnchanged: effects.get("docker-exec-start") === before.get("docker-exec-start"),
+        controlInputsUnchanged: effects.get("control-input") === before.get("control-input")
+      };
+      if (!Object.values(betweenMutationEvidence).every(Boolean)) {
+        throw new Error("post-signal-side-effect-observed", { cause: error });
+      }
+    }
   } finally {
-    await cleanup.cleanup();
+    await (shutdownPromise ?? cleanup.cleanup());
     clearInterval(keepAlive);
+  }
+  if (betweenMutationEvidence !== null) {
+    process.stdout.write(`${JSON.stringify({
+      type: "signal-result", stage, ...betweenMutationEvidence
+    })}\n`);
   }
 }
 
-async function signalCleanupMatrix(runId) {
+async function signalCleanupMatrix(operation, runId) {
   const stages = [
     "after-container-create",
     "during-archive-upload",
     "during-supervisor-bootstrap",
-    "during-helper-reconnect"
+    "during-helper-reconnect",
+    "between-mutations"
   ];
   for (const stage of stages) {
     for (const signal of ["SIGINT", "SIGTERM"]) {
+      operation.assertOpen();
       const signalRunId = `${runId}-${stages.indexOf(stage)}-${signal.toLowerCase()}`;
+    operation.mark("signal-test-child-spawn");
     const child = spawn(process.execPath, [
       new URL(import.meta.url).pathname, "--signal-child", signalRunId, stage
     ], {
       stdio: ["ignore", "pipe", "pipe"],
       env: { DEVSPACE_DOCKER_SOCKET_PATH: SOCKET }
     });
+    const abort = () => child.kill("SIGTERM");
+    operation.signal.addEventListener("abort", abort, { once: true });
     let stdout = "";
     let stderr = "";
     let stateRoot;
@@ -658,6 +838,8 @@ async function signalCleanupMatrix(runId) {
       });
     });
     await ready;
+    operation.assertOpen();
+    operation.mark("signal-test-child-signal");
     child.kill(signal);
     const outcome = await new Promise((resolve) => child.once("exit", (code, exitSignal) => {
       resolve({ code, exitSignal });
@@ -665,7 +847,17 @@ async function signalCleanupMatrix(runId) {
     if (outcome.code !== 0 || outcome.exitSignal !== null || stderr !== "") {
       throw new Error(`signal-child-cleanup-failed-${outcome.code}-${outcome.exitSignal}-${stderr.length}`);
     }
+    operation.signal.removeEventListener("abort", abort);
+    operation.assertOpen();
+    if (stage === "between-mutations") {
+      const messages = stdout.trim().split("\n").map((line) => JSON.parse(line));
+      const result = messages.find((message) => message.type === "signal-result");
+      if (result === undefined || !result.categoricalAbort
+        || !result.dockerRequestsUnchanged || !result.execStartsUnchanged
+        || !result.controlInputsUnchanged) throw new Error("between-mutations-evidence-missing");
+    }
     await assertNoProofResources(stateRoot, signalRunId);
+    operation.assertOpen();
     }
   }
   return stages.flatMap((stage) => [`${stage}:SIGINT`, `${stage}:SIGTERM`]);
@@ -678,24 +870,30 @@ async function main() {
   const cleanup = createCleanupCoordinator(runId);
   cleanup.registerRoot(stateRoot);
   const controller = new AbortController();
+  const operation = new ProofOperationFence(cleanup, controller.signal);
   const execCounter = new Map();
   const matrix = {};
   let signalSeen = null;
+  let shutdownPromise;
   const onSignal = (signal) => {
+    if (signalSeen !== null) return;
     signalSeen = signal;
-    controller.abort(new Error(`proof-${signal.toLowerCase()}`));
-    void cleanup.cleanup().then(() => { process.exitCode = 128 + (signal === "SIGINT" ? 2 : 15); });
+    shutdownPromise = beginProofShutdown(cleanup, controller);
+    void shutdownPromise.then(() => {
+      process.exitCode = 128 + (signal === "SIGINT" ? 2 : 15);
+    });
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
-    await api("GET", "/_ping");
-    const info = await json("GET", "/info");
+    await api(operation, "GET", "/_ping");
+    operation.assertOpen();
+    const info = await json(operation, "GET", "/info");
     if (!info.SecurityOptions?.some((value) => /rootless/iu.test(value))) {
       throw new Error("daemon-not-rootless");
     }
-    const cgroupResult = await probeCgroups(runId, cleanup, execCounter);
-    controller.signal.throwIfAborted();
+    const cgroupResult = await probeCgroups(operation, runId, cleanup, execCounter);
+    operation.assertOpen();
     if (cgroupResult.classification.outcome !== "BLOCKED") {
       await cleanup.cleanup();
       process.stdout.write(`${JSON.stringify({
@@ -710,9 +908,9 @@ async function main() {
     }
     const cgroup = cgroupResult.probe;
 
-    const normal = await launch(runId, stateRoot, "normal", cleanup, execCounter);
-    controller.signal.throwIfAborted();
-    const roundTrip = await helper(normal.container.id, request(normal.record, "send", {
+    const normal = await launch(operation, runId, stateRoot, "normal", cleanup, execCounter);
+    operation.assertOpen();
+    const roundTrip = await helper(operation, normal.container.id, request(normal.record, "send", {
       operationId: "normal-round-trip", value: "fixture"
     }), execCounter);
     if (roundTrip.response.result?.type !== "echo") throw new Error("round-trip-failed");
@@ -721,23 +919,28 @@ async function main() {
       sideEffect: "one correlated provider input", cleanup: "tracked" };
 
     const reconnect = await separateHostReconnect(
-      normal.recordPath, normal.record.binding, normal.record.ownership, normal.record.credential
+      operation, normal.recordPath, normal.record.binding,
+      normal.record.ownership, normal.record.credential
     );
     if (!reconnect.response.ok || reconnect.hostCredentialAbsent !== true) {
       throw new Error("reconnect-rejected");
     }
     const continued = await recoveryEntry(
-      normal.recordPath, normal.record.binding, "proof", execCounter
+      operation, normal.recordPath, normal.record.binding, "proof", execCounter
     );
     if (!continued.response.ok) throw new Error("reconnect-proof-rejected");
     matrix.B = { status: "PASS", action: "destroyed launch attachment and used separate host process/new helper exec",
       evidence: "exact container and supervisor exec re-inspected before authenticated socket access",
       sideEffect: "new helper only after identity verification", cleanup: "tracked" };
 
-    const baseline = await recoveryEntry(normal.recordPath, normal.record.binding, "proof", execCounter);
+    const baseline = await recoveryEntry(
+      operation, normal.recordPath, normal.record.binding, "proof", execCounter
+    );
     const wrongCredential = structuredClone(request(normal.record, "proof"));
     wrongCredential.credential = "0".repeat(64);
-    const rejectedCredential = await helper(normal.container.id, wrongCredential, execCounter);
+    const rejectedCredential = await helper(
+      operation, normal.container.id, wrongCredential, execCounter
+    );
     if (rejectedCredential.response.code !== "authentication-failed") throw new Error("wrong-credential-accepted");
     matrix.C = { status: "PASS", action: "sent wrong credential through real helper",
       evidence: "authentication-failed and unchanged event sequence", sideEffect: "none",
@@ -749,7 +952,9 @@ async function main() {
     ]) {
       const altered = structuredClone(request(normal.record, "proof"));
       mutation(altered);
-      if ((await helper(normal.container.id, altered, execCounter)).response.ok !== false) {
+      if ((await helper(
+        operation, normal.container.id, altered, execCounter
+      )).response.ok !== false) {
         throw new Error("generation-claim-accepted");
       }
     }
@@ -764,11 +969,15 @@ async function main() {
           ? "f".repeat(64)
           : field === "profileRevision" ? `sha256-ai-profile-v1:${"c".repeat(64)}`
             : "01990000-0000-7000-8000-000000000099";
-      if ((await helper(normal.container.id, altered, execCounter)).response.ok !== false) {
+      if ((await helper(
+        operation, normal.container.id, altered, execCounter
+      )).response.ok !== false) {
         throw new Error(`mutated-binding-accepted-${field}`);
       }
     }
-    const afterReject = await recoveryEntry(normal.recordPath, normal.record.binding, "proof", execCounter);
+    const afterReject = await recoveryEntry(
+      operation, normal.recordPath, normal.record.binding, "proof", execCounter
+    );
     if (afterReject.response.result.eventSequence !== baseline.response.result.eventSequence) {
       throw new Error("rejection-had-provider-side-effect");
     }
@@ -776,12 +985,18 @@ async function main() {
       evidence: "strict schema/equality rejection and stable event sequence", sideEffect: "none",
       cleanup: "tracked" };
 
-    const replay = await launch(runId, stateRoot, "replay", cleanup, execCounter);
+    const replay = await launch(
+      operation, runId, stateRoot, "replay", cleanup, execCounter
+    );
     const interruptId = randomUUID();
     const interruptRequest = request(replay.record, "interrupt", null, interruptId);
-    const interrupted = await helper(replay.container.id, interruptRequest, execCounter);
-    const duplicate = await helper(replay.container.id, interruptRequest, execCounter);
-    const conflicting = await helper(replay.container.id, {
+    const interrupted = await helper(
+      operation, replay.container.id, interruptRequest, execCounter
+    );
+    const duplicate = await helper(
+      operation, replay.container.id, interruptRequest, execCounter
+    );
+    const conflicting = await helper(operation, replay.container.id, {
       ...interruptRequest,
       action: "send",
       payload: { operationId: "conflicting-replay", value: "must-not-forward" }
@@ -792,22 +1007,22 @@ async function main() {
       throw new Error("interrupt-correlation-failed");
     }
     for (let index = 0; index < 255; index += 1) {
-      const filled = await helper(replay.container.id, request(replay.record, "send", {
+      const filled = await helper(operation, replay.container.id, request(replay.record, "send", {
         operationId: `ledger-fill-${index}`, value: "fixture"
       }), execCounter);
       if (filled.response.result?.type !== "echo") throw new Error("ledger-fill-failed");
     }
     const beforeCapacity = await recoveryEntry(
-      replay.recordPath, replay.record.binding, "proof", execCounter
+      operation, replay.recordPath, replay.record.binding, "proof", execCounter
     );
-    const atCapacity = await helper(replay.container.id, request(replay.record, "send", {
+    const atCapacity = await helper(operation, replay.container.id, request(replay.record, "send", {
       operationId: "ledger-overflow", value: "must-not-forward"
     }), execCounter);
     const duplicateAtCapacity = await helper(
-      replay.container.id, interruptRequest, execCounter
+      operation, replay.container.id, interruptRequest, execCounter
     );
     const afterCapacity = await recoveryEntry(
-      replay.recordPath, replay.record.binding, "proof", execCounter
+      operation, replay.recordPath, replay.record.binding, "proof", execCounter
     );
     if (atCapacity.response.code !== "request-ledger-capacity-reached"
       || JSON.stringify(duplicateAtCapacity.response) !== JSON.stringify(interrupted.response)
@@ -819,11 +1034,13 @@ async function main() {
       sideEffect: "one provider interrupt", cleanup: "tracked" };
 
     const graceful = await helper(
-      normal.container.id, request(normal.record, "fixture-stop"), execCounter
+      operation, normal.container.id, request(normal.record, "fixture-stop"), execCounter
     );
     if (graceful.response.result?.authority !== "fixture-process-group-experiment"
       || graceful.response.result?.escalated !== false
-      || !(await json("GET", `/containers/${normal.container.id}/json`)).State.Running) {
+      || !(await json(
+        operation, "GET", `/containers/${normal.container.id}/json`
+      )).State.Running) {
       throw new Error("fixture-graceful-experiment-failed");
     }
     matrix.G = { status: "PARTIAL", action: "sent SIGTERM to rechecked cooperative fixture PGID",
@@ -831,49 +1048,74 @@ async function main() {
       sideEffect: "fixture-only group signal", cleanup: "tracked",
       limitation: "numeric PGID is non-atomic/reusable and not production Stop authority" };
 
-    const forced = await launch(runId, stateRoot, "forced", cleanup, execCounter, "ignore-term");
+    const forced = await launch(
+      operation, runId, stateRoot, "forced", cleanup, execCounter, "ignore-term"
+    );
     const forcedResult = await helper(
-      forced.container.id, request(forced.record, "fixture-stop"), execCounter
+      operation, forced.container.id, request(forced.record, "fixture-stop"), execCounter
     );
     if (forcedResult.response.result?.escalated !== true
-      || !(await json("GET", `/containers/${forced.container.id}/json`)).State.Running) {
+      || !(await json(
+        operation, "GET", `/containers/${forced.container.id}/json`
+      )).State.Running) {
       throw new Error("fixture-force-experiment-failed");
     }
     for (const mode of ["setsid-child", "double-fork", "group-churn"]) {
-      await expectReject(() => launch(runId, stateRoot, `adversarial-${mode}`, cleanup, execCounter, mode));
+      await expectReject(() => launch(
+        operation, runId, stateRoot, `adversarial-${mode}`, cleanup, execCounter, mode
+      ));
     }
     matrix.H = { status: "BLOCKED", action: "probed cgroup delegation and adversarial fixture escape/churn",
       evidence: "cgroup filesystem read-only; rootless writable-cgroups start rejected; escapes/churn invalidate PGID proof",
       sideEffect: "fixture-only escalation executed; no production-safe boundary", cleanup: "tracked",
       limitation: "atomic descendant-tree termination unavailable" };
 
-    const exited = await launch(runId, stateRoot, "exited", cleanup, execCounter);
-    await helper(exited.container.id, request(exited.record, "exit-provider"), execCounter);
-    const already = await helper(exited.container.id, request(exited.record, "fixture-stop"), execCounter);
+    const exited = await launch(
+      operation, runId, stateRoot, "exited", cleanup, execCounter
+    );
+    await helper(
+      operation, exited.container.id, request(exited.record, "exit-provider"), execCounter
+    );
+    const already = await helper(
+      operation, exited.container.id, request(exited.record, "fixture-stop"), execCounter
+    );
     const stale = structuredClone(request(exited.record, "proof"));
     stale.ownership.provider.startTime = String(BigInt(stale.ownership.provider.startTime) + 1n);
     if (already.response.result?.signalSent !== false
-      || (await helper(exited.container.id, stale, execCounter)).response.ok !== false) {
+      || (await helper(
+        operation, exited.container.id, stale, execCounter
+      )).response.ok !== false) {
       throw new Error("already-exited-safety-failed");
     }
     matrix.I = { status: "PASS", action: "exited provider then invoked fixture stop and stale-start proof",
       evidence: "no signal sent after exit; start-time mismatch rejected", sideEffect: "none after exit",
       cleanup: "tracked", limitation: "deterministic PID reuse not forced" };
 
-    const replaced = await launch(runId, stateRoot, "replaced", cleanup, execCounter);
+    const replaced = await launch(
+      operation, runId, stateRoot, "replaced", cleanup, execCounter
+    );
     const staleRecord = replaced.recordPath;
     const staleBinding = replaced.record.binding;
     const oldId = replaced.container.id;
     const oldName = replaced.container.name;
-    await removeContainer(oldId);
+    await api(operation, "DELETE", `/containers/${oldId}?force=1`, undefined, [204, 404]);
+    operation.assertOpen();
     cleanup.forgetContainer(oldId);
-    const replacement = await createContainer(runId, "replacement", cleanup, null, oldName);
+    const replacement = await createContainer(
+      operation, runId, "replacement", cleanup, null, oldName
+    );
     const beforeB = execCounter.get(replacement.id) ?? 0;
-    await expectReject(() => recoveryEntry(staleRecord, staleBinding, "proof", execCounter));
-    await expectReject(() => recoveryEntry(staleRecord, staleBinding, "fixture-stop", execCounter));
+    await expectReject(() => recoveryEntry(
+      operation, staleRecord, staleBinding, "proof", execCounter
+    ));
+    await expectReject(() => recoveryEntry(
+      operation, staleRecord, staleBinding, "fixture-stop", execCounter
+    ));
     const afterB = execCounter.get(replacement.id) ?? 0;
     if (replacement.id === oldId || beforeB !== afterB
-      || !(await json("GET", `/containers/${replacement.id}/json`)).State.Running) {
+      || !(await json(
+        operation, "GET", `/containers/${replacement.id}/json`
+      )).State.Running) {
       throw new Error("replaced-container-contacted");
     }
     matrix.J = { status: "PASS", action: "replaced A with B under the same name; invoked real recovery and signal-capable entry",
@@ -883,6 +1125,7 @@ async function main() {
     const corruptCases = [];
     const base = structuredClone(normal.record);
     const separateSession = await launch(
+      operation,
       runId,
       stateRoot,
       "separate-session",
@@ -973,10 +1216,12 @@ async function main() {
       const testPath = index === 0 ? missing : path.join(stateRoot, `corrupt-${index}.json`);
       if (index > 0) await writeFile(testPath, value, { mode: 0o600 });
       await expectReject(() => recoveryEntry(
-        testPath, normal.record.binding, "proof", execCounter, null, normal.record.ownership
+        operation, testPath, normal.record.binding,
+        "proof", execCounter, null, normal.record.ownership
       ));
       await expectReject(() => recoveryEntry(
-        testPath, normal.record.binding, "fixture-stop", execCounter, null, normal.record.ownership
+        operation, testPath, normal.record.binding,
+        "fixture-stop", execCounter, null, normal.record.ownership
       ));
       corruptCases.push(name);
     }
@@ -988,10 +1233,13 @@ async function main() {
       limitation: "proof-local validators are not production request authority" };
 
     const leakTarget = forced;
-    const leak = await helper(leakTarget.container.id, request(leakTarget.record, "leak-inspect"), execCounter);
+    const leak = await helper(
+      operation, leakTarget.container.id,
+      request(leakTarget.record, "leak-inspect"), execCounter
+    );
     const inspections = [
-      await json("GET", `/containers/${leakTarget.container.id}/json`),
-      await json("GET", `/exec/${leakTarget.execId}/json`),
+      await json(operation, "GET", `/containers/${leakTarget.container.id}/json`),
+      await json(operation, "GET", `/exec/${leakTarget.execId}/json`),
       leak.inspection
     ];
     const hostBytes = Buffer.concat([
@@ -1000,8 +1248,11 @@ async function main() {
     const repositoryLeak = await repositoryContainsSecret(
       process.cwd(), leakTarget.record.credential
     );
+    operation.assertOpen();
     const stateMode = (await stat(stateRoot)).mode & 0o777;
+    operation.assertOpen();
     const recordMode = (await stat(leakTarget.recordPath)).mode & 0o777;
+    operation.assertOpen();
     if (leak.response.result.credentialPresent
       || inspections.some((value) => JSON.stringify(value).includes(leakTarget.record.credential))
       || hostBytes.includes(Buffer.from(leakTarget.record.credential))
@@ -1015,8 +1266,11 @@ async function main() {
       sideEffect: "read-only inspection", cleanup: "tracked",
       limitation: "coverage is the enumerated success and sanitized-error paths, not universal future failures" };
 
-    const injected = await failureInjectionMatrix(`${runId}-inject`);
-    const signals = await signalCleanupMatrix(`${runId}-signal`);
+    operation.assertOpen();
+    const injected = await failureInjectionMatrix(operation, `${runId}-inject`);
+    operation.assertOpen();
+    const signals = await signalCleanupMatrix(operation, `${runId}-signal`);
+    operation.assertOpen();
     await cleanup.cleanup();
     await assertNoProofResources(stateRoot, runId);
     matrix.M = { status: "PASS", action: "idempotent cleanup plus six injected failures",
@@ -1034,12 +1288,18 @@ async function main() {
       scenarios: ordered
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } catch (error) {
+    if (signalSeen !== null && isProofOperationAborted(error)) {
+      await shutdownPromise;
+      return;
+    }
+    throw error;
   } finally {
     if (signalSeen === null) {
       process.removeListener("SIGINT", onSignal);
       process.removeListener("SIGTERM", onSignal);
     }
-    await cleanup.cleanup();
+    await (shutdownPromise ?? cleanup.cleanup());
   }
 }
 
@@ -1053,8 +1313,10 @@ if (process.argv[2] === "--reconnect-child") {
   const input = first.value;
   const { recordPath, expectedBinding, expectedOwnership } = JSON.parse(input);
   const counter = new Map();
+  const controller = new AbortController();
+  const operation = new ProofOperationFence({ state: "open" }, controller.signal);
   const result = await recoveryEntry(
-    recordPath, expectedBinding, "proof", counter, null, expectedOwnership
+    operation, recordPath, expectedBinding, "proof", counter, null, expectedOwnership
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
   const release = await iterator.next();

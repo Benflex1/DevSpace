@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  BINDING_KEYS, bindingsEqual, classifyCgroupProbe, CleanupLifecycle, cleanupPlan,
-  credentialEqual, deriveSocketPath, DockerMultiplexParser, escalationDecision,
-  parseBinding, parseBootstrap, parseControlRequest, parseJsonLine, parseOwnershipRecord,
-  parseProcStat, parseReadiness, parseReadinessFrames, processIdentityEqual, redact,
-  SerializedRequestLedger, spawnConfigurationContainsSecret, validateDescendantBoundary,
-  validateStableTopology
+  beginProofShutdown, BINDING_KEYS, bindingsEqual, classifyCgroupProbe, CleanupLifecycle,
+  cleanupPlan, credentialEqual, deriveSocketPath, DockerMultiplexParser, escalationDecision,
+  isProofOperationAborted, parseBinding, parseBootstrap, parseControlRequest, parseJsonLine,
+  parseOwnershipRecord, parseProcStat, parseReadiness, parseReadinessFrames,
+  processIdentityEqual, ProofOperationFence, redact, SerializedRequestLedger,
+  spawnConfigurationContainsSecret, validateDescendantBoundary, validateStableTopology
 } from "../ai-supervisor-proof/core.mjs";
 
 const dockerId = "a".repeat(64);
@@ -285,6 +285,89 @@ test("cleanup incorporates late creation and rejects registration while closing"
   assert.equal(lifecycle.state, "closed");
   await lifecycle.cleanup();
   assert.deepEqual(removed, ["late-container"]);
+});
+
+test("signal transition fences the next helper mutation and every awaited side-effect stage", async () => {
+  const removed = [];
+  const cleanup = new CleanupLifecycle({
+    removeContainer: async (id) => removed.push(id),
+    removeRoot: async () => {},
+    audit: async () => {}
+  });
+  const controller = new AbortController();
+  const counters = new Map();
+  const fence = new ProofOperationFence(cleanup, controller.signal, counters);
+  const effects = {
+    createExec: 0, startExec: 0, socketConnect: 0, providerInput: 0, signalControl: 0
+  };
+  const guardedHelper = async (action = "send") => {
+    const execId = await fence.run("create-exec", async () => {
+      effects.createExec += 1;
+      return "exec";
+    });
+    await fence.run("start-exec", async () => {
+      assert.equal(execId, "exec");
+      effects.startExec += 1;
+    });
+    await fence.run("socket-connect", async () => { effects.socketConnect += 1; });
+    await fence.run("provider-input", async () => {
+      effects.providerInput += 1;
+      if (action === "fixture-stop") effects.signalControl += 1;
+    });
+  };
+
+  await guardedHelper();
+  assert.deepEqual(effects, {
+    createExec: 1, startExec: 1, socketConnect: 1, providerInput: 1, signalControl: 0
+  });
+
+  let releaseContinuation;
+  const paused = new Promise((resolve) => { releaseContinuation = resolve; });
+  const continuation = (async () => {
+    await paused;
+    return guardedHelper("fixture-stop");
+  })();
+  const firstShutdown = beginProofShutdown(cleanup, controller);
+  const secondShutdown = beginProofShutdown(cleanup, controller);
+  assert.equal(firstShutdown, secondShutdown);
+  assert.equal(cleanup.state, "closing");
+  releaseContinuation();
+  await assert.rejects(continuation, isProofOperationAborted);
+  await firstShutdown;
+  assert.deepEqual(effects, {
+    createExec: 1, startExec: 1, socketConnect: 1, providerInput: 1, signalControl: 0
+  });
+  assert.equal(cleanup.state, "closed");
+});
+
+test("in-flight guarded stages cannot advance after cleanup begins", async () => {
+  for (const [pausedStage, forbiddenStage] of [
+    ["create-exec", "start-exec"],
+    ["start-exec", "provider-input"],
+    ["recovery-inspect", "socket-connect"]
+  ]) {
+    const cleanup = new CleanupLifecycle({
+      removeContainer: async () => {},
+      removeRoot: async () => {},
+      audit: async () => {}
+    });
+    const controller = new AbortController();
+    const counters = new Map();
+    const fence = new ProofOperationFence(cleanup, controller.signal, counters);
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    const operation = fence.run(pausedStage, () => pending);
+    const shutdown = beginProofShutdown(cleanup, controller);
+    release("completed-remotely");
+    await assert.rejects(operation, isProofOperationAborted);
+    await assert.rejects(
+      fence.run(forbiddenStage, async () => "must-not-run"),
+      isProofOperationAborted
+    );
+    await shutdown;
+    assert.equal(counters.get(pausedStage), 1);
+    assert.equal(counters.has(forbiddenStage), false);
+  }
 });
 
 test("spawn configuration secret checks cover argv and environment", () => {
