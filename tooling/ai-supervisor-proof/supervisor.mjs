@@ -184,7 +184,7 @@ async function awaitEvent(requestId, baseline, type, timeout = 1_000) {
   throw new Error("provider-response-timeout");
 }
 
-const mutationLedger = new SerializedRequestLedger();
+const mutationLedger = new SerializedRequestLedger(256);
 function serializeMutation(request, operation) {
   const canonical = JSON.stringify({ action: request.action, payload: request.payload });
   return mutationLedger.run(request.requestId, canonical, operation);

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  BINDING_KEYS, bindingsEqual, cleanupPlan, credentialEqual, DockerMultiplexParser,
-  escalationDecision, parseBinding, parseBootstrap, parseControlRequest, parseJsonLine,
-  parseOwnershipRecord, parseProcStat, parseReadiness, processIdentityEqual, redact,
-  SerializedRequestLedger, validateDescendantBoundary, validateStableTopology
+  BINDING_KEYS, bindingsEqual, classifyCgroupProbe, CleanupLifecycle, cleanupPlan,
+  credentialEqual, deriveSocketPath, DockerMultiplexParser, escalationDecision,
+  parseBinding, parseBootstrap, parseControlRequest, parseJsonLine, parseOwnershipRecord,
+  parseProcStat, parseReadiness, parseReadinessFrames, processIdentityEqual, redact,
+  SerializedRequestLedger, spawnConfigurationContainsSecret, validateDescendantBoundary,
+  validateStableTopology
 } from "../ai-supervisor-proof/core.mjs";
 
 const dockerId = "a".repeat(64);
@@ -85,6 +87,46 @@ test("bootstrap, control request, and ownership records reject unknown and cross
   assert.throws(() => parseOwnershipRecord({
     ...record, ownership: { ...ownership, provider: { ...provider, nspid: ["bad"] } }
   }), /invalid-process-identity/u);
+  assert.equal(deriveSocketPath(binding), socketPath);
+  assert.throws(() => parseOwnershipRecord({
+    ...record,
+    socketPath: "/tmp/devspace-ai-proof/01990000-0000-7000-8000-000000000099-1.sock"
+  }), /ownership-record-binding-mismatch/u);
+  assert.throws(() => parseOwnershipRecord({
+    ...record,
+    socketPath: `/tmp/devspace-ai-proof/${binding.aiSessionId}-2.sock`
+  }), /ownership-record-binding-mismatch/u);
+});
+
+test("ownership parsing rejects semantically inconsistent topology before use", () => {
+  const mutations = [
+    ["provider-parent", (value) => { value.ownership.provider.ppid = 99; }],
+    ["provider-group", (value) => { value.ownership.provider.pgid = 99; }],
+    ["escaped-pgid", (value) => { value.ownership.descendants[0].pgid = 99; }],
+    ["escaped-sid", (value) => { value.ownership.descendants[0].sid = 99; }],
+    ["crossed-namespace", (value) => { value.ownership.descendants[0].pidNamespace = "pid:[99]"; }],
+    ["altered-parent", (value) => { value.ownership.descendants[1].ppid = 1; }],
+    ["inconsistent-member", (value) => {
+      value.ownership.groupMembers[1] = {
+        ...value.ownership.groupMembers[1],
+        startTime: "9999"
+      };
+    }],
+    ["foreign-member", (value) => { value.ownership.groupMembers.push(identity(99, 1)); }],
+    ["duplicate-pid", (value) => {
+      value.ownership.descendants[1].pid = value.ownership.descendants[0].pid;
+      value.ownership.descendants[1].nspid = [...value.ownership.descendants[0].nspid];
+    }],
+    ["missing-descendant", (value) => {
+      value.ownership.descendants.pop();
+      value.ownership.groupMembers.pop();
+    }]
+  ];
+  for (const [name, mutation] of mutations) {
+    const crossed = structuredClone(record);
+    mutation(crossed);
+    assert.throws(() => parseOwnershipRecord(crossed), /invalid-ownership/u, name);
+  }
 });
 
 test("credential comparison is constant-time shaped and strict on type, length, and bytes", () => {
@@ -141,6 +183,31 @@ test("incremental Docker multiplex parser accepts valid split frames", () => {
   assert.equal(frames[0].kind, "stdout");
   assert.equal(frames[1].kind, "stderr");
 });
+test("readiness framing rejects trailing partial and additional frames", () => {
+  const ready = frame(1, '{"type":"supervisor-ready"}\n');
+  const partialHeader = new DockerMultiplexParser();
+  const parsedReady = partialHeader.push(Buffer.concat([ready, Buffer.from([1, 0])]));
+  assert.deepEqual(parseReadinessFrames(parsedReady), { type: "supervisor-ready" });
+  assert.throws(() => partialHeader.assertBoundary(), /header-truncated/u);
+
+  const partialPayload = new DockerMultiplexParser();
+  partialPayload.push(Buffer.concat([ready, frame(1, "abc").subarray(0, 9)]));
+  assert.throws(() => partialPayload.assertBoundary(), /payload-truncated/u);
+
+  assert.throws(() => parseReadinessFrames([
+    { kind: "stdout", payload: Buffer.from('{"type":"supervisor-ready"}\n') },
+    { kind: "stdout", payload: Buffer.from("{}\n") }
+  ]), /framing-invalid/u);
+  assert.throws(() => parseReadinessFrames([
+    { kind: "stderr", payload: Buffer.from('{"type":"supervisor-ready"}\n') }
+  ]), /framing-invalid/u);
+});
+test("Docker multiplex parser enforces a total frame-count boundary including empty frames", () => {
+  const parser = new DockerMultiplexParser({ maxFrameCount: 2 });
+  assert.equal(parser.push(Buffer.concat([frame(1, ""), frame(2, "")])).length, 2);
+  parser.assertBoundary();
+  assert.throws(() => parser.push(frame(1, "")), /frame-count-exceeded/u);
+});
 test("Docker multiplex parser rejects kind, reserved, truncation, and excess", () => {
   assert.throws(() => new DockerMultiplexParser().push(frame(3, "x")), /kind-invalid/u);
   assert.throws(() => new DockerMultiplexParser().push(frame(1, "x", [1, 0, 0])), /reserved-invalid/u);
@@ -177,6 +244,87 @@ test("request ledger correlates duplicates, rejects conflicts, and serializes mu
   assert.equal(await duplicate, "done");
   assert.equal(await second, "next");
   assert.deepEqual(order, ["first-start", "first-end", "second"]);
+});
+
+test("request IDs remain tombstoned and capacity fails closed beyond the old eviction boundary", async () => {
+  const ledger = new SerializedRequestLedger(256);
+  let effects = 0;
+  const firstId = "01990000-0000-4000-8000-000000000000";
+  const first = await ledger.run(firstId, "interrupt", async () => ++effects);
+  for (let index = 1; index < 256; index += 1) {
+    const id = `01990000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    await ledger.run(id, `operation-${index}`, async () => ++effects);
+  }
+  assert.equal(effects, 256);
+  assert.equal(await ledger.run(firstId, "interrupt", async () => ++effects), first);
+  assert.deepEqual(await ledger.run(firstId, "conflict", async () => ++effects),
+    { ok: false, code: "conflicting-request-id" });
+  assert.deepEqual(await ledger.run(
+    "01990000-0000-4000-8000-000000009999", "new", async () => ++effects
+  ), { ok: false, code: "request-ledger-capacity-reached" });
+  assert.equal(effects, 256);
+});
+
+test("cleanup incorporates late creation and rejects registration while closing", async () => {
+  const removed = [];
+  let resolveCreation;
+  const creation = new Promise((resolve) => { resolveCreation = resolve; });
+  const lifecycle = new CleanupLifecycle({
+    removeContainer: async (id) => removed.push(id),
+    removeRoot: async () => {},
+    audit: async () => {}
+  });
+  const tracked = lifecycle.trackCreation(creation);
+  const cleaning = lifecycle.cleanup();
+  assert.equal(lifecycle.state, "closing");
+  assert.throws(() => lifecycle.registerRoot("/tmp/devspace-ai-proof-late"), /cleanup-in-progress/u);
+  resolveCreation("late-container");
+  assert.equal(await tracked, "late-container");
+  await cleaning;
+  assert.deepEqual(removed, ["late-container"]);
+  assert.equal(lifecycle.state, "closed");
+  await lifecycle.cleanup();
+  assert.deepEqual(removed, ["late-container"]);
+});
+
+test("spawn configuration secret checks cover argv and environment", () => {
+  const secret = "e".repeat(64);
+  assert.equal(spawnConfigurationContainsSecret(["worker", "--fixed"], { SAFE: "yes" }, secret), false);
+  assert.equal(spawnConfigurationContainsSecret(["worker", secret], { SAFE: "yes" }, secret), true);
+  assert.equal(spawnConfigurationContainsSecret(["worker"], { PRIVATE: secret }, secret), true);
+});
+
+test("cgroup probe classification conditions the executable verdict", () => {
+  const current = {
+    version: 2,
+    namespace: "cgroup:[42]",
+    path: "0::/",
+    mountReadOnly: true,
+    controllers: ["cpu", "memory", "pids"],
+    subtreeControl: [],
+    delegatedChild: false,
+    childCreation: "read-only",
+    killPresent: true,
+    killWritable: false,
+    rootlessWritableCgroup: "rejected-by-rootless-user-namespace"
+  };
+  assert.equal(classifyCgroupProbe(current).outcome, "BLOCKED");
+  assert.equal(classifyCgroupProbe({ ...current, version: 1, path: "2:cpu:/" }).outcome,
+    "ENVIRONMENT_CHANGED_REVIEW_REQUIRED");
+  assert.equal(classifyCgroupProbe({
+    ...current, mountReadOnly: false, delegatedChild: true, childCreation: "created"
+  }).outcome, "ENVIRONMENT_CHANGED_REVIEW_REQUIRED");
+  assert.equal(classifyCgroupProbe({
+    ...current, mountReadOnly: false, killWritable: true
+  }).outcome, "ENVIRONMENT_CHANGED_REVIEW_REQUIRED");
+  assert.equal(classifyCgroupProbe({
+    ...current, rootlessWritableCgroup: "started"
+  }).outcome, "ENVIRONMENT_CHANGED_REVIEW_REQUIRED");
+  assert.equal(classifyCgroupProbe({ ...current, controllers: "cpu memory" }).outcome,
+    "PROBE_FAILED");
+  assert.equal(classifyCgroupProbe({
+    ...current, delegatedChild: true, childCreation: "read-only"
+  }).outcome, "PROBE_FAILED");
 });
 
 test("framing, escalation, nested redaction, and cleanup planning fail closed", () => {

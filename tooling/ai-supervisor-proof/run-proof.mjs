@@ -1,13 +1,15 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
+import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import {
-  DockerMultiplexParser, parseOwnershipRecord, parseReadiness
+  classifyCgroupProbe, CleanupLifecycle, deriveSocketPath, DockerMultiplexParser, parseOwnershipRecord,
+  parseReadinessFrames, spawnConfigurationContainsSecret
 } from "./core.mjs";
 
 const SOCKET = process.env.DEVSPACE_DOCKER_SOCKET_PATH;
@@ -19,7 +21,14 @@ if (SOCKET !== "/run/devspace-docker/docker.sock") {
   throw new Error("proof-requires-dedicated-container-socket");
 }
 
-function api(method, requestPath, body, accepted = [200, 201, 204], contentType = "application/json") {
+function api(
+  method,
+  requestPath,
+  body,
+  accepted = [200, 201, 204],
+  contentType = "application/json",
+  onStarted = null
+) {
   const encoded = body === undefined ? undefined
     : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
   return new Promise((resolve, reject) => {
@@ -36,17 +45,29 @@ function api(method, requestPath, body, accepted = [200, 201, 204], contentType 
         if (bytes > 1024 * 1024) request.destroy(new Error("docker-response-too-large"));
         else chunks.push(Buffer.from(chunk));
       });
-      response.on("end", () => {
-        if (accepted.includes(response.statusCode ?? 0)) resolve(Buffer.concat(chunks));
-        else reject(Object.assign(new Error(`docker-api-${method}-${response.statusCode}`), {
-          statusCode: response.statusCode
-        }));
+      response.on("end", async () => {
+        try {
+          await startedGate;
+          if (accepted.includes(response.statusCode ?? 0)) resolve(Buffer.concat(chunks));
+          else {
+            const responseBody = Buffer.concat(chunks).toString("utf8");
+            const safeReason = /conflicts with user namespaces and rootless mode/iu.test(responseBody)
+              ? "rootless-user-namespace-conflict"
+              : "unclassified";
+            reject(Object.assign(new Error(`docker-api-${method}-${response.statusCode}`), {
+              statusCode: response.statusCode,
+              safeReason
+            }));
+          }
+        } catch (error) { reject(error); }
       });
     });
     request.setTimeout(10_000, () => request.destroy(new Error("docker-api-timeout")));
     request.on("error", reject);
     if (encoded !== undefined) request.write(encoded);
     request.end();
+    const startedGate = onStarted === null ? Promise.resolve() : Promise.resolve().then(onStarted);
+    startedGate.catch((error) => request.destroy(error));
   });
 }
 async function json(method, requestPath, body, accepted) {
@@ -57,37 +78,38 @@ async function removeContainer(id) {
   await api("DELETE", `/containers/${id}?force=1`, undefined, [204, 404]);
 }
 
-class CleanupCoordinator {
-  #containers = new Set();
-  #roots = new Set();
-  #inflight = new Set();
-  #promise;
-  constructor(runId) { this.runId = runId; }
-  registerRoot(root) { this.#roots.add(root); }
-  trackCreation(promise) {
-    this.#inflight.add(promise);
-    promise.then((id) => this.#containers.add(id), () => {}).finally(() => this.#inflight.delete(promise));
-    return promise;
-  }
-  trackContainer(id) { this.#containers.add(id); }
-  forgetContainer(id) { this.#containers.delete(id); }
-  cleanup() {
-    this.#promise ??= (async () => {
-      await Promise.allSettled([...this.#inflight]);
-      const failures = [];
-      for (const id of this.#containers) {
-        try { await removeContainer(id); } catch { failures.push("container-removal-failed"); }
-      }
-      for (const root of this.#roots) {
-        try { await rm(root, { recursive: true, force: true }); } catch { failures.push("state-removal-failed"); }
-      }
-      const filters = encodeURIComponent(JSON.stringify({ label: [`${LABEL}=${this.runId}`] }));
+function createCleanupCoordinator(runId) {
+  return new CleanupLifecycle({
+    removeContainer,
+    removeRoot: (root) => rm(root, { recursive: true, force: true }),
+    audit: async () => {
+      const filters = encodeURIComponent(JSON.stringify({ label: [`${LABEL}=${runId}`] }));
       const remaining = await json("GET", `/containers/json?all=1&filters=${filters}`);
-      if (remaining.length > 0) failures.push("proof-container-audit-failed");
-      if (failures.length > 0) throw new Error(failures.join(","));
-    })();
-    return this.#promise;
-  }
+      const named = (await json("GET", "/containers/json?all=1"))
+        .filter((item) => item.Names?.some((name) =>
+          name.startsWith(`/devspace-ai-proof-${runId}`)));
+      if (remaining.length > 0 || named.length > 0) throw new Error("proof-container-audit-failed");
+    }
+  });
+}
+
+function createLifecycleHooks({ failStage = null, pauseStage = null, signal = null, onPause = null } = {}) {
+  return {
+    async reached(stage) {
+      if (failStage === stage) throw new Error(`injected-${stage}`);
+      if (pauseStage !== stage) return;
+      onPause?.(stage);
+      await new Promise((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new Error("proof-aborted"));
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(
+          signal.reason ?? new Error("proof-aborted")
+        ), { once: true });
+      });
+    }
+  };
 }
 
 async function createExec(containerId, command, counter) {
@@ -99,7 +121,7 @@ async function createExec(containerId, command, counter) {
   return response.Id;
 }
 
-function startExec(execId, stdin, { readiness = false } = {}) {
+function startExec(execId, stdin, { readiness = false, onStarted = null } = {}) {
   const encoded = Buffer.from('{"Detach":false,"Tty":false}');
   return new Promise((resolve, reject) => {
     const request = http.request({
@@ -112,22 +134,30 @@ function startExec(execId, stdin, { readiness = false } = {}) {
     let settled = false;
     const timer = setTimeout(() => fail(new Error("exec-lifetime-timeout")), EXEC_TIMEOUT);
     const parser = new DockerMultiplexParser();
-    const streams = { stdout: [], stderr: [] };
+    const frames = [];
+    let readinessObserved = false;
+    let readinessTimer;
+    let startGateReady = onStarted === null;
     function finish(socket, requireEnd) {
       if (settled) return;
       try {
-        if (requireEnd) parser.finish();
+        if (requireEnd) parser.finish(); else parser.assertBoundary();
+        if (readiness && parser.frameCount !== 1) throw new Error("supervisor-readiness-frame-count");
+        const streams = { stdout: [], stderr: [] };
+        for (const frame of frames) streams[frame.kind].push(frame.payload);
         const output = {
           stdout: Buffer.concat(streams.stdout).toString("utf8"),
           stderr: Buffer.concat(streams.stderr).toString("utf8")
         };
-        if (readiness) parseReadiness(output.stdout, output.stderr);
+        if (readiness) parseReadinessFrames(frames);
         settled = true;
         clearTimeout(timer);
         if (readiness) socket.destroy();
         resolve({ ...output, socket });
       } catch (error) {
-        const privateText = Buffer.concat(streams.stderr).toString("utf8");
+        const privateText = Buffer.concat(
+          frames.filter((frame) => frame.kind === "stderr").map((frame) => frame.payload)
+        ).toString("utf8");
         const classification = [
           "fixture-process-group-unproven", "process-topology-unstable-or-escaped",
           "invalid-bootstrap", "fixture-process-group-topology-churn"
@@ -144,13 +174,22 @@ function startExec(execId, stdin, { readiness = false } = {}) {
     request.once("upgrade", (_response, socket, head) => {
       const consume = (chunk) => {
         try {
-          for (const frame of parser.push(Buffer.from(chunk))) streams[frame.kind].push(frame.payload);
+          const parsed = parser.push(Buffer.from(chunk));
+          frames.push(...parsed);
           if (readiness) {
-            const stdout = Buffer.concat(streams.stdout).toString("utf8");
-            const stderr = Buffer.concat(streams.stderr).toString("utf8");
-            if (stdout.endsWith("\n")) {
-              parseReadiness(stdout, stderr);
-              finish(socket, false);
+            if (readinessObserved) {
+              parser.assertBoundary();
+              if (parsed.length > 0) throw new Error("supervisor-readiness-extra-frame");
+            }
+            if (frames.length > 1) throw new Error("supervisor-readiness-extra-frame");
+            if (frames.length === 1) {
+              parseReadinessFrames(frames);
+              parser.assertBoundary();
+              readinessObserved = true;
+              clearTimeout(readinessTimer);
+              readinessTimer = setTimeout(() => {
+                if (startGateReady) finish(socket, false);
+              }, 20);
             }
           }
         } catch (error) { socket.destroy(); fail(error); }
@@ -160,6 +199,18 @@ function startExec(execId, stdin, { readiness = false } = {}) {
       socket.once("end", () => finish(socket, true));
       socket.once("error", fail);
       socket.write(Buffer.from(`${stdin}\n`));
+      if (onStarted !== null) {
+        Promise.resolve().then(onStarted).then(() => {
+          startGateReady = true;
+          if (readinessObserved) {
+            clearTimeout(readinessTimer);
+            readinessTimer = setTimeout(() => finish(socket, false), 20);
+          }
+        }, (error) => {
+          socket.destroy();
+          fail(error);
+        });
+      }
     });
     request.once("response", (response) => fail(new Error(`exec-start-http-${response.statusCode}`)));
     request.once("error", fail);
@@ -167,17 +218,24 @@ function startExec(execId, stdin, { readiness = false } = {}) {
   });
 }
 
-async function uploadTooling(containerId, inject) {
-  if (inject === "during-archive-upload") throw new Error("injected-during-archive-upload");
+async function uploadTooling(containerId, hooks) {
   const repositoryRoot = path.dirname(path.dirname(TOOL_ROOT));
   const archive = spawnSync("tar", ["-C", repositoryRoot, "-cf", "-", "tooling/ai-supervisor-proof"], {
     encoding: null, maxBuffer: 8 * 1024 * 1024
   });
   if (archive.status !== 0) throw new Error("proof-archive-failed");
-  await api("PUT", `/containers/${containerId}/archive?path=/`, archive.stdout, [200], "application/x-tar");
+  await api(
+    "PUT",
+    `/containers/${containerId}/archive?path=/`,
+    archive.stdout,
+    [200],
+    "application/x-tar",
+    () => hooks?.reached("during-archive-upload")
+  );
 }
 
-async function createContainer(runId, suffix, cleanup, inject = null, fixedName = null) {
+async function createContainer(runId, suffix, cleanup, hooks = null, fixedName = null) {
+  cleanup.assertOpen();
   const name = fixedName ?? `devspace-ai-proof-${runId}-${suffix}`;
   const creation = json("POST", `/containers/create?name=${name}`, {
     Image: IMAGE,
@@ -192,16 +250,24 @@ async function createContainer(runId, suffix, cleanup, inject = null, fixedName 
     }
   }).then((created) => created.Id);
   const id = await cleanup.trackCreation(creation);
-  if (inject === "after-container-create") throw new Error("injected-after-container-create");
-  await uploadTooling(id, inject);
+  cleanup.assertOpen();
+  await hooks?.reached("after-container-create");
+  await uploadTooling(id, hooks);
+  cleanup.assertOpen();
   await api("POST", `/containers/${id}/start`);
-  if (inject === "after-start") throw new Error("injected-after-start");
+  cleanup.assertOpen();
+  await hooks?.reached("after-start");
   const inspected = await json("GET", `/containers/${id}/json`);
   if (inspected.Id !== id || inspected.State.Running !== true) throw new Error("container-identity-unproven");
   return { id, name };
 }
 
-function binding(containerId, execId, generation = 1) {
+function binding(
+  containerId,
+  execId,
+  generation = 1,
+  aiSessionId = "01990000-0000-7000-8000-000000000004"
+) {
   return {
     schemaVersion: "devspace.ai-supervisor-proof-binding/v1",
     projectId: "01990000-0000-7000-8000-000000000001",
@@ -210,7 +276,7 @@ function binding(containerId, execId, generation = 1) {
     runtimePlanHash: `sha256-runtime-plan-v1:${"a".repeat(64)}`,
     runtimeGeneration: 7,
     containerId,
-    aiSessionId: "01990000-0000-7000-8000-000000000004",
+    aiSessionId,
     profileId: "proof-profile",
     profileRevision: `sha256-ai-profile-v1:${"b".repeat(64)}`,
     processGeneration: generation,
@@ -228,32 +294,50 @@ const request = (record, action, payload = null, requestId = randomUUID()) => ({
   requestId
 });
 
-async function helper(containerId, control, counter, inject = null) {
+async function helper(containerId, control, counter, hooks = null) {
   const execId = await createExec(containerId, [
     "node", "/tooling/ai-supervisor-proof/control-client.mjs"
   ], counter);
-  if (inject === "during-helper-reconnect") throw new Error("injected-during-helper-reconnect");
-  const output = await startExec(execId, JSON.stringify(control));
+  const output = await startExec(execId, JSON.stringify(control), {
+    onStarted: () => hooks?.reached("during-helper-reconnect")
+  });
   if (output.stderr !== "") throw new Error("helper-private-diagnostic");
   let response;
   try { response = JSON.parse(output.stdout.trim()); } catch { throw new Error("helper-response-invalid"); }
   return { execId, response, inspection: await json("GET", `/exec/${execId}/json`) };
 }
 
-async function launch(runId, stateRoot, suffix, cleanup, counter, fixtureMode = "cooperative", inject = null) {
-  const container = await createContainer(runId, suffix, cleanup, inject);
+async function launch(
+  runId,
+  stateRoot,
+  suffix,
+  cleanup,
+  counter,
+  fixtureMode = "cooperative",
+  hooks = null,
+  identity = {}
+) {
+  const container = await createContainer(runId, suffix, cleanup, hooks);
   const execId = await createExec(container.id, [
     "node", "/tooling/ai-supervisor-proof/supervisor.mjs"
   ], counter);
-  const bound = binding(container.id, execId);
+  const bound = binding(
+    container.id,
+    execId,
+    identity.processGeneration ?? 1,
+    identity.aiSessionId ?? "01990000-0000-7000-8000-000000000004"
+  );
   const credential = randomBytes(32).toString("hex");
-  const socketPath = `/tmp/devspace-ai-proof/${bound.aiSessionId}-${bound.processGeneration}.sock`;
+  const socketPath = deriveSocketPath(bound);
   const bootstrap = {
     format: "devspace.ai-supervisor-proof-bootstrap/v2",
     credential, socketPath, binding: bound, fixtureMode
   };
-  if (inject === "during-supervisor-bootstrap") throw new Error("injected-during-supervisor-bootstrap");
-  const initial = await startExec(execId, JSON.stringify(bootstrap), { readiness: true });
+  const initial = await startExec(execId, JSON.stringify(bootstrap), {
+    readiness: true,
+    onStarted: () => hooks?.reached("during-supervisor-bootstrap")
+  });
+  cleanup.assertOpen();
   const execInspection = await json("GET", `/exec/${execId}/json`);
   if (execInspection.ID !== execId || execInspection.ContainerID !== container.id
     || !execInspection.Running || !Number.isSafeInteger(execInspection.Pid)) {
@@ -277,7 +361,7 @@ async function launch(runId, stateRoot, suffix, cleanup, counter, fixtureMode = 
   };
   await writeFile(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
   await chmod(recordPath, 0o600);
-  if (inject === "after-ownership-record-write") throw new Error("injected-after-ownership-record-write");
+  await hooks?.reached("after-ownership-record-write");
   if ((await stat(recordPath)).mode & 0o077) throw new Error("ownership-record-permissions");
   return { container, execId, execInspection, record, recordPath, initial };
 }
@@ -294,7 +378,7 @@ async function loadRecord(recordPath, expectedBinding, expectedOwnership = null)
 }
 
 async function recoveryEntry(
-  recordPath, expectedBinding, action, counter, inject = null, expectedOwnership = null
+  recordPath, expectedBinding, action, counter, hooks = null, expectedOwnership = null
 ) {
   const record = await loadRecord(recordPath, expectedBinding, expectedOwnership);
   let container;
@@ -309,26 +393,50 @@ async function recoveryEntry(
     || execInspection.ContainerID !== record.containerId
     || execInspection.Pid !== record.ownership.dockerExecProcess.outerPid
     || !execInspection.Running) throw new Error("owned-exec-mismatch");
-  return helper(record.containerId, request(record, action), counter, inject);
+  return helper(record.containerId, request(record, action), counter, hooks);
 }
 
-async function separateHostReconnect(recordPath, expectedBinding, expectedOwnership) {
-  const child = spawn(process.execPath, [new URL(import.meta.url).pathname, "--reconnect-child"], {
+async function separateHostReconnect(recordPath, expectedBinding, expectedOwnership, credential) {
+  const argv = [new URL(import.meta.url).pathname, "--reconnect-child"];
+  const environment = { DEVSPACE_DOCKER_SOCKET_PATH: SOCKET };
+  if (spawnConfigurationContainsSecret(argv, environment, credential)) {
+    throw new Error("reconnect-spawn-credential-leak");
+  }
+  const child = spawn(process.execPath, argv, {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { DEVSPACE_DOCKER_SOCKET_PATH: SOCKET }
+    env: environment
   });
-  child.stdin.end(`${JSON.stringify({ recordPath, expectedBinding, expectedOwnership })}\n`);
-  const stdout = [];
+  child.stdin.write(`${JSON.stringify({ recordPath, expectedBinding, expectedOwnership })}\n`);
+  let stdout = "";
   const stderr = [];
   let bytes = 0;
-  for (const stream of [child.stdout, child.stderr]) stream.on("data", (chunk) => {
+  const responseLine = new Promise((resolve, reject) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > 128 * 1024) reject(new Error("reconnect-child-output-too-large"));
+      const newline = stdout.indexOf("\n");
+      if (newline >= 0) resolve(stdout.slice(0, newline));
+    });
+  });
+  child.stderr.on("data", (chunk) => {
     bytes += chunk.length;
     if (bytes > 128 * 1024) child.kill("SIGKILL");
-    (stream === child.stdout ? stdout : stderr).push(Buffer.from(chunk));
+    stderr.push(Buffer.from(chunk));
   });
+  const encodedResponse = await responseLine;
+  const liveProcessData = Buffer.concat([
+    await readFile(`/proc/${child.pid}/cmdline`),
+    await readFile(`/proc/${child.pid}/environ`)
+  ]);
+  if (liveProcessData.includes(Buffer.from(credential))) {
+    throw new Error("reconnect-live-process-credential-leak");
+  }
+  child.stdin.end("release\n");
   const code = await new Promise((resolve) => child.once("exit", resolve));
-  if (code !== 0) throw new Error("reconnect-child-failed");
-  return JSON.parse(Buffer.concat(stdout).toString("utf8"));
+  if (code !== 0 || stderr.length > 0) throw new Error("reconnect-child-failed");
+  return { ...JSON.parse(encodedResponse), hostCredentialAbsent: true };
 }
 
 async function probeCgroups(runId, cleanup, counter) {
@@ -338,9 +446,15 @@ async function probeCgroups(runId, cleanup, counter) {
   ], counter);
   const output = await startExec(execId, "");
   if (output.stderr !== "") throw new Error("cgroup-probe-diagnostic");
-  const probe = JSON.parse(output.stdout.trim());
+  let probe;
+  try { probe = JSON.parse(output.stdout.trim()); } catch {
+    return {
+      probe: null,
+      classification: { outcome: "PROBE_FAILED", reason: "invalid-cgroup-probe-json" }
+    };
+  }
   const name = `devspace-ai-proof-${runId}-writable-cgroup`;
-  let rootlessWritableCgroup = "unexpectedly-started";
+  let rootlessWritableCgroup = "started";
   const creation = json("POST", `/containers/create?name=${name}`, {
     Image: IMAGE, Cmd: ["node", "-e", "setInterval(()=>{},1000)"],
     Labels: { [LABEL]: runId },
@@ -352,12 +466,15 @@ async function probeCgroups(runId, cleanup, counter) {
   const candidate = await cleanup.trackCreation(creation);
   try { await api("POST", `/containers/${candidate}/start`); } catch (error) {
     rootlessWritableCgroup = error.statusCode === 500
+      && error.safeReason === "rootless-user-namespace-conflict"
       ? "rejected-by-rootless-user-namespace" : "docker-start-rejected";
   }
-  if (rootlessWritableCgroup === "unexpectedly-started") {
-    throw new Error("writable-cgroup-capability-requires-review");
-  }
-  return { ...probe, rootlessWritableCgroup };
+  const completeProbe = {
+    ...probe,
+    rootlessWritableCgroup: rootlessWritableCgroup === "docker-start-rejected"
+      ? "probe-failed" : rootlessWritableCgroup
+  };
+  return { probe: completeProbe, classification: classifyCgroupProbe(completeProbe) };
 }
 
 async function expectReject(operation) {
@@ -365,11 +482,60 @@ async function expectReject(operation) {
   throw new Error("expected-rejection-missing");
 }
 
+async function repositoryContainsSecret(root, secret, {
+  maximumFileBytes = 1024 * 1024,
+  maximumTotalBytes = 128 * 1024 * 1024,
+  maximumFiles = 10_000
+} = {}) {
+  const skippedDirectories = new Set([
+    ".git", ".cache", ".next", "coverage", "dist", "node_modules"
+  ]);
+  const sourceDirectories = new Set([
+    ".github", "apps", "deploy", "docs", "e2e", "packages", "schemas", "tooling"
+  ]);
+  const resolvedRoot = path.resolve(root);
+  const pending = [resolvedRoot];
+  let totalBytes = 0;
+  let files = 0;
+  const needle = Buffer.from(secret);
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && skippedDirectories.has(entry.name)) continue;
+      if (directory === resolvedRoot && entry.isDirectory()
+        && !sourceDirectories.has(entry.name)) continue;
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(candidate);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const metadata = await lstat(candidate);
+      files += 1;
+      if (files > maximumFiles) throw new Error("repository-secret-scan-file-limit");
+      if (metadata.size > maximumFileBytes) continue;
+      totalBytes += metadata.size;
+      if (totalBytes > maximumTotalBytes) throw new Error("repository-secret-scan-total-limit");
+      const handle = await open(candidate, "r");
+      try {
+        const bytes = Buffer.alloc(metadata.size);
+        const { bytesRead } = await handle.read(bytes, 0, metadata.size, 0);
+        if (bytes.subarray(0, bytesRead).includes(needle)) return true;
+      } finally { await handle.close(); }
+    }
+  }
+  return false;
+}
+
 async function assertNoProofResources(stateRoot, runId) {
   const filters = encodeURIComponent(JSON.stringify({ label: [`${LABEL}=${runId}`] }));
   const listed = await json("GET", `/containers/json?all=1&filters=${filters}`);
+  const named = (await json("GET", "/containers/json?all=1")).filter((item) =>
+    item.Names?.some((name) => name.startsWith(`/devspace-ai-proof-${runId}`)));
   const rootExists = await stat(stateRoot).then(() => true, () => false);
-  if (listed.length !== 0 || rootExists) throw new Error("cleanup-verification-failed");
+  if (listed.length !== 0 || named.length !== 0 || rootExists) {
+    throw new Error("cleanup-verification-failed");
+  }
 }
 
 async function failureInjectionMatrix(runId) {
@@ -381,15 +547,20 @@ async function failureInjectionMatrix(runId) {
     const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-ai-proof-"));
     await chmod(stateRoot, 0o700);
     const stageRunId = `${runId}-${stages.indexOf(stage)}`;
-    const cleanup = new CleanupCoordinator(stageRunId);
+    const cleanup = createCleanupCoordinator(stageRunId);
     cleanup.registerRoot(stateRoot);
     const counter = new Map();
+    const hooks = createLifecycleHooks({ failStage: stage });
     try {
       if (stage === "during-helper-reconnect") {
         const launched = await launch(stageRunId, stateRoot, `inject-${stage}`, cleanup, counter);
-        await recoveryEntry(launched.recordPath, launched.record.binding, "proof", counter, stage);
+        await recoveryEntry(
+          launched.recordPath, launched.record.binding, "proof", counter, hooks
+        );
       } else {
-        await launch(stageRunId, stateRoot, `inject-${stage}`, cleanup, counter, "cooperative", stage);
+        await launch(
+          stageRunId, stateRoot, `inject-${stage}`, cleanup, counter, "cooperative", hooks
+        );
       }
       throw new Error("failure-injection-not-triggered");
     } catch (error) {
@@ -402,29 +573,59 @@ async function failureInjectionMatrix(runId) {
   return stages;
 }
 
-async function signalChild(runId) {
+async function signalChild(runId, stage) {
   const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-ai-proof-"));
   await chmod(stateRoot, 0o700);
-  const cleanup = new CleanupCoordinator(runId);
+  const cleanup = createCleanupCoordinator(runId);
   cleanup.registerRoot(stateRoot);
-  await createContainer(runId, "signal", cleanup);
-  const keepAlive = setInterval(() => {}, 1_000);
-  const signalled = new Promise((resolve, reject) => {
-    for (const signal of ["SIGINT", "SIGTERM"]) {
-      process.once(signal, () => {
-        void cleanup.cleanup().then(resolve, reject);
-      });
+  const controller = new AbortController();
+  let readySent = false;
+  const hooks = createLifecycleHooks({
+    pauseStage: stage,
+    signal: controller.signal,
+    onPause: () => {
+      if (readySent) return;
+      readySent = true;
+      process.stdout.write(`${JSON.stringify({ type: "signal-ready", stateRoot, stage })}\n`);
     }
   });
-  process.stdout.write(`${JSON.stringify({ type: "signal-ready", stateRoot })}\n`);
-  try { await signalled; } finally { clearInterval(keepAlive); }
+  const keepAlive = setInterval(() => {}, 1_000);
+  for (const signalName of ["SIGINT", "SIGTERM"]) {
+    process.once(signalName, () => {
+      controller.abort(new Error(`proof-${signalName.toLowerCase()}`));
+      void cleanup.cleanup();
+    });
+  }
+  try {
+    if (stage === "during-helper-reconnect") {
+      const launched = await launch(runId, stateRoot, "signal", cleanup, new Map());
+      await recoveryEntry(
+        launched.recordPath, launched.record.binding, "proof", new Map(), hooks
+      );
+    } else {
+      await launch(runId, stateRoot, "signal", cleanup, new Map(), "cooperative", hooks);
+    }
+    throw new Error("signal-stage-not-reached");
+  } catch (error) {
+    if (!controller.signal.aborted) throw error;
+  } finally {
+    await cleanup.cleanup();
+    clearInterval(keepAlive);
+  }
 }
 
 async function signalCleanupMatrix(runId) {
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    const signalRunId = `${runId}-${signal.toLowerCase()}`;
+  const stages = [
+    "after-container-create",
+    "during-archive-upload",
+    "during-supervisor-bootstrap",
+    "during-helper-reconnect"
+  ];
+  for (const stage of stages) {
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+      const signalRunId = `${runId}-${stages.indexOf(stage)}-${signal.toLowerCase()}`;
     const child = spawn(process.execPath, [
-      new URL(import.meta.url).pathname, "--signal-child", signalRunId
+      new URL(import.meta.url).pathname, "--signal-child", signalRunId, stage
     ], {
       stdio: ["ignore", "pipe", "pipe"],
       env: { DEVSPACE_DOCKER_SOCKET_PATH: SOCKET }
@@ -444,7 +645,7 @@ async function signalCleanupMatrix(runId) {
         if (!stdout.includes("\n")) return;
         try {
           const message = JSON.parse(stdout.slice(0, stdout.indexOf("\n")));
-          if (message.type !== "signal-ready") throw new Error();
+          if (message.type !== "signal-ready" || message.stage !== stage) throw new Error();
           stateRoot = message.stateRoot;
           clearTimeout(timer);
           resolve();
@@ -465,21 +666,24 @@ async function signalCleanupMatrix(runId) {
       throw new Error(`signal-child-cleanup-failed-${outcome.code}-${outcome.exitSignal}-${stderr.length}`);
     }
     await assertNoProofResources(stateRoot, signalRunId);
+    }
   }
-  return ["SIGINT", "SIGTERM"];
+  return stages.flatMap((stage) => [`${stage}:SIGINT`, `${stage}:SIGTERM`]);
 }
 
 async function main() {
   const runId = randomUUID().slice(0, 8);
   const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-ai-proof-"));
   await chmod(stateRoot, 0o700);
-  const cleanup = new CleanupCoordinator(runId);
+  const cleanup = createCleanupCoordinator(runId);
   cleanup.registerRoot(stateRoot);
+  const controller = new AbortController();
   const execCounter = new Map();
   const matrix = {};
   let signalSeen = null;
   const onSignal = (signal) => {
     signalSeen = signal;
+    controller.abort(new Error(`proof-${signal.toLowerCase()}`));
     void cleanup.cleanup().then(() => { process.exitCode = 128 + (signal === "SIGINT" ? 2 : 15); });
   };
   process.once("SIGINT", onSignal);
@@ -490,9 +694,24 @@ async function main() {
     if (!info.SecurityOptions?.some((value) => /rootless/iu.test(value))) {
       throw new Error("daemon-not-rootless");
     }
-    const cgroup = await probeCgroups(runId, cleanup, execCounter);
+    const cgroupResult = await probeCgroups(runId, cleanup, execCounter);
+    controller.signal.throwIfAborted();
+    if (cgroupResult.classification.outcome !== "BLOCKED") {
+      await cleanup.cleanup();
+      process.stdout.write(`${JSON.stringify({
+        schemaVersion: "devspace.ai-supervisor-proof-result/v3",
+        verdict: cgroupResult.classification.outcome,
+        reason: cgroupResult.classification.reason,
+        environment: { engineClass: "dedicated rootless Docker", image: IMAGE },
+        cgroup: cgroupResult.probe,
+        scenarios: null
+      }, null, 2)}\n`);
+      return;
+    }
+    const cgroup = cgroupResult.probe;
 
     const normal = await launch(runId, stateRoot, "normal", cleanup, execCounter);
+    controller.signal.throwIfAborted();
     const roundTrip = await helper(normal.container.id, request(normal.record, "send", {
       operationId: "normal-round-trip", value: "fixture"
     }), execCounter);
@@ -502,9 +721,11 @@ async function main() {
       sideEffect: "one correlated provider input", cleanup: "tracked" };
 
     const reconnect = await separateHostReconnect(
-      normal.recordPath, normal.record.binding, normal.record.ownership
+      normal.recordPath, normal.record.binding, normal.record.ownership, normal.record.credential
     );
-    if (!reconnect.response.ok) throw new Error("reconnect-rejected");
+    if (!reconnect.response.ok || reconnect.hostCredentialAbsent !== true) {
+      throw new Error("reconnect-rejected");
+    }
     const continued = await recoveryEntry(
       normal.recordPath, normal.record.binding, "proof", execCounter
     );
@@ -555,16 +776,46 @@ async function main() {
       evidence: "strict schema/equality rejection and stable event sequence", sideEffect: "none",
       cleanup: "tracked" };
 
+    const replay = await launch(runId, stateRoot, "replay", cleanup, execCounter);
     const interruptId = randomUUID();
-    const interruptRequest = request(normal.record, "interrupt", null, interruptId);
-    const interrupted = await helper(normal.container.id, interruptRequest, execCounter);
-    const duplicate = await helper(normal.container.id, interruptRequest, execCounter);
+    const interruptRequest = request(replay.record, "interrupt", null, interruptId);
+    const interrupted = await helper(replay.container.id, interruptRequest, execCounter);
+    const duplicate = await helper(replay.container.id, interruptRequest, execCounter);
+    const conflicting = await helper(replay.container.id, {
+      ...interruptRequest,
+      action: "send",
+      payload: { operationId: "conflicting-replay", value: "must-not-forward" }
+    }, execCounter);
     if (interrupted.response.result?.type !== "interrupted"
-      || JSON.stringify(interrupted.response) !== JSON.stringify(duplicate.response)) {
+      || JSON.stringify(interrupted.response) !== JSON.stringify(duplicate.response)
+      || conflicting.response.code !== "conflicting-request-id") {
       throw new Error("interrupt-correlation-failed");
     }
+    for (let index = 0; index < 255; index += 1) {
+      const filled = await helper(replay.container.id, request(replay.record, "send", {
+        operationId: `ledger-fill-${index}`, value: "fixture"
+      }), execCounter);
+      if (filled.response.result?.type !== "echo") throw new Error("ledger-fill-failed");
+    }
+    const beforeCapacity = await recoveryEntry(
+      replay.recordPath, replay.record.binding, "proof", execCounter
+    );
+    const atCapacity = await helper(replay.container.id, request(replay.record, "send", {
+      operationId: "ledger-overflow", value: "must-not-forward"
+    }), execCounter);
+    const duplicateAtCapacity = await helper(
+      replay.container.id, interruptRequest, execCounter
+    );
+    const afterCapacity = await recoveryEntry(
+      replay.recordPath, replay.record.binding, "proof", execCounter
+    );
+    if (atCapacity.response.code !== "request-ledger-capacity-reached"
+      || JSON.stringify(duplicateAtCapacity.response) !== JSON.stringify(interrupted.response)
+      || beforeCapacity.response.result.eventSequence !== afterCapacity.response.result.eventSequence) {
+      throw new Error("request-ledger-capacity-safety-failed");
+    }
     matrix.F = { status: "PASS", action: "correlated cooperative interrupt and exact duplicate",
-      evidence: "post-baseline request ID match; idempotent duplicate; provider remained live",
+      evidence: "duplicates remained idempotent at capacity; conflict/new IDs rejected without provider effects",
       sideEffect: "one provider interrupt", cleanup: "tracked" };
 
     const graceful = await helper(
@@ -631,23 +882,94 @@ async function main() {
 
     const corruptCases = [];
     const base = structuredClone(normal.record);
-    const values = [
-      "", "{", JSON.stringify({ ...base, extra: true }),
-      JSON.stringify({ ...base, format: "wrong" }),
-      JSON.stringify({ ...base, containerId: "f".repeat(64) }),
-      JSON.stringify({ ...base, supervisorExecId: "f".repeat(64) }),
-      JSON.stringify({ ...base, ownership: { ...base.ownership, supervisor: undefined } }),
-      JSON.stringify({ ...base, ownership: { ...base.ownership,
-        provider: { ...base.ownership.provider, nspid: ["bad"] } } }),
-      JSON.stringify({ ...base, binding: { ...base.binding, processGeneration: 99 } }),
-      JSON.stringify({ ...base, ownership: { ...base.ownership,
-        provider: { ...base.ownership.provider,
-          startTime: String(BigInt(base.ownership.provider.startTime) + 1n) } } }),
-      JSON.stringify(forced.record)
+    const separateSession = await launch(
+      runId,
+      stateRoot,
+      "separate-session",
+      cleanup,
+      execCounter,
+      "cooperative",
+      null,
+      { aiSessionId: "01990000-0000-7000-8000-000000000088", processGeneration: 2 }
+    );
+    const mutateRecord = (mutation) => {
+      const value = structuredClone(base);
+      mutation(value);
+      return JSON.stringify(value);
+    };
+    const cases = [
+      ["empty", ""],
+      ["truncated-json", "{"],
+      ["unknown-field", JSON.stringify({ ...base, extra: true })],
+      ["wrong-format", JSON.stringify({ ...base, format: "wrong" })],
+      ["top-container-mismatch", mutateRecord((value) => { value.containerId = "f".repeat(64); })],
+      ["binding-container-mismatch", mutateRecord((value) => {
+        value.binding.containerId = "f".repeat(64);
+      })],
+      ["top-exec-mismatch", mutateRecord((value) => { value.supervisorExecId = "f".repeat(64); })],
+      ["binding-exec-mismatch", mutateRecord((value) => {
+        value.binding.dockerExecId = "f".repeat(64);
+      })],
+      ["missing-supervisor", JSON.stringify({
+        ...base, ownership: { ...base.ownership, supervisor: undefined }
+      })],
+      ["malformed-nspid", mutateRecord((value) => {
+        value.ownership.provider.nspid = ["bad"];
+      })],
+      ["stale-generation", mutateRecord((value) => { value.binding.processGeneration = 99; })],
+      ["stale-start", mutateRecord((value) => {
+        value.ownership.provider.startTime = String(
+          BigInt(value.ownership.provider.startTime) + 1n
+        );
+      })],
+      ["escaped-descendant-pgid", mutateRecord((value) => {
+        value.ownership.descendants[0].pgid += 1;
+      })],
+      ["escaped-descendant-sid", mutateRecord((value) => {
+        value.ownership.descendants[0].sid += 1;
+      })],
+      ["inconsistent-group-member", mutateRecord((value) => {
+        value.ownership.groupMembers[1].startTime = String(
+          BigInt(value.ownership.groupMembers[1].startTime) + 1n
+        );
+      })],
+      ["foreign-group-member", mutateRecord((value) => {
+        const foreignPid = 120;
+        value.ownership.groupMembers.push({
+          ...value.ownership.provider,
+          pid: foreignPid,
+          ppid: 1,
+          startTime: "999999",
+          nspid: [foreignPid]
+        });
+      })],
+      ["missing-descendant", mutateRecord((value) => {
+        value.ownership.descendants.pop();
+        value.ownership.groupMembers.pop();
+      })],
+      ["altered-descendant-parent", mutateRecord((value) => {
+        value.ownership.descendants[1].ppid = 1;
+        value.ownership.groupMembers[2].ppid = 1;
+      })],
+      ["duplicate-pid", mutateRecord((value) => {
+        const duplicate = value.ownership.descendants[0];
+        value.ownership.descendants[1].pid = duplicate.pid;
+        value.ownership.descendants[1].nspid = [...duplicate.nspid];
+        value.ownership.groupMembers[2].pid = duplicate.pid;
+        value.ownership.groupMembers[2].nspid = [...duplicate.nspid];
+      })],
+      ["crossed-socket-generation", mutateRecord((value) => {
+        value.socketPath = `/tmp/devspace-ai-proof/${value.binding.aiSessionId}-2.sock`;
+      })],
+      ["crossed-socket-session", mutateRecord((value) => {
+        value.socketPath = "/tmp/devspace-ai-proof/01990000-0000-7000-8000-000000000077-1.sock";
+      })],
+      ["genuine-separate-session", JSON.stringify(separateSession.record)]
     ];
     const missing = path.join(stateRoot, "missing.json");
     const execBeforeK = [...execCounter.values()].reduce((sum, value) => sum + value, 0);
-    for (const [index, value] of [null, ...values].entries()) {
+    for (const [index, entry] of [["missing", null], ...cases].entries()) {
+      const [name, value] = entry;
       const testPath = index === 0 ? missing : path.join(stateRoot, `corrupt-${index}.json`);
       if (index > 0) await writeFile(testPath, value, { mode: 0o600 });
       await expectReject(() => recoveryEntry(
@@ -656,12 +978,12 @@ async function main() {
       await expectReject(() => recoveryEntry(
         testPath, normal.record.binding, "fixture-stop", execCounter, null, normal.record.ownership
       ));
-      corruptCases.push(index === 0 ? "missing" : `case-${index}`);
+      corruptCases.push(name);
     }
     const execAfterK = [...execCounter.values()].reduce((sum, value) => sum + value, 0);
     if (execBeforeK !== execAfterK) throw new Error("corrupt-record-created-helper");
     matrix.K = { status: "PASS", action: "ran real recovery and signal-capable entries across strict corrupt-record corpus",
-      evidence: `${corruptCases.length} cases rejected before Docker helper creation; exec count unchanged`,
+      evidence: `${corruptCases.length} semantic/cross-authority cases rejected before Docker helper creation; exec count unchanged`,
       sideEffect: "none", cleanup: "temp corpus under tracked root",
       limitation: "proof-local validators are not production request authority" };
 
@@ -675,15 +997,15 @@ async function main() {
     const hostBytes = Buffer.concat([
       await readFile(`/proc/${process.pid}/cmdline`), await readFile(`/proc/${process.pid}/environ`)
     ]);
-    const repositorySearch = spawnSync("rg", ["-l", leakTarget.record.credential, "."], {
-      cwd: process.cwd(), encoding: "utf8"
-    });
+    const repositoryLeak = await repositoryContainsSecret(
+      process.cwd(), leakTarget.record.credential
+    );
     const stateMode = (await stat(stateRoot)).mode & 0o777;
     const recordMode = (await stat(leakTarget.recordPath)).mode & 0o777;
     if (leak.response.result.credentialPresent
       || inspections.some((value) => JSON.stringify(value).includes(leakTarget.record.credential))
       || hostBytes.includes(Buffer.from(leakTarget.record.credential))
-      || repositorySearch.status === 0 || stateMode !== 0o700 || recordMode !== 0o600
+      || repositoryLeak || stateMode !== 0o700 || recordMode !== 0o600
       || leakTarget.initial.stdout.includes(leakTarget.record.credential)
       || leakTarget.initial.stderr.includes(leakTarget.record.credential)) {
       throw new Error("credential-leak-detected");
@@ -708,6 +1030,7 @@ async function main() {
       blocker: "production-safe descendant termination boundary not proven",
       environment: { engineClass: "dedicated rootless Docker", image: IMAGE },
       cgroup,
+      cgroupClassification: cgroupResult.classification,
       scenarios: ordered
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -721,20 +1044,24 @@ async function main() {
 }
 
 if (process.argv[2] === "--reconnect-child") {
-  let input = "";
-  process.stdin.setEncoding("utf8");
-  for await (const chunk of process.stdin) {
-    input += chunk;
-    if (Buffer.byteLength(input) > 128 * 1024) throw new Error("reconnect-input-too-large");
+  const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const iterator = lines[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  if (first.done || Buffer.byteLength(first.value) > 128 * 1024) {
+    throw new Error("reconnect-input-invalid");
   }
+  const input = first.value;
   const { recordPath, expectedBinding, expectedOwnership } = JSON.parse(input);
   const counter = new Map();
   const result = await recoveryEntry(
     recordPath, expectedBinding, "proof", counter, null, expectedOwnership
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
+  const release = await iterator.next();
+  lines.close();
+  if (release.done || release.value !== "release") throw new Error("reconnect-release-invalid");
 } else if (process.argv[2] === "--signal-child") {
-  await signalChild(process.argv[3]);
+  await signalChild(process.argv[3], process.argv[4]);
 } else {
   await main();
 }

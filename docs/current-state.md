@@ -253,7 +253,9 @@ cgroup or equivalent atomic descendant-tree boundary. Production provider launch
 remains blocked pending the prerequisite described in
 `docs/research/ai-session-supervisor-capability-proof.md`. Production AI execution, supervisor
 integration, durable ownership, credentials, F11 handlers, event persistence, Web routes, SQLite
-data, and UI remain absent.
+data, and UI remain absent. The opt-in executable now conditions this blocked result on the
+reviewed cgroup probe tuple; a stronger or malformed future environment yields an explicit
+review-required or probe-failed result instead of replaying the static blocker matrix.
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
