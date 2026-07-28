@@ -15,6 +15,18 @@
   next developer would otherwise receive materially incorrect information.
 - For documentation conflicts, use the single authority order in `docs/README.md`.
 
+## Beta delivery rule
+
+- Prioritize complete browser-usable vertical slices for the owner-only beta; normally only P0
+  blocks a slice: likely data loss, credential exposure, crossed project/workspace authority, a
+  broken main workflow, or ordinary use becoming unrecoverable.
+- Document and defer rare races, hostile-process behavior, generic deployment concerns, perfect
+  recovery, and future multi-user hardening. Do not broaden work merely to make it theoretically
+  complete.
+- Before designing equivalent AI-session UI or workflows, inspect `pingdotgg/t3code`; MIT-licensed
+  code may be copied or adapted with required attribution. Retain DevSpace's Web/Agent, workspace,
+  persistence, Docker, filesystem, and process-authority boundaries.
+
 ## Architecture boundaries
 
 - The browser talks only to the web application.

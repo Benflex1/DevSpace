@@ -4,6 +4,16 @@
 
 Milestone 1 — complete.
 
+The TypeScript 7 acceleration slice is complete. All DevSpace CLI typecheck and build paths now
+resolve `tsc` to native TypeScript 7.0.2; the named `typescript` dependency is a deliberately
+narrow alias to `@typescript/typescript6` for `tooling/check-workspace-graph.mjs` and
+`typescript-eslint`, exposing `tsc6` 6.0.3. The removed `baseUrl` was replaced with semantically
+equivalent explicit relative path aliases, and WebSocket terminal frames now copy into owned
+`ArrayBuffer` payloads for TypeScript 7's stricter DOM typing. On the development server, warm
+`pnpm typecheck` fell from 56.78/46.38/46.33 seconds (TypeScript 5.9.3) to
+18.19/18.56/18.41 seconds (TypeScript 7.0.2); default native parallelism was retained rather than
+pinning checker/builder counts. No product or runtime authority boundary changed.
+
 AI Session Foundation Slice 0 now defines the accepted post-M1 architecture and executable
 contracts only: ADR 015, AI Sessions v1, separate structured session/process/turn/interaction
 graphs, the F11 Agent API extension, canonical per-session events, a durable acknowledged Agent

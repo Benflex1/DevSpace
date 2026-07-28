@@ -21,6 +21,13 @@ Run the usable local slice with `pnpm dev`, then open `http://localhost:3000`. R
 browser test with `pnpm test:e2e`. Production authentication and runtime settings are listed in
 `.env.example`.
 
+## TypeScript toolchain
+
+DevSpace uses the pinned native TypeScript 7.0.2 package alias for every repository `tsc` typecheck
+and project-reference build. The `typescript` dependency deliberately aliases
+`@typescript/typescript6` (currently exposing `tsc6` 6.0.3) for the legacy compiler API used by the
+workspace-graph checker and `typescript-eslint`. Run `pnpm toolchain:check` to verify the split.
+
 ## Preview ingress contract
 
 DevSpace uses an administrator-owned preview base domain and reserved label suffix, for example

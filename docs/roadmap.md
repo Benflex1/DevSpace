@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated July 2026.
+> Updated July 28, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -15,7 +15,66 @@
 
 ---
 
+# Current delivery policy — high-quality beta acceleration
+
+DevSpace is now optimizing for the fastest responsible path to a coherent, semi-finished beta of
+the entire product.
+
+The quality bar remains high, but completeness is judged by real owner-controlled workflows rather
+than exhaustive production hardening.
+
+## MVP/beta blocking policy
+
+- **P0 — blocks the current slice:** the normal workflow does not work, likely data loss, credential
+  exposure, cross-project/workspace authority failure, or an ordinary failure that leaves the product
+  unusable.
+- **P1 — fix when encountered or directly adjacent:** common workflow defects, confusing UX,
+  recurring restart problems, and recoverable inconsistent state.
+- **P2 — document and defer:** rare races, hostile-process behavior, unusual corruption, perfect
+  recovery, generic deployment coverage, and future multi-user hardening.
+
+Only P0 issues should normally block a beta slice. P1/P2 work may be included when small and directly
+adjacent, but must not turn a vertical slice into an open-ended hardening project.
+
+## T3 Code reuse policy
+
+`pingdotgg/t3code` is an MIT-licensed reference implementation and should be inspected before
+designing equivalent AI-session or Workbench UX from scratch.
+
+DevSpace may copy or adapt suitable T3 Code code where this accelerates delivery. Substantial reuse
+must preserve the required license notices and be recorded in attribution documentation.
+
+Strong reuse targets include AI-session navigation, streaming turns, approvals, structured questions,
+model/provider selection, activity rendering, changed-file summaries, diff UX, interruption/reconnect
+states, keyboard interactions, and loading/empty/error states.
+
+DevSpace must retain its own authority boundaries: Web remains the sole SQLite writer; Agent owns
+Git, filesystem, Docker, PTYs, tasks, previews, and provider processes; providers run in the exact
+Agent-managed workspace; and no host/Coolify Docker socket is exposed.
+
+---
+
 # Current overall status
+
+## Current beta target
+
+**Status: 🟡 Active**
+
+The next product target is a coherent semi-finished beta, not another foundation-only milestone.
+
+TypeScript 7 acceleration is complete. The active next product slice is AI Session Beta Slice B;
+the remaining beta path prioritizes:
+
+1. a browser-usable Codex-first AI session flow;
+2. private GitHub repository access;
+3. project creation from scratch;
+4. essential files, Git, task, Project Options, and Workbench UX;
+5. focused stabilization and visual polish based on real use.
+
+AI-session contracts and capability research are complete. Production-safe termination of arbitrary
+hostile descendant processes remains deliberately unclaimed; the owner-only beta may use cooperative
+process assumptions, best-effort interruption, degraded-session reporting, and workspace restart as
+the fallback.
 
 ## Milestone 0 — Foundation
 
@@ -282,18 +341,87 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
   through eligible GitHub Student benefits, and any GitHub Student Pack security tooling that is
   genuinely free for this private repository. These options have not been adopted.
 
-### Toolchain maintenance (post-M1)
+### Toolchain acceleration — TypeScript 7
 
-- 🧊 Evaluate and adopt TypeScript 7 for faster typechecking where compatible
-- 🧊 Keep a compatibility TypeScript toolchain only where ecosystem tools still require the legacy compiler API
-- 🧊 Benchmark DevSpace typecheck/CI before and after migration
-- 🧊 Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, and the monorepo tsconfig hierarchy
+**Status: ✅ Complete — July 28, 2026**
+
+TypeScript 7 is now stable and is a high-leverage delivery accelerator. The TypeScript 7 migration
+is complete and has shortened DevSpace's normal typecheck feedback loop before the next product
+slice.
+
+Measured on the current development server with `/usr/bin/time` after a clean locked install:
+
+| `pnpm typecheck` | TypeScript 5.9.3 | TypeScript 7.0.2 |
+| --- | ---: | ---: |
+| warm 1 | 56.78 s / 552,656 KB | 18.19 s / 455,908 KB |
+| warm 2 | 46.38 s / 453,724 KB | 18.56 s / 453,412 KB |
+| warm 3 | 46.33 s / 455,496 KB | 18.41 s / 457,904 KB |
+
+TypeScript 7 is the native `tsc` CLI for all repository typecheck and build commands. The standard
+`typescript` dependency remains a narrow `@typescript/typescript6` alias because the workspace
+graph checker and `typescript-eslint` require the legacy programmatic API; its `tsc6` command is
+also checked in CI. The sole required configuration change removed the obsolete `baseUrl` and made
+the existing path aliases explicitly relative. Default TypeScript 7 parallelism was retained: a
+conservative `--checkers 2` experiment produced no material benefit, and no fixed checker or builder
+counts were selected.
+
+Completed migration scope:
+
+- ✅ Benchmark `pnpm typecheck` before and after the migration
+- ✅ Adopt TypeScript 7 for command-line typechecking and project builds where compatible
+- ✅ Keep TypeScript 6 side-by-side only for tooling that still needs the legacy compiler API
+- ✅ Verify compatibility with Next.js, `typescript-eslint`, `tsx`, Vitest, Playwright, declaration
+  output, and the monorepo tsconfig/project-reference hierarchy
+- ✅ Fix TypeScript 6/7 configuration changes that are directly required by DevSpace
+- ✅ Compare a conservative `--checkers 2` experiment and retain the faster default parallelism
+- ✅ Document the compatibility arrangement and rollback path
+
+Stop rule:
+
+- This is an acceleration slice, not a toolchain rewrite.
+- If a required tool cannot coexist cleanly with TypeScript 7 after a bounded investigation, retain
+  the compatible path for that tool and continue product work.
+- Do not wait for every ecosystem integration to become native before using TypeScript 7 for the
+  paths that already work.
 
 ---
 
 # Immediate next steps
 
-1. ⏳ Select and define the next post-M1 product milestone from the existing roadmap.
+1. ⏳ **AI Session Beta Slice B — Codex first**
+   - create and persist a workspace-scoped AI session;
+   - send prompts and stream turns/activity;
+   - support interrupt and resume/new-turn behavior;
+   - support approvals and structured questions;
+   - show a changed-files summary;
+   - retain conversation/session metadata after refresh;
+   - use T3 Code aggressively for UX and suitable MIT-licensed implementation details.
+
+2. ⏳ **Private GitHub repository access**
+   - make real private repositories usable through onboarding, clone/fetch, and push;
+   - keep credentials Agent-private, redacted, revocable, and out of repository URLs/logs;
+   - prefer a GitHub App when its setup remains bounded, with a fine-grained-token fallback for the
+     owner-only beta;
+   - support one GitHub account/install first rather than designing a generic provider platform.
+
+3. ⏳ **Create a project from scratch**
+   - create a local managed Git repository and primary workspace without a remote;
+   - support an initial commit and normal terminal/preview/AI workflows;
+   - optionally create/publish/connect a private GitHub repository using the credential path from
+     step 2;
+   - defer template marketplaces and broad scaffolding catalogs.
+
+4. ⏳ **Workbench beta completion**
+   - basic file tree/editing;
+   - practical Git status/diff/stage/commit/push;
+   - better task/process output and controls;
+   - essential Project Options editing;
+   - cohesive T3 Code-inspired Workbench navigation and visual polish.
+
+5. ⏳ **Focused beta stabilization**
+   - fix P0 defects and high-frequency P1 defects found through real use;
+   - document P2 limitations;
+   - avoid another broad proof/hardening phase before the beta is usable end-to-end.
 
 ---
 
@@ -301,13 +429,42 @@ Docker-capable host, directory, UID/GID, domain, authentication layer, or outer 
 
 ## Near-term product gaps after M1
 
+### Private GitHub repository access
+
+**Status: ❌ Not started — beta gate after the first AI slice**
+
+- ❌ Authenticate one owner-controlled GitHub account/installation
+- ❌ List/select authorized private repositories during onboarding
+- ❌ Clone and fetch private repositories without embedding credentials in remote URLs
+- ❌ Push through an explicit user action
+- ❌ Keep credentials and short-lived tokens Agent-private
+- ❌ Redact credentials from logs, errors, process arguments, and persisted public state
+- ❌ Revoke/disconnect access cleanly
+
+Sequencing decision:
+
+- Implement immediately after AI Session Beta Slice B.
+- It is required before inviting external beta users because most real development repositories are
+  private.
+- Do not delay the first AI vertical slice for a generic multi-provider source-control abstraction.
+- Start with GitHub only and one owner identity/installation.
+
 ### Create a project from scratch
 
-**Status: ❌ Not started**
+**Status: ❌ Not started — beta gate after private-repository access**
 
 - ❌ Create a brand-new DevSpace project without requiring an existing GitHub repository
-- ❌ Initialize repository/workspace safely
-- ❌ Optionally publish/connect it to GitHub later
+- ❌ Initialize a managed local Git repository, primary workspace, and initial commit safely
+- ❌ Support the normal terminal, task, preview, AI, files, and Git workflows before a remote exists
+- ❌ Optionally create/publish/connect a private GitHub repository later
+- ❌ Preserve a simple blank-project path before adding framework templates
+
+Sequencing decision:
+
+- Implement after private GitHub access so publishing can reuse one credential and repository-creation
+  path.
+- Complete it before broad Workbench polish because onboarding must support both existing and new
+  projects for the beta to feel coherent.
 
 ### Persistent terminals
 
@@ -327,11 +484,51 @@ This replaces the current Docker-exec PTY limitation where an Agent restart lose
 
 ---
 
-# Milestone 2 — Real Development Workbench
+# Milestone 2 — High-quality Semi-finished Beta
 
-**Status: ❌ Not started as a milestone**
+**Status: 🟡 Starting**
 
-Goal: make DevSpace the main place where normal development work happens without turning it into a VS Code clone with permanent multi-pane chrome.
+Goal: make DevSpace a coherent daily-use development product as quickly as possible without turning it
+into a VS Code clone or requiring production-grade handling of every theoretical edge case.
+
+## Definition of done
+
+A beta user can:
+
+1. import a public or authorized private GitHub repository, or create a project from scratch;
+2. create/start the primary managed workspace;
+3. use terminal, configured tasks, and previews through the browser;
+4. create a Codex-first AI session, stream turns/activity, answer approvals/structured questions,
+   interrupt it, and inspect a changed-files summary;
+5. browse and edit files;
+6. inspect Git status/diffs and explicitly stage, commit, and push;
+7. edit the Project Options required for normal runtime/task/preview behavior;
+8. recover from ordinary failures through clear retry, session restart, or workspace restart actions;
+9. navigate a cohesive, polished, responsive Workbench inspired by the strongest applicable T3 Code
+   patterns.
+
+Not required for this milestone:
+
+- hostile-repository containment;
+- perfect descendant termination;
+- checkpoint rollback;
+- multi-workspace orchestration;
+- generic source-control/provider support;
+- production deployment automation;
+- exhaustive diagnostics and recovery tooling.
+
+## Delivery order
+
+Completed: TypeScript 7 acceleration.
+
+Remaining delivery order:
+
+1. AI Session Beta Slice B
+2. Private GitHub repository access
+3. Create project from scratch
+4. Files and Git essentials
+5. Tasks, Project Options, Workbench integration, and beta polish
+6. Focused real-use stabilization
 
 ## Files and editor
 
@@ -352,12 +549,30 @@ Goal: make DevSpace the main place where normal development work happens without
 
 ## AI sessions
 
-- ❌ AI session tabs
-- ❌ Approved AI CLI profiles
-- ❌ Start/resume/interrupt/stop controls
-- ❌ Workspace-scoped credentials
-- ❌ Persistent AI session metadata
-- ❌ Better integration with project context
+Foundation completed:
+
+- ✅ Provider-neutral AI-session contracts
+- ✅ Session/process/turn/interaction lifecycle contracts
+- ✅ Authenticated supervisor recovery capability research
+- ✅ Explicitly documented production termination blocker and owner-only beta fallback
+
+AI Session Beta Slice B:
+
+- ⏳ Codex-first AI session tab
+- ⏳ Approved Codex CLI profile and workspace-scoped credential path
+- ⏳ Create, prompt, stream, interrupt, and resume/new-turn controls
+- ⏳ Persistent public session/turn metadata and refresh recovery
+- ⏳ Streaming assistant text and activity/tool events
+- ⏳ Approvals and structured questions
+- ⏳ Changed-files summary after turns
+- ⏳ Clear degraded-session and restart-workspace fallback
+
+Deferred until later:
+
+- 🧊 Inline full diff review inside the first AI slice
+- 🧊 Checkpoint/rollback
+- 🧊 Multiple providers
+- 🧊 Hostile descendant containment and atomic arbitrary process-tree termination
 
 ## Tasks and processes
 
@@ -387,8 +602,13 @@ Goal: make DevSpace the main place where normal development work happens without
 
 ## Additional vertical slices
 
+- ❌ Private GitHub repository access
 - ❌ Create project from scratch
 - ❌ Persistent terminals
+
+Persistent terminals remain valuable, but they do not precede the AI/private-repository/create-project
+beta gates because the existing terminal path is already usable. Implement them when ordinary
+Agent-restart loss becomes one of the highest-frequency remaining beta problems.
 
 ---
 
@@ -462,6 +682,12 @@ Full desktop Workbench parity is not required for the first mobile version.
 
 # Explicitly deferred / not current scope
 
+These items must not block the semi-finished beta unless real use promotes one to P0:
+
+- 🧊 Exhaustive handling of rare lifecycle races and internal-record corruption
+- 🧊 Perfect recovery from simultaneous service/runtime failures
+- 🧊 Production-safe termination of arbitrary hostile descendant process trees
+- 🧊 Generic source-control and AI-provider platforms before the GitHub/Codex paths work
 - 🧊 Hostile-code multi-tenant sandboxing
 - 🧊 Automatic merge
 - 🧊 Automatic production deployment
