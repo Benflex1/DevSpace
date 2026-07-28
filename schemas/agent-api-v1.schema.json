@@ -10508,6 +10508,136 @@
             },
             "eventType": {
               "type": "string",
+              "const": "turn.files.changed"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "files": {
+                  "maxItems": 256,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "change": {
+                        "type": "string",
+                        "enum": [
+                          "added",
+                          "modified",
+                          "deleted",
+                          "renamed",
+                          "untracked"
+                        ]
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "oldPath": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "change",
+                      "path",
+                      "oldPath"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "files",
+                "truncated"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "eventId",
+            "sessionId",
+            "sequence",
+            "observedAt",
+            "profile",
+            "processGeneration",
+            "turnId",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "string",
+              "const": "devspace.ai-event/v1"
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "sessionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "observedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            "profile": {
+              "type": "object",
+              "properties": {
+                "profileId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                },
+                "profileRevision": {
+                  "type": "string",
+                  "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
+                },
+                "provider": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                }
+              },
+              "required": [
+                "profileId",
+                "profileRevision",
+                "provider"
+              ],
+              "additionalProperties": false
+            },
+            "processGeneration": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "turnId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "eventType": {
+              "type": "string",
               "const": "turn.failed"
             },
             "payload": {
@@ -12864,6 +12994,136 @@
                   },
                   "required": [
                     "outcome"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "schemaVersion",
+                "eventId",
+                "sessionId",
+                "sequence",
+                "observedAt",
+                "profile",
+                "processGeneration",
+                "turnId",
+                "eventType",
+                "payload"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "schemaVersion": {
+                  "type": "string",
+                  "const": "devspace.ai-event/v1"
+                },
+                "eventId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "sessionId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "observedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                },
+                "profile": {
+                  "type": "object",
+                  "properties": {
+                    "profileId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                    },
+                    "profileRevision": {
+                      "type": "string",
+                      "pattern": "^sha256-ai-profile-v1:[0-9a-f]{64}$"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+                    }
+                  },
+                  "required": [
+                    "profileId",
+                    "profileRevision",
+                    "provider"
+                  ],
+                  "additionalProperties": false
+                },
+                "processGeneration": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "turnId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "eventType": {
+                  "type": "string",
+                  "const": "turn.files.changed"
+                },
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "files": {
+                      "maxItems": 256,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "change": {
+                            "type": "string",
+                            "enum": [
+                              "added",
+                              "modified",
+                              "deleted",
+                              "renamed",
+                              "untracked"
+                            ]
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "oldPath": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "change",
+                          "path",
+                          "oldPath"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "files",
+                    "truncated"
                   ],
                   "additionalProperties": false
                 }
