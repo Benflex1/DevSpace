@@ -72,6 +72,7 @@ interface SessionRecord {
   activeTurnId: string | null;
   nextSequence: number;
   acknowledgedThrough: number;
+  eventChain: Promise<void>;
 }
 
 interface ProviderAdapter {
@@ -340,20 +341,26 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const events = await readOutbox(stateRoot, binding.aiSessionId);
     const record: SessionRecord = {
       binding, processGeneration: 1, events, listeners: new Set(), turnBaselines: new Map(), adapter: null, activeTurnId: null,
-      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0
+      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve()
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
 
   async function emit(record: SessionRecord, turnId: string | null, eventType: string, payload: unknown): Promise<CanonicalAiEvent> {
-    const event = canonicalAiEventSchema.parse({ schemaVersion: "devspace.ai-event/v1", eventId: createId(), sessionId: record.binding.aiSessionId,
-      turnId, sequence: record.nextSequence++, observedAt: now().toISOString(), profile: { profileId: CODEX_PROFILE_ID, profileRevision: profileRevision(), provider: CODEX_PROFILE_ID },
-      processGeneration: record.processGeneration, eventType, payload });
-    await mkdir(path.dirname(outboxPath(stateRoot, record.binding.aiSessionId)), { recursive: true, mode: 0o700 });
-    await appendFile(outboxPath(stateRoot, record.binding.aiSessionId), `${JSON.stringify(event)}\n`, { mode: 0o600 });
-    record.events.push(event); if (record.events.length > MAX_OUTBOX_EVENTS) record.events.splice(0, record.events.length - MAX_OUTBOX_EVENTS);
-    for (const listener of record.listeners) listener(event);
-    return event;
+    let event: CanonicalAiEvent | undefined;
+    const previous = record.eventChain;
+    const current = previous.then(async () => {
+      event = canonicalAiEventSchema.parse({ schemaVersion: "devspace.ai-event/v1", eventId: createId(), sessionId: record.binding.aiSessionId,
+        turnId, sequence: record.nextSequence++, observedAt: now().toISOString(), profile: { profileId: CODEX_PROFILE_ID, profileRevision: profileRevision(), provider: CODEX_PROFILE_ID },
+        processGeneration: record.processGeneration, eventType, payload });
+      await mkdir(path.dirname(outboxPath(stateRoot, record.binding.aiSessionId)), { recursive: true, mode: 0o700 });
+      await appendFile(outboxPath(stateRoot, record.binding.aiSessionId), `${JSON.stringify(event)}\n`, { mode: 0o600 });
+      record.events.push(event); if (record.events.length > MAX_OUTBOX_EVENTS) record.events.splice(0, record.events.length - MAX_OUTBOX_EVENTS);
+      for (const listener of record.listeners) listener(event);
+    });
+    record.eventChain = current.then(() => undefined, () => undefined);
+    await current;
+    return event!;
   }
 
   const runtime: AiSessionRuntime = {

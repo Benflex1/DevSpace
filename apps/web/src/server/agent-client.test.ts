@@ -3,6 +3,7 @@ import { mkdtemp, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
+import { AI_EVENT_NDJSON_CONTENT_TYPE } from "@devspace/contracts";
 import { AgentResponseError, createAgentClient, AgentUnavailableError } from "./agent-client.js";
 import { createLogger } from "@devspace/diagnostics";
 import { normalizeUserFacingFailure } from "./user-facing-failure.js";
@@ -34,6 +35,44 @@ test("constructs protocol headers and parses valid success envelopes", async () 
     const client = createAgentClient(service.socketPath, { createId: () => id, now: () => new Date(timestamp) });
     await expect(client.health()).resolves.toEqual({ status: "ok" });
   } finally { await service.close(); }
+});
+
+test("keeps an established AI event stream alive through the observation timeout", async () => {
+  const sessionId = "018f0f00-0000-7000-8000-000000000010";
+  const frame = { schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence: 0 } as const;
+  const service = await listen((_request, response) => {
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.flushHeaders();
+    setTimeout(() => response.end(`${JSON.stringify(frame)}\n`), 6_000);
+  });
+  const iterator = createAgentClient(service.socketPath, { observationTimeoutMs: 50, createId: () => id, now: () => new Date(timestamp) })
+    .streamAiEvents(sessionId, 0)[Symbol.asyncIterator]();
+  let settled = false;
+  let received: IteratorResult<unknown> | undefined;
+  let failure: unknown;
+  const next = iterator.next().then((value) => { settled = true; received = value; }, (error: unknown) => { settled = true; failure = error; });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(settled).toBe(false);
+    await next;
+    expect(failure).toBeUndefined();
+    expect(received).toEqual({ done: false, value: frame });
+  } finally {
+    await iterator.return?.(undefined);
+    await service.close();
+  }
+}, 10_000);
+
+test("bounds AI event stream establishment when response headers never arrive", async () => {
+  const service = await listen(() => undefined);
+  const iterator = createAgentClient(service.socketPath, { observationTimeoutMs: 50, createId: () => id, now: () => new Date(timestamp) })
+    .streamAiEvents("018f0f00-0000-7000-8000-000000000011", 0)[Symbol.asyncIterator]();
+  try {
+    await expect(iterator.next()).rejects.toMatchObject({ code: "AGENT_REQUEST_TIMEOUT" });
+  } finally {
+    await iterator.return?.(undefined);
+    await service.close();
+  }
 });
 
 test("rejects malformed envelopes and unavailable sockets without exposing internals", async () => {

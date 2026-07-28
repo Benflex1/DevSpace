@@ -15,8 +15,8 @@ equivalent explicit relative path aliases, and WebSocket terminal frames now cop
 pinning checker/builder counts. No product or runtime authority boundary changed.
 
 AI Session Foundation Slice 0 established the accepted post-M1 architecture and executable
-contracts. Checkpoint 1 of AI Session Beta Slice B is now implemented as a browser-usable
-Codex-first vertical slice: one deployment-owned Codex 0.145.0 profile runs through the Agent in
+contracts. Checkpoint 1 of AI Session Beta Slice B is implemented as a Codex-first vertical slice:
+one deployment-owned Codex 0.145.0 profile runs through the Agent in
 the exact managed workspace container, with a deterministic fake provider for tests; Web remains
 the sole SQLite writer and commits canonical events before browser publication. The Workbench AI
 tab supports availability, session creation, streamed text/activity, cooperative interruption,
@@ -27,7 +27,11 @@ generation. Credentials are copied from one Agent-private deployment login into 
 session-scoped ephemeral in-container `CODEX_HOME`; the host Codex directory is never mounted and
 credential values are not persisted or projected. This is intentionally one live session per
 workspace, and the beta makes no claim of hostile descendant containment. Approvals and structured
-questions remain explicitly in progress for Checkpoint 2.
+questions remain explicitly in progress for Checkpoint 2. Established Agent event streams use a
+bounded response-establishment timeout and no short post-establishment idle timeout. The fake
+provider browser flow passes; a fresh real Codex run reached terminal assistant output, but the
+approved `node:24-bookworm` workspace lacked `bubblewrap`, so file-changing real validation remains
+blocked and Checkpoint 1 is not yet claimed complete.
 
 Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
 SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and
@@ -277,7 +281,7 @@ review-required or probe-failed result instead of replaying the static blocker m
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
-editing, rebuild, and AI sessions remain intentionally unimplemented. Preview service-target
+editing, and rebuild remain intentionally unimplemented. Preview service-target
 execution, automatic long-running dev-task startup, multiple parallel workspaces, preview
 sharing/public controls, and the general logging overhaul remain deferred. Preview sharing and
 public controls are not implied by the canonical hostname; the current path is an authenticated

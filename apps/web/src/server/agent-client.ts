@@ -296,28 +296,47 @@ export function createAgentClient(socketPath: string, options: {
     streamAiEvents: async function* (sessionId: string, afterSequence: number): AsyncGenerator<AiEventStreamFrame> {
       const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
       const requestId = createId();
-      const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
-        const request = http.request({ socketPath, path: endpoint.path.replace("{aiSessionId}", encodeURIComponent(sessionId)) + `?afterSequence=${afterSequence}`,
-          method: "GET", headers: { "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION), "X-DevSpace-Request-Id": requestId,
-            "X-DevSpace-Sent-At": now().toISOString(), Accept: endpoint.successContentType } }, resolve);
-        request.setTimeout(observationTimeoutMs, () => request.destroy(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure", requestId)));
-        request.once("error", reject); request.end();
-      });
-      if (response.statusCode !== endpoint.successStatus) {
-        const chunks: Buffer[] = []; for await (const chunk of response) chunks.push(Buffer.from(chunk as Uint8Array));
-        try {
-          const parsed = endpoint.errorSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8"))) as { error: { code: string; message: string; retryable: boolean } };
-          throw new AgentResponseError(parsed.error.code, parsed.error.message, parsed.error.retryable, undefined, classifyFailureCode(parsed.error.code), requestId);
-        } catch (error) { if (error instanceof AgentResponseError) throw error; throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId); }
-      }
-      let buffer = "";
-      for await (const chunk of response) {
-        buffer += Buffer.from(chunk as Uint8Array).toString("utf8");
-        let newline = buffer.indexOf("\n");
-        while (newline >= 0) {
-          const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n");
-          if (line.length > 0) yield aiEventStreamFrameSchema.parse(JSON.parse(line));
+      let activeResponse: http.IncomingMessage | null = null;
+      let cleanupRequest: (() => void) | null = null;
+      try {
+        const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
+          const request = http.request({ socketPath, path: endpoint.path.replace("{aiSessionId}", encodeURIComponent(sessionId)) + `?afterSequence=${afterSequence}`,
+            method: "GET", headers: { "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION), "X-DevSpace-Request-Id": requestId,
+              "X-DevSpace-Sent-At": now().toISOString(), Accept: endpoint.successContentType } }, (response) => {
+                if (response.statusCode === endpoint.successStatus && response.headers["content-type"] === endpoint.successContentType) request.setTimeout(0);
+                resolve(response);
+              });
+          cleanupRequest = () => request.destroy();
+          request.setTimeout(observationTimeoutMs, () => request.destroy(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure", requestId)));
+          request.once("error", reject); request.end();
+        });
+        activeResponse = response;
+        if (response.statusCode !== endpoint.successStatus) {
+          const chunks: Buffer[] = []; let bytes = 0;
+          for await (const chunk of response) {
+            const data = Buffer.from(chunk as Uint8Array); bytes += data.length;
+            if (bytes > MAX_RESPONSE_BYTES) throw new AgentUnavailableError("AGENT_RESPONSE_TOO_LARGE", "transport-failure", requestId);
+            chunks.push(data);
+          }
+          try {
+            const parsed = endpoint.errorSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8"))) as { error: { code: string; message: string; retryable: boolean } };
+            throw new AgentResponseError(parsed.error.code, parsed.error.message, parsed.error.retryable, undefined, classifyFailureCode(parsed.error.code), requestId);
+          } catch (error) { if (error instanceof AgentResponseError) throw error; throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId); }
         }
+        if (response.headers["content-type"] !== endpoint.successContentType) throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
+        let buffer = "";
+        for await (const chunk of response) {
+          buffer += Buffer.from(chunk as Uint8Array).toString("utf8");
+          let newline = buffer.indexOf("\n");
+          while (newline >= 0) {
+            const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n");
+            if (line.length > 0) yield aiEventStreamFrameSchema.parse(JSON.parse(line));
+          }
+        }
+      } finally {
+        activeResponse?.destroy();
+        const cleanup = cleanupRequest as (() => void) | null;
+        if (cleanup !== null) cleanup();
       }
     }
   };
