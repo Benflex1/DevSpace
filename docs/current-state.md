@@ -28,10 +28,14 @@ session-scoped ephemeral in-container `CODEX_HOME`; the host Codex directory is 
 credential values are not persisted or projected. This is intentionally one live session per
 workspace, and the beta makes no claim of hostile descendant containment. Approvals and structured
 questions remain explicitly in progress for Checkpoint 2. Established Agent event streams use a
-bounded response-establishment timeout and no short post-establishment idle timeout. The fake
-provider browser flow passes; a fresh real Codex run reached terminal assistant output, but the
-approved `node:24-bookworm` workspace lacked `bubblewrap`, so file-changing real validation remains
-blocked and Checkpoint 1 is not yet claimed complete.
+bounded response-establishment timeout and no short post-establishment idle timeout. The fixed
+managed-container external-sandbox policy was validated with real Codex 0.145.0: authentication,
+file creation, streamed browser output, changed-file projection, refresh recovery, a read-only turn,
+interruption, and post-interrupt continuation all worked in a fresh disposable workspace. Browser
+replay avoids appending historical output deltas to already-persisted turn text, and provider staging
+cleanup runs through the exact container. The browser stop action was rerun after that cleanup fix:
+the provider process exited, the staged directory was absent, and the exact workspace then stopped.
+Checkpoint 1 is complete for the owner-only beta; approvals and structured questions remain deferred.
 
 Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
 SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and

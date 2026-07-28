@@ -393,7 +393,7 @@ Stop rule:
    - ✅ send prompts and stream assistant text/activity;
    - ✅ cooperatively interrupt and send another turn;
    - ✅ show bounded changed-files summaries and retain history after refresh;
-   - ✅ stop the live session and recover truthful lost/degraded state with **Restart workspace**;
+   - ✅ stop the live session and verify post-fix ephemeral staging cleanup;
    - 🟡 approvals and structured questions remain Checkpoint 2;
    - ✅ use T3 Code-informed UX patterns with attribution; no host/process/persistence assumptions
      were copied.
