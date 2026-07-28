@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const composeFile = path.join(repositoryRoot, "deploy/preview-gateway/compose.coolify.yaml");
+const caddyConfigFile = path.join(repositoryRoot, "deploy/preview-gateway/caddy.json");
 const alias = "devspace-preview-ingress";
+const previewHttpListener = "unix//run/devspace/gateway/ingress/preview-http.sock|0660";
 
 function dockerAvailable() {
   const result = spawnSync("docker", ["info"], { stdio: "ignore" });
@@ -68,6 +70,7 @@ async function main() {
   const runtimeVolume = `devspace-coolify-smoke-runtime-${uniqueId}`;
   const ingressVolume = `devspace-coolify-smoke-ingress-${uniqueId}`;
   const ingressDirectory = path.join(temporaryRoot, "ingress");
+  const smokeCaddyConfigFile = path.join(temporaryRoot, "caddy-smoke.json");
   const overrideFile = path.join(temporaryRoot, "compose.smoke.yaml");
   const composeEnvironment = {
     ...process.env,
@@ -111,7 +114,25 @@ async function main() {
     await chmod(temporaryRoot, 0o777);
     await mkdir(ingressDirectory, { mode: 0o777 });
     await chmod(ingressDirectory, 0o777);
+
+    const caddyConfig = JSON.parse(await readFile(caddyConfigFile, "utf8"));
+    const caddyServer = caddyConfig?.apps?.http?.servers?.["devspace-preview"];
+    assert.deepEqual(
+      caddyServer?.listen,
+      ["127.0.0.1:18080", previewHttpListener],
+      "source Caddy config must retain the production loopback and Unix listeners"
+    );
+    caddyServer.listen = [previewHttpListener];
+    await writeFile(
+      smokeCaddyConfigFile,
+      `${JSON.stringify(caddyConfig, null, 2)}\n`
+    );
+    await chmod(smokeCaddyConfigFile, 0o444);
+
     await writeFile(overrideFile, [
+      "services:",
+      "  caddy:",
+      '    command: ["caddy", "run", "--config", "/run/devspace/gateway/caddy-smoke.json"]',
       "volumes:",
       "  gateway-runtime:",
       "    external: true",
@@ -158,6 +179,11 @@ async function main() {
     const connectorInspect = parseJsonOutput(
       await runDocker(["inspect", connectorId, "--format", "{{json .}}"]),
       "connector inspection"
+    );
+    assert.deepEqual(
+      caddyInspect.Config.Cmd,
+      ["caddy", "run", "--config", "/run/devspace/gateway/caddy-smoke.json"],
+      "Caddy must use the collision-free smoke configuration"
     );
     assert.equal(caddyInspect.HostConfig.NetworkMode, "host", "Caddy must remain host-networked.");
     assertNoPortBindings(caddyInspect, "Caddy");
