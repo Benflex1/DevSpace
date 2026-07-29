@@ -7,7 +7,8 @@ import { replayAiEvents } from "./ai-session-replay.js";
 type Profile = { profileId: string; profileRevision: string; displayName: string; availability: { state: "available" | "unavailable"; code?: string }; capabilities: { interrupt: boolean } };
 type FileSummary = { files: Array<{ path: string; change: string; oldPath: string | null }>; truncated: boolean };
 type Turn = { id: string; state: string; content: { kind: "text"; text: string }; outputText: string; activities: string[]; changedFiles: FileSummary; createdAt: string };
-type SessionData = { id: string; title: string; state: string; profileRevision: string; lastSequence: number };
+type SessionData = { id: string; title: string; state: string; profileRevision: string; lastSequence: number; historyStartSequence: number; historyTruncated: boolean };
+type SessionSummary = Pick<SessionData, "id" | "title" | "state" | "lastSequence" | "historyStartSequence" | "historyTruncated"> & { workspaceId: string; createdAt: string; updatedAt: string };
 type Event = { eventType: string; eventId: string; sequence: number; turnId: string | null; payload: Record<string, unknown> };
 
 export function AiSessionTab({ projectId, workspaceId, active }: { projectId: string; workspaceId: string; active: boolean }) {
@@ -48,20 +49,38 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     });
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (requestedSessionId?: string) => {
     setLoading(true);
     try {
-      const response = await fetch(`/api/projects/${projectId}/ai?workspaceId=${encodeURIComponent(workspaceId)}`, { cache: "no-store" });
-      const body = await response.json() as { profile?: Profile; session?: { session: SessionData; turns: Array<Omit<Turn, "activities"> & { changedFiles: FileSummary }>; events: Event[] } | null; message?: string };
+      const query = new URLSearchParams({ workspaceId });
+      if (requestedSessionId !== undefined) query.set("sessionId", requestedSessionId);
+      const response = await fetch(`/api/projects/${projectId}/ai?${query.toString()}`, { cache: "no-store" });
+      const body = await response.json() as {
+        profile?: Profile;
+        sessions?: SessionSummary[];
+        session?: { session: SessionData; turns: Array<Omit<Turn, "activities"> & { changedFiles: FileSummary }>; events: Event[]; interactions?: unknown[] } | null;
+        message?: string;
+      };
       if (!response.ok || body.profile === undefined) throw new Error(body.message ?? "Codex availability could not be inspected.");
       setProfile(body.profile);
-      if (body.session !== null && body.session !== undefined) {
-        setSession(body.session.session); lastSequence.current = body.session.session.lastSequence;
-        setTurns(replayAiEvents(body.session.turns.map((turn) => ({ ...turn, activities: [] })), body.session.events));
+      let selected = body.session;
+      const selectedSessionId = requestedSessionId ?? body.sessions?.[0]?.id;
+      if (selected === null && selectedSessionId !== undefined) {
+        const exactQuery = new URLSearchParams({ workspaceId, sessionId: selectedSessionId });
+        const exactResponse = await fetch(`/api/projects/${projectId}/ai?${exactQuery.toString()}`, { cache: "no-store" });
+        const exactBody = await exactResponse.json() as typeof body;
+        if (!exactResponse.ok || exactBody.session === null || exactBody.session === undefined) {
+          throw new Error(exactBody.message ?? "The selected AI session could not be loaded.");
+        }
+        selected = exactBody.session;
+      }
+      if (selected !== null && selected !== undefined) {
+        setSession(selected.session); lastSequence.current = selected.session.lastSequence;
+        setTurns(replayAiEvents(selected.turns.map((turn) => ({ ...turn, activities: [] })), selected.events));
       } else { setSession(null); setTurns([]); lastSequence.current = 0; }
     } catch (error) { setMessage(error instanceof Error ? error.message : "AI session unavailable."); }
     finally { setLoading(false); }
-  }, [applyEvent, projectId, workspaceId]);
+  }, [projectId, workspaceId]);
 
   useEffect(() => { void load(); return () => abortRef.current?.abort(); }, [load]);
 
@@ -94,7 +113,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const create = async () => { try { await post({ action: "create", workspaceId }); await load(); setMessage(null); } catch (error) { setMessage(error instanceof Error ? error.message : "Session creation failed."); } };
   const send = async () => { const text = composer.trim(); if (!text || session === null) return; setComposer(""); try { await post({ action: "send", workspaceId, sessionId: session.id, content: { kind: "text", text } }); } catch (error) { setComposer(text); setMessage(error instanceof Error ? error.message : "Turn could not be sent."); } };
   const interrupt = async () => { const turn = turns.find((candidate) => candidate.state === "running"); if (turn === undefined || session === null) return; try { await post({ action: "interrupt", workspaceId, sessionId: session.id, turnId: turn.id }); } catch (error) { setMessage(error instanceof Error ? error.message : "Interrupt failed."); } };
-  const stop = async () => { if (session === null) return; try { await post({ action: "stop", workspaceId, sessionId: session.id }); await load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Stop failed."); } };
+  const stop = async () => { if (session === null) return; try { await post({ action: "stop", workspaceId, sessionId: session.id }); await load(session.id); } catch (error) { setMessage(error instanceof Error ? error.message : "Stop failed."); } };
   const restartWorkspace = async () => { try { await fetch(`/api/projects/${projectId}/runtime`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "start" }) }); await load(); } catch { setMessage("Workspace restart could not be requested."); } };
 
   if (loading && profile === null) return <div className="ai-tab-surface" role="status">Inspecting Codex availability…</div>;

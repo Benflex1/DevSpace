@@ -28,9 +28,13 @@ export async function GET(request: Request, context: { params: Promise<{ project
   let projectId: string | undefined;
   try {
     const config = readWebRuntimeConfig(); await authenticateHeaders(request.headers, config.auth); ({ projectId } = await context.params);
-    const workspaceId = new URL(request.url).searchParams.get("workspaceId");
+    const query = new URL(request.url).searchParams;
+    const workspaceId = query.get("workspaceId");
+    const sessionId = query.get("sessionId");
     if (workspaceId === null || !uuidV7Schema.safeParse(workspaceId).success) return json({ message: "The workspace identity is invalid." }, 422);
-    const data = await inspectAiWorkbench(projectId, workspaceId, { database: getProjectDatabase(config.databasePath), agent: createAgentClient(config.agentSocketPath) });
+    if (sessionId !== null && !uuidV7Schema.safeParse(sessionId).success) return json({ message: "The session identity is invalid." }, 422);
+    const data = await inspectAiWorkbench(projectId, workspaceId, sessionId ?? undefined,
+      { database: getProjectDatabase(config.databasePath), agent: createAgentClient(config.agentSocketPath) });
     return json(data);
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);

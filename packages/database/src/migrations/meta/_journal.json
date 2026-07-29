@@ -29,6 +29,20 @@
       "when": 1785249454821,
       "tag": "0003_ai_session_beta",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1785365594723,
+      "tag": "0004_ai_session_history_bounds",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1785368394320,
+      "tag": "0005_ai_interaction_history_truncation",
+      "breakpoints": true
     }
   ]
 }

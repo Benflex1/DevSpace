@@ -92,8 +92,11 @@ per-session chain. Retention keeps the newest 512 acknowledged events and every 
 event within the 2,048-event bound, with a fixed terminal-lifecycle reserve and `AI_EVENT_GAP`
 before replay can begin past a compacted prefix.
 
-This corrects only the Agent outbox and acknowledgement portion of P1-3. Caller-supplied Web
-session-ID binding and SQLite aggregate-history bounds remain separate follow-up work.
+This corrects only the Agent outbox and acknowledgement portion of P1-3. The separate Web
+session-binding and SQLite aggregate-history correction is now implemented on this branch: exact
+caller-supplied session identity is required for session-scoped operations, and bounded Web/SQLite
+history uses explicit replay/truncation metadata. This does not claim the entire final review is
+complete; Checkpoint 2 and the other deferred concerns below remain out of scope.
 
 ### Codex authority onboarding and recovery
 

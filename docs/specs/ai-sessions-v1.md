@@ -255,6 +255,43 @@ Web owns one durable session identity and its committed history. A session is bo
 workspace, safe profile identity, and configuration/runtime identity. It can acquire successive
 provider-process generations. Provider-native resume identity is not the DevSpace session ID.
 
+Every session-scoped Web read or mutation resolves the caller-supplied `(projectId, workspaceId,
+aiSessionId)` as one exact tuple. A turn-scoped operation additionally requires the supplied
+`turnId` to belong to that exact session. Web rejects missing, foreign, stale, and nonexistent
+identities through one bounded public conflict shape and passes only the verified tuple to F11;
+it never substitutes the latest workspace session, the only active session, or a cached session.
+Workspace-level creation and bounded session listing remain workspace-scoped. Exact binding applies
+to session snapshots/history, replay and polling, turn submission, interruption, Stop, changed-file
+and status projections, and turn lookups.
+
+The Web/SQLite projection is explicitly bounded. The current limits are:
+
+| Projection | Maximum | Retention/meaning |
+| --- | ---: | --- |
+| retained turns per session | 64 turns | newest turns; older turns and their event rows are retired |
+| one turn's assembled assistant output | 2 MiB UTF-8 | deterministic UTF-8 prefix; `outputTruncated` is true when compacted |
+| all retained turn output per session | 8 MiB UTF-8 | newest turns receive the remaining budget; older output is truncated |
+| retained canonical event rows per session | 2,048 rows / 16 MiB UTF-8 | one contiguous newest sequence suffix |
+| interaction rows per session | 256 rows / 4 MiB JSON bytes | newest rows first, deterministic `(createdAt,id)` order |
+| one interaction request or response JSON value | 128 KiB UTF-8 | oversized values are omitted from the bounded projection |
+| one session/history response | 8 MiB UTF-8 JSON | session state, retained terminal turn state, truncation metadata, then newest history |
+
+SQLite applies output, turn, interaction, and canonical-event pruning in the same transaction as
+the event insert and aggregate update. A failed compaction rolls back the event and leaves the
+Agent-private outbox acknowledgement unchanged, so replay remains available. Event retention is
+always a contiguous suffix; `historyStartSequence` identifies its first sequence and
+`historyTruncated` records a dropped prefix or byte/count compaction. Replay before that boundary
+returns the bounded gap/truncation outcome rather than a partial stream. Response truncation is
+deterministic and never claims complete output: `outputTruncated`, `historyTruncated`, the
+retained start sequence, and the complete/truncated interaction projection are explicit.
+
+Legacy oversized SQLite text and JSON rows are length-checked before being loaded. JSON is parsed
+only when within its bound and re-serialized as a valid bounded projection; UTF-8 text is decoded
+through a character-safe prefix, never by cutting serialized JSON bytes. Legacy rows remain
+readable through the bounded projection and are normalized on the next transactional persistence
+boundary. The Agent-private durable canonical-event outbox remains the source for replay and
+acknowledgement; SQLite is the Web-owned committed public projection.
+
 ```text
 creating -> ready | stopping | unavailable | lost
 ready -> running | stopping | unavailable | lost

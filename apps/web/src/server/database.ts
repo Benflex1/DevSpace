@@ -1,7 +1,26 @@
 import BetterSqlite3 from "better-sqlite3";
 import {
+  AI_INTERACTION_JSON_MAX_BYTES,
+  AI_SESSION_EVENT_HISTORY_MAX_BYTES,
+  AI_SESSION_EVENT_HISTORY_MAX_EVENTS,
+  AI_SESSION_HISTORY_MAX_TURNS,
+  AI_SESSION_INTERACTION_HISTORY_MAX_BYTES,
+  AI_SESSION_INTERACTION_HISTORY_MAX_ROWS,
+  AI_SESSION_OUTPUT_MAX_BYTES,
+  AI_SESSION_RESPONSE_MAX_BYTES,
+  AI_TURN_OUTPUT_MAX_BYTES,
+  decodeUtf8Prefix,
+  parseBoundedJson,
+  serializedBytes,
+  truncateUtf8,
+  utf8ByteLength
+} from "./ai-history.js";
+import {
+  AI_USER_CONTENT_MAX_BYTES,
+  aiChangedFilesSummarySchema,
   canonicalAiEventSchema,
   classifyAiEventAppend,
+  aiTurnContentSchema,
   type AgentSnapshotData,
   type CanonicalAiEvent,
   type WorkspaceInspectionData
@@ -19,8 +38,6 @@ import { v7 as uuidv7 } from "uuid";
 import { parseProjectOptionsV1 } from "@devspace/project-options";
 import { persistedFailureMessage } from "./failure-policy.js";
 import { materializePreviews as materializePreviewRows } from "./preview-persistence.js";
-
-function parseJsonValue(value: string): unknown { return JSON.parse(value) as unknown; }
 
 export interface ProjectView {
   readonly id: string;
@@ -246,6 +263,289 @@ export function openProjectDatabase(path: string, options: {
       terminals: terminalRows.map((terminal) => ({ id: terminal.id, processId: terminal.processId,
         title: terminalTitles.get(terminal.id) ?? terminal.title, state: terminal.state })),
       previews: previewRows.map(toPreviewView)
+    };
+  };
+  const assertAiWorkspace = (projectId: string, workspaceId: string) => {
+    const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
+    if (project === undefined || project.state !== "ready" || project.primaryWorkspaceId === null || project.activeConfigRevisionId === null) {
+      throw new ProjectSetupConflictError("The AI session is no longer available.");
+    }
+    const workspace = db.select().from(workspaces).where(and(
+      eq(workspaces.id, workspaceId), eq(workspaces.projectId, projectId), eq(workspaces.id, project.primaryWorkspaceId)
+    )).get();
+    const revision = db.select().from(projectConfigRevisions).where(and(
+      eq(projectConfigRevisions.id, project.activeConfigRevisionId), eq(projectConfigRevisions.projectId, projectId)
+    )).get();
+    if (workspace === undefined || workspace.kind !== "primary" || revision === undefined || workspace.configRevisionId !== revision.id) {
+      throw new ProjectSetupConflictError("The AI session is no longer available.");
+    }
+    return { project, workspace, revision };
+  };
+  type RawAiTurnRow = {
+    id: string;
+    state: string;
+    contentJson: string | null;
+    outputBytes: number;
+    outputPrefix: Buffer | null;
+    outputTruncated: number;
+    changedFilesJson: string | null;
+    failureJson: string | null;
+    createdAt: string;
+    updatedAt: string;
+    completedAt: string | null;
+  };
+  type RawAiEventRow = { eventJson: string | null; eventBytes: number; sequence: number };
+  type RawAiInteractionRow = {
+    id: string;
+    turnId: string | null;
+    kind: string;
+    state: string;
+    requestJson: string | null;
+    requestBytes: number;
+    responseJson: string | null;
+    responseBytes: number;
+    createdAt: string;
+    updatedAt: string;
+  };
+  const readAiInteractionRows = (sessionId: string) => {
+    const candidates = client.prepare(`
+      select id as id, turn_id as turnId, kind as kind, state as state,
+        case when length(cast(request_json as blob)) <= ? then request_json else null end as requestJson,
+        length(cast(request_json as blob)) as requestBytes,
+        case when response_json is null or length(cast(response_json as blob)) <= ? then response_json else null end as responseJson,
+        coalesce(length(cast(response_json as blob)), 0) as responseBytes,
+        created_at as createdAt, updated_at as updatedAt
+      from ai_interaction_requests where session_id = ?
+      order by created_at desc, id desc limit ?
+    `).all(AI_INTERACTION_JSON_MAX_BYTES, AI_INTERACTION_JSON_MAX_BYTES, sessionId,
+      AI_SESSION_INTERACTION_HISTORY_MAX_ROWS + 1) as RawAiInteractionRow[];
+    let truncated = candidates.length > AI_SESSION_INTERACTION_HISTORY_MAX_ROWS;
+    let bytes = 0;
+    const selected: Array<Record<string, unknown>> = [];
+    for (const row of candidates.slice(0, AI_SESSION_INTERACTION_HISTORY_MAX_ROWS)) {
+      const rowBytes = row.requestBytes + row.responseBytes;
+      if (row.requestJson === null || (row.responseBytes > 0 && row.responseJson === null)
+        || bytes + rowBytes > AI_SESSION_INTERACTION_HISTORY_MAX_BYTES) {
+        truncated = true;
+        continue;
+      }
+      const request = parseBoundedJson(row.requestJson, AI_INTERACTION_JSON_MAX_BYTES);
+      const response = row.responseJson === null ? null : parseBoundedJson(row.responseJson, AI_INTERACTION_JSON_MAX_BYTES);
+      if (request === null || (row.responseJson !== null && response === null)) {
+        truncated = true;
+        continue;
+      }
+      selected.push({ id: row.id, turnId: row.turnId, kind: row.kind, state: row.state, request, response,
+        createdAt: row.createdAt, updatedAt: row.updatedAt });
+      bytes += rowBytes;
+    }
+    return { rows: selected.reverse(), truncated };
+  };
+  const readAiSessionView = (projectId: string, workspaceId: string, sessionId: string) => {
+    assertAiWorkspace(projectId, workspaceId);
+    const session = db.select().from(aiSessions).where(and(
+      eq(aiSessions.id, sessionId), eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.providerKey, "codex")
+    )).get();
+    if (session === undefined) return null;
+    const rawTurns = client.prepare(`
+      select id as id, state as state,
+        case when length(cast(content_json as blob)) <= ? then content_json else null end as contentJson,
+        length(cast(output_text as blob)) as outputBytes,
+        substr(cast(output_text as blob), 1, ?) as outputPrefix,
+        output_truncated as outputTruncated,
+        case when length(cast(changed_files_json as blob)) <= ? then changed_files_json else null end as changedFilesJson,
+        case when failure_json is null or length(cast(failure_json as blob)) <= ? then failure_json else null end as failureJson,
+        created_at as createdAt, updated_at as updatedAt, completed_at as completedAt
+      from ai_turns where session_id = ?
+      order by created_at desc, id desc limit ?
+    `).all(AI_USER_CONTENT_MAX_BYTES, AI_TURN_OUTPUT_MAX_BYTES + 4, AI_INTERACTION_JSON_MAX_BYTES,
+      AI_INTERACTION_JSON_MAX_BYTES, session.id, AI_SESSION_HISTORY_MAX_TURNS + 1) as RawAiTurnRow[];
+    let responseTruncated = rawTurns.length > AI_SESSION_HISTORY_MAX_TURNS;
+    const turnViews = rawTurns.slice(0, AI_SESSION_HISTORY_MAX_TURNS).map((row) => {
+      const content = parseBoundedJson(row.contentJson, AI_USER_CONTENT_MAX_BYTES);
+      const parsedContent = aiTurnContentSchema.safeParse(content);
+      const output = decodeUtf8Prefix(row.outputPrefix ?? Buffer.alloc(0), AI_TURN_OUTPUT_MAX_BYTES);
+      const changedFiles = aiChangedFilesSummarySchema.safeParse(parseBoundedJson(row.changedFilesJson, AI_INTERACTION_JSON_MAX_BYTES));
+      const failure = row.failureJson === null ? null : parseBoundedJson(row.failureJson, AI_INTERACTION_JSON_MAX_BYTES);
+      if (!parsedContent.success || !changedFiles.success || row.outputBytes > AI_TURN_OUTPUT_MAX_BYTES
+        || output.truncated || row.outputTruncated !== 0 || row.contentJson === null || row.changedFilesJson === null
+        || (row.failureJson !== null && failure === null)) responseTruncated = true;
+      return {
+        id: row.id,
+        state: row.state,
+        content: parsedContent.success ? parsedContent.data : { kind: "text" as const, text: "" },
+        outputText: output.value,
+        outputTruncated: row.outputTruncated !== 0 || row.outputBytes > AI_TURN_OUTPUT_MAX_BYTES || output.truncated,
+        changedFiles: changedFiles.success ? changedFiles.data : { files: [], truncated: true },
+        failure,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        completedAt: row.completedAt
+      };
+    }).reverse();
+    const rawEvents = client.prepare(`
+      select sequence as sequence,
+        case when length(cast(event_json as blob)) <= ? then event_json else null end as eventJson,
+        length(cast(event_json as blob)) as eventBytes
+      from ai_events where session_id = ? order by sequence desc limit ?
+    `).all(AI_SESSION_EVENT_HISTORY_MAX_BYTES, session.id, AI_SESSION_EVENT_HISTORY_MAX_EVENTS + 1) as RawAiEventRow[];
+    const eventViews: CanonicalAiEvent[] = [];
+    for (const row of rawEvents.slice(0, AI_SESSION_EVENT_HISTORY_MAX_EVENTS)) {
+      const event = row.eventJson === null ? null : canonicalAiEventSchema.safeParse(parseBoundedJson(row.eventJson, AI_SESSION_EVENT_HISTORY_MAX_BYTES));
+      if (event !== null && event.success) eventViews.push(event.data);
+      else responseTruncated = true;
+      if (row.eventBytes > AI_SESSION_EVENT_HISTORY_MAX_BYTES) responseTruncated = true;
+    }
+    const interactions = readAiInteractionRows(session.id);
+    responseTruncated ||= interactions.truncated;
+    const sessionView = {
+      id: session.id, workspaceId: session.workspaceId, title: session.title, state: session.state,
+      profileId: session.profileKey, profileRevision: session.profileRevision, revisionId: session.revisionId,
+      runtimePlanHash: session.runtimePlanHash, runtimeGeneration: session.runtimeGeneration, processGeneration: session.processGeneration,
+      lastSequence: session.lastSequence, historyStartSequence: session.historyStartSequence,
+      historyTruncated: session.historyTruncated || responseTruncated,
+      interactionsTruncated: session.interactionHistoryTruncated || interactions.truncated,
+      failureCode: session.failureCode, createdAt: session.createdAt, updatedAt: session.updatedAt
+    };
+    const retainedTurns: typeof turnViews = [];
+    const retainedEvents: CanonicalAiEvent[] = [];
+    const responseInteractions = interactions.rows;
+    let retainedTurnContentBytes = 0;
+    const turnResponseBaseBytes = serializedBytes({ session: sessionView, turns: [], interactions: responseInteractions, events: retainedEvents });
+    for (const turn of [...turnViews].reverse()) {
+      const turnBytes = serializedBytes(turn);
+      const separatorBytes = retainedTurns.length === 0 ? 0 : 1;
+      if (turnResponseBaseBytes + retainedTurnContentBytes + turnBytes + separatorBytes <= AI_SESSION_RESPONSE_MAX_BYTES) {
+        retainedTurns.unshift(turn);
+        retainedTurnContentBytes += turnBytes + separatorBytes;
+      }
+      else { responseTruncated = true; break; }
+    }
+    const eventResponseBaseBytes = serializedBytes({ session: sessionView, turns: retainedTurns, interactions: responseInteractions, events: [] });
+    let retainedEventContentBytes = 0;
+    const eventBySequence = new Map(eventViews.map((event) => [event.sequence, event]));
+    for (const row of rawEvents.slice(0, AI_SESSION_EVENT_HISTORY_MAX_EVENTS)) {
+      const parsed = eventBySequence.get(row.sequence);
+      if (parsed === undefined) continue;
+      const eventBytes = serializedBytes(parsed);
+      const separatorBytes = retainedEvents.length === 0 ? 0 : 1;
+      if (eventResponseBaseBytes + retainedEventContentBytes + eventBytes + separatorBytes <= AI_SESSION_RESPONSE_MAX_BYTES) {
+        retainedEvents.unshift(parsed);
+        retainedEventContentBytes += eventBytes + separatorBytes;
+      }
+      else { responseTruncated = true; break; }
+    }
+    const finalSession = { ...sessionView, historyTruncated: sessionView.historyTruncated || responseTruncated };
+    return { session: finalSession, turns: retainedTurns, interactions: responseInteractions, events: retainedEvents };
+  };
+  const listAiSessionSummaries = (projectId: string, workspaceId: string) => {
+    assertAiWorkspace(projectId, workspaceId);
+    return db.select({ id: aiSessions.id, workspaceId: aiSessions.workspaceId, title: aiSessions.title, state: aiSessions.state,
+      lastSequence: aiSessions.lastSequence, historyStartSequence: aiSessions.historyStartSequence,
+      historyTruncated: aiSessions.historyTruncated, createdAt: aiSessions.createdAt, updatedAt: aiSessions.updatedAt })
+      .from(aiSessions).where(and(eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.providerKey, "codex")))
+      .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).limit(AI_SESSION_HISTORY_MAX_TURNS).all();
+  };
+  const readAiTurnIdentity = (projectId: string, workspaceId: string, sessionId: string, turnId: string) => {
+    assertAiWorkspace(projectId, workspaceId);
+    const row = client.prepare(
+      "select id, session_id as sessionId from ai_turns where id = ? and session_id = ?"
+    ).get(turnId, sessionId) as { id: string; sessionId: string } | undefined;
+    return row === undefined ? null : row;
+  };
+  const pruneAiTurns = (sessionId: string): boolean => {
+    const oldTurns = client.prepare(`
+      select id from ai_turns where session_id = ?
+      order by created_at desc, id desc limit -1 offset ?
+    `).all(sessionId, AI_SESSION_HISTORY_MAX_TURNS) as Array<{ id: string }>;
+    for (const turn of oldTurns) {
+      client.prepare("delete from ai_events where turn_id = ?").run(turn.id);
+      client.prepare("delete from ai_turns where id = ? and session_id = ?").run(turn.id, sessionId);
+    }
+    return oldTurns.length > 0;
+  };
+  const compactAiOutputs = (sessionId: string): void => {
+    const turns = client.prepare(`
+      select id, length(cast(output_text as blob)) as outputBytes, output_truncated as outputTruncated
+      from ai_turns where session_id = ? order by created_at desc, id desc
+    `).all(sessionId) as Array<{ id: string; outputBytes: number; outputTruncated: number }>;
+    let remaining = AI_SESSION_OUTPUT_MAX_BYTES;
+    for (const turn of turns) {
+      const allowed = Math.min(AI_TURN_OUTPUT_MAX_BYTES, remaining);
+      const prefix = allowed === 0 ? Buffer.alloc(0) : ((client.prepare(`
+        select substr(cast(output_text as blob), 1, ?) as outputPrefix
+        from ai_turns where id = ? and session_id = ?
+      `).get(allowed + 4, turn.id, sessionId) as { outputPrefix: Buffer | null } | undefined)?.outputPrefix ?? Buffer.alloc(0));
+      const output = decodeUtf8Prefix(prefix, allowed);
+      const truncated = turn.outputTruncated !== 0 || turn.outputBytes > allowed || output.truncated;
+      if (allowed === 0 || turn.outputBytes > allowed || truncated) {
+        client.prepare("update ai_turns set output_text = ?, output_truncated = ? where id = ? and session_id = ?")
+          .run(output.value, truncated ? 1 : 0, turn.id, sessionId);
+      }
+      remaining -= utf8ByteLength(output.value);
+    }
+  };
+  const compactAiInteractions = (sessionId: string): boolean => {
+    const candidates = client.prepare(`
+      select id, length(cast(request_json as blob)) + coalesce(length(cast(response_json as blob)), 0) as rowBytes
+      from ai_interaction_requests where session_id = ?
+      order by created_at desc, id desc limit ?
+    `).all(sessionId, AI_SESSION_INTERACTION_HISTORY_MAX_ROWS + 1) as Array<{ id: string; rowBytes: number }>;
+    let bytes = 0;
+    const keep: string[] = [];
+    for (const row of candidates) {
+      if (keep.length >= AI_SESSION_INTERACTION_HISTORY_MAX_ROWS
+        || row.rowBytes > AI_INTERACTION_JSON_MAX_BYTES * 2
+        || bytes + row.rowBytes > AI_SESSION_INTERACTION_HISTORY_MAX_BYTES) continue;
+      keep.push(row.id);
+      bytes += row.rowBytes;
+    }
+    const placeholders = keep.map(() => "?").join(", ");
+    const result = keep.length === 0
+      ? client.prepare("delete from ai_interaction_requests where session_id = ?").run(sessionId)
+      : client.prepare(`delete from ai_interaction_requests where session_id = ? and id not in (${placeholders})`)
+        .run(sessionId, ...keep);
+    return candidates.length > keep.length || result.changes > 0;
+  };
+  const compactAiEvents = (sessionId: string, lastSequence: number, currentHistoryStartSequence: number, alreadyTruncated: boolean): {
+    readonly historyStartSequence: number;
+    readonly historyTruncated: boolean;
+  } => {
+    const total = client.prepare(`
+      select count(*) as count, coalesce(sum(length(cast(event_json as blob))), 0) as bytes,
+        coalesce(min(sequence), 0) as minimumSequence, coalesce(max(sequence), 0) as maximumSequence
+      from ai_events where session_id = ?
+    `).get(sessionId) as { count: number; bytes: number; minimumSequence: number; maximumSequence: number };
+    const contiguous = total.count === 0 || total.maximumSequence - total.minimumSequence + 1 === total.count;
+    if (total.count <= AI_SESSION_EVENT_HISTORY_MAX_EVENTS && total.bytes <= AI_SESSION_EVENT_HISTORY_MAX_BYTES
+      && contiguous && (total.count === 0 || total.minimumSequence === currentHistoryStartSequence)) {
+      return { historyStartSequence: currentHistoryStartSequence, historyTruncated: alreadyTruncated };
+    }
+    const candidates = client.prepare(`
+      select sequence, length(cast(event_json as blob)) as eventBytes
+      from ai_events where session_id = ? order by sequence desc limit ?
+    `).all(sessionId, AI_SESSION_EVENT_HISTORY_MAX_EVENTS) as Array<{ sequence: number; eventBytes: number }>;
+    let bytes = 0;
+    let retained = 0;
+    let historyStartSequence = lastSequence + 1;
+    let expectedSequence = lastSequence;
+    for (const row of candidates) {
+      if (row.sequence !== expectedSequence) break;
+      if (retained >= AI_SESSION_EVENT_HISTORY_MAX_EVENTS || row.eventBytes > AI_SESSION_EVENT_HISTORY_MAX_BYTES
+        || bytes + row.eventBytes > AI_SESSION_EVENT_HISTORY_MAX_BYTES) break;
+      bytes += row.eventBytes;
+      retained += 1;
+      historyStartSequence = row.sequence;
+      expectedSequence -= 1;
+    }
+    if (retained === 0) {
+      client.prepare("delete from ai_events where session_id = ?").run(sessionId);
+    } else {
+      client.prepare("delete from ai_events where session_id = ? and sequence < ?").run(sessionId, historyStartSequence);
+    }
+    return {
+      historyStartSequence,
+      historyTruncated: alreadyTruncated || total.count > retained || total.bytes > bytes
     };
   };
   return {
@@ -563,25 +863,14 @@ export function openProjectDatabase(path: string, options: {
       }
       return { project, workspace, revision };
     },
-    getAiSession(projectId: string, workspaceId: string) {
-      const context = this.getRuntimeContext(projectId);
-      if (context.workspace.id !== workspaceId) throw new ProjectSetupConflictError("The AI session workspace is not owned by this project.");
-      const session = db.select().from(aiSessions).where(and(eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.providerKey, "codex")))
-        .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).get();
-      if (session === undefined) return null;
-      const turns = db.select().from(aiTurns).where(eq(aiTurns.sessionId, session.id)).orderBy(aiTurns.createdAt, aiTurns.id).all();
-      const events = db.select().from(aiEvents).where(eq(aiEvents.sessionId, session.id)).orderBy(aiEvents.sequence).all()
-        .map((row) => canonicalAiEventSchema.parse(parseJsonValue(row.eventJson)));
-      return {
-        session: { id: session.id, workspaceId: session.workspaceId, title: session.title, state: session.state,
-          profileId: session.profileKey, profileRevision: session.profileRevision, revisionId: session.revisionId,
-          runtimePlanHash: session.runtimePlanHash, runtimeGeneration: session.runtimeGeneration, processGeneration: session.processGeneration,
-          lastSequence: session.lastSequence,
-          failureCode: session.failureCode, createdAt: session.createdAt, updatedAt: session.updatedAt },
-        turns: turns.map((turn) => ({ id: turn.id, state: turn.state, content: parseJsonValue(turn.contentJson), outputText: turn.outputText,
-          changedFiles: parseJsonValue(turn.changedFilesJson), failure: turn.failureJson === null ? null : parseJsonValue(turn.failureJson),
-          createdAt: turn.createdAt, updatedAt: turn.updatedAt, completedAt: turn.completedAt })), events
-      };
+    getAiSession(projectId: string, workspaceId: string, sessionId: string) {
+      return readAiSessionView(projectId, workspaceId, sessionId);
+    },
+    listAiSessions(projectId: string, workspaceId: string) {
+      return listAiSessionSummaries(projectId, workspaceId);
+    },
+    getAiTurn(projectId: string, workspaceId: string, sessionId: string, turnId: string) {
+      return readAiTurnIdentity(projectId, workspaceId, sessionId, turnId);
     },
     createAiSession(input: { projectId: string; workspaceId: string; profileId: string; profileRevision: string; title?: string }) {
       return client.transaction(() => {
@@ -596,7 +885,8 @@ export function openProjectDatabase(path: string, options: {
         const session = {
           id: createId(), workspaceId: input.workspaceId, terminalSessionId: null, processId: null, providerKey: "codex", profileKey: input.profileId,
           profileRevision: input.profileRevision, revisionId: context.revision.id, runtimePlanHash: context.revision.runtimePlanHash,
-          runtimeGeneration: Math.max(1, runtime?.runtimeGeneration ?? 1), processGeneration: 1, lastSequence: 0, failureCode: null, failureJson: null,
+          runtimeGeneration: Math.max(1, runtime?.runtimeGeneration ?? 1), processGeneration: 1, lastSequence: 0,
+          historyStartSequence: 1, historyTruncated: false, interactionHistoryTruncated: false, failureCode: null, failureJson: null,
           externalSessionId: null, title: input.title?.trim().slice(0, 128) || "Codex session", state: "creating" as const,
           createdAt: timestamp, updatedAt: timestamp, lastActivityAt: null, stoppedAt: null
         };
@@ -611,8 +901,10 @@ export function openProjectDatabase(path: string, options: {
         const existing = db.select().from(aiTurns).where(and(eq(aiTurns.id, input.turnId), eq(aiTurns.sessionId, input.sessionId))).get();
         if (existing !== undefined) return existing;
         const timestamp = now().toISOString();
-        const turn = { id: input.turnId, sessionId: input.sessionId, state: "accepted" as const, contentJson: JSON.stringify(input.content), outputText: "",
-          changedFilesJson: JSON.stringify({ files: [], truncated: false }), failureJson: null, createdAt: timestamp, updatedAt: timestamp, completedAt: null };
+        const content = aiTurnContentSchema.parse(input.content);
+        const turn = { id: input.turnId, sessionId: input.sessionId, state: "accepted" as const, contentJson: JSON.stringify(content), outputText: "",
+          outputTruncated: false, changedFilesJson: JSON.stringify({ files: [], truncated: false }), failureJson: null,
+          createdAt: timestamp, updatedAt: timestamp, completedAt: null };
         db.insert(aiTurns).values(turn).run(); return turn;
       }).immediate();
     },
@@ -629,25 +921,71 @@ export function openProjectDatabase(path: string, options: {
         if (decision.kind === "exact-duplicate") return "duplicate";
         if (decision.kind !== "append") throw new ProjectSetupConflictError(decision.kind === "gap" ? "The AI event stream has a sequence gap." : "The AI event stream has a conflicting sequence.");
         const timestamp = now().toISOString();
+        const deletedTurns = pruneAiTurns(event.sessionId);
+        const outputBounds = client.prepare(`
+          select coalesce(sum(min(length(cast(output_text as blob)), ?)), 0) as bytes,
+            coalesce(max(length(cast(output_text as blob))), 0) as maxBytes
+          from ai_turns where session_id = ?
+        `).get(AI_TURN_OUTPUT_MAX_BYTES, event.sessionId) as { bytes: number; maxBytes: number };
+        if (outputBounds.bytes > AI_SESSION_OUTPUT_MAX_BYTES || outputBounds.maxBytes > AI_TURN_OUTPUT_MAX_BYTES) {
+          compactAiOutputs(event.sessionId);
+        }
+        const interactionsCompacted = compactAiInteractions(event.sessionId);
         db.insert(aiEvents).values({ eventId: event.eventId, sessionId: event.sessionId, turnId: event.turnId, sequence: event.sequence,
           eventType: event.eventType, eventJson: JSON.stringify(event), observedAt: event.observedAt }).run();
         const sessionState = event.eventType === "session.stopped" ? "stopped" : event.eventType === "session.lost" ? "lost"
           : event.eventType === "session.stopping" ? "active" : "active";
-        db.update(aiSessions).set({ state: sessionState, lastSequence: event.sequence, updatedAt: timestamp,
-          lastActivityAt: timestamp, stoppedAt: event.eventType === "session.stopped" ? timestamp : session.stoppedAt }).where(eq(aiSessions.id, event.sessionId)).run();
+        let outputTruncated = false;
         if (event.turnId !== null) {
-          const turn = db.select().from(aiTurns).where(eq(aiTurns.id, event.turnId)).get();
+          const turn = db.select({
+            id: aiTurns.id,
+            state: aiTurns.state,
+            outputTruncated: aiTurns.outputTruncated,
+            changedFilesJson: aiTurns.changedFilesJson,
+            failureJson: aiTurns.failureJson,
+            completedAt: aiTurns.completedAt
+          }).from(aiTurns).where(and(eq(aiTurns.id, event.turnId), eq(aiTurns.sessionId, event.sessionId))).get();
           if (turn !== undefined) {
-            let state = turn.state; let outputText = turn.outputText; let changedFilesJson = turn.changedFilesJson; let failureJson = turn.failureJson; let completedAt = turn.completedAt;
+            let state = turn.state; let outputText: string | undefined; let outputWasTruncated = turn.outputTruncated;
+            let changedFilesJson = turn.changedFilesJson; let failureJson = turn.failureJson; let completedAt = turn.completedAt;
             if (event.eventType === "turn.started") state = "running";
-            if (event.eventType === "turn.output.delta") outputText += event.payload.text;
+            if (event.eventType === "turn.output.delta") {
+              const current = client.prepare(`
+                select length(cast(output_text as blob)) as outputBytes,
+                  substr(cast(output_text as blob), 1, ?) as outputPrefix
+                from ai_turns where id = ? and session_id = ?
+              `).get(AI_TURN_OUTPUT_MAX_BYTES + 4, turn.id, event.sessionId) as { outputBytes: number; outputPrefix: Buffer | null };
+              const currentOutput = decodeUtf8Prefix(current.outputPrefix ?? Buffer.alloc(0), AI_TURN_OUTPUT_MAX_BYTES);
+              const totalOutput = client.prepare(`
+                select coalesce(sum(min(length(cast(output_text as blob)), ?)), 0) as bytes
+                from ai_turns where session_id = ?
+              `).get(AI_TURN_OUTPUT_MAX_BYTES, event.sessionId) as { bytes: number };
+              const currentBytes = utf8ByteLength(currentOutput.value);
+              const otherOutputBytes = Math.max(0, totalOutput.bytes - Math.min(current.outputBytes, AI_TURN_OUTPUT_MAX_BYTES));
+              const available = Math.max(0, Math.min(
+                AI_TURN_OUTPUT_MAX_BYTES - currentBytes,
+                AI_SESSION_OUTPUT_MAX_BYTES - otherOutputBytes - currentBytes
+              ));
+              const delta = truncateUtf8(event.payload.text, available);
+              outputText = truncateUtf8(`${currentOutput.value}${delta.value}`, AI_TURN_OUTPUT_MAX_BYTES).value;
+              outputWasTruncated = turn.outputTruncated || current.outputBytes > AI_TURN_OUTPUT_MAX_BYTES
+                || currentOutput.truncated || delta.truncated || utf8ByteLength(delta.value) < utf8ByteLength(event.payload.text);
+              outputTruncated = outputWasTruncated;
+            }
             if (event.eventType === "turn.files.changed") { changedFilesJson = JSON.stringify(event.payload); }
             if (event.eventType === "turn.failed") { state = "failed"; failureJson = JSON.stringify(event.payload.failure); completedAt = timestamp; }
             if (event.eventType === "turn.interrupted") { state = "interrupted"; completedAt = timestamp; }
             if (event.eventType === "turn.quiesced") { state = event.payload.outcome === "completed" ? "completed" : event.payload.outcome === "interrupted" ? "interrupted" : "failed"; completedAt = timestamp; }
-            db.update(aiTurns).set({ state, outputText, changedFilesJson, failureJson, completedAt, updatedAt: timestamp }).where(eq(aiTurns.id, turn.id)).run();
+            db.update(aiTurns).set({ state, ...(outputText === undefined ? {} : { outputText }), outputTruncated: outputWasTruncated, changedFilesJson, failureJson,
+              completedAt, updatedAt: timestamp }).where(and(eq(aiTurns.id, turn.id), eq(aiTurns.sessionId, event.sessionId))).run();
           }
         }
+        const compacted = compactAiEvents(event.sessionId, event.sequence, session.historyStartSequence,
+          session.historyTruncated || deletedTurns || outputTruncated);
+        db.update(aiSessions).set({ state: sessionState, lastSequence: event.sequence, historyStartSequence: compacted.historyStartSequence,
+          historyTruncated: compacted.historyTruncated, interactionHistoryTruncated: session.interactionHistoryTruncated || interactionsCompacted,
+          updatedAt: timestamp, lastActivityAt: timestamp,
+          stoppedAt: event.eventType === "session.stopped" ? timestamp : session.stoppedAt }).where(eq(aiSessions.id, event.sessionId)).run();
         return "appended";
       }).immediate();
     },
