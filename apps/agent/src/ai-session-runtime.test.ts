@@ -86,6 +86,16 @@ function dockerBytes(payload: Buffer): Buffer {
   return Buffer.concat([header, payload]);
 }
 
+function stagedReadbackBytes(bytes: Buffer): Buffer {
+  const snapshot = [7n, 42n, BigInt(bytes.length), 0o100600n, 1000n, 1n, 1000n];
+  const metadata = Buffer.alloc(112);
+  for (const [index, value] of [...snapshot, ...snapshot].entries()) metadata.writeBigUInt64BE(value, index * 8);
+  const header = Buffer.alloc(20);
+  Buffer.from("DSAUTH01", "ascii").copy(header, 0);
+  header.writeUInt32BE(1, 8); header.writeUInt32BE(metadata.length, 12); header.writeUInt32BE(bytes.length, 16);
+  return Buffer.concat([header, metadata, bytes]);
+}
+
 type ProtocolDockerControl = {
   readonly uploadExitCodes?: Record<string, number>;
   cleanupExitCode?: number;
@@ -114,7 +124,7 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
     docker: {
     createExec: (_containerId: string, input: DockerExecInput) => {
       const command = Array.isArray(input.command) ? input.command.join(" ") : "";
-      const kind = command.includes("cat >") ? "upload" : command.includes("stat -c") ? "readback" : command.includes("rm -rf") ? "cleanup" : "provider";
+      const kind = command.includes("cat >") ? "upload" : command.includes("staged-readback-helper") ? "readback" : command.includes("rm -rf") ? "cleanup" : "provider";
       const id = `${kind}-${++sequence}`;
       captured.push({ id, input });
       if (kind === "upload") uploadNames.set(id, String((input.environment as Record<string, string>).DEVSPACE_TARGET_NAME));
@@ -141,7 +151,7 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
       if (execId.startsWith("readback-")) {
         const auth = uploads.get("auth.json") ?? Buffer.alloc(0);
         const stream = new Duplex({ read() { /* readback output is pushed below */ }, write(_chunk, _encoding, callback) { callback(); } });
-        process.nextTick(() => { stream.push(Buffer.concat([dockerBytes(Buffer.from(`regular file 600 ${auth.length}\n`)), dockerBytes(auth)])); setImmediate(() => stream.emit("close")); });
+        process.nextTick(() => { stream.push(dockerBytes(stagedReadbackBytes(auth))); setImmediate(() => stream.emit("close")); });
         return Promise.resolve(stream);
       }
       let lineBuffer = "";

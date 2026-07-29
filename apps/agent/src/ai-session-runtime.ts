@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import {
   AI_EVENT_NDJSON_CONTENT_TYPE,
   aiAfterSequenceSchema,
@@ -28,6 +29,8 @@ import {
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
 const CODEX_EXECUTABLE_SHA256 = "a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14";
+const CODEX_STAGED_READBACK_HELPER_SHA256 = "d07b2735546d3f514c2be5871521ec0430352638f24f0b134f93cbb5c2b951d1";
+const CODEX_STAGED_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-staged-readback");
 const MAX_OUTBOX_EVENTS = 2048;
 const ACK_RETAINED_EVENTS = 512;
 const MAX_GIT_PATHS = 256;
@@ -69,6 +72,9 @@ export interface AiSessionRuntimeOptions {
   readonly onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void;
   /** Deterministic adapter-test preflight; the server never supplies this hook. */
   readonly codexPreflight?: () => void | Promise<void>;
+  /** Agent-private deterministic helper seam; production uses the reproducibly built helper asset. */
+  readonly codexReadbackHelperBytes?: Uint8Array;
+  readonly codexReadbackHelperPath?: string;
   /** Agent-private bounded authority seam; the server never supplies this implementation. */
   readonly codexCredentialAuthority?: CodexCredentialAuthority;
 }
@@ -433,6 +439,7 @@ class CodexProvider implements ProviderAdapter {
     readonly executablePath: string;
     readonly sessionId: string;
     readonly processGeneration: number;
+    readonly readbackHelperBytes: Buffer;
     readonly callbacks: AdapterCallbacks;
     readonly authority: CodexCredentialAuthority;
   }) {}
@@ -447,6 +454,7 @@ class CodexProvider implements ProviderAdapter {
       this.containerDir = containerDir;
       const executable = await readFile(this.input.executablePath);
       await this.runUpload(containerDir, executable, "codex");
+      await this.runUpload(containerDir, this.input.readbackHelperBytes, "staged-readback-helper");
       await this.runUpload(`${containerDir}/home`, Buffer.from(auth.bytes), "auth.json", { CODEX_HOME: `${containerDir}/home` });
       const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
         command: [`${containerDir}/codex`, "app-server", "--stdio"], workingDirectory: "/workspace",
@@ -539,7 +547,7 @@ class CodexProvider implements ProviderAdapter {
       try {
         await this.input.authority.synchronizeStaged({
           docker: this.input.docker, containerId: this.input.ownership.ownership.developmentContainer.id,
-          stagedAuthPath: `${this.containerDir}/home/auth.json`
+          stagedAuthPath: `${this.containerDir}/home/auth.json`, readbackHelperPath: `${this.containerDir}/staged-readback-helper`
         });
         this.synchronizationResult = "synchronized";
       } catch {
@@ -681,6 +689,14 @@ async function verifyCodexExecutable(executablePath: string): Promise<void> {
   if (digest !== CODEX_EXECUTABLE_SHA256) throw new Error("codex-executable-integrity-mismatch");
 }
 
+async function readCodexReadbackHelper(options: AiSessionRuntimeOptions): Promise<Buffer> {
+  if (options.codexReadbackHelperBytes !== undefined) return Buffer.from(options.codexReadbackHelperBytes);
+  if (options.codexPreflight !== undefined) return Buffer.from("deterministic-agent-owned-readback-helper");
+  const helper = await readFile(options.codexReadbackHelperPath ?? CODEX_STAGED_READBACK_HELPER_PATH);
+  if (createHash("sha256").update(helper).digest("hex") !== CODEX_STAGED_READBACK_HELPER_SHA256) throw new Error("codex-readback-helper-integrity-mismatch");
+  return helper;
+}
+
 function bindingMatches(left: AiSessionBinding, right: AiSessionBinding): boolean {
   return left.projectId === right.projectId && left.workspaceId === right.workspaceId && left.aiSessionId === right.aiSessionId
     && left.revisionId === right.revisionId && left.runtimePlanHash === right.runtimePlanHash && left.runtimeGeneration === right.runtimeGeneration
@@ -802,6 +818,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
           if (result.stdout.trim() !== CODEX_APP_SERVER_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
         }
+        await readCodexReadbackHelper(options);
         await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
         return publicProfile({ state: "available" }, authority);
       } catch (error) {
@@ -850,8 +867,9 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       } else {
         if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
         if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
+        const readbackHelperBytes = await readCodexReadbackHelper(options);
         const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
-        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: record.processGeneration, callbacks,
+        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: record.processGeneration, readbackHelperBytes, callbacks,
           authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot) });
       }
       record.adapter = adapter;
@@ -923,4 +941,4 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   return runtime;
 }
 
-export { AI_EVENT_NDJSON_CONTENT_TYPE, CODEX_EXECUTABLE_SHA256, CODEX_PROFILE_ID, CODEX_APP_SERVER_CLI_VERSION };
+export { AI_EVENT_NDJSON_CONTENT_TYPE, CODEX_EXECUTABLE_SHA256, CODEX_STAGED_READBACK_HELPER_SHA256, CODEX_PROFILE_ID, CODEX_APP_SERVER_CLI_VERSION };

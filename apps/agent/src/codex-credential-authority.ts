@@ -47,6 +47,40 @@ export interface CodexCredentialLease {
 
 type DockerReadbackClient = Pick<DockerEngineClient, "createExec" | "startExecAttached" | "inspectExec">;
 
+export type LeaseFileSystem = Readonly<{
+  readonly rename: (oldPath: string, newPath: string) => Promise<void>;
+  readonly remove: (target: string) => Promise<void>;
+  readonly lstat: (target: string) => Promise<void>;
+  readonly syncDirectory: (directory: string) => Promise<void>;
+}>;
+
+export type CodexCredentialAuthorityOptions = Readonly<{
+  /** Agent-private deterministic filesystem seam; production uses the real fs operations. */
+  readonly leaseFileSystem?: Partial<LeaseFileSystem>;
+}>;
+
+export type StagedSnapshot = Readonly<{
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly size: bigint;
+  readonly mode: bigint;
+  readonly uid: bigint;
+  readonly nlink: bigint;
+  readonly executionUid: bigint;
+}>;
+
+export type StagedReadbackProof = Readonly<{
+  readonly before: StagedSnapshot;
+  readonly bytes: Buffer;
+  readonly after: StagedSnapshot;
+}>;
+
+const STAGED_READBACK_MAGIC = Buffer.from("DSAUTH01", "ascii");
+const STAGED_READBACK_VERSION = 1;
+const STAGED_READBACK_HEADER_BYTES = 20;
+const STAGED_READBACK_SNAPSHOT_BYTES = 56;
+const STAGED_READBACK_METADATA_BYTES = STAGED_READBACK_SNAPSHOT_BYTES * 2;
+
 export interface CodexCredentialAuthority {
   /** Agent-private paths; these are not part of any Web or browser projection. */
   readonly authorityDir: string;
@@ -56,7 +90,7 @@ export interface CodexCredentialAuthority {
   read(): Promise<ValidatedCodexAuthority>;
   inspect(): Promise<void>;
   acquire(metadata: CodexCredentialLeaseMetadata): Promise<CodexCredentialLease>;
-  synchronizeStaged(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string }): Promise<void>;
+  synchronizeStaged(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string; readbackHelperPath: string }): Promise<void>;
   replaceDurable(bytes: Uint8Array, options?: { readonly failAfterWrite?: () => void }): Promise<void>;
   markReauthenticationRequired(): Promise<void>;
 }
@@ -176,6 +210,15 @@ async function existsAsAnyPath(filePath: string): Promise<boolean> {
   try { await lstat(filePath); return true; } catch { return false; }
 }
 
+async function assertAbsentUsing(filePath: string, check: (target: string) => Promise<void>): Promise<void> {
+  try { await check(filePath); throw safeError("credential-lease-release"); }
+  catch (error) {
+    if (error instanceof Error && error.message.startsWith("codex-")) throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw safeError("credential-lease-release");
+  }
+}
+
 async function hasLeaseControl(authorityDir: string, leaseDir: string): Promise<boolean> {
   if (await existsAsAnyPath(leaseDir)) return true;
   try {
@@ -190,13 +233,19 @@ async function readExactLeaseMetadata(metadataPath: string, expected: string): P
   let handle;
   try {
     handle = await open(metadataPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stats = await handle.stat({ bigint: true });
-    if (!stats.isFile() || (stats.mode & 0o777n) !== 0o600n || stats.nlink !== 1n ||
-      (expectedUid() !== null && stats.uid !== expectedUid()) || stats.size === 0n || stats.size > 8_192n) {
+    const before = await handle.stat({ bigint: true });
+    const expectedBytes = Buffer.from(expected, "utf8");
+    if (!before.isFile() || (before.mode & 0o777n) !== 0o600n || before.nlink !== 1n ||
+      (expectedUid() !== null && before.uid !== expectedUid()) || before.size !== BigInt(expectedBytes.length)) {
       throw safeError("credential-lease-release");
     }
-    const current = (await handle.readFile()).toString("utf8");
-    if (current !== expected) throw safeError("credential-lease-release");
+    const current = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (current.length !== expectedBytes.length || !current.equals(expectedBytes)
+      || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mode !== before.mode || after.uid !== before.uid || after.nlink !== before.nlink) {
+      throw safeError("credential-lease-release");
+    }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("codex-")) throw error;
     throw safeError("credential-lease-release");
@@ -244,25 +293,53 @@ function decodeDockerFrames(input: Buffer): Buffer {
   return Buffer.concat(output);
 }
 
-async function readStagedAuth(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string }): Promise<Buffer> {
+function readU64(input: Buffer, offset: number): bigint {
+  if (offset + 8 > input.length) throw safeError("staged-read");
+  return input.readBigUInt64BE(offset);
+}
+
+function readStagedSnapshot(input: Buffer, offset: number): StagedSnapshot {
+  return {
+    dev: readU64(input, offset), ino: readU64(input, offset + 8), size: readU64(input, offset + 16),
+    mode: readU64(input, offset + 24), uid: readU64(input, offset + 32), nlink: readU64(input, offset + 40),
+    executionUid: readU64(input, offset + 48)
+  };
+}
+
+function decodePrivateStagedReadback(input: Buffer): StagedReadbackProof {
+  if (input.length < STAGED_READBACK_HEADER_BYTES || !input.subarray(0, STAGED_READBACK_MAGIC.length).equals(STAGED_READBACK_MAGIC)
+    || input.readUInt32BE(8) !== STAGED_READBACK_VERSION || input.readUInt32BE(12) !== STAGED_READBACK_METADATA_BYTES) {
+    throw safeError("staged-read");
+  }
+  const byteLength = input.readUInt32BE(16);
+  const expectedLength = STAGED_READBACK_HEADER_BYTES + STAGED_READBACK_METADATA_BYTES + byteLength;
+  if (byteLength === 0 || byteLength > CODEX_AUTH_MAX_BYTES || expectedLength !== input.length) throw safeError("staged-file");
+  const before = readStagedSnapshot(input, STAGED_READBACK_HEADER_BYTES);
+  const after = readStagedSnapshot(input, STAGED_READBACK_HEADER_BYTES + STAGED_READBACK_SNAPSHOT_BYTES);
+  const bytes = input.subarray(STAGED_READBACK_HEADER_BYTES + STAGED_READBACK_METADATA_BYTES);
+  const validSnapshot = (snapshot: StagedSnapshot) =>
+    (snapshot.mode & 0o170000n) === 0o100000n && (snapshot.mode & 0o7777n) === 0o600n
+    && snapshot.uid === snapshot.executionUid && snapshot.nlink === 1n && snapshot.size > 0n
+    && snapshot.size <= BigInt(CODEX_AUTH_MAX_BYTES);
+  if (!validSnapshot(before) || !validSnapshot(after) || before.executionUid !== after.executionUid
+    || bytes.length !== Number(before.size) || after.dev !== before.dev || after.ino !== before.ino
+    || after.size !== before.size || after.mode !== before.mode || after.uid !== before.uid || after.nlink !== before.nlink) {
+    throw safeError("staged-file");
+  }
+  return { before, bytes: Buffer.from(bytes), after };
+}
+
+async function readStagedAuth(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string; readbackHelperPath: string }): Promise<StagedReadbackProof> {
   const execId = await input.docker.createExec(input.containerId, {
-    command: ["sh", "-c", "set -eu; test -f \"$DEVSPACE_TARGET_FILE\"; test ! -L \"$DEVSPACE_TARGET_FILE\"; stat -c '%F %a %s' -- \"$DEVSPACE_TARGET_FILE\"; cat -- \"$DEVSPACE_TARGET_FILE\""],
+    command: [input.readbackHelperPath],
     workingDirectory: "/workspace", environment: { DEVSPACE_TARGET_FILE: input.stagedAuthPath }, attachStdin: false, tty: false
   });
   const stream = await input.docker.startExecAttached(execId, false);
-  const framed = decodeDockerFrames(await readDockerOutput(stream));
-  const newline = framed.indexOf(10);
-  if (newline < 0) throw safeError("staged-file");
-  const metadata = framed.subarray(0, newline).toString("utf8").split(" ");
-  const bytes = framed.subarray(newline + 1);
-  if (metadata.length !== 4 || metadata[0] !== "regular" || metadata[1] !== "file" || metadata[2] !== "600") {
-    throw safeError("staged-file");
-  }
-  const size = Number(metadata[metadata.length - 1]);
-  if (!Number.isSafeInteger(size) || size <= 0 || size > CODEX_AUTH_MAX_BYTES || bytes.length !== size) throw safeError("staged-file");
-  const inspection = await input.docker.inspectExec(execId);
+  const output = await readDockerOutput(stream);
+  let inspection;
+  try { inspection = await input.docker.inspectExec(execId); } catch { throw safeError("staged-file"); }
   if (inspection.Running || inspection.ExitCode !== 0) throw safeError("staged-file");
-  return bytes;
+  return decodePrivateStagedReadback(decodeDockerFrames(output));
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -279,10 +356,17 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
   readonly authPath: string;
   readonly leaseDir: string;
   readonly reauthMarkerPath: string;
-  constructor(readonly authorityDir: string) {
+  private readonly leaseFileSystem: LeaseFileSystem;
+  constructor(readonly authorityDir: string, options: CodexCredentialAuthorityOptions = {}) {
     this.authPath = path.join(authorityDir, CODEX_AUTH_FILE);
     this.leaseDir = path.join(authorityDir, CODEX_LEASE_DIRECTORY);
     this.reauthMarkerPath = path.join(authorityDir, CODEX_REAUTH_MARKER);
+    this.leaseFileSystem = {
+      rename: options.leaseFileSystem?.rename ?? (async (oldPath, newPath) => { await rename(oldPath, newPath); }),
+      remove: options.leaseFileSystem?.remove ?? (async (target) => { await rm(target, { recursive: true, force: false }); }),
+      lstat: options.leaseFileSystem?.lstat ?? (async (target) => { await lstat(target); }),
+      syncDirectory: options.leaseFileSystem?.syncDirectory ?? syncDirectory
+    };
   }
   async read(): Promise<ValidatedCodexAuthority> {
     await assertPrivateDirectory(this.authorityDir);
@@ -310,34 +394,89 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
       await rm(this.leaseDir, { recursive: true, force: true }).catch(() => undefined);
       throw safeError("credential-lease-unavailable");
     }
-    let released = false;
+    let releaseState: "owned" | "renamed" | "released" = "owned";
     let releasePath: string | null = null;
+    let renameSynchronized = false;
+    let removalSynchronized = false;
+    let removalObserved = false;
     return {
       release: async () => {
-        if (released) return;
-        if (releasePath !== null) {
-          await rm(releasePath, { recursive: true, force: false });
-        } else {
+        if (releaseState === "released") return;
+        if (releaseState === "owned") {
           await readExactLeaseMetadata(leaseMetadataPath, leaseMetadata);
           releasePath = path.join(this.authorityDir, `.lease-release-${randomUUID()}`);
           try {
-            await rename(this.leaseDir, releasePath);
+            await this.leaseFileSystem.rename(this.leaseDir, releasePath);
+            releaseState = "renamed";
           } catch {
-            throw safeError("credential-lease-release");
+            let leaseStillExists = false;
+            let ownedReleaseExists = false;
+            try { await this.leaseFileSystem.lstat(this.leaseDir); leaseStillExists = true; } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw safeError("credential-lease-release");
+            }
+            try { await this.leaseFileSystem.lstat(releasePath); ownedReleaseExists = true; } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw safeError("credential-lease-release");
+            }
+            if (!leaseStillExists && ownedReleaseExists) releaseState = "renamed";
+            else { releasePath = null; throw safeError("credential-lease-release"); }
           }
         }
-        await rm(releasePath, { recursive: true, force: false });
-        if (await existsAsAnyPath(this.leaseDir) || await existsAsAnyPath(releasePath)) throw safeError("credential-lease-release");
-        released = true;
+        if (releasePath === null || releaseState !== "renamed") throw safeError("credential-lease-release");
+        if (!renameSynchronized) {
+          try { await this.leaseFileSystem.syncDirectory(this.authorityDir); }
+          catch { throw safeError("credential-lease-release"); }
+          renameSynchronized = true;
+        }
+        try { await this.leaseFileSystem.lstat(this.leaseDir); throw safeError("credential-lease-release"); }
+        catch (error) {
+          if (error instanceof Error && error.message.startsWith("codex-")) throw error;
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw safeError("credential-lease-release");
+        }
+        if (!removalSynchronized) {
+          let ownedReleaseExists = true;
+          try { await this.leaseFileSystem.lstat(releasePath); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") ownedReleaseExists = false;
+            else throw safeError("credential-lease-release");
+          }
+          if (ownedReleaseExists) {
+            try { await this.leaseFileSystem.remove(releasePath); removalObserved = true; }
+            catch {
+              let stillExists = false;
+              try { await this.leaseFileSystem.lstat(releasePath); stillExists = true; }
+              catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw safeError("credential-lease-release");
+              }
+              if (stillExists) throw safeError("credential-lease-release");
+              removalObserved = true;
+              throw safeError("credential-lease-release");
+            }
+          }
+          if (removalObserved) {
+            try { await this.leaseFileSystem.syncDirectory(this.authorityDir); }
+            catch { throw safeError("credential-lease-release"); }
+          }
+          removalSynchronized = true;
+        }
+        try {
+          await assertAbsentUsing(this.leaseDir, this.leaseFileSystem.lstat);
+          await assertAbsentUsing(releasePath, this.leaseFileSystem.lstat);
+        } catch { throw safeError("credential-lease-release"); }
+        releaseState = "released";
       }
     };
   }
-  async synchronizeStaged(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string }): Promise<void> {
+  async synchronizeStaged(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string; readbackHelperPath: string }): Promise<void> {
     const first = await readStagedAuth(input);
     const second = await readStagedAuth(input);
-    if (!first.equals(second)) throw safeError("staged-unstable");
-    validateCodexChatGptAuthority(first);
-    await this.replaceDurable(first);
+    const sameSnapshot = (left: StagedSnapshot, right: StagedSnapshot) => left.dev === right.dev && left.ino === right.ino
+      && left.size === right.size && left.mode === right.mode && left.uid === right.uid && left.nlink === right.nlink
+      && left.executionUid === right.executionUid;
+    if (!first.bytes.equals(second.bytes) || !sameSnapshot(first.before, second.before) || !sameSnapshot(first.after, second.after)) {
+      throw safeError("staged-unstable");
+    }
+    validateCodexChatGptAuthority(first.bytes);
+    await this.replaceDurable(first.bytes);
   }
   async replaceDurable(bytes: Uint8Array, options: { readonly failAfterWrite?: () => void } = {}): Promise<void> {
     validateCodexChatGptAuthority(bytes);
@@ -371,8 +510,8 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
   }
 }
 
-export function createCodexCredentialAuthority(stateRoot: string): CodexCredentialAuthority {
-  return new FileCodexCredentialAuthority(codexAuthorityDirectoryForStateRoot(stateRoot));
+export function createCodexCredentialAuthority(stateRoot: string, options: CodexCredentialAuthorityOptions = {}): CodexCredentialAuthority {
+  return new FileCodexCredentialAuthority(codexAuthorityDirectoryForStateRoot(stateRoot), options);
 }
 
 export { readStagedAuth };

@@ -31,8 +31,13 @@ uploads the pinned executable and complete `auth.json` into an exact-container e
 external-sandbox network policy. Every executable, credential-upload, readback, and staging-cleanup
 exec requires bounded stream closure plus `Running === false` and `ExitCode === 0`; provider exit
 requires an independent bounded inspection proof. On finalization it performs two stable bounded
-Docker reads, complete validation, atomic same-directory fsync-and-rename writeback, exact container
-cleanup, and lease release. Failed turns and Unauthorized failures automatically enter this path.
+Docker reads through an Agent-built, integrity-bound no-follow helper. Each read proves regular-file
+type, mode `0600`, exact helper execution UID, `nlink === 1`, device, inode, and bounded size before
+and after reading through one descriptor; private length framing carries the proof and bytes without
+delimiters. Synchronization requires two complete equal proofs before complete validation and atomic
+same-directory fsync-and-rename writeback. Lease release tracks the owned release path explicitly and
+is retryable after a partial rename/removal, with both paths proven absent before success. Failed turns
+and Unauthorized failures automatically enter this path.
 Unproven cleanup keeps the lease and suppresses `session.stopped`; a later bounded Stop retries the
 remaining safe stages. Container root can read the staged credential during the provider lifetime;
 the repository is trusted owner-controlled code, and hostile descendant containment is not claimed
