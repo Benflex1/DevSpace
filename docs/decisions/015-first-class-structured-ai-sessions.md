@@ -113,11 +113,13 @@ and ordered arguments, runtime identity/capabilities, credential-source handle i
 capability declaration, and executable availability-inspection policy. Credential values, host
 paths, and display name are excluded; display name is cosmetic and cannot affect execution.
 
-Ambient host credential mounts are rejected. An existing host Codex login may be a deployment
-credential source only when Agent projects minimum process-scoped values into the exact exec
-without publishing the host path. Credentials never enter Project Options, SQLite, arguments,
-labels, logs, safe failures, or browser data. If the pin cannot authenticate without a broad mount,
-the profile is unavailable and runtime implementation is blocked.
+Ambient host credential mounts are rejected. The approved Codex beta uses one Agent-owned persistent
+authority under the existing Agent state root, with only a validated `auth.json` and non-secret
+control files. It is never seeded from or read through a user's normal Codex home. Agent acquires a
+global atomic lease, stages the complete authority into an exact-container ephemeral `CODEX_HOME`,
+and validates atomic refresh writeback after bounded provider shutdown. Credentials never enter
+Project Options, SQLite, arguments, labels, logs, safe failures, or browser data. A stale lease or
+reauthentication marker makes the profile unavailable until documented operator recovery.
 
 The browser supplies only `profileId`. Web inspects and may retain the safe projection, then sends
 both `profileId` and the inspected `profileRevision` on Agent start/resume. Agent independently

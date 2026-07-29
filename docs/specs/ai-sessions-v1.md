@@ -216,21 +216,28 @@ runtime profile. The v1 wire shape and revision hashes do not change in this sli
 ### Credential policy
 
 The deployment profile names an Agent-owned credential-source handle, never a value or host path.
-An existing administrator Codex login may back that source only if Agent can read it without
-revealing its location and can project the minimum required values into the exact provider exec.
-Mounting the host's `~/.codex`, a credential directory, or any other host credential path into the
-general workspace container is not acceptable.
+For the approved Codex beta profile, that handle is one persistent authority rooted at
+`<stateRoot>/codex-auth/codex/` and containing only the validated `auth.json` plus Agent-private
+control files. It is not seeded from or backed by another Codex client's home. The user's normal
+Codex home, `~/.codex`, and any other host credential path are never read by the production runtime
+or mounted into a workspace container.
 
-The runtime slice must choose process-scoped delivery supported by the pinned Codex version:
-either a minimal Docker-exec environment value or supervisor-created ephemeral in-container
-credential material delivered over the private channel, mode-restricted, bound to this process
-generation, and removed on exit. Values never appear in Project Options, SQLite, operation
+The Codex profile revision binds the credential-source identity, persistent-authority policy version,
+exclusive-lease policy version, and staged-writeback policy version, alongside the existing provider,
+sandbox, approval, and capability authority. It never binds the authority path, token content or
+digest, account identity, file metadata, lease holder, or authentication generation.
+
+The beta acquires one atomic filesystem lease under that authority before reading or staging, and
+holds it for the complete provider lifetime. It delivers the complete validated authority into a
+new exact-container ephemeral `CODEX_HOME`, mode-restricted and removed on exit. Codex may update
+that staged file. Finalization performs bounded shutdown, two bounded stable Docker reads, complete
+pinned validation, fsync-backed same-directory atomic replacement of the durable file, exact
+container cleanup, and lease release. Values never appear in Project Options, SQLite, operation
 fingerprints, Docker labels, command arguments, logs, diagnostics, safe failures, or browser
-payloads. Because v1 does not assume a dedicated provider user, other same-user processes in the
-same trusted-owner workspace may remain a residual process-inspection risk; cross-workspace
-credential sharing is still prohibited. If Codex 0.145.0 cannot authenticate without a broad
-ambient mount in the target image, the profile is `unavailable` and credential delivery blocks
-the runtime slice.
+payloads. A stale lease fails closed and is not automatically broken. During provider lifetime,
+trusted managed-container root can read the staged credential; hostile descendant containment is
+deferred. If the authority is missing, invalid, marked for reauthentication, or leased, the profile
+is `unavailable`.
 
 ### AI session
 

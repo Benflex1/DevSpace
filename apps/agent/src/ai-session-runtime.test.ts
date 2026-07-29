@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment,
   @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { describe, expect, test, vi } from "vitest";
 import { CODEX_EXECUTABLE_SHA256, codexProfileRevisionForAuthority, createAiSessionRuntime } from "./ai-session-runtime.js";
+import { createCodexCredentialAuthority } from "./codex-credential-authority.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 
@@ -16,9 +17,15 @@ const turnId = "018f1f34-7000-7000-8000-000000000004";
 const revisionId = "018f1f34-7000-7000-8000-000000000005";
 const profileRevision = `sha256-ai-profile-v1:${"b".repeat(64)}`;
 const runtimePlanHash = `sha256-project-options-v1:${"a".repeat(64)}`;
-const fixtureCredentialToken = "f".repeat(32);
-const fixtureCredential = JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: fixtureCredentialToken } });
-const fixtureCredentialReader = (): Promise<string> => Promise.resolve(fixtureCredential);
+const fixtureCredentialToken = "synthetic-access-value";
+const fixtureIdToken = [
+  Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+  Buffer.from(JSON.stringify({ sub: "synthetic-subject" })).toString("base64url"),
+  Buffer.from("synthetic-signature").toString("base64url")
+].join(".");
+const fixtureCredential = JSON.stringify({ auth_mode: "chatgpt", tokens: {
+  id_token: fixtureIdToken, access_token: fixtureCredentialToken, refresh_token: "synthetic-refresh-value", account_id: "synthetic-account-value"
+}, last_refresh: "2026-07-29T10:00:00.000Z" });
 
 const binding = {
   projectId, workspaceId, aiSessionId: sessionId, revisionId, runtimePlanHash,
@@ -74,6 +81,11 @@ function dockerMux(payload: unknown): Buffer {
   return Buffer.concat([header, body]);
 }
 
+function dockerBytes(payload: Buffer): Buffer {
+  const header = Buffer.alloc(8); header[0] = 1; header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
+}
+
 function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?: (request: { id?: number; method?: string }, emit: (message: unknown) => void) => void): {
   readonly docker: DockerEngineClient;
   readonly emit: (message: unknown) => void;
@@ -92,7 +104,7 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
     docker: {
     createExec: (_containerId: string, input: DockerExecInput) => {
       const command = Array.isArray(input.command) ? input.command.join(" ") : "";
-      const kind = command.includes("cat >") ? "upload" : command.includes("rm -rf") ? "cleanup" : "provider";
+      const kind = command.includes("cat >") ? "upload" : command.includes("stat -c") ? "readback" : command.includes("rm -rf") ? "cleanup" : "provider";
       const id = `${kind}-${++sequence}`;
       captured.push({ id, input });
       if (kind === "upload") uploadNames.set(id, String((input.environment as Record<string, string>).DEVSPACE_TARGET_NAME));
@@ -114,6 +126,12 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
       if (execId.startsWith("cleanup-")) {
         const stream = new Duplex({ read() { /* cleanup output is not consumed */ }, write(_chunk, _encoding, callback) { callback(); } });
         process.nextTick(() => stream.emit("close"));
+        return Promise.resolve(stream);
+      }
+      if (execId.startsWith("readback-")) {
+        const auth = uploads.get("auth.json") ?? Buffer.alloc(0);
+        const stream = new Duplex({ read() { /* readback output is pushed below */ }, write(_chunk, _encoding, callback) { callback(); } });
+        process.nextTick(() => { stream.push(Buffer.concat([dockerBytes(Buffer.from(`regular file 600 ${auth.length}\n`)), dockerBytes(auth)])); setImmediate(() => stream.emit("close")); });
         return Promise.resolve(stream);
       }
       let lineBuffer = "";
@@ -139,7 +157,8 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
         }
       });
       return Promise.resolve(stream);
-    }
+    },
+    inspectExec: () => Promise.resolve({ ID: "synthetic-exec", Running: false, ExitCode: 0, ContainerID: "devspace-test-container" })
     } as unknown as DockerEngineClient
   };
 }
@@ -154,6 +173,11 @@ function managedContext(stateRoot: string): WorkspaceExecutionContext {
 async function createCodexTestExecutable(stateRoot: string): Promise<string> {
   const executablePath = join(stateRoot, "codex-fixture");
   await writeFile(executablePath, "deterministic codex adapter fixture");
+  const authority = createCodexCredentialAuthority(stateRoot);
+  await mkdir(authority.authorityDir, { recursive: true, mode: 0o700 });
+  await chmod(authority.authorityDir, 0o700);
+  await writeFile(authority.authPath, fixtureCredential, { mode: 0o600 });
+  await chmod(authority.authPath, 0o600);
   return executablePath;
 }
 
@@ -214,24 +238,29 @@ describe("AI session runtime", () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-adapter-test-"));
     const captured: Array<Record<string, unknown>> = [];
     const protocol = createProtocolDocker(captured);
-    const readCredential = vi.fn(() => Promise.resolve(fixtureCredential));
     const executablePath = await createCodexTestExecutable(stateRoot);
     const context = managedContext(stateRoot);
     const managed = { executionContext: () => Promise.resolve(context) } as never;
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed, docker: protocol.docker, executablePath,
-      codexPreflight: () => undefined, codexCredentialReader: readCredential } as never);
+      codexPreflight: () => undefined } as never);
+    let restartedRuntime: ReturnType<typeof createAiSessionRuntime> | null = null;
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-      await runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
-      expect(readCredential).toHaveBeenCalledTimes(1);
       expect(protocol.uploads.get("auth.json")?.toString("utf8")).toBe(fixtureCredential);
+      const refreshedCredential = fixtureCredential.replace("synthetic-access-value", "synthetic-access-refreshed")
+        .replace("synthetic-refresh-value", "synthetic-refresh-refreshed").replace("2026-07-29T10:00:00.000Z", "2026-07-29T10:01:00.000Z");
+      protocol.uploads.set("auth.json", Buffer.from(refreshedCredential));
+      await runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
       const authUpload = captured.find((entry) => {
         const input = entry.input as DockerExecInput | undefined;
         return input?.environment.DEVSPACE_TARGET_NAME === "auth.json";
       });
       expect((authUpload?.input as DockerExecInput).command.join(" ")).toContain("chmod 600");
+      const authEnvironment = (authUpload?.input as DockerExecInput).environment as Record<string, string>;
+      expect(authEnvironment.DEVSPACE_TARGET_DIR).toMatch(/^\/tmp\/devspace-ai\/[^/]+\/home$/u);
+      expect(authEnvironment.CODEX_HOME).toBe(authEnvironment.DEVSPACE_TARGET_DIR);
       expect(captured.some((entry) => {
         const input = entry.input as DockerExecInput | undefined;
         return Array.isArray(input?.command) && input.command.join(" ").includes("rm -rf");
@@ -254,7 +283,15 @@ describe("AI session runtime", () => {
       expect(JSON.stringify(await runtime.replay(sessionId, 0))).not.toContain(fixtureCredentialToken);
       expect(CODEX_EXECUTABLE_SHA256).toHaveLength(64);
       expect((await runtime.replay(sessionId, 0)).every((event) => event.profile.profileRevision === profile.profileRevision)).toBe(true);
+      const restartedProtocol = createProtocolDocker([]);
+      restartedRuntime = createAiSessionRuntime({ mode: "codex", stateRoot, managed, docker: restartedProtocol.docker, executablePath,
+        codexPreflight: () => undefined } as never);
+      const restartedProfile = await restartedRuntime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await restartedRuntime.start({ ...binding, profileRevision: restartedProfile.profileRevision });
+      expect(restartedProtocol.uploads.get("auth.json")?.toString("utf8")).toBe(refreshedCredential);
+      await restartedRuntime.stop({ ...binding, profileRevision: restartedProfile.profileRevision, processGeneration: 1 });
     } finally {
+      await restartedRuntime?.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
       await rm(stateRoot, { recursive: true, force: true });
     }
@@ -265,16 +302,19 @@ describe("AI session runtime", () => {
       providerVersion: "0.145.0", transport: "stdio-jsonl", threadSandbox: "danger-full-access",
       turnSandboxPolicy: "externalSandbox", networkAccess: "enabled", approvalPolicy: "never",
       declaredCapabilities: { interrupt: true, approvals: false, structuredInput: false },
-      credentialSourceIdentity: "deployment-owned-codex-auth-v1",
+      credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1",
       runtimeIdentity: { projectId, workspaceId, revisionId, runtimePlanHash, runtimeGeneration: 1 },
       displayName: "Codex"
     } as const;
     const base = codexProfileRevisionForAuthority(authority);
     expect(codexProfileRevisionForAuthority({ ...authority, displayName: "Codex (managed)" })).toBe(base);
     expect(codexProfileRevisionForAuthority({ ...authority, threadSandbox: "workspace-write" })).not.toBe(base);
-    expect(codexProfileRevisionForAuthority({ ...authority, approvalPolicy: "on-request" })).not.toBe(base);
-    expect(codexProfileRevisionForAuthority({ ...authority, turnSandboxPolicy: "dangerFullAccess" })).not.toBe(base);
-    expect(codexProfileRevisionForAuthority({ ...authority, declaredCapabilities: { ...authority.declaredCapabilities, interrupt: false } })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, approvalPolicy: "on-request" })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, turnSandboxPolicy: "dangerFullAccess" })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, declaredCapabilities: { ...authority.declaredCapabilities, interrupt: false } })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, persistentAuthorityPolicyVersion: "other-authority-policy" })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, exclusiveLeasePolicyVersion: "other-lease-policy" })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, stagedWritebackPolicyVersion: "other-writeback-policy" })).not.toBe(base);
   });
 
   test("fake long turns remain active until interrupt", async () => {
@@ -307,7 +347,7 @@ describe("AI session runtime", () => {
     const context = managedContext(stateRoot);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined, codexCredentialReader: fixtureCredentialReader,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
       onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
@@ -340,7 +380,7 @@ describe("AI session runtime", () => {
     const context = managedContext(stateRoot);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined, codexCredentialReader: fixtureCredentialReader,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
       onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
@@ -370,7 +410,7 @@ describe("AI session runtime", () => {
     const context = managedContext(stateRoot);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined, codexCredentialReader: fixtureCredentialReader,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
       onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
@@ -399,7 +439,7 @@ describe("AI session runtime", () => {
     const context = managedContext(stateRoot);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined, codexCredentialReader: fixtureCredentialReader,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
       onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
@@ -424,7 +464,7 @@ describe("AI session runtime", () => {
     const context = managedContext(stateRoot);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined, codexCredentialReader: fixtureCredentialReader } as never);
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
@@ -438,26 +478,68 @@ describe("AI session runtime", () => {
     }
   });
 
-  test("production credential fallback remains required and does not launch a provider without it", async () => {
+  test("production uses only the dedicated authority and does not launch without it", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-production-credential-test-"));
     const captured: Array<Record<string, unknown>> = [];
     const protocol = createProtocolDocker(captured);
     const executablePath = await createCodexTestExecutable(stateRoot);
-    const previousAuthJson = process.env.DEVSPACE_CODEX_AUTH_JSON;
-    const previousAuthPath = process.env.DEVSPACE_CODEX_AUTH_PATH;
-    delete process.env.DEVSPACE_CODEX_AUTH_JSON;
-    process.env.DEVSPACE_CODEX_AUTH_PATH = join(stateRoot, "missing-auth.json");
+    const authority = createCodexCredentialAuthority(stateRoot);
+    await rm(authority.authPath);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
       docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
-      await expect(runtime.start({ ...binding, profileRevision: profile.profileRevision })).rejects.toThrow("codex-credential-source-unavailable");
+      await expect(runtime.start({ ...binding, profileRevision: profile.profileRevision })).rejects.toThrow("ai-profile-unavailable");
       expect(captured.some((entry) => entry.id === "provider-1")).toBe(false);
     } finally {
-      if (previousAuthJson === undefined) delete process.env.DEVSPACE_CODEX_AUTH_JSON;
-      else process.env.DEVSPACE_CODEX_AUTH_JSON = previousAuthJson;
-      if (previousAuthPath === undefined) delete process.env.DEVSPACE_CODEX_AUTH_PATH;
-      else process.env.DEVSPACE_CODEX_AUTH_PATH = previousAuthPath;
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("provider start failure cleans staging and releases the acquired lease", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-start-failure-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      setImmediate(() => emit({ id: request.id, error: { code: -32000, message: "synthetic-provider-start-failure" } }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const authority = createCodexCredentialAuthority(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await expect(runtime.start({ ...binding, profileRevision: profile.profileRevision })).rejects.toThrow();
+      await expect(authority.inspect()).resolves.toBeUndefined();
+      expect(captured.some((entry) => String(entry.id).startsWith("cleanup-"))).toBe(true);
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("Unauthorized preserves the failed turn, marks reauthentication, and keeps durable auth", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-unauthorized-test-"));
+    const protocol = createProtocolDocker([], (request, emit) => {
+      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
+      setImmediate(() => emit({ id: request.id, result }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const authority = createCodexCredentialAuthority(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      protocol.emit(errorNotification({ message: "synthetic unauthorized", codexErrorInfo: "unauthorized" }));
+      protocol.emit(failedTurn({ codexErrorInfo: "unauthorized" }));
+      const events = await runtime.collect(sessionId, 0, 50);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      await expect(authority.inspect()).rejects.toThrow("credential-unavailable");
+      await expect(authority.read()).resolves.toMatchObject({ document: { auth_mode: "chatgpt" } });
+      expect(JSON.stringify(events)).not.toContain("synthetic unauthorized");
+    } finally {
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
       await rm(stateRoot, { recursive: true, force: true });
     }

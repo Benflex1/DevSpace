@@ -15,27 +15,41 @@ equivalent explicit relative path aliases, and WebSocket terminal frames now cop
 pinning checker/builder counts. No product or runtime authority boundary changed.
 
 AI Session Foundation Slice 0 established the accepted post-M1 architecture and executable
-contracts. Checkpoint 1 of AI Session Beta Slice B is implemented as a Codex-first vertical slice:
-one deployment-owned Codex 0.145.0 profile runs through the Agent in
-the exact managed workspace container, with a deterministic fake provider for tests; Web remains
-the sole SQLite writer and commits canonical events before browser publication. The Workbench AI
-tab supports availability, session creation, streamed text/activity, cooperative interruption,
-new turns, refresh recovery, bounded changed-file summaries, stop, and truthful `lost` recovery
-through **Restart workspace**. The live attachment binds project, workspace, configuration
-revision, runtime plan/generation, container identity, profile revision, session, and process
-generation. Credentials are copied from one Agent-private deployment login into a mode-restricted,
-session-scoped ephemeral in-container `CODEX_HOME`; the host Codex directory is never mounted and
-credential values are not persisted or projected. This is intentionally one live session per
-workspace, and the beta makes no claim of hostile descendant containment. Approvals and structured
-questions remain explicitly in progress for Checkpoint 2. Established Agent event streams use a
-bounded response-establishment timeout and no short post-establishment idle timeout. The fixed
-managed-container external-sandbox policy was validated with real Codex 0.145.0: authentication,
-file creation, streamed browser output, changed-file projection, refresh recovery, a read-only turn,
-interruption, and post-interrupt continuation all worked in a fresh disposable workspace. Browser
-replay avoids appending historical output deltas to already-persisted turn text, and provider staging
-cleanup runs through the exact container. The browser stop action was rerun after that cleanup fix:
-the provider process exited, the staged directory was absent, and the exact workspace then stopped.
-Checkpoint 1 is complete for the owner-only beta; approvals and structured questions remain deferred.
+contracts. Checkpoint 1 of AI Session Beta Slice B is implemented in code as a Codex-first vertical
+slice, but its live validation remains incomplete. One Agent-owned persistent Codex 0.145.0
+authority is derived from the configured state root: production defaults to
+`/srv/devspace/state/codex-auth/codex/auth.json`. It contains only the validated pinned ChatGPT
+authority, never the user's normal Codex home or a general-purpose Codex home. A global atomic
+`.lease` directory serializes all beta Codex providers; a stale lease is unavailable until an
+operator verifies that no provider remains and removes that exact lease directory. The
+`reauth-required` marker preserves the last-known-good authority while making inspection
+unavailable.
+
+After lease acquisition, the Agent validates the complete authority through a no-follow descriptor,
+uploads the pinned executable and complete `auth.json` into an exact-container ephemeral
+`CODEX_HOME`, and starts app-server with the existing fixed `never` / `danger-full-access` and
+external-sandbox network policy. On finalization it performs bounded provider shutdown, two stable
+bounded Docker reads, complete validation, atomic same-directory fsync-and-rename writeback, exact
+container cleanup, and lease release. Container root can read the staged credential during the
+provider lifetime; the repository is trusted owner-controlled code, and hostile descendant
+containment is not claimed in this beta. Credentials never enter Project Options, SQLite, canonical
+events, public errors, diagnostics, logs, Docker labels, arguments, or browser data.
+
+The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
+structured questions remain explicitly in progress for Checkpoint 2. No real provider, device-code,
+browser, or production-container validation has been run in this implementation round. Checkpoint 1
+therefore remains incomplete pending owner authentication and the bounded live validation described
+below.
+
+### Codex authority onboarding and recovery
+
+The deployment owner must authenticate the dedicated authority with the pinned executable using the
+literal command supplied in the implementation handoff. The command must run as the Agent OS user,
+with `OPENAI_API_KEY`, organization, and project environment variables removed. It must not read or
+print `auth.json`; it fixes directory/file modes and removes `reauth-required` only after successful
+`codex login status`. If a stale `.lease` exists, first verify that no provider process remains,
+then remove only that exact `.lease` directory before login. This is operational device-code login,
+not browser/F11/app-server login orchestration.
 
 Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
 SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and
@@ -275,13 +289,13 @@ but its corrected hands-on verdict is **blocked**. The proof demonstrates authen
 after the original exec attachment is gone and stable `/proc` process-start identity. It also
 demonstrates that process-group signalling works for a cooperative fixture but is not a race-safe
 production Stop authority: the dedicated rootless environment exposes no writable delegated
-cgroup or equivalent atomic descendant-tree boundary. Production provider launch therefore
-remains blocked pending the prerequisite described in
-`docs/research/ai-session-supervisor-capability-proof.md`. Production AI execution, supervisor
-integration, durable ownership, credentials, F11 handlers, event persistence, Web routes, SQLite
-data, and UI remain absent. The opt-in executable now conditions this blocked result on the
-reviewed cgroup probe tuple; a stronger or malformed future environment yields an explicit
-review-required or probe-failed result instead of replaying the static blocker matrix.
+cgroup or equivalent atomic descendant-tree boundary. The owner-only beta provider lifecycle is
+implemented through the exact managed workspace container and dedicated authority above, but it
+does not claim hostile-descendant containment. F11 handlers, approvals, structured questions, and
+broader multi-provider support remain absent. The opt-in executable now conditions this blocked
+supervisor result on the reviewed cgroup probe tuple; a stronger or malformed future environment
+yields an explicit review-required or probe-failed result instead of replaying the static blocker
+matrix.
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision

@@ -16,6 +16,14 @@ import {
 import { v7 as uuidv7 } from "uuid";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ManagedWorkspaces, WorkspaceExecutionContext } from "./managed-workspaces.js";
+import {
+  CODEX_AUTH_CREDENTIAL_SOURCE_IDENTITY,
+  CODEX_AUTHORITY_POLICY_VERSION,
+  CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
+  CODEX_STAGED_WRITEBACK_POLICY_VERSION,
+  createCodexCredentialAuthority,
+  type CodexCredentialAuthority
+} from "./codex-credential-authority.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
@@ -28,7 +36,6 @@ const CODEX_APPROVAL_POLICY = "never" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
 const CODEX_NETWORK_ACCESS = "enabled" as const;
-const CODEX_CREDENTIAL_SOURCE_IDENTITY = "deployment-owned-codex-auth-v1" as const;
 const CODEX_CAPABILITIES = Object.freeze({
   inspect: true, start: true, resume: false, sendTurn: true, interrupt: true,
   approvals: false, structuredInput: false, stop: true, streamEvents: true
@@ -61,8 +68,8 @@ export interface AiSessionRuntimeOptions {
   readonly onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void;
   /** Deterministic adapter-test preflight; the server never supplies this hook. */
   readonly codexPreflight?: () => void | Promise<void>;
-  /** Agent-internal deterministic credential seam; the server never supplies this reader. */
-  readonly codexCredentialReader?: () => Promise<string>;
+  /** Agent-private bounded authority seam; the server never supplies this implementation. */
+  readonly codexCredentialAuthority?: CodexCredentialAuthority;
 }
 
 export type CodexPrivateFailureObservation = Readonly<{
@@ -112,6 +119,7 @@ interface SessionRecord {
   nextSequence: number;
   acknowledgedThrough: number;
   eventChain: Promise<void>;
+  finalizationPromise: Promise<void> | null;
 }
 
 interface ProviderAdapter {
@@ -127,6 +135,7 @@ interface AdapterCallbacks {
   readonly completed: (outcome: "completed" | "interrupted" | "failed") => Promise<void>;
   readonly privateFailure: (observation: CodexPrivateFailureObservation) => void;
   readonly failed: (observation: CodexPrivateFailureObservation) => Promise<void>;
+  readonly providerClosed: () => Promise<void>;
 }
 
 export interface CodexProfileRevisionAuthority {
@@ -138,6 +147,9 @@ export interface CodexProfileRevisionAuthority {
   readonly approvalPolicy: string;
   readonly declaredCapabilities: Readonly<Record<string, boolean>>;
   readonly credentialSourceIdentity: string;
+  readonly persistentAuthorityPolicyVersion?: string;
+  readonly exclusiveLeasePolicyVersion?: string;
+  readonly stagedWritebackPolicyVersion?: string;
   readonly runtimeIdentity: Readonly<{
     projectId: string; workspaceId: string; revisionId: string; runtimePlanHash: string; runtimeGeneration: number;
   }> | null;
@@ -156,6 +168,9 @@ export function codexProfileRevisionForAuthority(input: CodexProfileRevisionAuth
     approvalPolicy: input.approvalPolicy,
     declaredCapabilities: input.declaredCapabilities,
     credentialSourceIdentity: input.credentialSourceIdentity,
+    persistentAuthorityPolicyVersion: input.persistentAuthorityPolicyVersion ?? CODEX_AUTHORITY_POLICY_VERSION,
+    exclusiveLeasePolicyVersion: input.exclusiveLeasePolicyVersion ?? CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
+    stagedWritebackPolicyVersion: input.stagedWritebackPolicyVersion ?? CODEX_STAGED_WRITEBACK_POLICY_VERSION,
     runtimeIdentity: input.runtimeIdentity
   });
   return `sha256-ai-profile-v1:${createHash("sha256").update(identity).digest("hex")}`;
@@ -165,7 +180,10 @@ function defaultProfileAuthority(): CodexProfileRevisionAuthority {
   return {
     providerVersion: CODEX_APP_SERVER_CLI_VERSION, transport: "stdio-jsonl", threadSandbox: CODEX_THREAD_SANDBOX,
     turnSandboxPolicy: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS, approvalPolicy: CODEX_APPROVAL_POLICY,
-    declaredCapabilities: CODEX_CAPABILITIES, credentialSourceIdentity: CODEX_CREDENTIAL_SOURCE_IDENTITY, runtimeIdentity: null
+    declaredCapabilities: CODEX_CAPABILITIES, credentialSourceIdentity: CODEX_AUTH_CREDENTIAL_SOURCE_IDENTITY,
+    persistentAuthorityPolicyVersion: CODEX_AUTHORITY_POLICY_VERSION,
+    exclusiveLeasePolicyVersion: CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
+    stagedWritebackPolicyVersion: CODEX_STAGED_WRITEBACK_POLICY_VERSION, runtimeIdentity: null
   };
 }
 
@@ -349,37 +367,58 @@ class CodexProvider implements ProviderAdapter {
   private containerDir: string | null = null;
   private dockerBuffer = Buffer.alloc(0);
   private turnFailure: CodexPrivateFailureObservation | null = null;
+  private providerExecId: string | null = null;
+  private providerStarted = false;
+  private providerReady = false;
+  private finalizationPromise: Promise<void> | null = null;
+  private finalizing = false;
+  private lease: Awaited<ReturnType<CodexCredentialAuthority["acquire"]>> | null = null;
   constructor(private readonly input: {
     readonly docker: DockerEngineClient;
     readonly ownership: WorkspaceExecutionContext;
     readonly executablePath: string;
     readonly sessionId: string;
+    readonly processGeneration: number;
     readonly callbacks: AdapterCallbacks;
-    readonly readCredential: () => Promise<string>;
+    readonly authority: CodexCredentialAuthority;
   }) {}
   async start(): Promise<void> {
-    const opaque = `${this.input.sessionId.replaceAll("-", "")}-${Date.now().toString(36)}`;
-    const containerDir = `${PRIVATE_CONTAINER_ROOT}/${opaque}`;
-    this.containerDir = containerDir;
-    const executable = await readFile(this.input.executablePath);
-    await this.runUpload(containerDir, executable, "codex");
-    const auth = await this.input.readCredential();
-    await this.runUpload(`${containerDir}/home`, Buffer.from(auth), "auth.json", { CODEX_HOME: `${containerDir}/home` });
-    const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
-      command: [`${containerDir}/codex`, "app-server", "--stdio"], workingDirectory: "/workspace",
-      environment: { CODEX_HOME: `${containerDir}/home` }, attachStdin: true, tty: false
-    });
-    this.stream = await this.input.docker.startExecAttached(execId, false);
-    this.stream.on("data", (chunk: Buffer) => this.readDockerFrames(chunk));
-    this.stream.on("error", () => this.rejectPending());
-    this.stream.on("close", () => this.rejectPending());
-    await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
-    this.write({ method: "initialized" });
-    const thread = await this.request("thread/start", {
-      cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, sandbox: CODEX_THREAD_SANDBOX
-    }) as { thread?: { id?: string } };
-    this.threadId = typeof thread.thread?.id === "string" ? thread.thread.id : null;
-    if (this.threadId === null) throw new Error("codex-thread-id-missing");
+    try {
+      this.lease = await this.input.authority.acquire({
+        aiSessionId: this.input.sessionId, workspaceId: this.input.ownership.workspaceId, processGeneration: this.input.processGeneration
+      });
+      const auth = await this.input.authority.read();
+      const opaque = `${this.input.sessionId.replaceAll("-", "")}-${Date.now().toString(36)}`;
+      const containerDir = `${PRIVATE_CONTAINER_ROOT}/${opaque}`;
+      this.containerDir = containerDir;
+      const executable = await readFile(this.input.executablePath);
+      await this.runUpload(containerDir, executable, "codex");
+      await this.runUpload(`${containerDir}/home`, Buffer.from(auth.bytes), "auth.json", { CODEX_HOME: `${containerDir}/home` });
+      const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
+        command: [`${containerDir}/codex`, "app-server", "--stdio"], workingDirectory: "/workspace",
+        environment: { CODEX_HOME: `${containerDir}/home` }, attachStdin: true, tty: false
+      });
+      this.providerExecId = execId;
+      this.stream = await this.input.docker.startExecAttached(execId, false);
+      this.providerStarted = true;
+      this.stream.on("data", (chunk: Buffer) => this.readDockerFrames(chunk));
+      this.stream.on("error", () => this.rejectPending());
+      this.stream.on("close", () => {
+        this.rejectPending();
+        if (!this.finalizing) void this.input.callbacks.providerClosed();
+      });
+      await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
+      this.write({ method: "initialized" });
+      const thread = await this.request("thread/start", {
+        cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, sandbox: CODEX_THREAD_SANDBOX
+      }) as { thread?: { id?: string } };
+      this.threadId = typeof thread.thread?.id === "string" ? thread.thread.id : null;
+      if (this.threadId === null) throw new Error("codex-thread-id-missing");
+      this.providerReady = true;
+    } catch (error) {
+      await this.finalize().catch(() => undefined);
+      throw error;
+    }
   }
   async sendTurn(_turnId: string, text: string): Promise<void> {
     if (this.threadId === null) throw new Error("codex-thread-not-started");
@@ -393,13 +432,50 @@ class CodexProvider implements ProviderAdapter {
   async interrupt(): Promise<void> {
     if (this.threadId !== null && this.turnId !== null) await this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
   }
-  async stop(): Promise<void> {
-    await this.interrupt().catch(() => undefined);
-    this.stream?.destroy(); this.stream = null;
-    if (this.containerDir !== null) await this.removeContainerDir(this.containerDir);
-    this.containerDir = null;
+  async stop(): Promise<void> { await this.finalize(); }
+  private async finalize(): Promise<void> {
+    if (this.finalizationPromise !== null) return await this.finalizationPromise;
+    this.finalizing = true;
+    this.finalizationPromise = (async () => {
+      await this.interrupt().catch(() => undefined);
+      const stream = this.stream;
+      if (stream !== null && !stream.destroyed) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 1_000);
+          stream.once("close", () => { clearTimeout(timer); resolve(); });
+          stream.once("error", () => { clearTimeout(timer); resolve(); });
+        });
+        if (!stream.destroyed) stream.destroy();
+      }
+      this.stream = null;
+      let providerExited = true;
+      if (this.providerExecId !== null) {
+        providerExited = false;
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          const inspection = await this.input.docker.inspectExec(this.providerExecId).catch(() => null);
+          if (inspection !== null && !inspection.Running) { providerExited = true; break; }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      if (this.providerReady && providerExited && this.containerDir !== null) {
+        await this.input.authority.synchronizeStaged({
+          docker: this.input.docker, containerId: this.input.ownership.ownership.developmentContainer.id,
+          stagedAuthPath: `${this.containerDir}/home/auth.json`
+        }).catch(async () => { await this.input.authority.markReauthenticationRequired().catch(() => undefined); });
+      }
+      const cleanupSucceeded = this.containerDir === null ? true : await this.removeContainerDir(this.containerDir);
+      this.containerDir = null;
+      this.providerExecId = null;
+      this.providerReady = false;
+      if (providerExited && cleanupSucceeded) {
+        await this.lease?.release().catch(() => undefined);
+        this.lease = null;
+      }
+    })();
+    return await this.finalizationPromise;
   }
-  private async removeContainerDir(directory: string): Promise<void> {
+  private async removeContainerDir(directory: string): Promise<boolean> {
     try {
       const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
         command: ["sh", "-c", 'rm -rf -- "$DEVSPACE_TARGET_DIR"'], workingDirectory: "/workspace",
@@ -408,7 +484,8 @@ class CodexProvider implements ProviderAdapter {
       const stream = await this.input.docker.startExecAttached(execId, false);
       stream.resume();
       await new Promise<void>((resolve) => stream.once("close", () => resolve()));
-    } catch { /* cleanup is best effort after the provider attachment is gone */ }
+      return true;
+    } catch { /* cleanup is best effort after the provider attachment is gone */ return false; }
   }
   private async runUpload(directory: string, data: Buffer, name: string, environment: Record<string, string> = {}): Promise<void> {
     const mode = name === "auth.json" ? "600" : "700";
@@ -462,7 +539,13 @@ class CodexProvider implements ProviderAdapter {
       const pending = this.pending.get(message.id);
       if (pending !== undefined) {
         this.pending.delete(message.id); clearTimeout(pending.timeout);
-        if ("error" in message) pending.reject(new CodexRequestFailure({ stage: "request", kind: "Unknown", httpStatusCode: null }));
+        if ("error" in message) {
+          const error = message.error;
+          const detail = error !== null && typeof error === "object" ? (error as Record<string, unknown>).codexErrorInfo : null;
+          const observation = codexPrivateFailureObservation("request", detail);
+          if (observation.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
+          pending.reject(new CodexRequestFailure(observation));
+        }
         else pending.resolve(message.result);
       }
       return;
@@ -474,6 +557,7 @@ class CodexProvider implements ProviderAdapter {
       const error = params.error;
       const detail = error !== null && typeof error === "object" ? (error as Record<string, unknown>).codexErrorInfo : null;
       if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", detail);
+      if (this.turnFailure.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
       this.input.callbacks.privateFailure(this.turnFailure);
     }
     else if (method === "item/agentMessage/delta" && typeof params.delta === "string") void this.input.callbacks.outputDelta(params.delta);
@@ -483,6 +567,7 @@ class CodexProvider implements ProviderAdapter {
       const status = turnRecord?.status;
       if (status === "failed") {
         if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", (turnRecord?.error as Record<string, unknown> | undefined)?.codexErrorInfo);
+        if (this.turnFailure.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
         void this.input.callbacks.failed(this.turnFailure);
         this.turnFailure = null;
       } else void this.input.callbacks.completed(status === "interrupted" ? "interrupted" : "completed");
@@ -494,17 +579,6 @@ async function verifyCodexExecutable(executablePath: string): Promise<void> {
   const executable = await readFile(executablePath);
   const digest = createHash("sha256").update(executable).digest("hex");
   if (digest !== CODEX_EXECUTABLE_SHA256) throw new Error("codex-executable-integrity-mismatch");
-}
-
-async function readMinimalCredential(): Promise<string> {
-  const source = process.env.DEVSPACE_CODEX_AUTH_JSON ?? await readFile(
-    process.env.DEVSPACE_CODEX_AUTH_PATH ?? "/home/benjamin/.codex/auth.json", "utf8"
-  ).catch(() => { throw new Error("codex-credential-source-unavailable"); });
-  const parsed: unknown = JSON.parse(source);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("codex-credential-source-invalid");
-  const record = parsed as Record<string, unknown>;
-  if (record.auth_mode !== "chatgpt" || record.tokens === null || typeof record.tokens !== "object") throw new Error("codex-credential-source-invalid");
-  return JSON.stringify({ auth_mode: record.auth_mode, tokens: record.tokens });
 }
 
 function bindingMatches(left: AiSessionBinding, right: AiSessionBinding): boolean {
@@ -520,7 +594,6 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   const createId = options.createId ?? uuidv7;
   const sessions = new Map<string, SessionRecord>();
   const docker = options.docker ?? new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
-  const readCredential = options.codexCredentialReader ?? readMinimalCredential;
 
   async function recordFor(binding: AiSessionBinding | AiProcessBinding): Promise<SessionRecord> {
     const existing = sessions.get(binding.aiSessionId);
@@ -534,7 +607,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const events = await readOutbox(stateRoot, binding.aiSessionId);
     const record: SessionRecord = {
       binding, processGeneration: 1, events, listeners: new Set(), turnBaselines: new Map(), privateFailures: new Map(), adapter: null, activeTurnId: null,
-      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve()
+      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve(), finalizationPromise: null
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
@@ -576,6 +649,19 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     await emit(record, turnId, "turn.failed", { failure: { code, category: code === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure", incidentId: createId() } });
   }
 
+  async function finalizeRecord(record: SessionRecord, reason: "user-request" | "provider-exited"): Promise<void> {
+    if (record.finalizationPromise !== null) return await record.finalizationPromise;
+    const adapter = record.adapter;
+    if (adapter === null) return;
+    record.finalizationPromise = (async () => {
+      if (reason === "user-request") await emit(record, null, "session.stopping", { reason });
+      await adapter.stop().catch(() => undefined);
+      record.adapter = null;
+      await emit(record, null, "session.stopped", { reason });
+    })();
+    await record.finalizationPromise;
+  }
+
   const runtime: AiSessionRuntime = {
     async inspect(input) {
       if (input.profileId !== CODEX_PROFILE_ID) throw new Error("ai-profile-not-found");
@@ -591,8 +677,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           await verifyCodexExecutable(executablePath);
           const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
           if (result.stdout.trim() !== CODEX_APP_SERVER_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
-          await readMinimalCredential();
         }
+        await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
         return publicProfile({ state: "available" }, authority);
       } catch (error) {
         if (error instanceof Error && error.message.includes("credential")) return publicProfile({ state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" }, authority);
@@ -630,7 +716,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         },
         failed: async (observation) => {
           if (record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation);
-        }
+        },
+        providerClosed: async () => { await finalizeRecord(record, "provider-exited"); }
       };
       let adapter: ProviderAdapter;
       if (mode === "fake") {
@@ -640,9 +727,19 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
         if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
         const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
-        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, callbacks, readCredential });
+        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: record.processGeneration, callbacks,
+          authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot) });
       }
-      record.adapter = adapter; await emit(record, null, "session.started", { processGeneration: record.processGeneration }); await adapter.start(); await emit(record, null, "session.ready", {});
+      record.adapter = adapter;
+      await emit(record, null, "session.started", { processGeneration: record.processGeneration });
+      try {
+        await adapter.start();
+        await emit(record, null, "session.ready", {});
+      } catch (error) {
+        await adapter.stop().catch(() => undefined);
+        record.adapter = null;
+        throw error;
+      }
     },
     async sendTurn(input) {
       const record = await recordFor(input); if (record.adapter === null) throw new Error("ai-session-not-started");
@@ -661,9 +758,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       await emit(record, input.turnId, "turn.interrupt.requested", {}); await record.adapter.interrupt();
     },
     async stop(input) {
-      const record = await recordFor(input); if (record.adapter === null) return;
-      await emit(record, null, "session.stopping", { reason: "user-request" }); await record.adapter.stop(); record.adapter = null;
-      await emit(record, null, "session.stopped", { reason: "user-request" });
+      const record = await recordFor(input); await finalizeRecord(record, "user-request");
     },
     async replay(sessionId, afterSequence) {
       aiAfterSequenceSchema.parse(afterSequence);
