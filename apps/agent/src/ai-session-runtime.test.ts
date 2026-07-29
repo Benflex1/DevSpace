@@ -23,7 +23,7 @@ const fixtureIdToken = [
   Buffer.from(JSON.stringify({ sub: "synthetic-subject" })).toString("base64url"),
   Buffer.from("synthetic-signature").toString("base64url")
 ].join(".");
-const fixtureCredential = JSON.stringify({ auth_mode: "chatgpt", tokens: {
+const fixtureCredential = JSON.stringify({ auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: {
   id_token: fixtureIdToken, access_token: fixtureCredentialToken, refresh_token: "synthetic-refresh-value", account_id: "synthetic-account-value"
 }, last_refresh: "2026-07-29T10:00:00.000Z" });
 

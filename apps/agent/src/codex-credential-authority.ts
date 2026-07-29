@@ -107,7 +107,8 @@ export function validateCodexChatGptAuthority(input: string | Uint8Array): Valid
   }
   if (!isObject(parsed)) throw safeError("authority-structure");
   const topLevelKeys = Object.keys(parsed).sort();
-  if (topLevelKeys.some((key) => !["auth_mode", "last_refresh", "tokens"].includes(key))) throw safeError("authority-fields");
+  if (topLevelKeys.some((key) => !["OPENAI_API_KEY", "auth_mode", "last_refresh", "tokens"].includes(key))) throw safeError("authority-fields");
+  if (Object.hasOwn(parsed, "OPENAI_API_KEY") && parsed.OPENAI_API_KEY !== null) throw safeError("authority-fields");
   if (!topLevelKeys.includes("last_refresh")) throw safeError("authority-last-refresh");
   if (!topLevelKeys.includes("auth_mode") || !topLevelKeys.includes("tokens")) throw safeError("authority-structure");
   if (parsed.auth_mode !== "chatgpt") throw safeError("authority-auth-mode");

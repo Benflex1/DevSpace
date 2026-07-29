@@ -23,6 +23,7 @@ const syntheticTokens = {
 };
 const completeAuthority = () => JSON.stringify({
   auth_mode: "chatgpt",
+  OPENAI_API_KEY: null,
   tokens: syntheticTokens,
   last_refresh: "2026-07-29T10:00:00.000Z"
 });
@@ -68,7 +69,43 @@ describe("Codex credential authority", () => {
   test("accepts a complete pinned ChatGPT authority without projecting it", () => {
     const validated = validateCodexChatGptAuthority(completeAuthority());
     expect(validated.bytes.toString("utf8")).toBe(completeAuthority());
+    expect(validated.bytes.toString("utf8")).toContain('"OPENAI_API_KEY":null');
     expect(validated.bytes.toString("utf8")).toContain("synthetic-access-value");
+  });
+
+  test("accepts an omitted OPENAI_API_KEY", () => {
+    const document = JSON.parse(completeAuthority()) as Record<string, unknown>;
+    delete document.OPENAI_API_KEY;
+    const input = JSON.stringify(document);
+    const validated = validateCodexChatGptAuthority(input);
+    expect(validated.bytes.toString("utf8")).toBe(input);
+  });
+
+  test("rejects a non-null OPENAI_API_KEY without exposing its value", () => {
+    const document = JSON.parse(completeAuthority()) as Record<string, unknown>;
+    const value = "synthetic-api-key-value";
+    document.OPENAI_API_KEY = value;
+    let error: unknown;
+    try { validateCodexChatGptAuthority(JSON.stringify(document)); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("authority-fields");
+    expect(String(error)).not.toContain(value);
+  });
+
+  test.each(["agent_identity", "personal_access_token", "bedrock_api_key"])(
+    "rejects unrelated pinned field %s",
+    (field) => {
+      const document = JSON.parse(completeAuthority()) as Record<string, unknown>;
+      document[field] = "synthetic-unrelated-value";
+      expect(() => validateCodexChatGptAuthority(JSON.stringify(document))).toThrow("authority-fields");
+    }
+  );
+
+  test("rejects an unknown top-level field", () => {
+    const document = JSON.parse(completeAuthority()) as Record<string, unknown>;
+    document.synthetic_unknown = "synthetic-unknown-value";
+    expect(() => validateCodexChatGptAuthority(JSON.stringify(document))).toThrow("authority-fields");
   });
 
   test.each(["apikey", "personalAccessToken", "bedrockApiKey", "agentIdentity", "headers"])(
@@ -177,6 +214,7 @@ describe("Codex credential authority", () => {
         .replace("2026-07-29T10:00:00.000Z", "2026-07-29T10:01:00.000Z");
       await fixture.authority.synchronizeStaged({ docker: stagedDocker(Buffer.from(refreshed)), containerId: "synthetic-container", stagedAuthPath: "/tmp/exact-home/auth.json" });
       const stored = (await fixture.authority.read()).bytes.toString("utf8");
+      expect(stored).toBe(refreshed);
       expect(stored).toContain("synthetic-access-refreshed");
       expect(stored).toContain("synthetic-refresh-refreshed");
       expect(stored).toContain("2026-07-29T10:01:00.000Z");
