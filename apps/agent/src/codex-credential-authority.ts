@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, mkdir, open, lstat, rename, rm } from "node:fs/promises";
+import { chmod, mkdir, open, lstat, readdir, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { Duplex } from "node:stream";
 import path from "node:path";
@@ -175,6 +175,35 @@ async function existsAsAnyPath(filePath: string): Promise<boolean> {
   try { await lstat(filePath); return true; } catch { return false; }
 }
 
+async function hasLeaseControl(authorityDir: string, leaseDir: string): Promise<boolean> {
+  if (await existsAsAnyPath(leaseDir)) return true;
+  try {
+    const entries = await readdir(authorityDir);
+    return entries.some((entry) => entry.startsWith(".lease-release-"));
+  } catch {
+    return true;
+  }
+}
+
+async function readExactLeaseMetadata(metadataPath: string, expected: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(metadataPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stats = await handle.stat({ bigint: true });
+    if (!stats.isFile() || (stats.mode & 0o777n) !== 0o600n || stats.nlink !== 1n ||
+      (expectedUid() !== null && stats.uid !== expectedUid()) || stats.size === 0n || stats.size > 8_192n) {
+      throw safeError("credential-lease-release");
+    }
+    const current = (await handle.readFile()).toString("utf8");
+    if (current !== expected) throw safeError("credential-lease-release");
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("codex-")) throw error;
+    throw safeError("credential-lease-release");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function readDockerOutput(stream: Duplex): Promise<Buffer> {
   return await new Promise((resolve, reject) => {
     let chunks: Buffer[] = [];
@@ -260,11 +289,12 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
   }
   async inspect(): Promise<void> {
     await assertPrivateDirectory(this.authorityDir);
-    if (await existsAsAnyPath(this.leaseDir) || await existsAsAnyPath(this.reauthMarkerPath)) throw safeError("credential-unavailable");
+    if (await hasLeaseControl(this.authorityDir, this.leaseDir) || await existsAsAnyPath(this.reauthMarkerPath)) throw safeError("credential-unavailable");
     await this.read();
   }
   async acquire(metadata: CodexCredentialLeaseMetadata): Promise<CodexCredentialLease> {
     await assertPrivateDirectory(this.authorityDir);
+    if (await hasLeaseControl(this.authorityDir, this.leaseDir)) throw safeError("credential-lease-unavailable");
     try {
       await mkdir(this.leaseDir, { mode: CODEX_LEASE_MODE });
     } catch {
@@ -280,22 +310,24 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
       throw safeError("credential-lease-unavailable");
     }
     let released = false;
+    let releasePath: string | null = null;
     return {
       release: async () => {
         if (released) return;
-        released = true;
-        let currentMetadata: string;
-        let handle;
-        try {
-          handle = await open(leaseMetadataPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-          currentMetadata = (await handle.readFile()).toString("utf8");
-        } catch {
-          return;
-        } finally {
-          await handle?.close().catch(() => undefined);
+        if (releasePath !== null) {
+          await rm(releasePath, { recursive: true, force: false });
+        } else {
+          await readExactLeaseMetadata(leaseMetadataPath, leaseMetadata);
+          releasePath = path.join(this.authorityDir, `.lease-release-${randomUUID()}`);
+          try {
+            await rename(this.leaseDir, releasePath);
+          } catch {
+            throw safeError("credential-lease-release");
+          }
         }
-        if (currentMetadata !== leaseMetadata) return;
-        await rm(this.leaseDir, { recursive: true, force: true });
+        await rm(releasePath, { recursive: true, force: false });
+        if (await existsAsAnyPath(this.leaseDir) || await existsAsAnyPath(releasePath)) throw safeError("credential-lease-release");
+        released = true;
       }
     };
   }

@@ -32,6 +32,7 @@ const MAX_OUTBOX_EVENTS = 2048;
 const ACK_RETAINED_EVENTS = 512;
 const MAX_GIT_PATHS = 256;
 const PRIVATE_CONTAINER_ROOT = "/tmp/devspace-ai";
+const CODEX_DOCKER_EXEC_TIMEOUT_MS = 5_000;
 const CODEX_APPROVAL_POLICY = "never" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
@@ -119,14 +120,29 @@ interface SessionRecord {
   nextSequence: number;
   acknowledgedThrough: number;
   eventChain: Promise<void>;
-  finalizationPromise: Promise<void> | null;
+  finalizationPromise: Promise<ProviderFinalizationResult> | null;
+  finalizationState: "active" | "finalizing" | "finalized" | "cleanup-unproven";
+  finalizationReason: "user-request" | "provider-exited" | null;
+  stoppingEmitted: boolean;
+}
+
+type CredentialSynchronizationResult = "synchronized" | "unchanged-valid" | "rejected-and-reauth-required";
+type ProviderFinalizationResult =
+  | { readonly state: "finalized"; readonly synchronization: CredentialSynchronizationResult }
+  | { readonly state: "cleanup-unproven"; readonly providerExited: boolean; readonly stagingRemoved: boolean; readonly leaseReleased: boolean };
+
+class ProviderFinalizationUnprovenError extends Error {
+  constructor() {
+    super("ai-provider-finalization-unproven");
+    this.name = "ProviderFinalizationUnprovenError";
+  }
 }
 
 interface ProviderAdapter {
   start(): Promise<void>;
   sendTurn(turnId: string, text: string): Promise<void>;
   interrupt(): Promise<void>;
-  stop(): Promise<void>;
+  stop(): Promise<ProviderFinalizationResult>;
 }
 
 interface AdapterCallbacks {
@@ -354,7 +370,42 @@ class FakeProvider implements ProviderAdapter {
     await this.callbacks.completed("completed");
   }
   async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); }
-  async stop(): Promise<void> { this.stopped = true; this.releaseLongTurn?.(); }
+  async stop(): Promise<ProviderFinalizationResult> {
+    this.stopped = true; this.releaseLongTurn?.();
+    return { state: "finalized", synchronization: "unchanged-valid" };
+  }
+}
+
+type DockerExecStream = import("node:stream").Duplex;
+
+async function waitForDockerExecClose(stream: DockerExecStream): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      stream.destroy();
+      reject(new Error("codex-docker-exec-unproven"));
+    }, CODEX_DOCKER_EXEC_TIMEOUT_MS);
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream.removeListener("close", onClose);
+      stream.removeListener("error", onError);
+      if (error !== undefined) reject(error); else resolve();
+    };
+    const onClose = () => finish();
+    const onError = () => finish(new Error("codex-docker-exec-unproven"));
+    stream.once("close", onClose);
+    stream.once("error", onError);
+  });
+}
+
+async function requireDockerExecSuccess(docker: DockerEngineClient, execId: string, stream: DockerExecStream, failureCode = "codex-docker-exec-failed"): Promise<void> {
+  await waitForDockerExecClose(stream);
+  const inspection = await docker.inspectExec(execId).catch(() => null);
+  if (inspection === null || inspection.Running || inspection.ExitCode !== 0) throw new Error(failureCode);
 }
 
 class CodexProvider implements ProviderAdapter {
@@ -368,10 +419,13 @@ class CodexProvider implements ProviderAdapter {
   private dockerBuffer = Buffer.alloc(0);
   private turnFailure: CodexPrivateFailureObservation | null = null;
   private providerExecId: string | null = null;
-  private providerStarted = false;
   private providerReady = false;
-  private finalizationPromise: Promise<void> | null = null;
-  private finalizing = false;
+  private finalizationPromise: Promise<ProviderFinalizationResult> | null = null;
+  private finalizationState: "active" | "finalizing" | "finalized" | "cleanup-unproven" = "active";
+  private finalizationResult: ProviderFinalizationResult | null = null;
+  private providerExitedProof: boolean | null = null;
+  private stagingRemoved = false;
+  private synchronizationResult: CredentialSynchronizationResult | null = null;
   private lease: Awaited<ReturnType<CodexCredentialAuthority["acquire"]>> | null = null;
   constructor(private readonly input: {
     readonly docker: DockerEngineClient;
@@ -400,12 +454,11 @@ class CodexProvider implements ProviderAdapter {
       });
       this.providerExecId = execId;
       this.stream = await this.input.docker.startExecAttached(execId, false);
-      this.providerStarted = true;
       this.stream.on("data", (chunk: Buffer) => this.readDockerFrames(chunk));
       this.stream.on("error", () => this.rejectPending());
       this.stream.on("close", () => {
         this.rejectPending();
-        if (!this.finalizing) void this.input.callbacks.providerClosed();
+        if (this.finalizationState === "active") void this.input.callbacks.providerClosed();
       });
       await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
       this.write({ method: "initialized" });
@@ -416,7 +469,7 @@ class CodexProvider implements ProviderAdapter {
       if (this.threadId === null) throw new Error("codex-thread-id-missing");
       this.providerReady = true;
     } catch (error) {
-      await this.finalize().catch(() => undefined);
+      await this.stop().catch(() => undefined);
       throw error;
     }
   }
@@ -432,48 +485,94 @@ class CodexProvider implements ProviderAdapter {
   async interrupt(): Promise<void> {
     if (this.threadId !== null && this.turnId !== null) await this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
   }
-  async stop(): Promise<void> { await this.finalize(); }
-  private async finalize(): Promise<void> {
+  async stop(): Promise<ProviderFinalizationResult> {
+    if (this.finalizationState === "finalized" && this.finalizationResult !== null) return this.finalizationResult;
     if (this.finalizationPromise !== null) return await this.finalizationPromise;
-    this.finalizing = true;
-    this.finalizationPromise = (async () => {
-      await this.interrupt().catch(() => undefined);
-      const stream = this.stream;
-      if (stream !== null && !stream.destroyed) {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 1_000);
-          stream.once("close", () => { clearTimeout(timer); resolve(); });
-          stream.once("error", () => { clearTimeout(timer); resolve(); });
-        });
-        if (!stream.destroyed) stream.destroy();
-      }
-      this.stream = null;
-      let providerExited = true;
-      if (this.providerExecId !== null) {
-        providerExited = false;
+    this.finalizationState = "finalizing";
+    const attempt = this.finalizeAttempt();
+    const promise = attempt.then((result) => {
+      this.finalizationState = result.state;
+      this.finalizationResult = result.state === "finalized" ? result : null;
+      return result;
+    }, (error) => {
+      this.finalizationState = "cleanup-unproven";
+      throw error;
+    });
+    this.finalizationPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.finalizationPromise === promise) this.finalizationPromise = null;
+    }
+  }
+  private async finalizeAttempt(): Promise<ProviderFinalizationResult> {
+    await Promise.race([
+      this.interrupt().catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 250))
+    ]);
+    const stream = this.stream;
+    if (stream !== null && !stream.destroyed) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1_000);
+        stream.once("close", () => { clearTimeout(timer); resolve(); });
+        stream.once("error", () => { clearTimeout(timer); resolve(); });
+      });
+      if (!stream.destroyed) stream.destroy();
+    }
+    this.stream = null;
+    if (this.providerExitedProof !== true) {
+      this.providerExitedProof = this.providerExecId === null;
+      if (this.providerExecId !== null && !this.providerExitedProof) {
         const deadline = Date.now() + 2_000;
         while (Date.now() < deadline) {
           const inspection = await this.input.docker.inspectExec(this.providerExecId).catch(() => null);
-          if (inspection !== null && !inspection.Running) { providerExited = true; break; }
+          if (inspection !== null && !inspection.Running && inspection.ExitCode !== null) {
+            this.providerExitedProof = true;
+            break;
+          }
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
       }
-      if (this.providerReady && providerExited && this.containerDir !== null) {
+    }
+    if (this.providerExitedProof !== true) return this.cleanupUnprovenResult();
+    if (this.providerReady && this.synchronizationResult === null && this.containerDir !== null) {
+      try {
         await this.input.authority.synchronizeStaged({
           docker: this.input.docker, containerId: this.input.ownership.ownership.developmentContainer.id,
           stagedAuthPath: `${this.containerDir}/home/auth.json`
-        }).catch(async () => { await this.input.authority.markReauthenticationRequired().catch(() => undefined); });
+        });
+        this.synchronizationResult = "synchronized";
+      } catch {
+        try {
+          await this.input.authority.markReauthenticationRequired();
+          this.synchronizationResult = "rejected-and-reauth-required";
+        } catch {
+          return this.cleanupUnprovenResult();
+        }
       }
-      const cleanupSucceeded = this.containerDir === null ? true : await this.removeContainerDir(this.containerDir);
+    }
+    if (!this.stagingRemoved && this.containerDir !== null) {
+      if (!await this.removeContainerDir(this.containerDir)) return this.cleanupUnprovenResult();
+      this.stagingRemoved = true;
       this.containerDir = null;
-      this.providerExecId = null;
-      this.providerReady = false;
-      if (providerExited && cleanupSucceeded) {
-        await this.lease?.release().catch(() => undefined);
+    }
+    if (this.lease !== null) {
+      try {
+        await this.lease.release();
         this.lease = null;
+      } catch {
+        return this.cleanupUnprovenResult();
       }
-    })();
-    return await this.finalizationPromise;
+    }
+    return { state: "finalized", synchronization: this.synchronizationResult ?? "unchanged-valid" };
+  }
+  private cleanupUnprovenResult(): ProviderFinalizationResult {
+    return {
+      state: "cleanup-unproven",
+      providerExited: this.providerExitedProof === true,
+      stagingRemoved: this.stagingRemoved,
+      leaseReleased: this.lease === null
+    };
   }
   private async removeContainerDir(directory: string): Promise<boolean> {
     try {
@@ -483,7 +582,7 @@ class CodexProvider implements ProviderAdapter {
       });
       const stream = await this.input.docker.startExecAttached(execId, false);
       stream.resume();
-      await new Promise<void>((resolve) => stream.once("close", () => resolve()));
+      await requireDockerExecSuccess(this.input.docker, execId, stream, "codex-cleanup-exec-failed");
       return true;
     } catch { /* cleanup is best effort after the provider attachment is gone */ return false; }
   }
@@ -494,7 +593,8 @@ class CodexProvider implements ProviderAdapter {
       command, workingDirectory: "/workspace", environment: { DEVSPACE_TARGET_DIR: directory, DEVSPACE_TARGET_NAME: name, ...environment }, attachStdin: true, tty: false
     });
     const stream = await this.input.docker.startExecAttached(execId, false);
-    stream.end(data); await new Promise<void>((resolve) => stream.once("close", () => resolve()));
+    stream.end(data);
+    await requireDockerExecSuccess(this.input.docker, execId, stream, "codex-upload-exec-failed");
   }
   private write(value: unknown): void { this.stream?.write(`${JSON.stringify(value)}\n`); }
   private request(method: string, params: unknown): Promise<unknown> {
@@ -607,7 +707,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const events = await readOutbox(stateRoot, binding.aiSessionId);
     const record: SessionRecord = {
       binding, processGeneration: 1, events, listeners: new Set(), turnBaselines: new Map(), privateFailures: new Map(), adapter: null, activeTurnId: null,
-      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve(), finalizationPromise: null
+      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve(), finalizationPromise: null,
+      finalizationState: "active", finalizationReason: null, stoppingEmitted: false
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
@@ -647,19 +748,42 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     record.activeTurnId = null; record.turnBaselines.delete(turnId); record.privateFailures.delete(turnId);
     const code = safeErrorCode(new CodexRequestFailure(selected));
     await emit(record, turnId, "turn.failed", { failure: { code, category: code === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure", incidentId: createId() } });
+    await finalizeRecord(record, "provider-exited");
   }
 
   async function finalizeRecord(record: SessionRecord, reason: "user-request" | "provider-exited"): Promise<void> {
-    if (record.finalizationPromise !== null) return await record.finalizationPromise;
+    if (record.finalizationState === "finalized") return;
+    if (record.finalizationPromise !== null) {
+      await record.finalizationPromise;
+      return;
+    }
     const adapter = record.adapter;
     if (adapter === null) return;
-    record.finalizationPromise = (async () => {
-      if (reason === "user-request") await emit(record, null, "session.stopping", { reason });
-      await adapter.stop().catch(() => undefined);
+    record.finalizationReason ??= reason;
+    record.finalizationState = "finalizing";
+    const finalizationReason = record.finalizationReason;
+    const attempt = (async () => {
+      if (!record.stoppingEmitted) {
+        record.stoppingEmitted = true;
+        await emit(record, null, "session.stopping", { reason: finalizationReason === "user-request" ? "user-request" : "runtime-stopping" });
+      }
+      const result = await adapter.stop();
+      if (result.state !== "finalized") throw new ProviderFinalizationUnprovenError();
       record.adapter = null;
-      await emit(record, null, "session.stopped", { reason });
+      record.finalizationState = "finalized";
+      await emit(record, null, "session.stopped", { reason: finalizationReason === "user-request" ? "user-request" : "provider-exited" });
+      return result;
     })();
-    await record.finalizationPromise;
+    const promise = attempt.then((result) => result, (error) => {
+      record.finalizationState = "cleanup-unproven";
+      throw error;
+    });
+    record.finalizationPromise = promise;
+    try {
+      await promise;
+    } finally {
+      if (record.finalizationPromise === promise) record.finalizationPromise = null;
+    }
   }
 
   const runtime: AiSessionRuntime = {
@@ -715,9 +839,9 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           if (record.activeTurnId !== null) rememberPrivateFailure(record, record.activeTurnId, observation);
         },
         failed: async (observation) => {
-          if (record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation);
+          if (record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation).catch(() => undefined);
         },
-        providerClosed: async () => { await finalizeRecord(record, "provider-exited"); }
+        providerClosed: async () => { await finalizeRecord(record, "provider-exited").catch(() => undefined); }
       };
       let adapter: ProviderAdapter;
       if (mode === "fake") {
@@ -736,8 +860,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         await adapter.start();
         await emit(record, null, "session.ready", {});
       } catch (error) {
-        await adapter.stop().catch(() => undefined);
-        record.adapter = null;
+        const finalization = await adapter.stop().catch(() => null);
+        if (finalization?.state === "finalized") record.adapter = null;
         throw error;
       }
     },

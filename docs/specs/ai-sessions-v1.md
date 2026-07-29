@@ -232,7 +232,10 @@ holds it for the complete provider lifetime. It delivers the complete validated 
 new exact-container ephemeral `CODEX_HOME`, mode-restricted and removed on exit. Codex may update
 that staged file. Finalization performs bounded shutdown, two bounded stable Docker reads, complete
 pinned validation, fsync-backed same-directory atomic replacement of the durable file, exact
-container cleanup, and lease release. Values never appear in Project Options, SQLite, operation
+container cleanup, and lease release. Every credential-related Docker exec requires both bounded
+stream closure and a successful post-closure exec inspection. Provider exit, staging removal, and
+lease release are independent proofs; missing proof leaves the lease held and suppresses the public
+stopped event until a later bounded retry succeeds. Values never appear in Project Options, SQLite, operation
 fingerprints, Docker labels, command arguments, logs, diagnostics, safe failures, or browser
 payloads. A stale lease fails closed and is not automatically broken. During provider lifetime,
 trusted managed-container root can read the staged credential; hostile descendant containment is

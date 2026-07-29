@@ -388,7 +388,7 @@ Stop rule:
 
 # Immediate next steps
 
-1. 🟡 **AI Session Beta Slice B — Checkpoint 1 implementation complete; live validation pending**
+1. 🟡 **AI Session Beta Slice B — Checkpoint 1 implementation candidate; live validation pending**
    - ✅ create and persist one workspace-scoped Codex session;
    - ✅ send prompts and stream assistant text/activity;
    - ✅ cooperatively interrupt and send another turn;
@@ -396,9 +396,11 @@ Stop rule:
    - ✅ stop the live session and verify post-fix ephemeral staging cleanup;
    - 🟡 approvals and structured questions remain Checkpoint 2;
    - ✅ use T3 Code-informed UX patterns with attribution; no host/process/persistence assumptions
+     were copied;
+   - ✅ failed-turn/Unauthorized finalization now requires provider exit, staging cleanup, and lease
+     release proof before `session.stopped`;
    - 🟡 owner device-code onboarding and bounded live provider validation remain before Checkpoint 1
      can be called complete; no real provider validation is claimed
-     were copied.
 
 2. ⏳ **Private GitHub repository access**
    - make real private repositories usable through onboarding, clone/fetch, and push;
@@ -570,7 +572,8 @@ AI Session Beta Slice B — Checkpoint 1:
 - ✅ Bounded changed-files summary after terminal turns
 - ✅ Clear degraded-session and restart-workspace fallback
 - 🟡 One global Codex provider at a time remains the beta limitation
-- 🟡 Checkpoint 1 live validation remains pending owner device-code onboarding; no real provider validation is claimed
+- 🟡 Checkpoint 1 implementation candidate remains pending owner device-code onboarding and live
+  validation; no real provider validation is claimed
 
 Deferred until later:
 

@@ -150,7 +150,7 @@ describe("Codex credential authority", () => {
       const first = await fixture.authority.acquire({ aiSessionId: "first-session", workspaceId: "synthetic-workspace", processGeneration: 1 });
       await rm(fixture.authority.leaseDir, { recursive: true, force: true });
       const second = await fixture.authority.acquire({ aiSessionId: "second-session", workspaceId: "synthetic-workspace", processGeneration: 2 });
-      await first.release();
+      await expect(first.release()).rejects.toThrow("lease-release");
       expect((await lstat(fixture.authority.leaseDir)).isDirectory()).toBe(true);
       await second.release();
     } finally {

@@ -15,8 +15,8 @@ equivalent explicit relative path aliases, and WebSocket terminal frames now cop
 pinning checker/builder counts. No product or runtime authority boundary changed.
 
 AI Session Foundation Slice 0 established the accepted post-M1 architecture and executable
-contracts. Checkpoint 1 of AI Session Beta Slice B is implemented in code as a Codex-first vertical
-slice, but its live validation remains incomplete. One Agent-owned persistent Codex 0.145.0
+contracts. Checkpoint 1 of AI Session Beta Slice B is an implementation candidate pending dedicated
+authority onboarding and live validation. One Agent-owned persistent Codex 0.145.0
 authority is derived from the configured state root: production defaults to
 `/srv/devspace/state/codex-auth/codex/auth.json`. It contains only the validated pinned ChatGPT
 authority, never the user's normal Codex home or a general-purpose Codex home. A global atomic
@@ -28,12 +28,16 @@ unavailable.
 After lease acquisition, the Agent validates the complete authority through a no-follow descriptor,
 uploads the pinned executable and complete `auth.json` into an exact-container ephemeral
 `CODEX_HOME`, and starts app-server with the existing fixed `never` / `danger-full-access` and
-external-sandbox network policy. On finalization it performs bounded provider shutdown, two stable
-bounded Docker reads, complete validation, atomic same-directory fsync-and-rename writeback, exact
-container cleanup, and lease release. Container root can read the staged credential during the
-provider lifetime; the repository is trusted owner-controlled code, and hostile descendant
-containment is not claimed in this beta. Credentials never enter Project Options, SQLite, canonical
-events, public errors, diagnostics, logs, Docker labels, arguments, or browser data.
+external-sandbox network policy. Every executable, credential-upload, readback, and staging-cleanup
+exec requires bounded stream closure plus `Running === false` and `ExitCode === 0`; provider exit
+requires an independent bounded inspection proof. On finalization it performs two stable bounded
+Docker reads, complete validation, atomic same-directory fsync-and-rename writeback, exact container
+cleanup, and lease release. Failed turns and Unauthorized failures automatically enter this path.
+Unproven cleanup keeps the lease and suppresses `session.stopped`; a later bounded Stop retries the
+remaining safe stages. Container root can read the staged credential during the provider lifetime;
+the repository is trusted owner-controlled code, and hostile descendant containment is not claimed
+in this beta. Credentials never enter Project Options, SQLite, canonical events, public errors,
+diagnostics, logs, Docker labels, arguments, or browser data.
 
 The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
 structured questions remain explicitly in progress for Checkpoint 2. No real provider, device-code,
