@@ -15,8 +15,8 @@ equivalent explicit relative path aliases, and WebSocket terminal frames now cop
 pinning checker/builder counts. No product or runtime authority boundary changed.
 
 AI Session Foundation Slice 0 established the accepted post-M1 architecture and executable
-contracts. Checkpoint 1 of AI Session Beta Slice B is an implementation candidate pending dedicated
-authority onboarding and live validation. One Agent-owned persistent Codex 0.145.0
+contracts. Checkpoint 1 of AI Session Beta Slice B is complete after dedicated authority onboarding,
+private Probe A and Probe B, and the real browser validation recorded below. One Agent-owned persistent Codex 0.145.0
 authority is derived from the configured state root: production defaults to
 `/srv/devspace/state/codex-auth/codex/auth.json`. It contains only the validated pinned ChatGPT
 authority, never the user's normal Codex home or a general-purpose Codex home. A global atomic
@@ -40,10 +40,32 @@ in this beta. Credentials never enter Project Options, SQLite, canonical events,
 diagnostics, logs, Docker labels, arguments, or browser data.
 
 The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
-structured questions remain explicitly in progress for Checkpoint 2. No real provider, device-code,
-browser, or production-container validation has been run in this implementation round. Checkpoint 1
-therefore remains incomplete pending owner authentication and the bounded live validation described
-below.
+structured questions remain explicitly in progress for Checkpoint 2. The fake-provider suite was not
+used as live-validation evidence. The real browser run used an isolated branch-local Web/Agent pair
+with `DEVSPACE_AI_PROVIDER_MODE=codex`, the dedicated rootless DevSpace Docker socket, and the
+dedicated persistent authority; the private GitHub source was represented by an exact-HEAD local
+HTTPS mirror because the Agent's credentialless Git boundary cannot inspect the private remote.
+
+### AI Session Beta Slice B — Checkpoint 1 evidence (2026-07-29)
+
+- ✅ Probe A and Probe B had already passed, including provider exit, staged credential
+  synchronization, staging removal, lease release, and post-stop authority availability.
+- ✅ Real browser validation passed with project `019fadd5-be82-753b-a0f5-661b71e56cd6`, workspace
+  `019fadd6-17b9-728e-bf3c-8ebf501e8265`, revision `019fadd6-17b7-7056-aba0-46cad86961ae`,
+  runtime generation `g1`, container
+  `c462a5bb2354063074420f5ff5af243d11baf5626577641dc16c7d272f3479ee`, and a clean initial
+  managed worktree at the expected branch head.
+- ✅ The browser showed Codex available, created exactly one session, streamed the exact file-
+  changing turn, presented the exact untracked changed-file payload, refreshed and replayed without
+  duplicate event identities, completed the exact read-only turn with an empty changed-files result,
+  and interrupted the third read-only turn truthfully.
+- ✅ Browser Stop produced one user-request stopping/stopped pair. Provider exit, synchronization,
+  exact staging removal, lease release, finalization, and authority availability were verified;
+  normal workspace Stop then exited the dedicated container with code `0`.
+- ✅ Credential material was absent from browser artifacts, SQLite, canonical events, public errors,
+  Docker command/label/env surfaces, Git changes, and the draft PR text. Baseline Codex process
+  names and baseline running containers remained unaffected.
+- ✅ Checkpoint 1 is complete. Checkpoint 2 remains approvals and structured questions.
 
 ### Codex authority onboarding and recovery
 
