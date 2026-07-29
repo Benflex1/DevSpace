@@ -81,8 +81,8 @@ function dockerMux(payload: unknown): Buffer {
   return Buffer.concat([header, body]);
 }
 
-function dockerBytes(payload: Buffer): Buffer {
-  const header = Buffer.alloc(8); header[0] = 1; header.writeUInt32BE(payload.length, 4);
+function dockerBytes(payload: Buffer, streamType = 1): Buffer {
+  const header = Buffer.alloc(8); header[0] = streamType; header.writeUInt32BE(payload.length, 4);
   return Buffer.concat([header, payload]);
 }
 
@@ -108,6 +108,7 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
   control: ProtocolDockerControl = {}): {
   readonly docker: DockerEngineClient;
   readonly emit: (message: unknown) => void;
+  readonly emitBytes: (bytes: Buffer) => void;
   readonly close: () => void;
   readonly uploads: Map<string, Buffer>;
   readonly control: ProtocolDockerControl;
@@ -117,8 +118,10 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
   const uploads = new Map<string, Buffer>();
   const uploadNames = new Map<string, string>();
   const emit = (message: unknown) => provider?.push(dockerMux(message));
+  const emitBytes = (bytes: Buffer) => provider?.push(bytes);
   return {
     emit,
+    emitBytes,
     uploads,
     close: () => provider?.destroy(),
     docker: {
@@ -215,6 +218,27 @@ async function createCodexTestExecutable(stateRoot: string): Promise<string> {
   return executablePath;
 }
 
+async function flushNativeTurnStart(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function startedCodexFixture(stateRoot: string, respond?: (request: { id?: number; method?: string }, emit: (message: unknown) => void) => void) {
+  const protocol = createProtocolDocker([], respond);
+  const executablePath = await createCodexTestExecutable(stateRoot);
+  const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+    managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+    docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+  const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+  await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+  return { protocol, runtime, profile };
+}
+
+async function startFixtureTurn(fixture: Awaited<ReturnType<typeof startedCodexFixture>>): Promise<void> {
+  await fixture.runtime.sendTurn({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1, turnId,
+    content: { kind: "text", text: "hello" } });
+  await flushNativeTurnStart();
+}
+
 async function pinnedServerNotificationSchema(): Promise<JsonSchema> {
   return JSON.parse(await readFile(new URL("../../../packages/contracts/fixtures/codex-app-server/0.145.0/stable/ServerNotification.json", import.meta.url), "utf8")) as JsonSchema;
 }
@@ -222,14 +246,14 @@ async function pinnedServerNotificationSchema(): Promise<JsonSchema> {
 function failedTurn(error: Record<string, unknown>): Record<string, unknown> {
   return {
     method: "turn/completed",
-    params: { threadId: "private-thread-id", turn: { id: "private-turn-id", items: [], status: "failed", error } }
+    params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "failed", error } }
   };
 }
 
 function errorNotification(error: Record<string, unknown>): Record<string, unknown> {
   return {
     method: "error",
-    params: { threadId: "private-thread-id", turnId: "private-turn-id", willRetry: false, error }
+    params: { threadId: "thread-1", turnId: "turn-1", willRetry: false, error }
   };
 }
 
@@ -240,6 +264,328 @@ const privateFixtureError = {
 };
 
 describe("AI session runtime", () => {
+  test("malformed native JSON fails the turn without escaping the stream callback", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-malformed-json-test-"));
+    const protocol = createProtocolDocker([], (request, emit) => {
+      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
+      setImmediate(() => emit({ id: request.id, result }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
+      protocol.emitBytes(dockerBytes(Buffer.from("{malformed-json\n", "utf8")));
+      const events = await runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("malformed-json");
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([null, true, 7, "text", [], ["message"]])("rejects a JSON %s instead of treating it as a native message", async (value) => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-json-shape-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from(`${JSON.stringify(value)}\n`, "utf8")));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("message");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects invalid UTF-8 and NUL-containing JSONL privately", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-utf8-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from([0xc3, 0x28])));
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from("{\"method\":\"x\"}\u0000\n", "utf8")));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("method");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("decodes a multibyte UTF-8 character split across Docker frames", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-split-utf8-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      const bytes = Buffer.from(`${JSON.stringify({ method: "item/agentMessage/delta", params: {
+        delta: "é", itemId: "item-1", threadId: "thread-1", turnId: "turn-1"
+      } })}\n`, "utf8");
+      const split = bytes.indexOf(0xc3);
+      fixture.protocol.emitBytes(dockerBytes(bytes.subarray(0, split + 1)));
+      fixture.protocol.emitBytes(dockerBytes(bytes.subarray(split + 1)));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.find((event) => event.eventType === "turn.output.delta")?.payload).toEqual({ stream: "assistant", text: "é" });
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an oversized Docker declaration before retaining its payload", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-frame-bound-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      const header = Buffer.alloc(8); header[0] = 1; header.writeUInt32BE(0xffff_ffff, 4);
+      fixture.protocol.emitBytes(header);
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an oversized JSONL line before newline and keeps stderr private", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-line-bound-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emitBytes(dockerBytes(Buffer.alloc(1_115_000, 0x61)));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("aaa");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an oversized complete native JSON message", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-complete-message-bound-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      const payload = Buffer.concat([Buffer.from('{"x":"', "utf8"), Buffer.alloc(1_114_110, 0x61), Buffer.from('"}\n', "utf8")]);
+      fixture.protocol.emitBytes(dockerBytes(payload));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("aaa");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores Docker stderr and rejects partial framing or an unterminated JSONL line at close", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-close-framing-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from("private stderr\n", "utf8"), 2));
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from("{}", "utf8")));
+      fixture.protocol.close();
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("private stderr");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("serializes duplicate terminal notifications and rejects conflicting terminals", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-terminal-claim-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    const completion = { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } };
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit(completion); fixture.protocol.emit(completion);
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "turn.quiesced")).toHaveLength(1);
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("conflicting duplicate terminal notifications cause one private protocol failure", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-conflicting-terminal-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
+      fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "interrupted" } } });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["header", "payload"] as const)("treats a partial Docker %s as protocol failure at close", async (kind) => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-partial-frame-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      const full = dockerBytes(Buffer.from("{}", "utf8"));
+      fixture.protocol.emitBytes(kind === "header" ? full.subarray(0, 4) : full.subarray(0, 9));
+      fixture.protocol.close();
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("an unsupported Docker stream type is a private protocol failure", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-stream-type-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from("private", "utf8"), 9));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("private");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a terminal notification without an active native turn cannot complete a later DevSpace turn", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-no-active-terminal-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
+      await fixture.runtime.collect(sessionId, 0, 100);
+      await fixture.runtime.sendTurn({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "later" } }).catch(() => undefined);
+      const events = await fixture.runtime.replay(sessionId, 0);
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(0);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("turn output and activity callbacks preserve native receive order", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-notification-order-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "item/agentMessage/delta", params: { delta: "first", itemId: "item-1", threadId: "thread-1", turnId: "turn-1" } });
+      fixture.protocol.emit({ method: "item/agentMessage/delta", params: { delta: "second", itemId: "item-2", threadId: "thread-1", turnId: "turn-1" } });
+      fixture.protocol.emit({ method: "item/started", params: { item: {}, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1" } });
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      const projected = events.filter((event) => event.eventType === "turn.output.delta" || event.eventType === "turn.activity.started");
+      expect(projected.map((event) => event.eventType === "turn.output.delta" ? (event.payload as { text: string }).text : event.eventType)).toEqual([
+        "first", "second", "turn.activity.started"
+      ]);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects both-result-and-error responses without leaking either response", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-response-shape-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      if (request.method === "turn/start") return;
+      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : {};
+      setImmediate(() => emit({ id: request.id, result }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
+      const request = captured.find((entry) => (entry.jsonRpc as { method?: string } | undefined)?.method === "turn/start")?.jsonRpc as { id: number };
+      protocol.emit({ id: request.id, result: {}, error: { code: -1, message: "private response" } });
+      const events = await runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("private response");
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("unknown and duplicate response IDs do not affect the valid pending request", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-response-correlation-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      if (request.method === "turn/start") return;
+      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : {};
+      setImmediate(() => emit({ id: request.id, result }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
+      const request = captured.find((entry) => (entry.jsonRpc as { method?: string } | undefined)?.method === "turn/start")?.jsonRpc as { id: number };
+      const response = { id: request.id, result: { turn: { id: "turn-1" } } };
+      protocol.emit({ id: 999_999, result: {} }); protocol.emit(response); protocol.emit(response);
+      protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
+      const events = await runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(0);
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("does not project output or activity after terminal processing is claimed", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-late-notification-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
+      fixture.protocol.emit({ method: "item/agentMessage/delta", params: { delta: "late-private-output", itemId: "item-1", threadId: "thread-1", turnId: "turn-1" } });
+      fixture.protocol.emit({ method: "item/started", params: { item: {}, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1" } });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(JSON.stringify(events)).not.toContain("late-private-output");
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when the native notification queue is exhausted", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-queue-bound-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      for (let index = 0; index < 257; index += 1) fixture.protocol.emit({ method: "pinned/unknown", params: {} });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   test("fake app-server preserves ordered streaming, interrupt, and replay", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-test-"));
     const runtime = createAiSessionRuntime({ mode: "fake", stateRoot });
@@ -420,6 +766,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(notification);
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(observations).toEqual([{ stage: "turn", kind: "ResponseStreamConnectionFailed", httpStatusCode: 503 }]);
@@ -450,6 +797,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(completion);
       const events = await runtime.collect(sessionId, 0, 50);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
@@ -478,6 +826,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(failedTurn(privateFixtureError));
       await new Promise((resolve) => setTimeout(resolve, 1_300));
       const events = await runtime.replay(sessionId, 0);
@@ -509,6 +858,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(errorNotification({ message: "synthetic unauthorized", codexErrorInfo: "unauthorized" }));
       protocol.emit(failedTurn({ codexErrorInfo: "unauthorized" }));
       await new Promise((resolve) => setTimeout(resolve, 1_300));
@@ -649,6 +999,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(failedTurn(privateFixtureError));
       const stop = runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
       await Promise.allSettled([stop, new Promise((resolve) => setTimeout(resolve, 1_300))]);
@@ -681,6 +1032,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(errorNotification(privateFixtureError));
       protocol.emit(failedTurn({ ...privateFixtureError, codexErrorInfo: "internalServerError" }));
       const events = await runtime.collect(sessionId, 0, 50);
@@ -768,6 +1120,7 @@ describe("AI session runtime", () => {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
       await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
+      await flushNativeTurnStart();
       protocol.emit(errorNotification({ message: "synthetic unauthorized", codexErrorInfo: "unauthorized" }));
       protocol.emit(failedTurn({ codexErrorInfo: "unauthorized" }));
       const events = await runtime.collect(sessionId, 0, 50);

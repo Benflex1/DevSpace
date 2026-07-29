@@ -44,6 +44,16 @@ the repository is trusted owner-controlled code, and hostile descendant containm
 in this beta. Credentials never enter Project Options, SQLite, canonical events, public errors,
 diagnostics, logs, Docker labels, arguments, or browser data.
 
+The native Codex stdio JSONL boundary is strict and bounded: Docker multiplex headers and
+payloads, retained partial frames, retained JSONL lines, complete native messages, and queued
+notifications have explicit private limits derived from the existing AI content bounds. Stdout is
+decoded with a fatal streaming UTF-8 decoder; stderr remains private. Malformed framing, invalid
+UTF-8, invalid JSON or message shapes, NULs, truncation, and bound exhaustion are contained as one
+private protocol failure with safe `AI_PROVIDER_PROTOCOL_FAILURE` classification. Provider-native
+notifications are serialized in receive order, and native terminal processing is claimed once;
+identical same-turn duplicates are ignored while conflicting or late terminal/output/activity
+notifications fail closed without projection. Native thread and turn IDs remain Agent-private.
+
 The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
 structured questions remain explicitly in progress for Checkpoint 2. The fake-provider suite was not
 used as live-validation evidence. The real browser run used an isolated branch-local Web/Agent pair

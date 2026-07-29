@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-/* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/no-unused-vars, @typescript-eslint/require-await */
+/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/require-await */
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import {
   AI_EVENT_NDJSON_CONTENT_TYPE,
   aiAfterSequenceSchema,
+  AI_OUTPUT_DELTA_MAX_BYTES,
+  AI_OUTPUT_ITEM_MAX_BYTES,
   aiProviderProfileProjectionSchema,
   canonicalAiEventSchema,
   type CanonicalAiEvent,
@@ -36,6 +38,16 @@ const ACK_RETAINED_EVENTS = 512;
 const MAX_GIT_PATHS = 256;
 const PRIVATE_CONTAINER_ROOT = "/tmp/devspace-ai";
 const CODEX_DOCKER_EXEC_TIMEOUT_MS = 5_000;
+// Codex 0.145.0 can carry an output item up to the public 1 MiB item bound.
+// The native envelope, JSON escaping, and a bounded future metadata allowance
+// add 64 KiB. Docker's one-frame bound adds one 8 KiB framing allowance. These
+// are Agent-private limits; public events remain governed by @devspace/contracts.
+const CODEX_PROTOCOL_JSON_OVERHEAD_BYTES = 64 * 1024;
+const CODEX_MAX_NATIVE_JSON_MESSAGE_BYTES = AI_OUTPUT_ITEM_MAX_BYTES + CODEX_PROTOCOL_JSON_OVERHEAD_BYTES;
+const CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES = CODEX_MAX_NATIVE_JSON_MESSAGE_BYTES + 8 * 1024;
+const CODEX_MAX_DOCKER_PARTIAL_BUFFER_BYTES = 8 + CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES;
+const CODEX_MAX_NATIVE_NOTIFICATIONS = 256;
+const CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS = 1_000;
 const CODEX_APPROVAL_POLICY = "never" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
@@ -81,6 +93,7 @@ export interface AiSessionRuntimeOptions {
 
 export type CodexPrivateFailureObservation = Readonly<{
   stage: "request" | "turn";
+  protocolFailure?: true;
   kind:
     | "ContextWindowExceeded"
     | "SessionBudgetExceeded"
@@ -294,6 +307,7 @@ function privateFailureFromError(error: unknown): CodexPrivateFailureObservation
 
 function safeErrorCode(error: unknown): "AI_PROVIDER_TRANSPORT_FAILURE" | "AI_PROVIDER_PROTOCOL_FAILURE" {
   const observation = privateFailureFromError(error);
+  if (observation?.protocolFailure === true) return "AI_PROVIDER_PROTOCOL_FAILURE";
   if (observation === null) return error instanceof SyntaxError ? "AI_PROVIDER_PROTOCOL_FAILURE" : "AI_PROVIDER_TRANSPORT_FAILURE";
   return observation.kind === "HttpConnectionFailed" || observation.kind === "ResponseStreamConnectionFailed" || observation.kind === "ResponseStreamDisconnected"
     ? "AI_PROVIDER_TRANSPORT_FAILURE" : "AI_PROVIDER_PROTOCOL_FAILURE";
@@ -414,15 +428,37 @@ async function requireDockerExecSuccess(docker: DockerEngineClient, execId: stri
   if (inspection === null || inspection.Running || inspection.ExitCode !== 0) throw new Error(failureCode);
 }
 
+function stablePrivateJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stablePrivateJson(item)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stablePrivateJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 class CodexProvider implements ProviderAdapter {
   private stream: import("node:stream").Duplex | null = null;
   private requestId = 0;
   private threadId: string | null = null;
   private turnId: string | null = null;
-  private buffer = "";
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>();
   private containerDir: string | null = null;
-  private dockerBuffer = Buffer.alloc(0);
+  private dockerHeader = Buffer.alloc(0);
+  private dockerPayload = Buffer.alloc(0);
+  private dockerPayloadLength: number | null = null;
+  private dockerStreamType: 1 | 2 | null = null;
+  private readonly utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+  private jsonLine = "";
+  private jsonLineBytes = 0;
+  private notificationChain = Promise.resolve();
+  private notificationQueueLength = 0;
+  private protocolFailureClaimed = false;
+  private protocolFailureObservation: CodexPrivateFailureObservation | null = null;
+  private nativeTurnState: "idle" | "active" | "terminal-claimed" | "terminal-delivered" = "idle";
+  private terminalFingerprint: string | null = null;
+  private streamClosePromise: Promise<void> | null = null;
+  private providerClosedNotified = false;
   private turnFailure: CodexPrivateFailureObservation | null = null;
   private providerExecId: string | null = null;
   private providerReady = false;
@@ -462,19 +498,25 @@ class CodexProvider implements ProviderAdapter {
       });
       this.providerExecId = execId;
       this.stream = await this.input.docker.startExecAttached(execId, false);
-      this.stream.on("data", (chunk: Buffer) => this.readDockerFrames(chunk));
-      this.stream.on("error", () => this.rejectPending());
-      this.stream.on("close", () => {
-        this.rejectPending();
-        if (this.finalizationState === "active") void this.input.callbacks.providerClosed();
-      });
-      await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
+      this.stream.on("data", (chunk: Buffer) => { this.receiveDockerData(chunk); });
+      this.stream.on("error", () => { this.rejectPending(new Error("codex-provider-stream-error")); });
+      this.stream.on("close", () => { this.streamClosePromise = this.handleStreamClose(); void this.streamClosePromise.catch(() => undefined); });
+      const initialized = await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
+      if (this.objectRecord(initialized) === null) {
+        this.failProtocolOnce();
+        throw new CodexRequestFailure(this.protocolFailureObservation ?? this.protocolObservation("request"));
+      }
       this.write({ method: "initialized" });
       const thread = await this.request("thread/start", {
         cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, sandbox: CODEX_THREAD_SANDBOX
-      }) as { thread?: { id?: string } };
-      this.threadId = typeof thread.thread?.id === "string" ? thread.thread.id : null;
-      if (this.threadId === null) throw new Error("codex-thread-id-missing");
+      });
+      const threadRecord = this.objectRecord(thread);
+      const threadValue = threadRecord === null ? null : this.objectRecord(threadRecord.thread);
+      this.threadId = threadValue !== null && typeof threadValue.id === "string" ? threadValue.id : null;
+      if (this.threadId === null) {
+        this.failProtocolOnce();
+        throw new CodexRequestFailure(this.protocolFailureObservation ?? this.protocolObservation("request"));
+      }
       this.providerReady = true;
     } catch (error) {
       await this.stop().catch(() => undefined);
@@ -487,11 +529,22 @@ class CodexProvider implements ProviderAdapter {
     const response = await this.request("turn/start", {
       threadId: this.threadId, input: [{ type: "text", text }],
       sandboxPolicy: { type: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS }
-    }) as { turn?: { id?: string } };
-    this.turnId = typeof response.turn?.id === "string" ? response.turn.id : this.turnId;
+    });
+    const responseRecord = this.objectRecord(response);
+    const turnRecord = responseRecord === null ? null : this.objectRecord(responseRecord.turn);
+    const nativeTurnId = turnRecord !== null && typeof turnRecord.id === "string" ? turnRecord.id : null;
+    if (nativeTurnId === null || this.nativeTurnState === "active" || this.nativeTurnState === "terminal-claimed") {
+      this.failProtocolOnce();
+      throw new CodexRequestFailure(this.protocolFailureObservation ?? this.protocolObservation("request"));
+    }
+    this.turnId = nativeTurnId;
+    this.nativeTurnState = "active";
+    this.terminalFingerprint = null;
   }
   async interrupt(): Promise<void> {
-    if (this.threadId !== null && this.turnId !== null) await this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+    if (this.threadId !== null && this.turnId !== null && this.nativeTurnState === "active") {
+      await this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+    }
   }
   async stop(): Promise<ProviderFinalizationResult> {
     if (this.finalizationState === "finalized" && this.finalizationResult !== null) return this.finalizationResult;
@@ -604,7 +657,16 @@ class CodexProvider implements ProviderAdapter {
     stream.end(data);
     await requireDockerExecSuccess(this.input.docker, execId, stream, "codex-upload-exec-failed");
   }
-  private write(value: unknown): void { this.stream?.write(`${JSON.stringify(value)}\n`); }
+  private objectRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  }
+  private protocolObservation(stage: CodexPrivateFailureObservation["stage"]): CodexPrivateFailureObservation {
+    return { stage, protocolFailure: true, kind: "Unknown", httpStatusCode: null };
+  }
+  private write(value: unknown): void {
+    if (this.stream === null || this.protocolFailureClaimed) throw new Error("codex-provider-stream-unavailable");
+    this.stream.write(`${JSON.stringify(value)}\n`);
+  }
   private request(method: string, params: unknown): Promise<unknown> {
     const id = ++this.requestId;
     return new Promise((resolve, reject) => {
@@ -614,71 +676,228 @@ class CodexProvider implements ProviderAdapter {
         this.pending.delete(id); pending.reject(new Error("codex-request-timeout"));
       }, 30_000);
       this.pending.set(id, { resolve, reject, timeout });
-      this.write({ id, method, params });
+      try { this.write({ id, method, params }); }
+      catch (error) {
+        this.pending.delete(id); clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error("codex-provider-write-failed"));
+      }
     });
   }
-  private rejectPending(): void {
+  private rejectPending(error = new Error("codex-provider-stream-closed")): void {
     const pending = [...this.pending.values()];
     this.pending.clear();
     for (const request of pending) {
       clearTimeout(request.timeout);
-      request.reject(new Error("codex-provider-stream-closed"));
+      request.reject(error);
     }
   }
-  private readDockerFrames(chunk: Buffer): void {
-    this.dockerBuffer = Buffer.concat([this.dockerBuffer, chunk]);
-    let offset = 0;
-    while (offset + 8 <= this.dockerBuffer.length) {
-      const size = this.dockerBuffer.readUInt32BE(offset + 4);
-      if (offset + 8 + size > this.dockerBuffer.length) break;
-      const streamType = this.dockerBuffer[offset]; const payload = this.dockerBuffer.subarray(offset + 8, offset + 8 + size).toString("utf8"); offset += 8 + size;
-      if (streamType !== 1) continue;
-      this.buffer += payload;
-      let newline = this.buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = this.buffer.slice(0, newline); this.buffer = this.buffer.slice(newline + 1); newline = this.buffer.indexOf("\n");
-        if (line.length > 0) this.handle(JSON.parse(line) as Record<string, unknown>);
-      }
-    }
-    this.dockerBuffer = this.dockerBuffer.subarray(offset);
-  }
-  private handle(message: Record<string, unknown>): void {
-    if (typeof message.id === "number" && ("result" in message || "error" in message)) {
-      const pending = this.pending.get(message.id);
-      if (pending !== undefined) {
-        this.pending.delete(message.id); clearTimeout(pending.timeout);
-        if ("error" in message) {
-          const error = message.error;
-          const detail = error !== null && typeof error === "object" ? (error as Record<string, unknown>).codexErrorInfo : null;
-          const observation = codexPrivateFailureObservation("request", detail);
-          if (observation.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
-          pending.reject(new CodexRequestFailure(observation));
+  private receiveDockerData(chunk: Buffer): void {
+    if (this.protocolFailureClaimed) return;
+    try {
+      if (!Buffer.isBuffer(chunk)) throw new Error("invalid-docker-chunk");
+      let offset = 0;
+      while (offset < chunk.length && !this.protocolFailureClaimed) {
+        if (this.dockerPayloadLength === null) {
+          const need = 8 - this.dockerHeader.length;
+          const take = Math.min(need, chunk.length - offset);
+          this.appendDockerBytes("header", chunk.subarray(offset, offset + take)); offset += take;
+          if (this.dockerHeader.length < 8) continue;
+          if (this.dockerHeader[1] !== 0 || this.dockerHeader[2] !== 0 || this.dockerHeader[3] !== 0) throw new Error("invalid-docker-header");
+          const streamType = this.dockerHeader[0];
+          if (streamType !== 1 && streamType !== 2) throw new Error("unsupported-docker-stream");
+          const size = this.dockerHeader.readUInt32BE(4);
+          if (!Number.isSafeInteger(size) || size > CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES
+            || size > Number.MAX_SAFE_INTEGER - 8) throw new Error("docker-frame-too-large");
+          this.dockerPayloadLength = size;
+          this.dockerStreamType = streamType;
+          this.dockerHeader = Buffer.alloc(0);
+          this.dockerPayload = Buffer.alloc(0);
+          if (size === 0) this.finishDockerFrame();
+        } else {
+          const need = this.dockerPayloadLength - this.dockerPayload.length;
+          const take = Math.min(need, chunk.length - offset);
+          this.appendDockerBytes("payload", chunk.subarray(offset, offset + take)); offset += take;
+          if (this.dockerPayload.length === this.dockerPayloadLength) this.finishDockerFrame();
         }
-        else pending.resolve(message.result);
       }
+    } catch {
+      this.failProtocolOnce();
+    }
+  }
+  private appendDockerBytes(kind: "header" | "payload", bytes: Uint8Array): void {
+    const retained = this.dockerHeader.length + this.dockerPayload.length + bytes.length;
+    if (retained > CODEX_MAX_DOCKER_PARTIAL_BUFFER_BYTES) throw new Error("docker-partial-buffer-too-large");
+    if (kind === "header") {
+      if (this.dockerHeader.length + bytes.length > 8) throw new Error("docker-header-overflow");
+      this.dockerHeader = Buffer.concat([this.dockerHeader, bytes]);
+    } else {
+      if (this.dockerPayloadLength === null || this.dockerPayload.length + bytes.length > this.dockerPayloadLength) throw new Error("docker-payload-overflow");
+      this.dockerPayload = Buffer.concat([this.dockerPayload, bytes]);
+    }
+  }
+  private finishDockerFrame(): void {
+    const payload = this.dockerPayload;
+    const streamType = this.dockerStreamType;
+    this.dockerPayload = Buffer.alloc(0); this.dockerPayloadLength = null; this.dockerStreamType = null;
+    if (streamType === 1 && payload.length > 0) this.processStdoutPayload(payload);
+  }
+  private processStdoutPayload(payload: Buffer): void {
+    try { this.processDecodedText(this.utf8Decoder.decode(payload, { stream: true })); }
+    catch { this.failProtocolOnce(); }
+  }
+  private processDecodedText(text: string): void {
+    if (text.includes("\u0000")) { this.failProtocolOnce(); return; }
+    let offset = 0;
+    while (offset < text.length && !this.protocolFailureClaimed) {
+      const newline = text.indexOf("\n", offset);
+      const end = newline < 0 ? text.length : newline;
+      const fragment = text.slice(offset, end);
+      const fragmentBytes = Buffer.byteLength(fragment, "utf8");
+      if (this.jsonLineBytes + fragmentBytes > CODEX_MAX_NATIVE_JSON_MESSAGE_BYTES) { this.failProtocolOnce(); return; }
+      this.jsonLine += fragment; this.jsonLineBytes += fragmentBytes;
+      if (newline < 0) return;
+      this.finishJsonLine();
+      offset = newline + 1;
+    }
+  }
+  private finishJsonLine(): void {
+    const line = this.jsonLine.endsWith("\r") ? this.jsonLine.slice(0, -1) : this.jsonLine;
+    this.jsonLine = ""; this.jsonLineBytes = 0;
+    if (line.length === 0) return;
+    let parsed: unknown;
+    try { parsed = JSON.parse(line) as unknown; } catch { this.failProtocolOnce(); return; }
+    const message = this.objectRecord(parsed);
+    if (message === null) { this.failProtocolOnce(); return; }
+    this.classifyMessage(message);
+  }
+  private classifyMessage(message: Record<string, unknown>): void {
+    if (this.protocolFailureClaimed) return;
+    const hasResult = Object.prototype.hasOwnProperty.call(message, "result");
+    const hasError = Object.prototype.hasOwnProperty.call(message, "error");
+    const hasId = Object.prototype.hasOwnProperty.call(message, "id");
+    if (hasResult || hasError) {
+      if (!hasId || typeof message.id !== "number" || !Number.isSafeInteger(message.id) || hasResult === hasError) {
+        this.failProtocolOnce(); return;
+      }
+      if (hasError) {
+        const error = this.objectRecord(message.error);
+        if (error === null || typeof error.code !== "number" || !Number.isSafeInteger(error.code) || typeof error.message !== "string") {
+          this.failProtocolOnce(); return;
+        }
+      }
+      const pending = this.pending.get(message.id);
+      if (pending === undefined) return;
+      this.pending.delete(message.id); clearTimeout(pending.timeout);
+      if (hasError) {
+        const error = message.error as Record<string, unknown>;
+        const detail = error.codexErrorInfo;
+        const observation = codexPrivateFailureObservation("request", detail);
+        if (observation.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
+        pending.reject(new CodexRequestFailure(observation));
+      } else pending.resolve(message.result);
       return;
     }
-    if (typeof message.method !== "string" || message.params === null || typeof message.params !== "object") return;
-    const method = message.method;
-    const params = message.params as Record<string, unknown>;
+    if (typeof message.method !== "string" || !Object.prototype.hasOwnProperty.call(message, "params")) { this.failProtocolOnce(); return; }
+    const params = this.objectRecord(message.params);
+    if (params === null) { this.failProtocolOnce(); return; }
+    this.enqueueNotification(message.method, params);
+  }
+  private enqueueNotification(method: string, params: Record<string, unknown>): void {
+    if (this.notificationQueueLength >= CODEX_MAX_NATIVE_NOTIFICATIONS) { this.failProtocolOnce(); return; }
+    this.notificationQueueLength += 1;
+    const previous = this.notificationChain;
+    const current = previous.then(async () => {
+      if (!this.protocolFailureClaimed) await this.dispatchNotification(method, params);
+    }).finally(() => { this.notificationQueueLength -= 1; });
+    this.notificationChain = current.then(() => undefined, () => undefined);
+    void current.catch(() => { this.failProtocolOnce(); });
+  }
+  private async dispatchNotification(method: string, params: Record<string, unknown>): Promise<void> {
     if (method === "error") {
-      const error = params.error;
-      const detail = error !== null && typeof error === "object" ? (error as Record<string, unknown>).codexErrorInfo : null;
+      const error = this.objectRecord(params.error);
+      if (!this.correlates(params, true) || error === null || typeof params.willRetry !== "boolean" || typeof error.message !== "string") { this.failProtocolOnce(); return; }
+      const detail = (params.error as Record<string, unknown>).codexErrorInfo;
       if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", detail);
       if (this.turnFailure.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
-      this.input.callbacks.privateFailure(this.turnFailure);
+      try { this.input.callbacks.privateFailure(this.turnFailure); } catch { this.failProtocolOnce(); }
+      return;
     }
-    else if (method === "item/agentMessage/delta" && typeof params.delta === "string") void this.input.callbacks.outputDelta(params.delta);
-    else if (method === "item/started") void this.input.callbacks.activity("Provider activity started.");
-    else if (method === "turn/completed") {
-      const turn = params.turn; const turnRecord = turn !== null && typeof turn === "object" ? turn as Record<string, unknown> : null;
-      const status = turnRecord?.status;
-      if (status === "failed") {
-        if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", (turnRecord?.error as Record<string, unknown> | undefined)?.codexErrorInfo);
+    if (method === "item/agentMessage/delta") {
+      if (!this.correlates(params, true) || typeof params.itemId !== "string" || typeof params.delta !== "string"
+        || Buffer.byteLength(params.delta, "utf8") > AI_OUTPUT_DELTA_MAX_BYTES) { this.failProtocolOnce(); return; }
+      await this.input.callbacks.outputDelta(params.delta);
+      return;
+    }
+    if (method === "item/started") {
+      if (!this.correlates(params, true) || this.objectRecord(params.item) === null || typeof params.startedAtMs !== "number"
+        || !Number.isSafeInteger(params.startedAtMs)) { this.failProtocolOnce(); return; }
+      await this.input.callbacks.activity("Provider activity started.");
+      return;
+    }
+    if (method === "turn/started") {
+      const turn = this.objectRecord(params.turn);
+      if (typeof params.threadId !== "string" || params.threadId !== this.threadId || turn === null || turn.id !== this.turnId
+        || !Array.isArray(turn.items) || !["inProgress", "completed", "interrupted", "failed"].includes(String(turn.status))) this.failProtocolOnce();
+      return;
+    }
+    if (method === "turn/completed") {
+      const turn = this.objectRecord(params.turn);
+      const nativeTurnId = turn?.id;
+      const identityMatches = typeof params.threadId === "string" && params.threadId === this.threadId && nativeTurnId === this.turnId;
+      const fingerprint = stablePrivateJson(params);
+      if (this.nativeTurnState === "terminal-claimed" || this.nativeTurnState === "terminal-delivered") {
+        if (identityMatches && fingerprint === this.terminalFingerprint) return;
+        this.failProtocolOnce(); return;
+      }
+      if (this.nativeTurnState !== "active" || !identityMatches || turn === null || !Array.isArray(turn.items)
+        || !["completed", "interrupted", "failed"].includes(String(turn.status))) {
+        this.failProtocolOnce(); return;
+      }
+      this.nativeTurnState = "terminal-claimed";
+      this.terminalFingerprint = fingerprint;
+      if (turn.status === "failed") {
+        if (this.turnFailure === null) this.turnFailure = codexPrivateFailureObservation("turn", (this.objectRecord(turn.error)?.codexErrorInfo));
         if (this.turnFailure.kind === "Unauthorized") void this.input.authority.markReauthenticationRequired().catch(() => undefined);
-        void this.input.callbacks.failed(this.turnFailure);
-        this.turnFailure = null;
-      } else void this.input.callbacks.completed(status === "interrupted" ? "interrupted" : "completed");
+        await this.input.callbacks.failed(this.turnFailure);
+      } else {
+        await this.input.callbacks.completed(turn.status === "interrupted" ? "interrupted" : "completed");
+      }
+      this.nativeTurnState = "terminal-delivered";
+      this.turnFailure = null;
+    }
+  }
+  private correlates(params: Record<string, unknown>, requireTurn: boolean): boolean {
+    if (this.nativeTurnState !== "active") return false;
+    if (typeof params.threadId !== "string" || params.threadId !== this.threadId) return false;
+    return !requireTurn || (typeof params.turnId === "string" && params.turnId === this.turnId);
+  }
+  private failProtocolOnce(): void {
+    if (this.protocolFailureClaimed) return;
+    this.protocolFailureClaimed = true;
+    const stage = this.nativeTurnState === "active" || this.nativeTurnState === "terminal-claimed" ? "turn" : "request";
+    const observation = this.protocolObservation(stage);
+    this.protocolFailureObservation = observation;
+    this.rejectPending(new CodexRequestFailure(observation));
+    try { this.input.callbacks.privateFailure(observation); } catch { /* private diagnostics cannot escape the protocol boundary */ }
+    if (this.nativeTurnState === "active") void this.input.callbacks.failed(observation).catch(() => undefined);
+    const stream = this.stream;
+    if (stream !== null && !stream.destroyed) stream.destroy();
+  }
+  private async handleStreamClose(): Promise<void> {
+    if (this.protocolFailureClaimed === false) {
+      try {
+        this.processDecodedText(this.utf8Decoder.decode());
+        if (this.dockerHeader.length !== 0 || this.dockerPayloadLength !== null || this.dockerPayload.length !== 0 || this.jsonLineBytes !== 0) throw new Error("codex-partial-protocol");
+      } catch { this.failProtocolOnce(); }
+    }
+    await Promise.race([
+      this.notificationChain,
+      new Promise<void>((resolve) => setTimeout(resolve, CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS))
+    ]);
+    this.rejectPending();
+    if (this.finalizationState === "active" && !this.providerClosedNotified) {
+      this.providerClosedNotified = true;
+      await this.input.callbacks.providerClosed().catch(() => undefined);
     }
   }
 }
@@ -854,6 +1073,9 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         },
         privateFailure: (observation) => {
           if (record.activeTurnId !== null) rememberPrivateFailure(record, record.activeTurnId, observation);
+          else {
+            try { options.onPrivateFailureObservation?.(observation); } catch { /* diagnostics never alter provider lifecycle */ }
+          }
         },
         failed: async (observation) => {
           if (record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation).catch(() => undefined);
