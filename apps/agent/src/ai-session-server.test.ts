@@ -17,7 +17,7 @@ async function call(socketPath: string, method: string, requestPath: string, dat
     const body = data === undefined ? undefined : JSON.stringify({ data });
     const request = http.request({ socketPath, method, path: requestPath, headers: {
       "X-DevSpace-Protocol-Version": "1", "X-DevSpace-Request-Id": "018f1f34-7000-7000-8000-000000000005",
-      "X-DevSpace-Sent-At": "2026-07-26T05:00:00.000Z", ...(method === "POST" && !requestPath.includes("ai-profiles/inspect") ? { "X-DevSpace-Operation-Id": "018f1f34-7000-7000-8000-000000000006" } : {}),
+      "X-DevSpace-Sent-At": "2026-07-26T05:00:00.000Z", ...(method === "POST" && !requestPath.includes("ai-profiles/inspect") && !requestPath.includes("acknowledge-events") ? { "X-DevSpace-Operation-Id": "018f1f34-7000-7000-8000-000000000006" } : {}),
       ...(body === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(body) })
     } }, (response) => { const chunks: Buffer[] = []; response.on("data", (chunk) => chunks.push(Buffer.from(chunk))); response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })); });
     request.once("error", reject); if (body !== undefined) request.write(body); request.end();
@@ -55,6 +55,12 @@ describe("F11 Agent fake provider flow", () => {
       const stream = await collectStream(socketPath, `/v1/ai-sessions/${sessionId}/events?afterSequence=0`);
       expect(stream.status).toBe(200);
       expect(stream.body).toContain("turn.output.delta"); expect(stream.body).toContain("turn.files.changed");
+      const canonical = stream.body.split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((frame) => frame.eventType === "turn.files.changed")!;
+      const acknowledgement = { projectId, workspaceId, aiSessionId: sessionId, throughSequence: canonical.sequence as number, throughEventId: canonical.eventId as string };
+      const acknowledged = await call(socketPath, "POST", "/v1/ai-sessions/acknowledge-events", acknowledgement);
+      expect(acknowledged.status).toBe(200);
+      expect(JSON.parse(acknowledged.body).data).toEqual(acknowledgement);
     } finally { await server.stop(); await rm(root, { recursive: true, force: true }); }
   });
 });

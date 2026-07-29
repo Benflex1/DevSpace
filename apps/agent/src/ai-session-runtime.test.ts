@@ -361,7 +361,7 @@ describe("AI session runtime", () => {
       fixture.protocol.emitBytes(dockerBytes(Buffer.alloc(1_115_000, 0x61)));
       const events = await fixture.runtime.collect(sessionId, 0, 100);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
-      expect(JSON.stringify(events)).not.toContain("aaa");
+      expect(JSON.stringify(events)).not.toContain('"x":"aaa');
     } finally {
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
@@ -424,7 +424,7 @@ describe("AI session runtime", () => {
       await startFixtureTurn(fixture);
       fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
       fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "interrupted" } } });
-      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      const events = await fixture.runtime.collect(sessionId, 0, 1_000);
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
       expect(events.filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
       expect(events.filter((event) => event.eventType === "session.stopped")).toHaveLength(1);

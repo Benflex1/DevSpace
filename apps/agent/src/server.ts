@@ -29,6 +29,7 @@ import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./previ
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
+import { AiOutboxError } from "./ai-session-outbox.js";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -390,7 +391,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!query.success) return requestError(response, requestId, now, { location: "query", field: null, reason: "malformed" });
       const afterSequence = Number(query.data.afterSequence);
       const sessionId = aiStreamMatch[1]!;
-      const replay = await aiRuntime.replay(sessionId, afterSequence);
+      let replay;
+      try { replay = await aiRuntime.replay(sessionId, afterSequence); }
+      catch (error) {
+        const code = error instanceof AiOutboxError ? error.code : "AI_OUTBOX_UNAVAILABLE";
+        const selected = code === "AI_EVENT_GAP" ? { status: 409, retryable: false } : { status: 503, retryable: true };
+        return sendJson(response, selected.status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code, message: "The AI event outbox could not be replayed safely.", retryable: selected.retryable,
+          failure: { code, category: code === "AI_EVENT_GAP" ? "protocol-failure" : "dependency-unavailable", incidentId: createId() }
+        } }));
+      }
       response.writeHead(200, { "content-type": endpoint.successContentType, "cache-control": "no-store", connection: "keep-alive" });
       response.flushHeaders();
       for (const event of replay) response.write(`${JSON.stringify(event)}\n`);
@@ -460,11 +470,24 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
 
     if (request.method === "POST" && url.pathname === f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"].path) {
       const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.acknowledge"];
-      let body: { data: { aiSessionId: string; throughSequence: number } };
+      let body: { data: Parameters<AiSessionRuntime["acknowledge"]>[0] };
       try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
       catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
-      await aiRuntime.acknowledge(body.data.aiSessionId, body.data.throughSequence);
-      return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: body.data }));
+      try {
+        const acknowledged = await aiRuntime.acknowledge(body.data);
+        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: acknowledged }));
+      } catch (error) {
+        const code = error instanceof AiOutboxError ? error.code : "AI_OUTBOX_UNAVAILABLE";
+        const selected = code === "AI_IDENTITY_MISMATCH"
+          ? { status: 409, retryable: false, category: "internal-failure" }
+          : code === "AI_EVENT_SEQUENCE_CONFLICT"
+            ? { status: 409, retryable: false, category: "protocol-failure" }
+            : { status: 503, retryable: true, category: "dependency-unavailable" };
+        return sendJson(response, selected.status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code, message: "The AI event acknowledgement could not be completed safely.", retryable: selected.retryable,
+          failure: { code, category: selected.category, incidentId: createId() }
+        } }));
+      }
     }
 
     if (request.method === "GET" && url.pathname === healthEndpoint.path) {

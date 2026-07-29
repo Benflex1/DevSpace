@@ -513,6 +513,7 @@ export const acknowledgeAiEventsDataSchema = z.strictObject({
   throughSequence: aiEventSequenceSchema,
   throughEventId: uuidV7Schema
 });
+export type AcknowledgeAiEventsData = z.infer<typeof acknowledgeAiEventsDataSchema>;
 
 export type AiEventAppendDecision =
   | { readonly kind: "append"; readonly sequence: number }

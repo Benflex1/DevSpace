@@ -9,6 +9,7 @@ import {
   type AiProviderProfileProjection,
   type AgentSnapshotData,
   type ActivatePreviewData,
+  type AcknowledgeAiEventsData,
   type ConfigurationRevisionData,
   type ConfigurationRuntimePlanData,
   type CreateManagedStoreData,
@@ -292,7 +293,7 @@ export function createAgentClient(socketPath: string, options: {
     sendAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.send", data, operationId) as MutationReceipt,
     interruptAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.interrupt", data, operationId) as MutationReceipt,
     stopAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.stop", data, operationId) as MutationReceipt,
-    acknowledgeAiEvents: async (data: unknown): Promise<unknown> => await call("ai-session.events.acknowledge", data),
+    acknowledgeAiEvents: async (data: AcknowledgeAiEventsData): Promise<AcknowledgeAiEventsData> => await call("ai-session.events.acknowledge", data) as AcknowledgeAiEventsData,
     streamAiEvents: async function* (sessionId: string, afterSequence: number): AsyncGenerator<AiEventStreamFrame> {
       const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
       const requestId = createId();

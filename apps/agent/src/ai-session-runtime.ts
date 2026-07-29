@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/require-await */
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,6 @@ import {
   AI_OUTPUT_DELTA_MAX_BYTES,
   AI_OUTPUT_ITEM_MAX_BYTES,
   aiProviderProfileProjectionSchema,
-  canonicalAiEventSchema,
   type CanonicalAiEvent,
   type AiProviderProfileProjection,
   CODEX_APP_SERVER_CLI_VERSION, CODEX_APP_SERVER_VERSION_OUTPUT
@@ -27,14 +26,18 @@ import {
   createCodexCredentialAuthority,
   type CodexCredentialAuthority
 } from "./codex-credential-authority.js";
+import {
+  createAiSessionOutbox,
+  openExistingAiSessionOutbox,
+  type AiEventAcknowledgement,
+  type AiSessionOutbox
+} from "./ai-session-outbox.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
 const CODEX_EXECUTABLE_SHA256 = "a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14";
 const CODEX_STAGED_READBACK_HELPER_SHA256 = "d07b2735546d3f514c2be5871521ec0430352638f24f0b134f93cbb5c2b951d1";
 const CODEX_STAGED_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-staged-readback");
-const MAX_OUTBOX_EVENTS = 2048;
-const ACK_RETAINED_EVENTS = 512;
 const MAX_GIT_PATHS = 256;
 const PRIVATE_CONTAINER_ROOT = "/tmp/devspace-ai";
 const CODEX_DOCKER_EXEC_TIMEOUT_MS = 5_000;
@@ -123,22 +126,18 @@ export interface AiSessionRuntime {
   stop(input: AiProcessBinding): Promise<void>;
   replay(sessionId: string, afterSequence: number): Promise<CanonicalAiEvent[]>;
   subscribe(sessionId: string, afterSequence: number, listener: (event: CanonicalAiEvent) => void): Promise<() => void>;
-  acknowledge(sessionId: string, throughSequence: number): Promise<void>;
+  acknowledge(input: AiEventAcknowledgement): Promise<AiEventAcknowledgement>;
   collect(sessionId: string, afterSequence: number, waitMs: number): Promise<CanonicalAiEvent[]>;
 }
 
 interface SessionRecord {
   readonly binding: AiSessionBinding;
   readonly processGeneration: number;
-  readonly events: CanonicalAiEvent[];
-  readonly listeners: Set<(event: CanonicalAiEvent) => void>;
+  readonly outbox: AiSessionOutbox;
   readonly turnBaselines: Map<string, Set<string>>;
   readonly privateFailures: Map<string, CodexPrivateFailureObservation>;
   adapter: ProviderAdapter | null;
   activeTurnId: string | null;
-  nextSequence: number;
-  acknowledgedThrough: number;
-  eventChain: Promise<void>;
   finalizationPromise: Promise<ProviderFinalizationResult> | null;
   finalizationState: "active" | "finalizing" | "finalized" | "cleanup-unproven";
   finalizationReason: "user-request" | "provider-exited" | null;
@@ -255,20 +254,6 @@ function publicProfile(availability: AiProviderProfileProjection["availability"]
   });
 }
 
-function outboxPath(root: string, sessionId: string): string {
-  return path.join(root, "ai-events", `${sessionId}.jsonl`);
-}
-
-async function readOutbox(root: string, sessionId: string): Promise<CanonicalAiEvent[]> {
-  try {
-    const text = await readFile(outboxPath(root, sessionId), "utf8");
-    return text.split("\n").filter((line) => line.length > 0).map((line) => canonicalAiEventSchema.parse(JSON.parse(line)));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-}
-
 class CodexRequestFailure extends Error {
   constructor(readonly observation: CodexPrivateFailureObservation) { super("codex-json-rpc-request-failed"); }
 }
@@ -383,7 +368,7 @@ class FakeProvider implements ProviderAdapter {
     }
     const chunks = ["Hello from the deterministic provider."];
     for (const chunk of chunks) {
-      await new Promise((resolve) => setTimeout(resolve, 8));
+      await new Promise<void>((resolve) => setImmediate(resolve));
       if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
       await this.callbacks.outputDelta(chunk);
     }
@@ -928,7 +913,21 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? uuidv7;
   const sessions = new Map<string, SessionRecord>();
+  const outboxes = new Map<string, AiSessionOutbox>();
   const docker = options.docker ?? new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
+
+  async function outboxFor(sessionId: string, binding?: AiSessionBinding): Promise<AiSessionOutbox> {
+    const cached = outboxes.get(sessionId);
+    if (cached !== undefined) {
+      if (binding !== undefined && (cached.binding.projectId !== binding.projectId || cached.binding.workspaceId !== binding.workspaceId)) throw new Error("ai-identity-mismatch");
+      return cached;
+    }
+    const opened = binding === undefined
+      ? await openExistingAiSessionOutbox({ stateRoot, sessionId, createId, now })
+      : await createAiSessionOutbox({ stateRoot, binding, createId, now });
+    outboxes.set(sessionId, opened);
+    return opened;
+  }
 
   async function recordFor(binding: AiSessionBinding | AiProcessBinding): Promise<SessionRecord> {
     const existing = sessions.get(binding.aiSessionId);
@@ -939,34 +938,22 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       return existing;
     }
     if (!("revisionId" in binding)) throw new Error("ai-session-not-started");
-    const events = await readOutbox(stateRoot, binding.aiSessionId);
+    const outbox = await outboxFor(binding.aiSessionId, binding);
     const record: SessionRecord = {
-      binding, processGeneration: 1, events, listeners: new Set(), turnBaselines: new Map(), privateFailures: new Map(), adapter: null, activeTurnId: null,
-      nextSequence: (events.at(-1)?.sequence ?? 0) + 1, acknowledgedThrough: 0, eventChain: Promise.resolve(), finalizationPromise: null,
+      binding, processGeneration: 1, outbox, turnBaselines: new Map(), privateFailures: new Map(), adapter: null, activeTurnId: null,
+      finalizationPromise: null,
       finalizationState: "active", finalizationReason: null, stoppingEmitted: false
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
 
   async function emit(record: SessionRecord, turnId: string | null, eventType: string, payload: unknown): Promise<CanonicalAiEvent> {
-    let event: CanonicalAiEvent | undefined;
-    const previous = record.eventChain;
-    const current = previous.then(async () => {
-      event = canonicalAiEventSchema.parse({ schemaVersion: "devspace.ai-event/v1", eventId: createId(), sessionId: record.binding.aiSessionId,
-        turnId, sequence: record.nextSequence++, observedAt: now().toISOString(), profile: {
-          profileId: CODEX_PROFILE_ID,
-          profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
-          provider: CODEX_PROFILE_ID
-        },
-        processGeneration: record.processGeneration, eventType, payload });
-      await mkdir(path.dirname(outboxPath(stateRoot, record.binding.aiSessionId)), { recursive: true, mode: 0o700 });
-      await appendFile(outboxPath(stateRoot, record.binding.aiSessionId), `${JSON.stringify(event)}\n`, { mode: 0o600 });
-      record.events.push(event); if (record.events.length > MAX_OUTBOX_EVENTS) record.events.splice(0, record.events.length - MAX_OUTBOX_EVENTS);
-      for (const listener of record.listeners) listener(event);
-    });
-    record.eventChain = current.then(() => undefined, () => undefined);
-    await current;
-    return event!;
+    const terminal = new Set(["turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced", "turn.failed", "session.stopping", "session.stopped", "session.lost"]).has(eventType);
+    return await record.outbox.append({ turnId, eventType, payload, profile: {
+      profileId: CODEX_PROFILE_ID,
+      profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
+      provider: CODEX_PROFILE_ID
+    }, processGeneration: record.processGeneration, kind: terminal ? "terminal" : "normal" });
   }
 
   function rememberPrivateFailure(record: SessionRecord, turnId: string, observation: CodexPrivateFailureObservation): CodexPrivateFailureObservation {
@@ -1007,6 +994,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       record.adapter = null;
       record.finalizationState = "finalized";
       await emit(record, null, "session.stopped", { reason: finalizationReason === "user-request" ? "user-request" : "provider-exited" });
+      await record.outbox.finishTurn();
       return result;
     })();
     const promise = attempt.then((result) => result, (error) => {
@@ -1070,6 +1058,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
             }
           } else await emit(record, turnId, "turn.files.changed", { files: [], truncated: false });
           await emit(record, turnId, "turn.quiesced", { outcome }); record.turnBaselines.delete(turnId); record.activeTurnId = null;
+          await record.outbox.finishTurn();
         },
         privateFailure: (observation) => {
           if (record.activeTurnId !== null) rememberPrivateFailure(record, record.activeTurnId, observation);
@@ -1108,11 +1097,16 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     async sendTurn(input) {
       const record = await recordFor(input); if (record.adapter === null) throw new Error("ai-session-not-started");
       if (record.activeTurnId !== null) throw new Error("ai-turn-state-conflict");
+      await record.outbox.beginTurn({ turnId: input.turnId, profile: {
+        profileId: CODEX_PROFILE_ID,
+        profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
+        provider: CODEX_PROFILE_ID
+      }, processGeneration: record.processGeneration, content: input.content });
       if (options.managed !== undefined) {
         const context = await options.managed.executionContext(input.projectId, input.workspaceId);
         record.turnBaselines.set(input.turnId, await gitBaseline(context.ownership.worktreePath).catch(() => new Set()));
       } else record.turnBaselines.set(input.turnId, new Set());
-      record.activeTurnId = input.turnId; await emit(record, input.turnId, "turn.accepted", { content: input.content }); await emit(record, input.turnId, "turn.started", {});
+      record.activeTurnId = input.turnId;
       void record.adapter.sendTurn(input.turnId, input.content.text).catch(async (error) => {
         await failTurn(record, input.turnId, privateFailureFromError(error) ?? { stage: "request", kind: "Unknown", httpStatusCode: null });
       });
@@ -1126,37 +1120,27 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     },
     async replay(sessionId, afterSequence) {
       aiAfterSequenceSchema.parse(afterSequence);
-      const record = sessions.get(sessionId); let events = record?.events ?? await readOutbox(stateRoot, sessionId);
-      if (record === undefined && events.length > 0) {
-        const last = events.at(-1)!;
+      const record = sessions.get(sessionId);
+      const outbox = record?.outbox ?? await outboxFor(sessionId);
+      if (record === undefined && outbox.events.length > 0) {
+        const last = outbox.events.at(-1)!;
         const terminal = last.eventType === "session.stopped" || last.eventType === "session.lost";
         if (!terminal) {
-          const lost = canonicalAiEventSchema.parse({ schemaVersion: "devspace.ai-event/v1", eventId: createId(), sessionId,
-            turnId: null, sequence: last.sequence + 1, observedAt: now().toISOString(), profile: last.profile,
-            processGeneration: last.processGeneration, eventType: "session.lost", payload: { code: "AGENT_RESTART" } });
-          await mkdir(path.dirname(outboxPath(stateRoot, sessionId)), { recursive: true, mode: 0o700 });
-          await appendFile(outboxPath(stateRoot, sessionId), `${JSON.stringify(lost)}\n`, { mode: 0o600 });
-          events = [...events, lost];
+          await outbox.append({ turnId: null, eventType: "session.lost", payload: { code: "AGENT_RESTART" }, profile: last.profile,
+            processGeneration: last.processGeneration, kind: "terminal" });
         }
       }
-      return events.filter((event) => event.sequence > afterSequence);
+      return await outbox.replay(afterSequence);
     },
     async subscribe(sessionId, afterSequence, listener) {
-      const record = sessions.get(sessionId); if (record === undefined) { await runtime.replay(sessionId, afterSequence); return () => undefined; }
-      for (const event of record.events.filter((candidate) => candidate.sequence > afterSequence)) listener(event);
-      record.listeners.add(listener); return () => { record.listeners.delete(listener); };
-    },
-    async acknowledge(sessionId, throughSequence) {
-      aiAfterSequenceSchema.parse(throughSequence);
       const record = sessions.get(sessionId);
-      if (record === undefined) return;
-      if (throughSequence >= record.nextSequence) throw new Error("ai-acknowledgement-ahead-of-outbox");
-      record.acknowledgedThrough = Math.max(record.acknowledgedThrough, throughSequence);
-      if (record.events.length <= ACK_RETAINED_EVENTS) return;
-      const retainFrom = Math.max(1, record.acknowledgedThrough - ACK_RETAINED_EVENTS + 1);
-      const retained = record.events.filter((event) => event.sequence >= retainFrom || event.sequence > record.acknowledgedThrough);
-      record.events.splice(0, record.events.length, ...retained);
-      await writeFile(outboxPath(stateRoot, sessionId), retained.map((event) => JSON.stringify(event)).join("\n") + (retained.length === 0 ? "" : "\n"), { mode: 0o600 });
+      const outbox = record?.outbox ?? await outboxFor(sessionId);
+      return await outbox.subscribe(afterSequence, listener);
+    },
+    async acknowledge(input) {
+      const record = sessions.get(input.aiSessionId);
+      const outbox = record?.outbox ?? await outboxFor(input.aiSessionId);
+      return await outbox.acknowledge(input);
     },
     async collect(sessionId, afterSequence, waitMs) { await new Promise((resolve) => setTimeout(resolve, waitMs)); return await runtime.replay(sessionId, afterSequence); }
   };

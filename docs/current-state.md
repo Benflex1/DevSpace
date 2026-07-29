@@ -82,6 +82,19 @@ HTTPS mirror because the Agent's credentialless Git boundary cannot inspect the 
   names and baseline running containers remained unaffected.
 - ✅ Checkpoint 1 is complete. Checkpoint 2 remains approvals and structured questions.
 
+### Agent outbox and acknowledgement correction (2026-07-29)
+
+The Agent-private canonical-event outbox now uses a strict owner-only
+`devspace.ai-outbox-state/v1` manifest beside the session JSONL. Exact project/workspace/session
+acknowledgements persist the greatest `(throughSequence, throughEventId)` atomically; append,
+acknowledgement, compaction, replay-boundary checks, and live handoff share one recoverable
+per-session chain. Retention keeps the newest 512 acknowledged events and every unacknowledged
+event within the 2,048-event bound, with a fixed terminal-lifecycle reserve and `AI_EVENT_GAP`
+before replay can begin past a compacted prefix.
+
+This corrects only the Agent outbox and acknowledgement portion of P1-3. Caller-supplied Web
+session-ID binding and SQLite aggregate-history bounds remain separate follow-up work.
+
 ### Codex authority onboarding and recovery
 
 The deployment owner must authenticate the dedicated authority with the pinned executable using the

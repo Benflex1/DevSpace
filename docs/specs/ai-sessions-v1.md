@@ -475,12 +475,22 @@ Agent owns sequence assignment. For each DevSpace session it durably stores:
 - the greatest assigned sequence;
 - each unacknowledged strict canonical event;
 - the exact event ID at each sequence; and
-- the greatest exact Web acknowledgement.
+- the greatest exact Web acknowledgement in an Agent-private manifest.
+
+The manifest is a strict `devspace.ai-outbox-state/v1` object containing only
+`projectId`, `workspaceId`, `aiSessionId`, `acknowledgedThrough`, and
+`acknowledgedEventId`. The acknowledgement pair is exact: sequence zero has a null event ID,
+and every positive acknowledgement names the retained canonical event UUID. The manifest and
+JSONL outbox are owner-only regular files with no-follow reads, bounded UTF-8/JSON, and atomic
+same-directory replacement where replacement is followed by file and directory synchronization.
 
 The sequence starts at 1 and is continuous for the lifetime of the DevSpace session. Agent boots
-and provider-process generations do not reset it. Assignment and outbox append complete before
-delivery. Provider event order is serialized by the one adapter reader for that process and
-canonical events are appended in that order.
+and provider-process generations do not reset it. Sequence allocation, capacity checks, append,
+acknowledgement, manifest persistence, compaction, replay boundary, and live-listener attachment
+run through one recoverable per-session serialization chain. An append opens the exact outbox
+with no-follow append semantics, validates its descriptor, writes one complete JSONL record, fsyncs
+the file, closes successfully, then updates memory and delivers listeners. A failed append does
+not allocate its sequence or deliver it.
 
 Web maintains unique constraints on `(session_id, sequence)` and `event_id` in the later SQLite
 schema. Before classifying an incoming event, Web reads both the event at its
@@ -499,12 +509,23 @@ duplicate equality is RFC 8785/JCS equality after strict canonical schema parsin
 object-key order or timestamps.
 
 Web delivers only committed events to the browser. After commit it acknowledges exact
-`(sessionId, throughSequence, throughEventId)`. A Web restart before commit causes replay from the
-last commit. A restart after commit but before acknowledgement causes an exact duplicate. An Agent
-restart reloads the private outbox/counter; corrupt or missing non-acknowledged history fails
-closed. Outbox retention may remove only acknowledged entries older than its bounded policy.
-Capacity exhaustion makes start/send unavailable until safe acknowledgement/retention advances; it
-does not silently drop or reorder.
+`(projectId, workspaceId, sessionId, throughSequence, throughEventId)`. A Web restart before commit causes replay from the
+last commit. A restart after commit but before acknowledgement causes an exact duplicate. Agent
+restart reloads and proves the private manifest/outbox pair: strict event schemas, exact session
+identity, unique IDs, continuous retained sequences, the exact acknowledged pair, and all
+unacknowledged history must be present. A corrupt, foreign, missing, or impossible retained
+boundary fails closed; Agent never reconstructs missing events. Retention is bounded at 2,048
+retained events and keeps the newest 512 acknowledged entries plus every unacknowledged event.
+Acknowledgement persistence is atomic and durable before JSONL compaction; compaction is an atomic
+same-directory replacement, so a crash may leave extra acknowledged records but cannot remove an
+unacknowledged one. Capacity exhaustion makes start/send unavailable until safe acknowledgement/
+retention advances; it does not silently drop or reorder.
+
+Before a turn is accepted, Agent reserves room for `turn.accepted`, `turn.started`, the mandatory
+terminal path (`turn.provider-completed` or `turn.failed`, `turn.files.changed` when applicable,
+`turn.quiesced` when applicable, `session.stopping`, and `session.stopped`). Ordinary output and
+activity events cannot consume that fixed reserve. If the terminal path itself cannot be durably
+written, Agent reports outbox unavailability and never fabricates terminal success.
 
 The alternatives rejected by ADR 015 are Web-assigned sequence plus delivery IDs, an undurable
 Agent sequence, and Web-leased ranges.
@@ -533,9 +554,12 @@ than `afterSequence`, then one:
 ```
 
 It then emits live events. Agent establishes the replay boundary and attaches live delivery under
-one session lock: an event is in replay or live, never omitted. Exact duplicates may occur only
-across reconnect and are handled above. The stream uses ordinary single-line UTF-8 JSON plus LF,
-with no blank lines or unterminated committed final line.
+the same per-session serialization chain: an event is in replay or live, never omitted. A request
+older than a compacted acknowledged prefix returns `AI_EVENT_GAP`; a request at the retained
+boundary returns every retained event after that sequence. Exact duplicates may occur only across
+reconnect and are handled above. The stream uses ordinary single-line UTF-8 JSON plus LF, with no
+blank lines or unterminated committed final line. Replay validation completes before the stream
+can send HTTP 200.
 
 Web acknowledges committed progress using the non-journaled idempotent F11 acknowledgement
 operation. Acknowledgement affects only private outbox retention and cannot trigger provider or
@@ -591,7 +615,8 @@ paths with replacement bounded shapes and adds:
 
 Mutation success is the existing `202 MutationReceipt`; it means durable operation acceptance only.
 Profile inspection returns the safe projection. Acknowledgement echoes the exact acknowledged
-identity. All F11 objects are strict. Route handlers are absent in Slice 0.
+identity. All F11 objects are strict. The Agent event stream and acknowledgement route validate
+replay/storage failures before success begins.
 
 F11 endpoint descriptors declare one of two operation-journal policies:
 
