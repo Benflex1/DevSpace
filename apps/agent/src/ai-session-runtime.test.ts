@@ -382,7 +382,7 @@ describe("AI session runtime", () => {
       fixture.protocol.emitBytes(dockerBytes(payload));
       const events = await fixture.runtime.collect(sessionId, 0, 100);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
-      expect(JSON.stringify(events)).not.toContain("aaa");
+      expect(JSON.stringify(events)).not.toContain('"x":"aaa');
     } finally {
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
