@@ -10,7 +10,7 @@ import {
   type CanonicalAiEvent
 } from "@devspace/contracts";
 import { openProjectDatabase } from "./database.js";
-import { boundAiWorkbenchResponse, inspectAiWorkbench, interruptAiTurn, sendAiTurn, stopAiSession, streamAiEvents } from "./ai-sessions.js";
+import { boundAiWorkbenchResponse, createAiSession, inspectAiWorkbench, interruptAiTurn, restartAiSession, sendAiTurn, stopAiSession, streamAiEvents } from "./ai-sessions.js";
 import {
   AI_SESSION_EVENT_HISTORY_MAX_EVENTS,
   AI_SESSION_OUTPUT_MAX_BYTES,
@@ -65,6 +65,8 @@ function fakeAgent() {
       capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: false,
         structuredInput: false, stop: true, streamEvents: true }, availability: { state: "available" as const }
     })),
+    startAiSession: vi.fn((_operationId: string, _data: Record<string, unknown>) =>
+      Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000006" })),
     sendAiTurn: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000007" })),
     interruptAiTurn: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000008" })),
     stopAiSession: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000009" })),
@@ -87,7 +89,7 @@ function fakeSessionDatabase() {
       { ...session(sessionAId), historyStartSequence: 1, historyTruncated: false }
     ]),
     getAiTurn: vi.fn((_project: string, _workspace: string, requestedSessionId: string, requestedTurnId: string) =>
-      requestedSessionId === sessionAId && requestedTurnId === turnId ? { id: turnId, sessionId: sessionAId } : null),
+      requestedSessionId === sessionAId && requestedTurnId === turnId ? { id: turnId, sessionId: sessionAId, state: "running" } : null),
     createAiTurn: vi.fn(() => undefined),
     commitAiEvent: vi.fn(() => "appended" as const)
   };
@@ -116,6 +118,104 @@ test("binds a supplied older session instead of acting on the newer workspace se
     aiSessionId: sessionAId
   });
   expect(typeof binding?.turnId).toBe("string");
+});
+
+test.each(["stopped", "lost", "creating"] as const)("rejects a %s session before creating or sending a turn", async (state) => {
+  const agent = fakeAgent();
+  const createAiTurn = vi.fn();
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), state } })),
+    createAiTurn
+  };
+
+  await expect(sendAiTurn(projectId, workspaceId, sessionAId, "must not persist", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_SESSION_CONFLICT" });
+
+  expect(createAiTurn).not.toHaveBeenCalled();
+  expect(agent.sendAiTurn).not.toHaveBeenCalled();
+});
+
+test("restarts the exact stopped session without sending process generation authority", async () => {
+  const agent = fakeAgent();
+  const stopped = { ...session(sessionAId), state: "stopped", profileKey: "codex" };
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: stopped })),
+    prepareAiSessionRestart: vi.fn(() => ({ ...stopped, state: "creating", updatedAt: "2026-07-30T12:00:00.001Z" })),
+    rollbackAiSessionRestart: vi.fn(() => true)
+  };
+
+  const result = await restartAiSession(projectId, workspaceId, sessionAId, { database, agent } as never);
+
+  expect(result.sessionId).toBe(sessionAId);
+  expect(database.prepareAiSessionRestart).toHaveBeenCalledWith({
+    projectId, workspaceId, sessionId: sessionAId, profileId: "codex", profileRevision
+  });
+  expect(agent.startAiSession).toHaveBeenCalledWith(expect.any(String), {
+    projectId, workspaceId, aiSessionId: sessionAId, revisionId: stopped.revisionId,
+    runtimePlanHash, runtimeGeneration: 1, profileId: "codex", profileRevision
+  });
+  expect(agent.startAiSession.mock.calls[0]?.[1]).not.toHaveProperty("processGeneration");
+  expect(database.rollbackAiSessionRestart).not.toHaveBeenCalled();
+});
+
+test.each(["active", "creating", "lost"] as const)("rejects restart from %s before inspecting or calling Agent", async (state) => {
+  const agent = fakeAgent();
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), state } })),
+    prepareAiSessionRestart: vi.fn()
+  };
+
+  await expect(restartAiSession(projectId, workspaceId, sessionAId, { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_SESSION_CONFLICT" });
+
+  expect(agent.inspectAiProvider).not.toHaveBeenCalled();
+  expect(database.prepareAiSessionRestart).not.toHaveBeenCalled();
+  expect(agent.startAiSession).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["foreign", "018f0f00-0000-7000-8000-000000000010"],
+  ["nonexistent", "018f0f00-0000-7000-8000-000000000011"]
+] as const)("rejects restart for a %s exact session without calling Agent", async (_label, requestedSessionId) => {
+  const agent = fakeAgent();
+  const database = { getAiSession: vi.fn(() => null), prepareAiSessionRestart: vi.fn() };
+  await expect(restartAiSession(projectId, workspaceId, requestedSessionId, { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_SESSION_CONFLICT", message: "The AI session is no longer available." });
+  expect(agent.inspectAiProvider).not.toHaveBeenCalled();
+  expect(agent.startAiSession).not.toHaveBeenCalled();
+});
+
+test("restores only the exact claimed stopped session when Agent rejects restart acceptance", async () => {
+  const agent = fakeAgent();
+  agent.startAiSession.mockRejectedValueOnce(new Error("agent unavailable"));
+  const stopped = { ...session(sessionAId), state: "stopped", profileKey: "codex", updatedAt: timestamp };
+  const prepared = { ...stopped, state: "creating", updatedAt: "2026-07-30T12:00:00.001Z" };
+  const rollbackAiSessionRestart = vi.fn(() => true);
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: stopped })),
+    prepareAiSessionRestart: vi.fn(() => prepared),
+    rollbackAiSessionRestart
+  };
+
+  await expect(restartAiSession(projectId, workspaceId, sessionAId, { database, agent } as never)).rejects.toThrow("agent unavailable");
+
+  expect(rollbackAiSessionRestart).toHaveBeenCalledWith({
+    projectId, workspaceId, sessionId: sessionAId, expectedUpdatedAt: prepared.updatedAt,
+    expectedLastSequence: prepared.lastSequence, expectedProcessGeneration: prepared.processGeneration
+  });
+});
+
+test("keeps workspace-level initial creation idempotent without treating an existing stopped session as restart", async () => {
+  const agent = fakeAgent();
+  const existing = { ...session(sessionAId), state: "stopped", profileKey: "codex" };
+  const database = {
+    createInitialAiSession: vi.fn(() => ({ session: existing, created: false }))
+  };
+
+  const result = await createAiSession(projectId, workspaceId, "owner", { database, agent } as never);
+
+  expect(result).toEqual({ sessionId: sessionAId, operationId: null });
+  expect(agent.startAiSession).not.toHaveBeenCalled();
 });
 
 test("complete response metadata advances past an event-empty retained suffix", () => {
@@ -253,6 +353,22 @@ test("rejects a turn that belongs to another exact session", async () => {
   expect(agent.interruptAiTurn).not.toHaveBeenCalled();
 });
 
+test.each([
+  ["stopped session", "stopped", "running", "AI_SESSION_CONFLICT"],
+  ["creating session", "creating", "running", "AI_SESSION_CONFLICT"],
+  ["completed turn", "active", "completed", "AI_TURN_CONFLICT"]
+] as const)("rejects interruption for an exact %s before calling Agent", async (_label, state, turnState, expectedCode) => {
+  const agent = fakeAgent();
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), state } })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: turnState }))
+  };
+
+  await expect(interruptAiTurn(projectId, workspaceId, sessionAId, turnId, { database, agent } as never))
+    .rejects.toMatchObject({ code: expectedCode });
+  expect(agent.interruptAiTurn).not.toHaveBeenCalled();
+});
+
 function successfulSetupAgent(): WorkspaceSetupAgent {
   const observations = new Map<string, AgentOperationObservation>();
   let revisionId = "";
@@ -346,6 +462,25 @@ function turnQuiescedEvent(sessionId: string, sequence: number, turnIdValue: str
   };
 }
 
+function sessionEvent(sessionId: string, sequence: number, eventType: "session.started" | "session.ready" | "session.stopping" | "session.stopped",
+  processGeneration: number): CanonicalAiEvent {
+  const payload = eventType === "session.started" ? { processGeneration }
+    : eventType === "session.stopping" ? { reason: "user-request" as const }
+      : eventType === "session.stopped" ? { reason: "user-request" as const } : {};
+  return {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f0f00-0000-7000-8000-${(30_000 + sequence).toString(16).padStart(12, "0")}`,
+    sessionId,
+    turnId: null,
+    sequence,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision, provider: "codex" },
+    processGeneration,
+    eventType,
+    payload
+  } as CanonicalAiEvent;
+}
+
 async function historyFixture() {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-ai-history-fixture-"));
   directories.push(directory);
@@ -372,6 +507,9 @@ async function historyFixture() {
     profileId: "codex",
     profileRevision
   });
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare("update ai_sessions set state = 'active' where id = ?").run(created.id);
+  raw.close();
   const createdTurnId = `018f0f00-0000-7000-8000-${(10 + directories.length).toString(16).padStart(12, "0")}`;
   database.createAiTurn({
     projectId: project.id,
@@ -382,6 +520,136 @@ async function historyFixture() {
   });
   return { database, databasePath, projectId: project.id, workspaceId: primaryWorkspace.id, sessionId: created.id, turnId: createdTurnId };
 }
+
+async function stoppedHistoryFixture() {
+  const fixture = await historyFixture();
+  const raw = new BetterSqlite3(fixture.databasePath);
+  raw.prepare("update ai_sessions set state = 'creating' where id = ?").run(fixture.sessionId);
+  raw.prepare(`
+    insert into runtime_stacks
+      (id, workspace_id, runtime_namespace, runtime_plan_hash, desired_state, observed_state, runtime_generation, created_at, updated_at)
+    select ?, workspace_id, 'workspace-runtime:' || workspace_id, runtime_plan_hash, 'running', 'running', runtime_generation, ?, ?
+    from ai_sessions where id = ?
+  `).run("018f0f00-0000-7000-8000-000000000098", timestamp, timestamp, fixture.sessionId);
+  raw.prepare("update ai_turns set state = 'completed', completed_at = ? where session_id = ?").run(timestamp, fixture.sessionId);
+  raw.close();
+  for (const [index, eventType] of ["session.started", "session.ready", "session.stopping", "session.stopped"].entries()) {
+    fixture.database.commitAiEvent({
+      projectId: fixture.projectId,
+      workspaceId: fixture.workspaceId,
+      event: sessionEvent(fixture.sessionId, index + 1, eventType as "session.started" | "session.ready" | "session.stopping" | "session.stopped", 1)
+    });
+  }
+  return fixture;
+}
+
+describe("SQLite stopped-session restart fencing", () => {
+  test("does not create a turn row for a stopped session", async () => {
+    const fixture = await stoppedHistoryFixture();
+    const before = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)!.turns;
+    expect(() => fixture.database.createAiTurn({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,
+      turnId: "018f0f00-0000-7000-8000-000000000099", content: { kind: "text", text: "must not persist" }
+    })).toThrow();
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.turns).toEqual(before);
+  });
+
+  test("moves only the exact stopped session to creating without changing its durable history", async () => {
+    const fixture = await stoppedHistoryFixture();
+    const before = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)!;
+
+    const prepared = fixture.database.prepareAiSessionRestart({
+      projectId: fixture.projectId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      profileId: "codex",
+      profileRevision
+    });
+
+    const after = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)!;
+    expect(prepared).toMatchObject({ id: fixture.sessionId, state: "creating", processGeneration: 1, lastSequence: 4 });
+    expect(after.session.id).toBe(before.session.id);
+    expect(after.session.state).toBe("creating");
+    expect(after.turns).toEqual(before.turns);
+    expect(after.events).toEqual(before.events);
+    expect(after.session.title).toBe(before.session.title);
+  });
+
+  test("rejects changed profile/runtime identity and process-generation overflow", async () => {
+    const profileFixture = await stoppedHistoryFixture();
+    expect(() => profileFixture.database.prepareAiSessionRestart({
+      projectId: profileFixture.projectId, workspaceId: profileFixture.workspaceId, sessionId: profileFixture.sessionId,
+      profileId: "codex", profileRevision: `sha256-ai-profile-v1:${"c".repeat(64)}`
+    })).toThrow();
+
+    const runtimeFixture = await stoppedHistoryFixture();
+    const runtimeRaw = new BetterSqlite3(runtimeFixture.databasePath);
+    runtimeRaw.prepare("update runtime_stacks set runtime_generation = runtime_generation + 1 where workspace_id = ?")
+      .run(runtimeFixture.workspaceId);
+    runtimeRaw.close();
+    expect(() => runtimeFixture.database.prepareAiSessionRestart({
+      projectId: runtimeFixture.projectId, workspaceId: runtimeFixture.workspaceId, sessionId: runtimeFixture.sessionId,
+      profileId: "codex", profileRevision
+    })).toThrow();
+
+    const overflowFixture = await stoppedHistoryFixture();
+    const overflowRaw = new BetterSqlite3(overflowFixture.databasePath);
+    overflowRaw.prepare("update ai_sessions set process_generation = ? where id = ?")
+      .run(Number.MAX_SAFE_INTEGER, overflowFixture.sessionId);
+    overflowRaw.close();
+    expect(() => overflowFixture.database.prepareAiSessionRestart({
+      projectId: overflowFixture.projectId, workspaceId: overflowFixture.workspaceId, sessionId: overflowFixture.sessionId,
+      profileId: "codex", profileRevision
+    })).toThrow();
+  });
+
+  test("advances generation only on the next canonical started event and fences older or future generations", async () => {
+    const fixture = await stoppedHistoryFixture();
+    const prepared = fixture.database.prepareAiSessionRestart({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,
+      profileId: "codex", profileRevision
+    });
+    const started = sessionEvent(fixture.sessionId, 5, "session.started", 2);
+
+    expect(fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: started })).toBe("appended");
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.session)
+      .toMatchObject({ state: "creating", processGeneration: 2, lastSequence: 5 });
+    expect(fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: started })).toBe("duplicate");
+    expect(fixture.database.rollbackAiSessionRestart({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,
+      expectedUpdatedAt: prepared.updatedAt, expectedLastSequence: prepared.lastSequence, expectedProcessGeneration: prepared.processGeneration
+    })).toBe(false);
+    expect(() => fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: sessionEvent(fixture.sessionId, 6, "session.ready", 1)
+    })).toThrow();
+    expect(() => fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: sessionEvent(fixture.sessionId, 6, "session.ready", 3)
+    })).toThrow();
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: sessionEvent(fixture.sessionId, 6, "session.ready", 2)
+    })).toBe("appended");
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.session.state).toBe("active");
+  });
+
+  test("requires an initial generation-one started event", async () => {
+    const fixture = await historyFixture();
+    const raw = new BetterSqlite3(fixture.databasePath);
+    raw.prepare("update ai_sessions set state = 'creating' where id = ?").run(fixture.sessionId);
+    raw.close();
+    expect(() => fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: sessionEvent(fixture.sessionId, 1, "session.started", 2)
+    })).toThrow();
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: sessionEvent(fixture.sessionId, 1, "session.started", 1)
+    })).toBe("appended");
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.session.processGeneration).toBe(1);
+  });
+});
 
 describe("SQLite AI aggregate bounds", () => {
   test("truncates one delta that crosses an already full turn aggregate", async () => {
@@ -406,7 +674,8 @@ describe("SQLite AI aggregate bounds", () => {
   test("does not let many small output deltas exceed the 2 MiB per-turn aggregate bound", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-ai-history-red-"));
     directories.push(directory);
-    const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));
+    const databasePath = path.join(directory, "devspace.sqlite");
+    const database = openProjectDatabase(databasePath);
     const project = database.createProject({
       name: "AI history test",
       slug: "ai-history-test",
@@ -428,6 +697,9 @@ describe("SQLite AI aggregate bounds", () => {
       profileId: "codex",
       profileRevision
     });
+    const raw = new BetterSqlite3(databasePath);
+    raw.prepare("update ai_sessions set state = 'active' where id = ?").run(created.id);
+    raw.close();
     const createdTurnId = "018f0f00-0000-7000-8000-000000000009";
     database.createAiTurn({
       projectId: project.id,
@@ -474,6 +746,10 @@ describe("SQLite AI aggregate bounds", () => {
   test("keeps the session output aggregate bounded across retained turns", async () => {
     const fixture = await historyFixture();
     for (let turnIndex = 0; turnIndex < 5; turnIndex += 1) {
+      const raw = new BetterSqlite3(fixture.databasePath);
+      raw.prepare("update ai_turns set state = 'completed', completed_at = ? where session_id = ? and state in ('accepted', 'running')")
+        .run(timestamp, fixture.sessionId);
+      raw.close();
       const currentTurnId = `018f0f00-0000-7000-8000-${(100 + turnIndex).toString(16).padStart(12, "0")}`;
       fixture.database.createAiTurn({
         projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,

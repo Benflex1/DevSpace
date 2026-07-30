@@ -183,7 +183,9 @@ export async function createAiSession(projectId: string, workspaceId: string, ac
   void actor;
   const profile = await dependencies.agent.inspectAiProvider(projectId, workspaceId, "codex");
   if (profile.availability.state !== "available") throw new AiSessionActionError("AI_PROFILE_UNAVAILABLE", "Codex is unavailable for this workspace.");
-  const created = dependencies.database.createAiSession({ projectId, workspaceId, profileId: profile.profileId, profileRevision: profile.profileRevision });
+  const initial = dependencies.database.createInitialAiSession({ projectId, workspaceId, profileId: profile.profileId, profileRevision: profile.profileRevision });
+  const created = initial.session;
+  if (!initial.created) return { sessionId: created.id, operationId: null };
   const operationId = uuidv7();
   const startBinding = { projectId, workspaceId, aiSessionId: created.id, revisionId: created.revisionId, runtimePlanHash: created.runtimePlanHash,
     runtimeGeneration: created.runtimeGeneration, profileId: created.profileKey, profileRevision: created.profileRevision };
@@ -191,8 +193,52 @@ export async function createAiSession(projectId: string, workspaceId: string, ac
   return { sessionId: created.id, operationId };
 }
 
+export async function restartAiSession(projectId: string, workspaceId: string, sessionId: string, dependencies: Dependencies) {
+  const selected = exactSession(projectId, workspaceId, sessionId, dependencies.database);
+  if (selected.session.state !== "stopped") {
+    throw new AiSessionActionError("AI_SESSION_CONFLICT", "Only a stopped AI session can be started again.");
+  }
+  const profile = await dependencies.agent.inspectAiProvider(projectId, workspaceId, "codex");
+  if (profile.availability.state !== "available") {
+    throw new AiSessionActionError("AI_PROFILE_UNAVAILABLE", "Codex is unavailable for this workspace.");
+  }
+  if (profile.profileId !== selected.session.profileId || profile.profileRevision !== selected.session.profileRevision) {
+    throw new AiSessionActionError("AI_SESSION_CONFLICT", "The stopped AI session no longer matches this workspace.");
+  }
+  let prepared: ReturnType<ProjectDatabase["prepareAiSessionRestart"]>;
+  try {
+    prepared = dependencies.database.prepareAiSessionRestart({
+      projectId, workspaceId, sessionId, profileId: profile.profileId, profileRevision: profile.profileRevision
+    });
+  } catch (error) {
+    if (error instanceof ProjectSetupConflictError) {
+      throw new AiSessionActionError("AI_SESSION_CONFLICT", "The stopped AI session can no longer be started again.");
+    }
+    throw error;
+  }
+  const operationId = uuidv7();
+  const startBinding = {
+    projectId, workspaceId, aiSessionId: prepared.id, revisionId: prepared.revisionId,
+    runtimePlanHash: prepared.runtimePlanHash, runtimeGeneration: prepared.runtimeGeneration,
+    profileId: prepared.profileKey, profileRevision: prepared.profileRevision
+  };
+  try {
+    await dependencies.agent.startAiSession(operationId, startBinding);
+  } catch (error) {
+    dependencies.database.rollbackAiSessionRestart({
+      projectId, workspaceId, sessionId, expectedUpdatedAt: prepared.updatedAt,
+      expectedLastSequence: prepared.lastSequence, expectedProcessGeneration: prepared.processGeneration
+    });
+    throw error;
+  }
+  return { sessionId, operationId };
+}
+
 export async function sendAiTurn(projectId: string, workspaceId: string, sessionId: string, text: string, dependencies: Dependencies) {
   const view = exactSession(projectId, workspaceId, sessionId, dependencies.database);
+  if (view.session.state !== "active") {
+    throw new AiSessionActionError("AI_SESSION_CONFLICT", "The AI session is not accepting turns.");
+  }
   const turnId = uuidv7();
   try {
     dependencies.database.createAiTurn({ projectId, workspaceId, sessionId, turnId, content: { kind: "text", text } });
@@ -210,7 +256,13 @@ export async function sendAiTurn(projectId: string, workspaceId: string, session
 
 export async function interruptAiTurn(projectId: string, workspaceId: string, sessionId: string, turnId: string, dependencies: Dependencies) {
   const view = exactSession(projectId, workspaceId, sessionId, dependencies.database);
-  exactTurn(projectId, workspaceId, sessionId, turnId, dependencies.database);
+  if (view.session.state !== "active") {
+    throw new AiSessionActionError("AI_SESSION_CONFLICT", "The AI session does not have an interruptible turn.");
+  }
+  const turn = exactTurn(projectId, workspaceId, sessionId, turnId, dependencies.database);
+  if (turn.state !== "running") {
+    throw new AiSessionActionError("AI_TURN_CONFLICT", "The AI turn is not active.");
+  }
   const operationId = uuidv7(); const session = view.session;
   await dependencies.agent.interruptAiTurn(operationId, { ...processBinding(projectId, session), turnId });
   return { operationId };

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/require-await */
+/* eslint-disable @typescript-eslint/require-await */
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -132,11 +132,12 @@ export interface AiSessionRuntime {
 
 interface SessionRecord {
   readonly binding: AiSessionBinding;
-  readonly processGeneration: number;
+  processGeneration: number;
   readonly outbox: AiSessionOutbox;
   readonly turnBaselines: Map<string, Set<string>>;
   readonly privateFailures: Map<string, CodexPrivateFailureObservation>;
   adapter: ProviderAdapter | null;
+  ready: boolean;
   activeTurnId: string | null;
   finalizationPromise: Promise<ProviderFinalizationResult> | null;
   finalizationState: "active" | "finalizing" | "finalized" | "cleanup-unproven";
@@ -907,6 +908,37 @@ function bindingMatches(left: AiSessionBinding, right: AiSessionBinding): boolea
     && left.profileId === right.profileId && left.profileRevision === right.profileRevision;
 }
 
+function validateStoppedOutbox(outbox: AiSessionOutbox, binding: AiSessionBinding): number {
+  const events = outbox.events;
+  const last = events.at(-1);
+  const penultimate = events.at(-2);
+  if (last === undefined || last.eventType !== "session.stopped" || last.turnId !== null
+    || penultimate === undefined || penultimate.eventType !== "session.stopping"
+    || penultimate.processGeneration !== last.processGeneration
+    || last.profile.profileId !== binding.profileId || last.profile.profileRevision !== binding.profileRevision
+    || last.profile.provider !== binding.profileId || !Number.isSafeInteger(last.processGeneration)
+    || last.processGeneration < 1) {
+    throw new Error("ai-session-restart-unavailable");
+  }
+  if (events.some((event) => event.profile.profileId !== binding.profileId
+    || event.profile.profileRevision !== binding.profileRevision || event.profile.provider !== binding.profileId)) {
+    throw new Error("ai-session-restart-unavailable");
+  }
+  for (let index = 1; index < events.length; index += 1) {
+    const previous = events[index - 1]!;
+    const current = events[index]!;
+    if (current.processGeneration < previous.processGeneration
+      || current.processGeneration > previous.processGeneration + 1
+      || (current.processGeneration === previous.processGeneration + 1
+        && (previous.eventType !== "session.stopped" || current.eventType !== "session.started"))
+      || ((previous.eventType === "session.stopped" || previous.eventType === "session.lost")
+        && current.processGeneration === previous.processGeneration)) {
+      throw new Error("ai-session-restart-unavailable");
+    }
+  }
+  return last.processGeneration;
+}
+
 export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): AiSessionRuntime {
   const mode = options.mode ?? "codex";
   const stateRoot = options.stateRoot ?? "/srv/devspace/state";
@@ -935,14 +967,16 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (existing.binding.projectId !== binding.projectId || existing.binding.workspaceId !== binding.workspaceId || existing.binding.profileId !== binding.profileId
         || existing.binding.profileRevision !== binding.profileRevision
         || ("processGeneration" in binding && existing.processGeneration !== binding.processGeneration)) throw new Error("ai-identity-mismatch");
+      if ("revisionId" in binding && !bindingMatches(existing.binding, binding)) throw new Error("ai-identity-mismatch");
       return existing;
     }
     if (!("revisionId" in binding)) throw new Error("ai-session-not-started");
     const outbox = await outboxFor(binding.aiSessionId, binding);
+    const previousGeneration = outbox.events.length === 0 ? 1 : validateStoppedOutbox(outbox, binding);
     const record: SessionRecord = {
-      binding, processGeneration: 1, outbox, turnBaselines: new Map(), privateFailures: new Map(), adapter: null, activeTurnId: null,
+      binding, processGeneration: previousGeneration, outbox, turnBaselines: new Map(), privateFailures: new Map(), adapter: null, ready: false, activeTurnId: null,
       finalizationPromise: null,
-      finalizationState: "active", finalizationReason: null, stoppingEmitted: false
+      finalizationState: outbox.events.length === 0 ? "active" : "finalized", finalizationReason: null, stoppingEmitted: outbox.events.length > 0
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
@@ -986,15 +1020,16 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const finalizationReason = record.finalizationReason;
     const attempt = (async () => {
       if (!record.stoppingEmitted) {
-        record.stoppingEmitted = true;
         await emit(record, null, "session.stopping", { reason: finalizationReason === "user-request" ? "user-request" : "runtime-stopping" });
+        record.stoppingEmitted = true;
       }
       const result = await adapter.stop();
       if (result.state !== "finalized") throw new ProviderFinalizationUnprovenError();
-      record.adapter = null;
-      record.finalizationState = "finalized";
+      record.ready = false;
       await emit(record, null, "session.stopped", { reason: finalizationReason === "user-request" ? "user-request" : "provider-exited" });
       await record.outbox.finishTurn();
+      record.adapter = null;
+      record.finalizationState = "finalized";
       return result;
     })();
     const promise = attempt.then((result) => result, (error) => {
@@ -1037,16 +1072,37 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     },
     async start(binding) {
       const record = await recordFor(binding);
-      if (record.adapter !== null) return;
+      const restarting = record.outbox.events.length > 0;
+      if (record.adapter !== null || record.activeTurnId !== null || record.finalizationPromise !== null
+        || (restarting && record.finalizationState !== "finalized")
+        || (!restarting && record.finalizationState !== "active")) {
+        throw new Error("ai-session-state-conflict");
+      }
+      let nextGeneration = record.processGeneration;
+      if (restarting) {
+        const previousGeneration = validateStoppedOutbox(record.outbox, binding);
+        if (previousGeneration !== record.processGeneration || previousGeneration === Number.MAX_SAFE_INTEGER) {
+          throw new Error("ai-session-restart-unavailable");
+        }
+        nextGeneration = previousGeneration + 1;
+      }
       if (mode === "codex" && binding.profileRevision !== profileRevisionForBinding(binding)) throw new Error("ai-profile-revision-mismatch");
       const profile = await runtime.inspect(binding);
       if (profile.availability.state !== "available" || (mode === "codex" && profile.profileRevision !== binding.profileRevision)) throw new Error("ai-profile-unavailable");
+      const stillRestarting = record.outbox.events.length > 0;
+      if (stillRestarting !== restarting || record.adapter !== null || record.activeTurnId !== null || record.finalizationPromise !== null
+        || (restarting && record.finalizationState !== "finalized")
+        || (!restarting && record.finalizationState !== "active")) throw new Error("ai-session-state-conflict");
+      if (restarting && validateStoppedOutbox(record.outbox, binding) !== record.processGeneration) throw new Error("ai-session-restart-unavailable");
+      const adapterGeneration = nextGeneration;
+      let generationAdapter: ProviderAdapter | null = null;
+      const currentGeneration = () => record.processGeneration === adapterGeneration && record.adapter === generationAdapter;
       const callbacks: AdapterCallbacks = {
-        outputDelta: async (text) => { await emit(record, record.activeTurnId, "turn.output.delta", { stream: "assistant", text }); },
-        activity: async (summary) => { const activityId = createId(); await emit(record, record.activeTurnId, "turn.activity.started", { activityId, presentation: { kind: "analysis", summary } });
+        outputDelta: async (text) => { if (currentGeneration()) await emit(record, record.activeTurnId, "turn.output.delta", { stream: "assistant", text }); },
+        activity: async (summary) => { if (!currentGeneration()) return; const activityId = createId(); await emit(record, record.activeTurnId, "turn.activity.started", { activityId, presentation: { kind: "analysis", summary } });
           await emit(record, record.activeTurnId, "turn.activity.completed", { activityId, outcome: "succeeded" }); },
         completed: async (outcome) => {
-          if (record.activeTurnId === null) return;
+          if (!currentGeneration() || record.activeTurnId === null) return;
           const turnId = record.activeTurnId; if (outcome === "interrupted") await emit(record, turnId, "turn.interrupted", { reason: "provider-confirmed" });
           await emit(record, turnId, "turn.provider-completed", { outcome });
           if (options.managed !== undefined) {
@@ -1061,15 +1117,16 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           await record.outbox.finishTurn();
         },
         privateFailure: (observation) => {
+          if (!currentGeneration()) return;
           if (record.activeTurnId !== null) rememberPrivateFailure(record, record.activeTurnId, observation);
           else {
             try { options.onPrivateFailureObservation?.(observation); } catch { /* diagnostics never alter provider lifecycle */ }
           }
         },
         failed: async (observation) => {
-          if (record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation).catch(() => undefined);
+          if (currentGeneration() && record.activeTurnId !== null) await failTurn(record, record.activeTurnId, observation).catch(() => undefined);
         },
-        providerClosed: async () => { await finalizeRecord(record, "provider-exited").catch(() => undefined); }
+        providerClosed: async () => { if (currentGeneration()) await finalizeRecord(record, "provider-exited").catch(() => undefined); }
       };
       let adapter: ProviderAdapter;
       if (mode === "fake") {
@@ -1080,22 +1137,32 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
         const readbackHelperBytes = await readCodexReadbackHelper(options);
         const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
-        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: record.processGeneration, readbackHelperBytes, callbacks,
+        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
           authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot) });
       }
+      generationAdapter = adapter;
+      record.processGeneration = adapterGeneration;
+      record.finalizationPromise = null;
+      record.finalizationState = "active";
+      record.finalizationReason = null;
+      record.stoppingEmitted = false;
+      record.turnBaselines.clear();
+      record.privateFailures.clear();
       record.adapter = adapter;
-      await emit(record, null, "session.started", { processGeneration: record.processGeneration });
       try {
+        await emit(record, null, "session.started", { processGeneration: record.processGeneration });
         await adapter.start();
         await emit(record, null, "session.ready", {});
+        record.ready = true;
       } catch (error) {
-        const finalization = await adapter.stop().catch(() => null);
-        if (finalization?.state === "finalized") record.adapter = null;
+        record.ready = false;
+        await finalizeRecord(record, "provider-exited").catch(() => undefined);
         throw error;
       }
     },
     async sendTurn(input) {
-      const record = await recordFor(input); if (record.adapter === null) throw new Error("ai-session-not-started");
+      const record = await recordFor(input);
+      if (record.adapter === null || !record.ready || record.finalizationState !== "active") throw new Error("ai-session-not-started");
       if (record.activeTurnId !== null) throw new Error("ai-turn-state-conflict");
       await record.outbox.beginTurn({ turnId: input.turnId, profile: {
         profileId: CODEX_PROFILE_ID,
@@ -1107,12 +1174,18 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         record.turnBaselines.set(input.turnId, await gitBaseline(context.ownership.worktreePath).catch(() => new Set()));
       } else record.turnBaselines.set(input.turnId, new Set());
       record.activeTurnId = input.turnId;
-      void record.adapter.sendTurn(input.turnId, input.content.text).catch(async (error) => {
+      const adapter = record.adapter;
+      const processGeneration = record.processGeneration;
+      void adapter.sendTurn(input.turnId, input.content.text).catch(async (error) => {
+        if (record.adapter !== adapter || record.processGeneration !== processGeneration) return;
         await failTurn(record, input.turnId, privateFailureFromError(error) ?? { stage: "request", kind: "Unknown", httpStatusCode: null });
       });
     },
     async interrupt(input) {
-      const record = await recordFor(input); if (record.adapter === null || record.activeTurnId !== input.turnId) throw new Error("ai-turn-state-conflict");
+      const record = await recordFor(input);
+      if (record.adapter === null || !record.ready || record.finalizationState !== "active" || record.activeTurnId !== input.turnId) {
+        throw new Error("ai-turn-state-conflict");
+      }
       await emit(record, input.turnId, "turn.interrupt.requested", {}); await record.adapter.interrupt();
     },
     async stop(input) {

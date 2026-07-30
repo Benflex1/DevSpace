@@ -1858,5 +1858,7 @@ new protocol decision:
     structured-input component, without network access.
 12. Content-bearing F11 mutations declare private-intent-reference journaling and never place
     prompts or answers in generic journal records or public operation observations.
-13. Slice 0 adds no route handlers, provider runtime, supervisor, persistence, credentials,
-    browser stream, or UI.
+13. Historical Slice 0 added no route handlers, provider runtime, supervisor, persistence,
+    credentials, browser stream, or UI. Beta Slice B now supplies the F11 handlers, Agent runtime,
+    Web-owned persistence and routes, exact browser stream, Agent-private credential staging, and
+    Workbench AI tab; approvals and structured questions remain Checkpoint 2.

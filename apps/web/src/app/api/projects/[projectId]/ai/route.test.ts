@@ -9,7 +9,9 @@ const ids = {
 };
 const mocks = vi.hoisted(() => ({
   inspect: vi.fn(),
-  getConfig: vi.fn(() => ({ databasePath: "test.sqlite", agentSocketPath: "test.sock", auth: { mode: "development", actor: "owner@example.invalid" } })),
+  restart: vi.fn(),
+  getConfig: vi.fn(() => ({ databasePath: "test.sqlite", agentSocketPath: "test.sock", appOrigin: "http://localhost",
+    auth: { mode: "development", actor: "owner@example.invalid" } })),
   authenticate: vi.fn(() => Promise.resolve({ identity: "owner@example.invalid" }))
 }));
 
@@ -22,10 +24,10 @@ vi.mock("../../../../../server/database.js", () => ({ getProjectDatabase: () => 
 vi.mock("../../../../../server/agent-client.js", () => ({ createAgentClient: () => ({}) }));
 vi.mock("../../../../../server/ai-sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../../../../server/ai-sessions.js")>("../../../../../server/ai-sessions.js");
-  return { ...actual, inspectAiWorkbench: mocks.inspect };
+  return { ...actual, inspectAiWorkbench: mocks.inspect, restartAiSession: mocks.restart };
 });
 
-import { GET } from "./route.js";
+import { GET, POST } from "./route.js";
 
 const profile = { profileId: "codex", profileRevision: "revision", displayName: "Codex", availability: { state: "available" }, capabilities: { interrupt: true } };
 const session = {
@@ -37,7 +39,12 @@ const session = {
 const context = { params: Promise.resolve({ projectId: ids.projectId }) };
 const request = new Request(`http://localhost/api/projects/${ids.projectId}/ai?workspaceId=${ids.workspaceId}&sessionId=${ids.sessionId}`);
 
-afterEach(() => mocks.inspect.mockReset());
+afterEach(() => {
+  mocks.inspect.mockReset();
+  mocks.restart.mockReset();
+  mocks.authenticate.mockReset();
+  mocks.authenticate.mockResolvedValue({ identity: "owner@example.invalid" });
+});
 
 describe("complete AI workbench response bound", () => {
   test("bounds the exact object passed to NextResponse.json, including the envelope", async () => {
@@ -63,5 +70,49 @@ describe("complete AI workbench response bound", () => {
     const parsed = JSON.parse(responseText) as { session?: { session?: { id?: string } } };
     expect(parsed.session?.session?.id).toBe(ids.sessionId);
     spy.mockRestore();
+  });
+});
+
+describe("AI stopped-session restart route", () => {
+  const post = (body: unknown, csrf = true) => new Request(`http://localhost/api/projects/${ids.projectId}/ai`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://localhost", ...(csrf ? { "x-devspace-csrf": "1" } : {}) },
+    body: JSON.stringify(body)
+  });
+
+  test("accepts only the strict exact restart action", async () => {
+    mocks.restart.mockResolvedValue({ sessionId: ids.sessionId, operationId: "018f0f00-0000-7000-8000-000000000104" });
+
+    const response = await POST(post({ action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId }), context);
+
+    expect(response.status).toBe(200);
+    expect(mocks.restart).toHaveBeenCalledWith(ids.projectId, ids.workspaceId, ids.sessionId, expect.any(Object));
+  });
+
+  test.each([
+    { action: "restart", workspaceId: ids.workspaceId },
+    { action: "restart", workspaceId: ids.workspaceId, sessionId: "not-a-session" },
+    { action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId, extra: true }
+  ])("rejects malformed, missing, or extra restart fields", async (body) => {
+    const response = await POST(post(body), context);
+    expect(response.status).toBe(422);
+    expect(mocks.restart).not.toHaveBeenCalled();
+  });
+
+  test("retains CSRF rejection and bounded restart conflicts", async () => {
+    expect((await POST(post({ action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId }, false), context)).status).toBe(403);
+    const { AiSessionActionError } = await import("../../../../../server/ai-sessions.js");
+    mocks.restart.mockRejectedValueOnce(new AiSessionActionError("AI_SESSION_CONFLICT", "Only a stopped AI session can be started again."));
+    const response = await POST(post({ action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId }), context);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ message: "Only a stopped AI session can be started again.", code: "AI_SESSION_CONFLICT" });
+  });
+
+  test("retains authentication rejection before restart dispatch", async () => {
+    const { AuthenticationError } = await import("../../../../../server/auth.js");
+    mocks.authenticate.mockRejectedValueOnce(new AuthenticationError());
+    const response = await POST(post({ action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId }), context);
+    expect(response.status).toBe(403);
+    expect(mocks.restart).not.toHaveBeenCalled();
   });
 });

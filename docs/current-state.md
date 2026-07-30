@@ -61,6 +61,19 @@ with `DEVSPACE_AI_PROVIDER_MODE=codex`, the dedicated rootless DevSpace Docker s
 dedicated persistent authority; the private GitHub source was represented by an exact-HEAD local
 HTTPS mirror because the Agent's credentialless Git boundary cannot inspect the private remote.
 
+Stopped-session recovery is now implemented on the final-review branch and awaits independent
+verification. The browser retains the exact stopped session and bounded history, removes prompt,
+Interrupt, and Stop controls, and offers one fenced `Start Codex again` action for that session ID.
+Web re-inspects the exact profile and unchanged configuration/runtime identity, compare-and-sets the
+same SQLite row to `creating`, and rolls back only an unchanged claim if Agent acceptance fails.
+Agent reuses the same durable outbox and event sequence but creates a new provider process with the
+next safe process generation, derived either from the finalized in-memory record or the exact
+terminal retained outbox. SQLite advances its stored generation only on canonical
+`session.started`. Each successful generation repeats credential staging, provider-exit proof,
+staging removal, synchronization, and lease release. This is not provider-native resume, does not
+recover `lost` sessions across runtime identity changes, and received no new real-provider or browser
+validation in this correction round.
+
 ### AI Session Beta Slice B — Checkpoint 1 evidence (2026-07-29)
 
 - ✅ Probe A and Probe B had already passed, including provider exit, staged credential

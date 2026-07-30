@@ -571,6 +571,8 @@ AI Session Beta Slice B — Checkpoint 1:
 - 🟡 Approvals and structured questions — Checkpoint 2
 - ✅ Bounded changed-files summary after terminal turns
 - ✅ Clear degraded-session and restart-workspace fallback
+- ✅ Exact stopped-session restart with one durable history/event chain and monotonically increasing
+  Agent-owned provider-process generations (final-review correction awaiting independent verification)
 - 🟡 One global Codex provider at a time remains the beta limitation
 - ✅ Checkpoint 1 passed: private Probe A, private Probe B, and the real browser first-write/read-
   only/interrupt/replay/Stop flow all used the Agent-owned Codex provider; provider exit, staging,

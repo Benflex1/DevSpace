@@ -7,8 +7,12 @@ architecture decision. `@devspace/domain` owns executable lifecycle edges.
 `@devspace/contracts` owns executable public schemas and the Agent API F11 extension. The pinned
 Codex adapter boundary is internal to Agent and is not a public provider protocol.
 
-Slice 0 defines architecture and contracts only. It adds no provider process, supervisor, route
-handler, Web API, SQLite migration, credential delivery, browser stream, or Workbench UI.
+Historical Foundation Slice 0 defined architecture and contracts only; that slice itself added no
+provider process, supervisor, route handler, Web API, SQLite migration, credential delivery, browser
+stream, or Workbench UI. The current Beta Slice B implementation now includes the F11 handlers,
+Agent-owned Codex runtime, Web routes, Web-owned SQLite session/turn/event storage, exact
+acknowledgement, credential staging, browser event streaming, and the Workbench AI tab. Approvals and
+structured questions remain Checkpoint 2.
 
 The authority path is:
 
@@ -40,7 +44,7 @@ The content plane is authorized session content: prompts, assistant text, code, 
 presentations, workspace-relative path presentations, approval descriptions, questions, and
 answers. Content:
 
-- may be persisted later only in dedicated AI-session storage;
+- is persisted only in dedicated AI-session storage;
 - may be shown only to the authenticated owner authorized for the exact project/workspace/session;
 - is strictly typed, valid Unicode, NUL-free, and UTF-8 byte-bounded;
 - is never placed in structured diagnostics, incident details, audit summaries, generic safe
@@ -264,6 +268,25 @@ Workspace-level creation and bounded session listing remain workspace-scoped. Ex
 to session snapshots/history, replay and polling, turn submission, interruption, Stop, changed-file
 and status projections, and turn lookups.
 
+A stopped session can be started again only through the strict Web action
+`{ action: "restart", workspaceId, sessionId }`. Web resolves that exact stopped session, re-inspects
+the profile, verifies the unchanged configuration revision, runtime-plan hash, workspace runtime
+generation, profile ID, and profile revision, and compare-and-sets the row from `stopped` to
+`creating`. Existing turns, events, interactions, title, durable session ID, history bounds, and
+event sequence remain in place. A failure before Agent acceptance restores only the exact claimed
+row and only if its state, event sequence, stored generation, and claim timestamp have not advanced.
+Initial workspace-level creation remains independently idempotent and never substitutes for this
+restart action.
+
+Agent remains process-generation authority; the public F11 start command does not carry a process
+generation. An in-memory restart requires a completely finalized current generation and an exact
+durable terminal `session.stopped`. A cold Agent requires a contiguous retained outbox ending in that
+same terminal event and derives the next safe generation from it. Each successful restart emits one
+new-generation `session.started` and `session.ready` on the existing outbox sequence. Web atomically
+advances SQLite generation only when it commits that exact `session.started`; later events must match
+the stored generation. This starts a new provider process for the same DevSpace session and committed
+history. It is not provider-native thread resume.
+
 The Web/SQLite projection is explicitly bounded. The current limits are:
 
 | Projection | Maximum | Retention/meaning |
@@ -306,7 +329,7 @@ interrupting -> ready | stopping | lost
 stopping -> stopped | lost
 stopped -> creating
 unavailable -> creating | stopping | lost
-lost -> creating | stopping
+lost -> terminal
 ```
 
 Only one nonterminal turn may exist. `waiting-for-approval`, `waiting-for-input`, and
@@ -611,7 +634,7 @@ the stream with a transport failure. It never drops a canonical event.
 
 ### Web to browser
 
-Web later exposes a dedicated authenticated AI stream, not the terminal WebSocket protocol and not
+Web exposes a dedicated authenticated AI stream, not the terminal WebSocket protocol and not
 raw Agent NDJSON. It requires the existing application session, strict Origin validation, and
 authorization for the exact project/workspace/session. Web completes exact identity and replay-gap
 preflight before returning HTTP 200, so foreign/nonexistent sessions and compacted-prefix requests
@@ -845,24 +868,30 @@ deployment profile and runtime authorization. It does not forward browser-suppli
 cwd, environment, permissions, sandbox, executable, arguments, or native IDs. Raw JSON-RPC stays
 inside Agent.
 
-## Later persistence shape (not implemented here)
+## Implemented persistence shape
 
-The persistence slice should use a hybrid model:
+Beta Slice B uses a hybrid model:
 
 - append-only canonical events as the durable ordered content/activity record;
 - normalized sessions, turns, and interaction-request read models for invariants and queries; and
-- a private encrypted/opaque resume-metadata record whose values are never public.
+- a reserved private resume-metadata table whose values are never public; provider-native resume is
+  not enabled by the current Codex profile.
 
-Minimum later tables are `ai_sessions`, `ai_turns`, `ai_events`, `ai_interaction_requests`, and
+The implemented tables are `ai_sessions`, `ai_turns`, `ai_events`, `ai_interaction_requests`, and
 `ai_provider_resume_metadata`. Web remains the sole writer. Required uniqueness includes one
 session sequence, global event ID, one nonterminal turn per session, and one response per request.
-The existing dormant `ai_sessions` table requires a forward migration; Slice 0 deliberately does
-not change it. Existing non-AI tables and lifecycles are not event sourced.
+The historical Slice 0 decision deliberately did not change the dormant `ai_sessions` table; the
+subsequent Beta migrations now provide this storage. Existing non-AI tables and lifecycles are not
+event sourced.
 
 ## Explicit exclusions
 
-AI Sessions v1 Slice 0 does not implement multiple providers, arbitrary executable configuration,
-host AI execution, terminal-backed first-class sessions, database changes, credentials, provider
-runtime, Agent/Web handlers, browser UI, file editor, Git staging/publish, checkpoints, autonomous
-orchestration, persistent generic terminals, multiple workspaces, authentication replacement,
-automatic merge, production deployment, or broad event sourcing.
+Historical AI Sessions v1 Slice 0 did not implement multiple providers, arbitrary executable
+configuration, host AI execution, terminal-backed first-class sessions, database changes,
+credentials, provider runtime, Agent/Web handlers, browser UI, file editor, Git staging/publish,
+checkpoints, autonomous orchestration, persistent generic terminals, multiple workspaces,
+authentication replacement, automatic merge, production deployment, or broad event sourcing.
+Current Beta Slice B implements the Codex-only runtime, storage, handlers, stream, credentials, and
+Workbench path described above. It still excludes multiple providers, provider-native resume,
+approvals, structured questions, hostile-descendant containment, automatic merge, and production
+deployment.

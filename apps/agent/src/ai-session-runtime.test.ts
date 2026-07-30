@@ -7,6 +7,7 @@ import { Duplex } from "node:stream";
 import { describe, expect, test, vi } from "vitest";
 import { CODEX_EXECUTABLE_SHA256, codexProfileRevisionForAuthority, createAiSessionRuntime } from "./ai-session-runtime.js";
 import { createCodexCredentialAuthority, type CodexCredentialAuthority } from "./codex-credential-authority.js";
+import { createAiSessionOutbox } from "./ai-session-outbox.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 
@@ -130,7 +131,11 @@ function createProtocolDocker(captured: Array<Record<string, unknown>>, respond?
       const kind = command.includes("cat >") ? "upload" : command.includes("staged-readback-helper") ? "readback" : command.includes("rm -rf") ? "cleanup" : "provider";
       const id = `${kind}-${++sequence}`;
       captured.push({ id, input });
-      if (kind === "upload") uploadNames.set(id, String((input.environment as Record<string, string>).DEVSPACE_TARGET_NAME));
+      if (kind === "upload") {
+        const name = String((input.environment as Record<string, string>).DEVSPACE_TARGET_NAME);
+        uploadNames.set(id, name);
+        uploads.set(name, Buffer.alloc(0));
+      }
       return Promise.resolve(id);
     },
     startExecAttached: (execId: string) => {
@@ -614,6 +619,105 @@ describe("AI session runtime", () => {
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
   });
 
+  test("restarts one durable session across three unique process generations", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-restart-test-"));
+    const runtime = createAiSessionRuntime({ mode: "fake", stateRoot });
+    const exactProfile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+    const exactBinding = { ...binding, profileRevision: exactProfile.profileRevision };
+    const secondTurnId = "018f1f34-7000-7000-8000-000000000006";
+    try {
+      await runtime.start(exactBinding);
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+
+      await runtime.start(exactBinding);
+      await runtime.sendTurn({ ...exactBinding, processGeneration: 2, turnId: secondTurnId,
+        content: { kind: "text", text: "generation two" } });
+      await runtime.collect(sessionId, 0, 30);
+      await expect(runtime.sendTurn({ ...exactBinding, processGeneration: 1, turnId,
+        content: { kind: "text", text: "stale" } })).rejects.toThrow("ai-identity-mismatch");
+      await expect(runtime.interrupt({ ...exactBinding, processGeneration: 1, turnId: secondTurnId }))
+        .rejects.toThrow("ai-identity-mismatch");
+      await expect(runtime.stop({ ...exactBinding, processGeneration: 1 })).rejects.toThrow("ai-identity-mismatch");
+      await runtime.stop({ ...exactBinding, processGeneration: 2 });
+
+      await runtime.start(exactBinding);
+      const events = await runtime.replay(sessionId, 0);
+      expect(events.map((event) => event.sequence)).toEqual(events.map((_event, index) => index + 1));
+      expect(events.filter((event) => event.eventType === "session.started").map((event) => event.processGeneration)).toEqual([1, 2, 3]);
+      expect(events.filter((event) => event.eventType === "session.ready").map((event) => event.processGeneration)).toEqual([1, 2, 3]);
+      expect(events.filter((event) => event.eventType === "session.stopping").map((event) => event.processGeneration)).toEqual([1, 2]);
+      expect(events.filter((event) => event.eventType === "session.stopped").map((event) => event.processGeneration)).toEqual([1, 2]);
+      expect(events.filter((event) => event.turnId === secondTurnId).every((event) => event.processGeneration === 2)).toBe(true);
+      await runtime.stop({ ...exactBinding, processGeneration: 3 });
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  test("cold Agent restart derives the next generation only from a clean terminal outbox", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-cold-restart-test-"));
+    const first = createAiSessionRuntime({ mode: "fake", stateRoot });
+    const profile = await first.inspect({ projectId, workspaceId, profileId: "codex" });
+    const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+    try {
+      await first.start(exactBinding);
+      await first.stop({ ...exactBinding, processGeneration: 1 });
+
+      const restarted = createAiSessionRuntime({ mode: "fake", stateRoot });
+      await restarted.start(exactBinding);
+      const events = await restarted.replay(sessionId, 0);
+      expect(events.at(-2)).toMatchObject({ eventType: "session.started", processGeneration: 2 });
+      expect(events.at(-1)).toMatchObject({ eventType: "session.ready", processGeneration: 2 });
+      expect(events.filter((event) => event.eventType === "session.lost")).toHaveLength(0);
+      await restarted.stop({ ...exactBinding, processGeneration: 2 });
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  test("cold Agent restart rejects a nonterminal outbox", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-cold-nonterminal-test-"));
+    const first = createAiSessionRuntime({ mode: "fake", stateRoot });
+    const profile = await first.inspect({ projectId, workspaceId, profileId: "codex" });
+    const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+    try {
+      await first.start(exactBinding);
+      const restarted = createAiSessionRuntime({ mode: "fake", stateRoot });
+      await expect(restarted.start(exactBinding)).rejects.toThrow("ai-session-restart-unavailable");
+      const events = await restarted.replay(sessionId, 0);
+      expect(events.at(-1)?.eventType).toBe("session.lost");
+      expect(events.filter((event) => event.eventType === "session.started")).toHaveLength(1);
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  test("cold Agent restart rejects overflow and conflicting retained generations", async () => {
+    for (const malformed of ["overflow", "decreasing"] as const) {
+      const stateRoot = await mkdtemp(join(tmpdir(), `devspace-ai-runtime-cold-${malformed}-test-`));
+      try {
+        const profile = (await createAiSessionRuntime({ mode: "fake", stateRoot }).inspect({ projectId, workspaceId, profileId: "codex" }));
+        const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+        const outbox = await createAiSessionOutbox({ stateRoot, binding });
+        const eventProfile = { profileId: "codex", profileRevision: profile.profileRevision, provider: "codex" };
+        if (malformed === "decreasing") {
+          await outbox.append({ turnId: null, eventType: "session.started", payload: { processGeneration: 2 },
+            profile: eventProfile, processGeneration: 2 });
+        }
+        await outbox.append({ turnId: null, eventType: "session.stopped", payload: { reason: "user-request" },
+          profile: eventProfile, processGeneration: malformed === "overflow" ? Number.MAX_SAFE_INTEGER : 1, kind: "terminal" });
+        const restarted = createAiSessionRuntime({ mode: "fake", stateRoot });
+        await expect(restarted.start(exactBinding)).rejects.toThrow("ai-session-restart-unavailable");
+      } finally { await rm(stateRoot, { recursive: true, force: true }); }
+    }
+  });
+
+  test("rejects restart while the current generation is active", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-active-restart-test-"));
+    const runtime = createAiSessionRuntime({ mode: "fake", stateRoot });
+    const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+    const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+    try {
+      await runtime.start(exactBinding);
+      await expect(runtime.start(exactBinding)).rejects.toThrow("ai-session-state-conflict");
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
   test("Codex adapter sends the pinned managed-container permission policy", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-adapter-test-"));
     const captured: Array<Record<string, unknown>> = [];
@@ -669,9 +773,9 @@ describe("AI session runtime", () => {
       const restartedProfile = await restartedRuntime.inspect({ projectId, workspaceId, profileId: "codex" });
       await restartedRuntime.start({ ...binding, profileRevision: restartedProfile.profileRevision });
       expect(restartedProtocol.uploads.get("auth.json")?.toString("utf8")).toBe(refreshedCredential);
-      await restartedRuntime.stop({ ...binding, profileRevision: restartedProfile.profileRevision, processGeneration: 1 });
+      await restartedRuntime.stop({ ...binding, profileRevision: restartedProfile.profileRevision, processGeneration: 2 });
     } finally {
-      await restartedRuntime?.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await restartedRuntime?.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 2 });
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
       await rm(stateRoot, { recursive: true, force: true });
     }
@@ -893,7 +997,8 @@ describe("AI session runtime", () => {
       expect(control.inspectCalls.some((id) => id.startsWith("cleanup-"))).toBe(true);
       await expect(authority.inspect()).resolves.toBeUndefined();
       expect((await runtime.replay(sessionId, 0)).some((event) => event.eventType === "session.ready")).toBe(false);
-      expect((await runtime.replay(sessionId, 0)).some((event) => event.eventType === "session.stopped")).toBe(false);
+      expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
+      expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }
@@ -910,8 +1015,14 @@ describe("AI session runtime", () => {
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
       await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-      await expect(runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 })).rejects.toThrow("finalization");
+      const stopping = runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
+      await expect(runtime.start({ ...binding, profileRevision: profile.profileRevision })).rejects.toThrow("ai-session-state-conflict");
+      await expect(stopping).rejects.toThrow("finalization");
       expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopped")).toHaveLength(0);
+      await expect(authority.inspect()).rejects.toThrow("credential-unavailable");
+      await expect(runtime.start({ ...binding, profileRevision: profile.profileRevision })).rejects.toThrow("ai-session-state-conflict");
+      await expect(runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        content: { kind: "text", text: "must not run" } })).rejects.toThrow("ai-session-not-started");
       await expect(authority.inspect()).rejects.toThrow("credential-unavailable");
       control.cleanupExitCode = 0;
       await runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
@@ -920,6 +1031,34 @@ describe("AI session runtime", () => {
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }
+  });
+
+  test("each successful provider generation stages, cleans, and releases credentials again", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-generation-cleanup-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const control = { inspectCalls: [] as string[] };
+    const protocol = createProtocolDocker(captured, undefined, control);
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const authority = createCodexCredentialAuthority(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      await runtime.start(exactBinding);
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+      await expect(authority.inspect()).resolves.toBeUndefined();
+      await runtime.start(exactBinding);
+      await runtime.stop({ ...exactBinding, processGeneration: 2 });
+      await expect(authority.inspect()).resolves.toBeUndefined();
+
+      const events = await runtime.replay(sessionId, 0);
+      expect(events.filter((event) => event.eventType === "session.stopped").map((event) => event.processGeneration)).toEqual([1, 2]);
+      expect(control.inspectCalls.filter((id) => id.startsWith("provider-"))).toHaveLength(2);
+      expect(control.inspectCalls.filter((id) => id.startsWith("cleanup-"))).toHaveLength(2);
+      expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
   });
 
   test("provider exit is required before synchronization or staging cleanup", async () => {
