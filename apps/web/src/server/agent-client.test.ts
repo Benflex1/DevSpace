@@ -2,13 +2,14 @@ import http from "node:http";
 import { mkdtemp, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   AI_EVENT_NDJSON_CONTENT_TYPE,
   AI_MAX_STRUCTURED_INPUT_QUESTIONS,
   AI_USER_CONTENT_MAX_BYTES
 } from "@devspace/contracts";
 import { AgentResponseError, createAgentClient, AgentUnavailableError } from "./agent-client.js";
+import { createAiStreamAdmission } from "./ai-stream-admission.js";
 import { createLogger } from "@devspace/diagnostics";
 import { normalizeUserFacingFailure } from "./user-facing-failure.js";
 
@@ -36,6 +37,14 @@ const synchronizedFrame = {
   throughSequence: 0
 } as const;
 
+const additionalStreamSessionIds = [
+  streamSessionId,
+  "018f0f00-0000-7000-8000-000000000011",
+  "018f0f00-0000-7000-8000-000000000012",
+  "018f0f00-0000-7000-8000-000000000013",
+  "018f0f00-0000-7000-8000-000000000014"
+] as const;
+
 async function collectStream(socketPath: string): Promise<unknown[]> {
   const frames: unknown[] = [];
   for await (const frame of createAgentClient(socketPath, { createId: () => id, now: () => new Date(timestamp) })
@@ -49,6 +58,171 @@ function streamService(write: (response: http.ServerResponse) => void): Promise<
     write(response);
   });
 }
+
+async function openStream(
+  socketPath: string,
+  sessionId: string,
+  options: Parameters<typeof createAgentClient>[1] = {}
+): Promise<AsyncIterator<unknown>> {
+  const iterator = createAgentClient(socketPath, options).streamAiEvents(sessionId, 0)[Symbol.asyncIterator]();
+  await expect(iterator.next()).resolves.toMatchObject({
+    done: false,
+    value: { frameType: "stream.synchronized", sessionId }
+  });
+  return iterator;
+}
+
+test("shares the four-stream global admission limit across Agent client instances and opens no fifth request", async () => {
+  let opened = 0;
+  const service = await listen((request, response) => {
+    opened += 1;
+    const match = /^\/v1\/ai-sessions\/([^/]+)\/events/u.exec(request.url ?? "");
+    expect(match).not.toBeNull();
+    const sessionId = match![1]!;
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.write(`${JSON.stringify({ ...synchronizedFrame, sessionId })}\n`);
+  });
+  const iterators: AsyncIterator<unknown>[] = [];
+  try {
+    for (const sessionId of additionalStreamSessionIds.slice(0, 4)) {
+      iterators.push(await openStream(service.socketPath, sessionId));
+    }
+    const denied = createAgentClient(service.socketPath)
+      .streamAiEvents(additionalStreamSessionIds[4], 0)[Symbol.asyncIterator]();
+    iterators.push(denied);
+    await expect(denied.next()).rejects.toMatchObject({
+        name: "AgentUnavailableError",
+        failureCategory: "dependency-unavailable"
+      });
+    expect(opened).toBe(4);
+  } finally {
+    await Promise.all(iterators.map(async (iterator) => { await iterator.return?.(); }));
+    await service.close();
+  }
+});
+
+test("admits only two Web Agent streams for one AI session and releases both slots on cancellation", async () => {
+  let opened = 0;
+  const service = await listen((_request, response) => {
+    opened += 1;
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.write(`${JSON.stringify(synchronizedFrame)}\n`);
+  });
+  const first = await openStream(service.socketPath, streamSessionId);
+  const second = await openStream(service.socketPath, streamSessionId);
+  try {
+    const denied = createAgentClient(service.socketPath).streamAiEvents(streamSessionId, 0)[Symbol.asyncIterator]();
+    await expect(denied.next()).rejects.toBeInstanceOf(AgentUnavailableError);
+    expect(opened).toBe(2);
+  } finally {
+    await first.return?.();
+    await second.return?.();
+  }
+  const replacement = await openStream(service.socketPath, streamSessionId);
+  await replacement.return?.();
+  expect(opened).toBe(3);
+  await service.close();
+});
+
+test("allocates no maximum-sized parser buffer for an empty or small AI event stream", async () => {
+  const allocationSizes: number[] = [];
+  const original = Buffer.allocUnsafe.bind(Buffer);
+  const spy = vi.spyOn(Buffer, "allocUnsafe").mockImplementation((size) => {
+    allocationSizes.push(size);
+    return original(size);
+  });
+  try {
+    const empty = await streamService((response) => response.end());
+    try { await expect(collectStream(empty.socketPath)).resolves.toEqual([]); }
+    finally { await empty.close(); }
+    const small = await streamService((response) => response.end(`${JSON.stringify(synchronizedFrame)}\n`));
+    try { await expect(collectStream(small.socketPath)).resolves.toEqual([synchronizedFrame]); }
+    finally { await small.close(); }
+  } finally {
+    spy.mockRestore();
+  }
+  const maximumCanonicalFrameBytes =
+    AI_MAX_STRUCTURED_INPUT_QUESTIONS * AI_USER_CONTENT_MAX_BYTES * 6 + 256 * 1024;
+  expect(allocationSizes).not.toContain(maximumCanonicalFrameBytes);
+  expect(Math.max(0, ...allocationSizes)).toBeLessThanOrEqual(64 * 1024);
+});
+
+test("one-byte socket chunking retains at most one parser slab for a small frame", async () => {
+  const event = {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: "018f0f00-0000-7000-8000-000000000020",
+    sessionId: streamSessionId,
+    turnId: "018f0f00-0000-7000-8000-000000000021",
+    sequence: 1,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision: `sha256-ai-profile-v1:${"a".repeat(64)}`, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.output.delta",
+    payload: { stream: "assistant", text: "x".repeat(4_096) }
+  } as const;
+  const encoded = Buffer.from(`${JSON.stringify(event)}\n`, "utf8");
+  const service = await streamService((response) => {
+    for (let index = 0; index < encoded.length; index += 1) response.write(encoded.subarray(index, index + 1));
+    response.end();
+  });
+  const original = Buffer.allocUnsafe.bind(Buffer);
+  let parserSlabs = 0;
+  const spy = vi.spyOn(Buffer, "allocUnsafe").mockImplementation((size) => {
+    if (size === 64 * 1024) parserSlabs += 1;
+    return original(size);
+  });
+  try { await expect(collectStream(service.socketPath)).resolves.toEqual([event]); }
+  finally { spy.mockRestore(); await service.close(); }
+  expect(parserSlabs).toBe(1);
+});
+
+test("accepts a legal near-maximum escaped structured-answer frame", async () => {
+  const answerText = "\u0001".repeat(AI_USER_CONTENT_MAX_BYTES);
+  const event = {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: "018f0f00-0000-7000-8000-000000000020",
+    sessionId: streamSessionId,
+    turnId: "018f0f00-0000-7000-8000-000000000021",
+    sequence: 1,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision: `sha256-ai-profile-v1:${"a".repeat(64)}`, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.input.responded",
+    payload: {
+      requestId: "018f0f00-0000-7000-8000-000000000022",
+      answers: Array.from({ length: AI_MAX_STRUCTURED_INPUT_QUESTIONS }, (_, index) => ({
+        questionId: `question-${index}`,
+        kind: "text" as const,
+        text: answerText
+      }))
+    }
+  } as const;
+  const encoded = Buffer.from(JSON.stringify(event), "utf8");
+  const maximumCanonicalFrameBytes =
+    AI_MAX_STRUCTURED_INPUT_QUESTIONS * AI_USER_CONTENT_MAX_BYTES * 6 + 256 * 1024;
+  expect(encoded.length).toBeGreaterThan(maximumCanonicalFrameBytes - 512 * 1024);
+  expect(encoded.length).toBeLessThanOrEqual(maximumCanonicalFrameBytes);
+  const service = await streamService((response) => response.end(Buffer.concat([encoded, Buffer.from("\n")])));
+  try { await expect(collectStream(service.socketPath)).resolves.toEqual([event]); }
+  finally { await service.close(); }
+}, 30_000);
+
+test("releases admission when setup throws before a request exists", async () => {
+  const admission = createAiStreamAdmission({ globalLimit: 1, perSessionLimit: 1 });
+  const failed = createAgentClient("/not-opened.sock", {
+    aiStreamAdmission: admission,
+    createId: () => { throw new Error("setup-failure"); }
+  }).streamAiEvents(streamSessionId, 0)[Symbol.asyncIterator]();
+  await expect(failed.next()).rejects.toThrow("setup-failure");
+
+  const service = await streamService((response) => response.end(`${JSON.stringify(synchronizedFrame)}\n`));
+  try {
+    const replacement = createAgentClient(service.socketPath, { aiStreamAdmission: admission })
+      .streamAiEvents(streamSessionId, 0)[Symbol.asyncIterator]();
+    await expect(replacement.next()).resolves.toEqual({ done: false, value: synchronizedFrame });
+    await replacement.return?.(undefined);
+  } finally { await service.close(); }
+});
 
 test("parses one or multiple canonical NDJSON frames from arbitrary socket chunks", async () => {
   const encoded = Buffer.from(`${JSON.stringify(synchronizedFrame)}\n`, "utf8");

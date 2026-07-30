@@ -24,6 +24,10 @@ export const AI_WORKSPACE_RELATIVE_PATH_MAX_BYTES = 4_096;
 export const AI_MAX_PRESENTATION_PATHS = 256;
 export const AI_MAX_STRUCTURED_INPUT_QUESTIONS = 16;
 export const AI_MAX_STRUCTURED_INPUT_OPTIONS = 32;
+// Shared non-wire implementation bound. This does not participate in any
+// request, response, event, or error schema.
+export const AI_EVENT_STREAM_FRAME_MAX_BYTES =
+  AI_MAX_STRUCTURED_INPUT_QUESTIONS * AI_USER_CONTENT_MAX_BYTES * 6 + 256 * 1024;
 
 const unicodeScalarString = z.string().refine((value) => {
   for (let index = 0; index < value.length; index += 1) {

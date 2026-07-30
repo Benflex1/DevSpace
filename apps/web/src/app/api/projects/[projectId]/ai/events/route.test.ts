@@ -74,4 +74,40 @@ describe("AI event stream HTTP preflight", () => {
     await expect(GET(malformed, context)).resolves.toMatchObject({ status: 422 });
     expect(mocks.agentStream).not.toHaveBeenCalled();
   });
+
+  test("pulls one Agent frame at a time and cancellation returns the iterator", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    let yielded = 0;
+    let released = false;
+    mocks.agentStream.mockImplementationOnce(async function* () {
+      await Promise.resolve();
+      try {
+        yielded += 1;
+        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+        yielded += 1;
+        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+        yielded += 1;
+        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+      } finally {
+        released = true;
+      }
+    });
+
+    const response = await GET(request(0), context);
+    const reader = response.body!.getReader();
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(yielded).toBe(2);
+    await reader.cancel();
+    expect(released).toBe(true);
+  });
 });

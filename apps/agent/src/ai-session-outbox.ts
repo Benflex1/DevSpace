@@ -314,7 +314,7 @@ export function manifestPathForAiSession(stateRoot: string, sessionId: string): 
 }
 
 export class AiSessionOutbox {
-  private readonly listeners = new Set<(event: CanonicalAiEvent) => void>();
+  private readonly listeners = new Set<(event: CanonicalAiEvent) => unknown>();
   private chain: Promise<void> = Promise.resolve();
   private eventsValue: CanonicalAiEvent[];
   private manifestValue: AiSessionOutboxManifest;
@@ -483,14 +483,16 @@ export class AiSessionOutbox {
     });
   }
 
-  async subscribe(afterSequence: number, listener: (event: CanonicalAiEvent) => void): Promise<() => void> {
+  async subscribe(afterSequence: number, listener: (event: CanonicalAiEvent) => unknown): Promise<() => void> {
     return await this.enqueue(() => {
       try { aiAfterSequenceSchema.parse(afterSequence); }
       catch { throw eventGap(); }
       const first = this.eventsValue[0]?.sequence ?? 1;
       if (afterSequence < first - 1) throw eventGap();
       for (const event of this.eventsValue.filter((candidate) => candidate.sequence > afterSequence)) {
-        try { listener(event); } catch { /* a consumer cannot invalidate durable state */ }
+        try {
+          if (listener(event) === false) return () => undefined;
+        } catch { /* a consumer cannot invalidate durable state */ }
       }
       this.listeners.add(listener);
       return () => { this.listeners.delete(listener); };
@@ -551,7 +553,9 @@ export class AiSessionOutbox {
     if (input.kind === "turn-finalization") this.activeTurnSlotsRemaining -= 1;
     if (input.kind === "provider-finalization") this.providerFinalizationSlotsRemaining -= 1;
     for (const listener of this.listeners) {
-      try { listener(event); } catch { /* delivery errors never poison the durable chain */ }
+      try {
+        if (listener(event) === false) this.listeners.delete(listener);
+      } catch { /* delivery errors never poison the durable chain */ }
     }
     return event;
   }

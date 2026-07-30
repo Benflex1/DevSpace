@@ -223,6 +223,22 @@ describe("Agent-private AI session outbox", () => {
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
   });
 
+  test("does not retain a listener that declines delivery during subscription catch-up", async () => {
+    const { stateRoot, outbox } = await fixture();
+    try {
+      await outbox.append(eventInput(1));
+      await outbox.append(eventInput(2));
+      const delivered: number[] = [];
+      const unsubscribe = await outbox.subscribe(0, (event) => {
+        delivered.push(event.sequence);
+        return false;
+      });
+      await outbox.append(eventInput(3));
+      expect(delivered).toEqual([1]);
+      unsubscribe();
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
   test.each([1, 2] as const)("distinguishes a beginTurn append fault at durable stage %s", async (failedAppend) => {
     const { stateRoot } = await fixture();
     let append = 0;

@@ -30,6 +30,13 @@ import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspa
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
 import { AiOutboxError } from "./ai-session-outbox.js";
+import { createAiStreamAdmission } from "./ai-stream-admission.js";
+import {
+  AI_STREAM_BACKPRESSURE_TIMEOUT_MS,
+  AI_STREAM_LIVE_QUEUE_MAX_BYTES,
+  AI_STREAM_LIVE_QUEUE_MAX_EVENTS,
+  createAiStreamDelivery
+} from "./ai-stream-delivery.js";
 
 const MAX_BODY_BYTES = 2_200_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
@@ -60,6 +67,13 @@ export interface AgentServerOptions {
   readonly createId?: () => string;
   readonly logger?: StructuredLogger;
   readonly aiRuntime?: AiSessionRuntime;
+  /** Internal test seams may only lower stream admission and queue limits. */
+  readonly aiStreamGlobalLimit?: number;
+  readonly aiStreamPerSessionLimit?: number;
+  readonly aiStreamLiveQueueMaxEvents?: number;
+  readonly aiStreamLiveQueueMaxBytes?: number;
+  /** Internal test seam for a shorter bounded drain timeout. */
+  readonly aiStreamBackpressureTimeoutMs?: number;
 }
 
 export interface AgentServer {
@@ -302,6 +316,22 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
     mode: process.env.DEVSPACE_AI_PROVIDER_MODE === "fake" ? "fake" : "codex" });
+  const aiStreamAdmission = createAiStreamAdmission({
+    globalLimit: Math.max(0, Math.min(options.aiStreamGlobalLimit ?? 4, 4)),
+    perSessionLimit: Math.max(0, Math.min(options.aiStreamPerSessionLimit ?? 2, 2))
+  });
+  const aiStreamBackpressureTimeoutMs = Math.max(
+    0,
+    Math.min(options.aiStreamBackpressureTimeoutMs ?? AI_STREAM_BACKPRESSURE_TIMEOUT_MS, AI_STREAM_BACKPRESSURE_TIMEOUT_MS)
+  );
+  const aiStreamLiveQueueMaxEvents = Math.max(
+    0,
+    Math.min(options.aiStreamLiveQueueMaxEvents ?? AI_STREAM_LIVE_QUEUE_MAX_EVENTS, AI_STREAM_LIVE_QUEUE_MAX_EVENTS)
+  );
+  const aiStreamLiveQueueMaxBytes = Math.max(
+    0,
+    Math.min(options.aiStreamLiveQueueMaxBytes ?? AI_STREAM_LIVE_QUEUE_MAX_BYTES, AI_STREAM_LIVE_QUEUE_MAX_BYTES)
+  );
   const terminalWebSockets = new WebSocketServer({ noServer: true, clientTracking: false,
     maxPayload: 65_537, perMessageDeflate: false, handleProtocols: (protocols) => protocols.size === 1 && protocols.has("devspace.terminal.v1")
       ? "devspace.terminal.v1" : false });
@@ -391,25 +421,67 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!query.success) return requestError(response, requestId, now, { location: "query", field: null, reason: "malformed" });
       const afterSequence = Number(query.data.afterSequence);
       const sessionId = aiStreamMatch[1]!;
+      const releaseAdmission = aiStreamAdmission.tryAcquire(sessionId);
+      if (releaseAdmission === null) {
+        return sendJson(response, 503, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code: "AI_OUTBOX_UNAVAILABLE",
+          message: "The AI event stream is temporarily unavailable.",
+          retryable: true,
+          failure: {
+            code: "AI_OUTBOX_UNAVAILABLE",
+            category: "dependency-unavailable",
+            incidentId: createId()
+          }
+        } }));
+      }
+      eventResponses.add(response);
+      const delivery = createAiStreamDelivery({
+        request,
+        response,
+        backpressureTimeoutMs: aiStreamBackpressureTimeoutMs,
+        liveQueueMaxEvents: aiStreamLiveQueueMaxEvents,
+        liveQueueMaxBytes: aiStreamLiveQueueMaxBytes,
+        onClose: () => {
+          eventResponses.delete(response);
+          releaseAdmission();
+        }
+      });
       let replay;
       try { replay = await aiRuntime.replay(sessionId, afterSequence); }
       catch (error) {
         const code = error instanceof AiOutboxError ? error.code : "AI_OUTBOX_UNAVAILABLE";
         const selected = code === "AI_EVENT_GAP" ? { status: 409, retryable: false } : { status: 503, retryable: true };
+        delivery.close(false);
+        if (response.destroyed) return;
         return sendJson(response, selected.status, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
           code, message: "The AI event outbox could not be replayed safely.", retryable: selected.retryable,
           failure: { code, category: code === "AI_EVENT_GAP" ? "protocol-failure" : "dependency-unavailable", incidentId: createId() }
         } }));
       }
-      response.writeHead(200, { "content-type": endpoint.successContentType, "cache-control": "no-store", connection: "keep-alive" });
-      response.flushHeaders();
-      for (const event of replay) response.write(`${JSON.stringify(event)}\n`);
-      const throughSequence = replay.at(-1)?.sequence ?? afterSequence;
-      const synchronized = aiEventStreamFrameSchema.parse({ schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence });
-      response.write(`${JSON.stringify(synchronized)}\n`);
-      const unsubscribe = await aiRuntime.subscribe(sessionId, throughSequence, (event) => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); });
-      request.once("close", unsubscribe);
-      response.once("close", unsubscribe);
+      if (delivery.closed) return;
+      try {
+        response.writeHead(200, { "content-type": endpoint.successContentType, "cache-control": "no-store", connection: "keep-alive" });
+        response.flushHeaders();
+        for (const event of replay) {
+          if (!await delivery.writeFrame(event)) return;
+        }
+        const throughSequence = replay.at(-1)?.sequence ?? afterSequence;
+        const synchronized = aiEventStreamFrameSchema.parse({
+          schemaVersion: "devspace.ai-stream/v1",
+          frameType: "stream.synchronized",
+          sessionId,
+          throughSequence
+        });
+        if (!await delivery.writeFrame(synchronized)) return;
+        const unsubscribe = await aiRuntime.subscribe(
+          sessionId,
+          throughSequence,
+          (event) => delivery.enqueueLive(event)
+        );
+        delivery.setUnsubscribe(unsubscribe);
+      } catch {
+        delivery.close();
+      }
       return;
     }
 

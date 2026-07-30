@@ -139,7 +139,7 @@ export interface AiSessionRuntime {
   interrupt(input: AiProcessBinding & { turnId: string }): Promise<void>;
   stop(input: AiProcessBinding): Promise<void>;
   replay(sessionId: string, afterSequence: number): Promise<CanonicalAiEvent[]>;
-  subscribe(sessionId: string, afterSequence: number, listener: (event: CanonicalAiEvent) => void): Promise<() => void>;
+  subscribe(sessionId: string, afterSequence: number, listener: (event: CanonicalAiEvent) => unknown): Promise<() => void>;
   acknowledge(input: AiEventAcknowledgement): Promise<AiEventAcknowledgement>;
   collect(sessionId: string, afterSequence: number, waitMs: number): Promise<CanonicalAiEvent[]>;
 }

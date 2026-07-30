@@ -5,8 +5,7 @@ import {
   f10AgentApiV1EndpointByOperation,
   f11AiAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
-  AI_MAX_STRUCTURED_INPUT_QUESTIONS,
-  AI_USER_CONTENT_MAX_BYTES,
+  AI_EVENT_STREAM_FRAME_MAX_BYTES,
   type AiEventStreamFrame,
   type AiProviderProfileProjection,
   type AgentSnapshotData,
@@ -29,13 +28,15 @@ import {
   classifyFailureCode, createLogger, type FailureCategory, type LogContext, type StructuredLogger
 } from "@devspace/diagnostics";
 import { v7 as uuidv7 } from "uuid";
+import {
+  processAiStreamAdmission,
+  type AiStreamAdmission
+} from "./ai-stream-admission.js";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
-// The widest public canonical payload is sixteen structured text answers. JSON
-// escaping can expand one UTF-8 byte to six ASCII bytes; the fixed allowance
-// covers canonical identity fields, question IDs, and framing metadata.
-const AI_EVENT_STREAM_FRAME_MAX_BYTES =
-  AI_MAX_STRUCTURED_INPUT_QUESTIONS * AI_USER_CONTENT_MAX_BYTES * 6 + 256 * 1024;
+const AI_EVENT_STREAM_PARSER_SLAB_BYTES = 64 * 1024;
+const AI_EVENT_STREAM_PARSER_MAX_SEGMENTS =
+  Math.ceil(AI_EVENT_STREAM_FRAME_MAX_BYTES / AI_EVENT_STREAM_PARSER_SLAB_BYTES);
 
 function streamProtocolFailure(requestId: string): AgentUnavailableError {
   return new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
@@ -45,9 +46,45 @@ async function* parseBoundedAiEventNdjson(
   response: http.IncomingMessage,
   requestId: string
 ): AsyncGenerator<AiEventStreamFrame> {
-  const pending = Buffer.allocUnsafe(AI_EVENT_STREAM_FRAME_MAX_BYTES);
+  let segments: Buffer[] = [];
   let pendingBytes = 0;
   const decoder = new TextDecoder("utf-8", { fatal: true });
+  const append = (bytes: Buffer, start: number, end: number): void => {
+    const length = end - start;
+    if (pendingBytes + length > AI_EVENT_STREAM_FRAME_MAX_BYTES) throw streamProtocolFailure(requestId);
+    let offset = start;
+    while (offset < end) {
+      let segment = segments.at(-1);
+      const used = pendingBytes % AI_EVENT_STREAM_PARSER_SLAB_BYTES;
+      if (segment === undefined || used === 0) {
+        if (segments.length >= AI_EVENT_STREAM_PARSER_MAX_SEGMENTS) throw streamProtocolFailure(requestId);
+        segment = Buffer.allocUnsafe(AI_EVENT_STREAM_PARSER_SLAB_BYTES);
+        segments.push(segment);
+      }
+      const copied = Math.min(end - offset, AI_EVENT_STREAM_PARSER_SLAB_BYTES - used);
+      bytes.copy(segment, used, offset, offset + copied);
+      pendingBytes += copied;
+      offset += copied;
+    }
+  };
+  const finishFrame = (): AiEventStreamFrame => {
+    if (pendingBytes === 0) throw streamProtocolFailure(requestId);
+    const length = pendingBytes;
+    const retained = segments;
+    segments = [];
+    pendingBytes = 0;
+    const encoded = retained.length === 1
+      ? retained[0]!.subarray(0, length)
+      : Buffer.concat(retained.map((segment, index) => segment.subarray(
+        0,
+        index === retained.length - 1 ? length - index * AI_EVENT_STREAM_PARSER_SLAB_BYTES : undefined
+      )), length);
+    try {
+      return aiEventStreamFrameSchema.parse(JSON.parse(decoder.decode(encoded)));
+    } catch {
+      throw streamProtocolFailure(requestId);
+    }
+  };
   try {
     for await (const chunk of response) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
@@ -55,21 +92,9 @@ async function* parseBoundedAiEventNdjson(
       while (offset < bytes.length) {
         const newline = bytes.indexOf(0x0a, offset);
         const end = newline < 0 ? bytes.length : newline;
-        const segmentLength = end - offset;
-        if (pendingBytes + segmentLength > AI_EVENT_STREAM_FRAME_MAX_BYTES) throw streamProtocolFailure(requestId);
-        if (segmentLength > 0) {
-          bytes.copy(pending, pendingBytes, offset, end);
-          pendingBytes += segmentLength;
-        }
+        append(bytes, offset, end);
         if (newline < 0) break;
-        if (pendingBytes === 0) throw streamProtocolFailure(requestId);
-        let frame: AiEventStreamFrame;
-        try {
-          frame = aiEventStreamFrameSchema.parse(JSON.parse(decoder.decode(pending.subarray(0, pendingBytes))));
-        } catch {
-          throw streamProtocolFailure(requestId);
-        }
-        pendingBytes = 0;
+        const frame = finishFrame();
         yield frame;
         offset = newline + 1;
       }
@@ -78,6 +103,9 @@ async function* parseBoundedAiEventNdjson(
   } catch (error) {
     response.destroy();
     throw error instanceof AgentUnavailableError ? error : streamProtocolFailure(requestId);
+  } finally {
+    segments = [];
+    pendingBytes = 0;
   }
 }
 
@@ -123,6 +151,7 @@ export function createAgentClient(socketPath: string, options: {
   createId?: () => string; now?: () => Date;
   logger?: StructuredLogger;
   previewFailureDiagnostics?: "terminal" | "deferred";
+  aiStreamAdmission?: AiStreamAdmission;
 } = {}) {
   const defaultTimeoutMs = options.timeoutMs ?? 5_000;
   const mutationReceiptTimeoutMs = options.mutationReceiptTimeoutMs ?? defaultTimeoutMs;
@@ -130,6 +159,7 @@ export function createAgentClient(socketPath: string, options: {
   const createId = options.createId ?? uuidv7;
   const now = options.now ?? (() => new Date());
   const logger = options.logger ?? createLogger({ component: "web", subsystem: "agent-client", now });
+  const aiStreamAdmission = options.aiStreamAdmission ?? processAiStreamAdmission;
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
@@ -347,11 +377,13 @@ export function createAgentClient(socketPath: string, options: {
     stopAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.stop", data, operationId) as MutationReceipt,
     acknowledgeAiEvents: async (data: AcknowledgeAiEventsData): Promise<AcknowledgeAiEventsData> => await call("ai-session.events.acknowledge", data) as AcknowledgeAiEventsData,
     streamAiEvents: async function* (sessionId: string, afterSequence: number): AsyncGenerator<AiEventStreamFrame> {
-      const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
-      const requestId = createId();
+      const releaseAdmission = aiStreamAdmission.tryAcquire(sessionId);
+      if (releaseAdmission === null) throw new AgentUnavailableError();
       let activeResponse: http.IncomingMessage | null = null;
       let cleanupRequest: (() => void) | null = null;
       try {
+        const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
+        const requestId = createId();
         const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
           const request = http.request({ socketPath, path: endpoint.path.replace("{aiSessionId}", encodeURIComponent(sessionId)) + `?afterSequence=${afterSequence}`,
             method: "GET", headers: { "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION), "X-DevSpace-Request-Id": requestId,
@@ -382,6 +414,7 @@ export function createAgentClient(socketPath: string, options: {
         activeResponse?.destroy();
         const cleanup = cleanupRequest as (() => void) | null;
         if (cleanup !== null) cleanup();
+        releaseAdmission();
       }
     }
   };

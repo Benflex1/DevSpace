@@ -59,8 +59,12 @@ validates managed execution context and baseline before reserving and appending 
 Stop serializes across the admission owner and partial accepted/started outbox faults resolve
 according to what became durable. Web no longer inserts a turn before the Agent call; canonical
 events and the post-receipt exact SQLite ensure converge stream-first or POST-first without a
-Web-only accepted row. The Web Agent event reader now uses a fixed byte-bounded NDJSON frame buffer,
-fatal UTF-8 decoding, strict frame validation, and rejects malformed or partial EOF framing.
+Web-only accepted row. The Web Agent event reader now uses lazy 64 KiB slabs under one shared legal
+frame bound, fatal UTF-8 decoding, strict frame validation, and rejects malformed or partial EOF
+framing. Process-global Web and per-Agent-server admission independently cap streams at four
+globally and two per session. Agent replay, synchronization, and one serialized live writer honor
+HTTP backpressure with a bounded timeout; each live subscriber has a 32-event, byte-bounded FIFO and
+is disconnected independently on overflow without affecting durable append.
 
 The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
 structured questions remain explicitly in progress for Checkpoint 2. The fake-provider suite was not
@@ -103,8 +107,8 @@ reconstruction appends one `turn.lost` before `session.lost` for an unfinished a
 SQLite rejects every later turn event without the matching committed canonical acceptance and
 generation, rejects illegal post-terminal progression, and projects `turn.lost` terminally.
 `session.started` envelope/payload generations must match, and Web `send` actions reject every
-additional top-level key. Stream admission/backpressure and lazy parser allocation remain isolated
-follow-up work; Checkpoint 2 remains deferred.
+additional top-level key. The isolated stream-resource correction is complete without new
+real-provider or browser validation; Checkpoint 2 remains deferred.
 
 ### AI Session Beta Slice B — Checkpoint 1 evidence (2026-07-29)
 
