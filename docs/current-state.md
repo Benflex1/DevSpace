@@ -54,6 +54,14 @@ notifications are serialized in receive order, and native terminal processing is
 identical same-turn duplicates are ignored while conflicting or late terminal/output/activity
 notifications fail closed without projection. Native thread and turn IDs remain Agent-private.
 
+Final-review Round B makes canonical `turn.accepted` the sole turn-admission authority. Agent
+validates managed execution context and baseline before reserving and appending acceptance, while
+Stop serializes across the admission owner and partial accepted/started outbox faults resolve
+according to what became durable. Web no longer inserts a turn before the Agent call; canonical
+events and the post-receipt exact SQLite ensure converge stream-first or POST-first without a
+Web-only accepted row. The Web Agent event reader now uses a fixed byte-bounded NDJSON frame buffer,
+fatal UTF-8 decoding, strict frame validation, and rejects malformed or partial EOF framing.
+
 The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
 structured questions remain explicitly in progress for Checkpoint 2. The fake-provider suite was not
 used as live-validation evidence. The real browser run used an isolated branch-local Web/Agent pair
@@ -367,7 +375,7 @@ demonstrates that process-group signalling works for a cooperative fixture but i
 production Stop authority: the dedicated rootless environment exposes no writable delegated
 cgroup or equivalent atomic descendant-tree boundary. The owner-only beta provider lifecycle is
 implemented through the exact managed workspace container and dedicated authority above, but it
-does not claim hostile-descendant containment. F11 handlers, approvals, structured questions, and
+does not claim hostile-descendant containment. Checkpoint 2 approvals, structured questions, and
 broader multi-provider support remain absent. The opt-in executable now conditions this blocked
 supervisor result on the reviewed cgroup probe tuple; a stronger or malformed future environment
 yields an explicit review-required or probe-failed result instead of replaying the static blocker

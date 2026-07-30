@@ -10,6 +10,7 @@ const ids = {
 const mocks = vi.hoisted(() => ({
   inspect: vi.fn(),
   restart: vi.fn(),
+  send: vi.fn(),
   getConfig: vi.fn(() => ({ databasePath: "test.sqlite", agentSocketPath: "test.sock", appOrigin: "http://localhost",
     auth: { mode: "development", actor: "owner@example.invalid" } })),
   authenticate: vi.fn(() => Promise.resolve({ identity: "owner@example.invalid" }))
@@ -24,7 +25,7 @@ vi.mock("../../../../../server/database.js", () => ({ getProjectDatabase: () => 
 vi.mock("../../../../../server/agent-client.js", () => ({ createAgentClient: () => ({}) }));
 vi.mock("../../../../../server/ai-sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../../../../server/ai-sessions.js")>("../../../../../server/ai-sessions.js");
-  return { ...actual, inspectAiWorkbench: mocks.inspect, restartAiSession: mocks.restart };
+  return { ...actual, inspectAiWorkbench: mocks.inspect, restartAiSession: mocks.restart, sendAiTurn: mocks.send };
 });
 
 import { GET, POST } from "./route.js";
@@ -42,6 +43,7 @@ const request = new Request(`http://localhost/api/projects/${ids.projectId}/ai?w
 afterEach(() => {
   mocks.inspect.mockReset();
   mocks.restart.mockReset();
+  mocks.send.mockReset();
   mocks.authenticate.mockReset();
   mocks.authenticate.mockResolvedValue({ identity: "owner@example.invalid" });
 });
@@ -87,6 +89,25 @@ describe("AI stopped-session restart route", () => {
 
     expect(response.status).toBe(200);
     expect(mocks.restart).toHaveBeenCalledWith(ids.projectId, ids.workspaceId, ids.sessionId, expect.any(Object));
+  });
+
+  test("returns only the opaque turn ID for an ambiguous send outcome", async () => {
+    const { AiTurnOutcomeAmbiguousError } = await import("../../../../../server/ai-sessions.js");
+    const turnId = "018f0f00-0000-7000-8000-000000000105";
+    mocks.send.mockRejectedValueOnce(new AiTurnOutcomeAmbiguousError(turnId));
+    const response = await POST(post({
+      action: "send",
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      content: { kind: "text", text: "private prompt" }
+    }), context);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      message: "The AI turn outcome is being reconciled. The selected session will be reloaded.",
+      code: "AI_SESSION_CONFLICT",
+      turnId,
+      outcome: "ambiguous"
+    });
   });
 
   test.each([

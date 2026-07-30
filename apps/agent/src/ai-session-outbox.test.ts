@@ -223,6 +223,32 @@ describe("Agent-private AI session outbox", () => {
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
   });
 
+  test.each([1, 2] as const)("distinguishes a beginTurn append fault at durable stage %s", async (failedAppend) => {
+    const { stateRoot } = await fixture();
+    let append = 0;
+    let faultEnabled = true;
+    try {
+      const outbox = await createAiSessionOutbox({ stateRoot, binding, faultHooks: {
+        beforeAppendWrite: () => {
+          append += 1;
+          if (faultEnabled && append === failedAppend) throw new Error("injected-begin-turn-failure");
+        }
+      } });
+      await outbox.reserveProviderGeneration();
+      await expect(outbox.beginTurn({
+        turnId: sessionId, profile, processGeneration: 1, content: { kind: "text", text: "hello" }
+      })).rejects.toMatchObject({ code: "AI_OUTBOX_UNAVAILABLE" });
+      expect(outbox.events.map((event) => event.eventType)).toEqual(failedAppend === 1 ? [] : ["turn.accepted"]);
+      if (failedAppend === 1) {
+        faultEnabled = false;
+        await expect(outbox.beginTurn({
+          turnId: sessionId, profile, processGeneration: 1, content: { kind: "text", text: "hello" }
+        })).resolves.toHaveLength(2);
+      }
+      await outbox.finishTurn();
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
   test("serializes concurrent append and acknowledgement without regression", async () => {
     const { stateRoot, outbox } = await fixture();
     try {

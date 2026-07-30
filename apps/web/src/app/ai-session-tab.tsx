@@ -15,6 +15,7 @@ type Turn = BrowserAiTurn;
 type SessionData = { id: string; title: string; state: string; profileRevision: string; lastSequence: number; historyStartSequence: number; historyTruncated: boolean };
 type SessionSummary = Pick<SessionData, "id" | "title" | "state" | "lastSequence" | "historyStartSequence" | "historyTruncated"> & { workspaceId: string; createdAt: string; updatedAt: string };
 type Event = BrowserAiEvent;
+type AiPostError = Error & { turnId: string | undefined; outcome: string | undefined };
 
 export function AiSessionTab({ projectId, workspaceId, active }: { projectId: string; workspaceId: string; active: boolean }) {
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -32,6 +33,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const terminal = useRef(false);
   const selectionGeneration = useRef(0);
   const lastEventId = useRef<string | null>(null);
+  const canonicalTurnIds = useRef<Set<string>>(new Set());
 
   const applyEvent = useCallback((event: Event): boolean => {
     if (selectedSessionId.current !== event.sessionId) return false;
@@ -44,6 +46,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     }
     if (event.turnId === null) return true;
     const turnId = event.turnId;
+    if (event.eventType === "turn.accepted") canonicalTurnIds.current.add(turnId);
     setTurns((current) => {
       const index = current.findIndex((turn) => turn.id === turnId);
       const existing = index < 0 ? { id: turnId, state: "accepted", content: { kind: "text" as const, text: "" }, outputText: "", outputTruncated: false, activities: [], changedFiles: { files: [], truncated: false }, createdAt: new Date().toISOString() } : current[index]!;
@@ -105,9 +108,11 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
         setSession(selected.session); lastSequence.current = selected.session.lastSequence;
         const lastEvent = selected.events.at(-1);
         lastEventId.current = lastEvent?.sequence === selected.session.lastSequence ? lastEvent.eventId : null;
+        canonicalTurnIds.current = new Set(selected.turns.map((turn) => turn.id));
         setTurns(replayAiEvents(selected.turns.map((turn) => ({ ...turn, activities: [] })), selected.events));
       } else {
         selectedSessionId.current = null; terminal.current = false; setSession(null); setTurns([]); lastSequence.current = 0; lastEventId.current = null;
+        canonicalTurnIds.current = new Set();
       }
     },
     setLoading,
@@ -160,8 +165,13 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
 
   const post = useCallback(async (body: Record<string, unknown>) => {
     const response = await fetch(`/api/projects/${projectId}/ai`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify(body) });
-    const result = await response.json() as { sessionId?: string; message?: string };
-    if (!response.ok) throw new Error(result.message ?? "AI session action failed.");
+    const result = await response.json() as { sessionId?: string; turnId?: string; outcome?: string; message?: string };
+    if (!response.ok) {
+      const error = new Error(result.message ?? "AI session action failed.") as AiPostError;
+      error.turnId = result.turnId;
+      error.outcome = result.outcome;
+      throw error;
+    }
     return result;
   }, [projectId]);
   const restartCoordinator = useMemo(() => createAiSessionRestartCoordinator({
@@ -173,7 +183,28 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     setMessage
   }), [cancelWork, load, post, workspaceId]);
   const create = async () => { try { await post({ action: "create", workspaceId }); await load(); setMessage(null); } catch (error) { setMessage(error instanceof Error ? error.message : "Session creation failed."); } };
-  const send = async () => { const text = composer.trim(); if (!text || session === null) return; setComposer(""); try { await post({ action: "send", workspaceId, sessionId: session.id, content: { kind: "text", text } }); } catch (error) { setComposer(text); setMessage(error instanceof Error ? error.message : "Turn could not be sent."); } };
+  const send = async () => {
+    const text = composer.trim();
+    if (!text || session === null) return;
+    const sentSessionId = session.id;
+    const sentGeneration = selectionGeneration.current;
+    setComposer("");
+    try {
+      await post({ action: "send", workspaceId, sessionId: sentSessionId, content: { kind: "text", text } });
+    } catch (error) {
+      const ambiguous = error as AiPostError;
+      if (ambiguous.outcome === "ambiguous" && typeof ambiguous.turnId === "string"
+        && sentGeneration === selectionGeneration.current && selectedSessionId.current === sentSessionId) {
+        await load(sentSessionId);
+        if (selectedSessionId.current === sentSessionId && !canonicalTurnIds.current.has(ambiguous.turnId)) setComposer(text);
+      } else if (sentGeneration === selectionGeneration.current && selectedSessionId.current === sentSessionId) {
+        setComposer(text);
+      }
+      if (selectedSessionId.current === sentSessionId) {
+        setMessage(error instanceof Error ? error.message : "Turn could not be sent.");
+      }
+    }
+  };
   const interrupt = async () => { const turn = turns.find((candidate) => candidate.state === "running"); if (turn === undefined || session === null) return; try { await post({ action: "interrupt", workspaceId, sessionId: session.id, turnId: turn.id }); } catch (error) { setMessage(error instanceof Error ? error.message : "Interrupt failed."); } };
   const stop = async () => { if (session === null) return; cancelWork(); try { await post({ action: "stop", workspaceId, sessionId: session.id }); await load(session.id); } catch (error) { setMessage(error instanceof Error ? error.message : "Stop failed."); } };
   const restart = async () => {

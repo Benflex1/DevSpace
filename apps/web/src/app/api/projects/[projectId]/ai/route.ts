@@ -4,7 +4,17 @@ import { createAgentClient } from "../../../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../../../server/config.js";
 import { getProjectDatabase } from "../../../../../server/database.js";
-import { boundAiWorkbenchResponse, createAiSession, inspectAiWorkbench, interruptAiTurn, restartAiSession, sendAiTurn, stopAiSession, toAiActionError } from "../../../../../server/ai-sessions.js";
+import {
+  AiTurnOutcomeAmbiguousError,
+  boundAiWorkbenchResponse,
+  createAiSession,
+  inspectAiWorkbench,
+  interruptAiTurn,
+  restartAiSession,
+  sendAiTurn,
+  stopAiSession,
+  toAiActionError
+} from "../../../../../server/ai-sessions.js";
 import { readBoundedJsonBody } from "../../../../../server/request-body.js";
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
@@ -59,6 +69,11 @@ export async function POST(request: Request, context: { params: Promise<{ projec
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     if (error instanceof Error && error.message === "CSRF_REJECTED") return json({ message: "Request origin could not be verified." }, 403);
-    const safe = toAiActionError(error); return json({ message: safe.message, code: safe.code }, safe.code === "AI_PROFILE_UNAVAILABLE" ? 503 : 409);
+    const safe = toAiActionError(error);
+    return json({
+      message: safe.message,
+      code: safe.code,
+      ...(error instanceof AiTurnOutcomeAmbiguousError ? { turnId: error.turnId, outcome: "ambiguous" as const } : {})
+    }, safe.code === "AI_PROFILE_UNAVAILABLE" ? 503 : 409);
   }
 }

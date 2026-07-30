@@ -5,6 +5,8 @@ import {
   f10AgentApiV1EndpointByOperation,
   f11AiAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
+  AI_MAX_STRUCTURED_INPUT_QUESTIONS,
+  AI_USER_CONTENT_MAX_BYTES,
   type AiEventStreamFrame,
   type AiProviderProfileProjection,
   type AgentSnapshotData,
@@ -29,6 +31,56 @@ import {
 import { v7 as uuidv7 } from "uuid";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
+// The widest public canonical payload is sixteen structured text answers. JSON
+// escaping can expand one UTF-8 byte to six ASCII bytes; the fixed allowance
+// covers canonical identity fields, question IDs, and framing metadata.
+const AI_EVENT_STREAM_FRAME_MAX_BYTES =
+  AI_MAX_STRUCTURED_INPUT_QUESTIONS * AI_USER_CONTENT_MAX_BYTES * 6 + 256 * 1024;
+
+function streamProtocolFailure(requestId: string): AgentUnavailableError {
+  return new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
+}
+
+async function* parseBoundedAiEventNdjson(
+  response: http.IncomingMessage,
+  requestId: string
+): AsyncGenerator<AiEventStreamFrame> {
+  const pending = Buffer.allocUnsafe(AI_EVENT_STREAM_FRAME_MAX_BYTES);
+  let pendingBytes = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  try {
+    for await (const chunk of response) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const newline = bytes.indexOf(0x0a, offset);
+        const end = newline < 0 ? bytes.length : newline;
+        const segmentLength = end - offset;
+        if (pendingBytes + segmentLength > AI_EVENT_STREAM_FRAME_MAX_BYTES) throw streamProtocolFailure(requestId);
+        if (segmentLength > 0) {
+          bytes.copy(pending, pendingBytes, offset, end);
+          pendingBytes += segmentLength;
+        }
+        if (newline < 0) break;
+        if (pendingBytes === 0) throw streamProtocolFailure(requestId);
+        let frame: AiEventStreamFrame;
+        try {
+          frame = aiEventStreamFrameSchema.parse(JSON.parse(decoder.decode(pending.subarray(0, pendingBytes))));
+        } catch {
+          throw streamProtocolFailure(requestId);
+        }
+        pendingBytes = 0;
+        yield frame;
+        offset = newline + 1;
+      }
+    }
+    if (pendingBytes !== 0) throw streamProtocolFailure(requestId);
+  } catch (error) {
+    response.destroy();
+    throw error instanceof AgentUnavailableError ? error : streamProtocolFailure(requestId);
+  }
+}
+
 export class AgentUnavailableError extends Error {
   readonly retryable = true;
   readonly incidentId: string | undefined = undefined;
@@ -325,15 +377,7 @@ export function createAgentClient(socketPath: string, options: {
           } catch (error) { if (error instanceof AgentResponseError) throw error; throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId); }
         }
         if (response.headers["content-type"] !== endpoint.successContentType) throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
-        let buffer = "";
-        for await (const chunk of response) {
-          buffer += Buffer.from(chunk as Uint8Array).toString("utf8");
-          let newline = buffer.indexOf("\n");
-          while (newline >= 0) {
-            const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n");
-            if (line.length > 0) yield aiEventStreamFrameSchema.parse(JSON.parse(line));
-          }
-        }
+        yield* parseBoundedAiEventNdjson(response, requestId);
       } finally {
         activeResponse?.destroy();
         const cleanup = cleanupRequest as (() => void) | null;

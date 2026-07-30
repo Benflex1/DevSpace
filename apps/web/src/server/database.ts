@@ -550,6 +550,44 @@ export function openProjectDatabase(path: string, options: {
       historyTruncated: alreadyTruncated || total.count > retained || total.bytes > bytes
     };
   };
+  const ensureAiTurnAcceptedRow = (input: {
+    projectId: string; workspaceId: string; sessionId: string; turnId: string;
+    processGeneration: number; content: unknown;
+  }) => {
+    assertAiWorkspace(input.projectId, input.workspaceId);
+    const session = db.select().from(aiSessions).where(and(
+      eq(aiSessions.id, input.sessionId),
+      eq(aiSessions.workspaceId, input.workspaceId),
+      eq(aiSessions.providerKey, "codex")
+    )).get();
+    if (session === undefined || session.processGeneration !== input.processGeneration) {
+      throw new ProjectSetupConflictError("The exact AI session generation does not own this turn.");
+    }
+    const content = aiTurnContentSchema.parse(input.content);
+    const canonicalContent = JSON.stringify(content);
+    const existingById = db.select().from(aiTurns).where(eq(aiTurns.id, input.turnId)).get();
+    if (existingById !== undefined) {
+      if (existingById.sessionId !== input.sessionId || existingById.contentJson !== canonicalContent) {
+        throw new ProjectSetupConflictError("The AI turn identity or canonical content conflicts with retained history.");
+      }
+      return existingById;
+    }
+    if (session.state !== "active") {
+      throw new ProjectSetupConflictError("The exact active AI session generation is not accepting this turn.");
+    }
+    const activeTurn = db.select({ id: aiTurns.id }).from(aiTurns).where(and(
+      eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"))
+    )).get();
+    if (activeTurn !== undefined) throw new ProjectSetupConflictError("The AI session already has an active turn.");
+    const timestamp = now().toISOString();
+    const turn = {
+      id: input.turnId, sessionId: input.sessionId, state: "accepted" as const, contentJson: canonicalContent,
+      outputText: "", outputTruncated: false, changedFilesJson: JSON.stringify({ files: [], truncated: false }), failureJson: null,
+      createdAt: timestamp, updatedAt: timestamp, completedAt: null
+    };
+    db.insert(aiTurns).values(turn).run();
+    return turn;
+  };
   return {
     close: () => client.close(),
     listProjects: (): ProjectView[] => db.select().from(projects).orderBy(desc(projects.createdAt)).all().map(toView),
@@ -924,6 +962,24 @@ export function openProjectDatabase(path: string, options: {
           eq(aiSessions.id, input.sessionId), eq(aiSessions.workspaceId, input.workspaceId)
         )).get();
         const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
+        if (session?.state === "stopped" && !session.historyTruncated && session.historyStartSequence === 1) {
+          const timestamp = now().toISOString();
+          client.prepare(`
+            update ai_turns
+            set state = 'failed', failure_json = ?, completed_at = ?, updated_at = ?
+            where session_id = ? and state in ('accepted', 'running')
+              and not exists (
+                select 1 from ai_events
+                where ai_events.session_id = ai_turns.session_id
+                  and ai_events.turn_id = ai_turns.id
+                  and ai_events.event_type = 'turn.accepted'
+              )
+          `).run(JSON.stringify({
+            code: "AI_SESSION_STATE_CONFLICT",
+            category: "state-conflict",
+            incidentId: null
+          }), timestamp, timestamp, input.sessionId);
+        }
         const activeTurn = db.select({ id: aiTurns.id }).from(aiTurns).where(and(
           eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"))
         )).get();
@@ -982,6 +1038,12 @@ export function openProjectDatabase(path: string, options: {
         db.insert(aiTurns).values(turn).run(); return turn;
       }).immediate();
     },
+    ensureAiTurnAccepted(input: {
+      projectId: string; workspaceId: string; sessionId: string; turnId: string;
+      processGeneration: number; content: unknown;
+    }) {
+      return client.transaction(() => ensureAiTurnAcceptedRow(input)).immediate();
+    },
     commitAiEvent(input: { projectId: string; workspaceId: string; event: CanonicalAiEvent }): "appended" | "duplicate" {
       return client.transaction(() => {
         const event = canonicalAiEventSchema.parse(input.event);
@@ -992,7 +1054,15 @@ export function openProjectDatabase(path: string, options: {
         const existingById = db.select().from(aiEvents).where(eq(aiEvents.eventId, event.eventId)).get();
         const parseExisting = (row: typeof existingAtSequence) => row === undefined ? null : canonicalAiEventSchema.parse(JSON.parse(row.eventJson));
         const decision = classifyAiEventAppend({ durableThroughSequence: session.lastSequence, existingAtSequence: parseExisting(existingAtSequence), existingByEventId: parseExisting(existingById), incoming: event });
-        if (decision.kind === "exact-duplicate") return "duplicate";
+        if (decision.kind === "exact-duplicate") {
+          if (event.eventType === "turn.accepted") {
+            ensureAiTurnAcceptedRow({
+              projectId: input.projectId, workspaceId: input.workspaceId, sessionId: event.sessionId,
+              turnId: event.turnId, processGeneration: event.processGeneration, content: event.payload.content
+            });
+          }
+          return "duplicate";
+        }
         if (decision.kind !== "append") throw new ProjectSetupConflictError(decision.kind === "gap" ? "The AI event stream has a sequence gap." : "The AI event stream has a conflicting sequence.");
         const previousEvent = session.lastSequence === 0 ? undefined : db.select().from(aiEvents).where(and(
           eq(aiEvents.sessionId, event.sessionId), eq(aiEvents.sequence, session.lastSequence)
@@ -1017,6 +1087,12 @@ export function openProjectDatabase(path: string, options: {
               && event.eventType !== "session.stopping" && event.eventType !== "session.lost")) {
             throw new ProjectSetupConflictError("The AI event is not valid for the current session state.");
           }
+        }
+        if (event.eventType === "turn.accepted") {
+          ensureAiTurnAcceptedRow({
+            projectId: input.projectId, workspaceId: input.workspaceId, sessionId: event.sessionId,
+            turnId: event.turnId, processGeneration: event.processGeneration, content: event.payload.content
+          });
         }
         const timestamp = now().toISOString();
         const deletedTurns = pruneAiTurns(event.sessionId);

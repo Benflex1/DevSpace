@@ -3,7 +3,11 @@ import { mkdtemp, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { AI_EVENT_NDJSON_CONTENT_TYPE } from "@devspace/contracts";
+import {
+  AI_EVENT_NDJSON_CONTENT_TYPE,
+  AI_MAX_STRUCTURED_INPUT_QUESTIONS,
+  AI_USER_CONTENT_MAX_BYTES
+} from "@devspace/contracts";
 import { AgentResponseError, createAgentClient, AgentUnavailableError } from "./agent-client.js";
 import { createLogger } from "@devspace/diagnostics";
 import { normalizeUserFacingFailure } from "./user-facing-failure.js";
@@ -23,6 +27,126 @@ async function listen(handler: http.RequestListener): Promise<{ socketPath: stri
     await unlink(socketPath).catch(() => undefined);
   } };
 }
+
+const streamSessionId = "018f0f00-0000-7000-8000-000000000010";
+const synchronizedFrame = {
+  schemaVersion: "devspace.ai-stream/v1",
+  frameType: "stream.synchronized",
+  sessionId: streamSessionId,
+  throughSequence: 0
+} as const;
+
+async function collectStream(socketPath: string): Promise<unknown[]> {
+  const frames: unknown[] = [];
+  for await (const frame of createAgentClient(socketPath, { createId: () => id, now: () => new Date(timestamp) })
+    .streamAiEvents(streamSessionId, 0)) frames.push(frame);
+  return frames;
+}
+
+function streamService(write: (response: http.ServerResponse) => void): Promise<{ socketPath: string; close: () => Promise<void> }> {
+  return listen((_request, response) => {
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    write(response);
+  });
+}
+
+test("parses one or multiple canonical NDJSON frames from arbitrary socket chunks", async () => {
+  const encoded = Buffer.from(`${JSON.stringify(synchronizedFrame)}\n`, "utf8");
+  const cases = [
+    [encoded],
+    [Buffer.concat([encoded, encoded])],
+    [encoded.subarray(0, 1), encoded.subarray(1, encoded.length - 1), encoded.subarray(encoded.length - 1)]
+  ];
+  for (const chunks of cases) {
+    const service = await streamService((response) => {
+      for (const chunk of chunks) response.write(chunk);
+      response.end();
+    });
+    try {
+      await expect(collectStream(service.socketPath)).resolves.toEqual(
+        chunks.length === 1 && chunks[0]!.length === encoded.length * 2
+          ? [synchronizedFrame, synchronizedFrame]
+          : [synchronizedFrame]
+      );
+    } finally { await service.close(); }
+  }
+});
+
+test("decodes a multibyte UTF-8 scalar split across socket chunks", async () => {
+  const event = {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: "018f0f00-0000-7000-8000-000000000020",
+    sessionId: streamSessionId,
+    turnId: "018f0f00-0000-7000-8000-000000000021",
+    sequence: 1,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision: `sha256-ai-profile-v1:${"a".repeat(64)}`, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.output.delta",
+    payload: { stream: "assistant", text: "é" }
+  } as const;
+  const encoded = Buffer.from(`${JSON.stringify(event)}\n`, "utf8");
+  const scalar = encoded.indexOf(0xc3);
+  const service = await streamService((response) => {
+    response.write(encoded.subarray(0, scalar + 1));
+    response.end(encoded.subarray(scalar + 1));
+  });
+  try {
+    await expect(collectStream(service.socketPath)).resolves.toEqual([event]);
+  } finally { await service.close(); }
+});
+
+test.each([
+  ["invalid UTF-8", Buffer.from([0xc3, 0x28, 0x0a])],
+  ["malformed JSON", Buffer.from("{private-prompt}\n", "utf8")],
+  ["schema-invalid JSON", Buffer.from(`${JSON.stringify({ private: "private-prompt" })}\n`, "utf8")],
+  ["partial final JSON", Buffer.from("{\"private\":\"private-prompt\"", "utf8")],
+  ["valid frame then partial final frame", Buffer.concat([
+    Buffer.from(`${JSON.stringify(synchronizedFrame)}\n`, "utf8"),
+    Buffer.from("{\"private\":\"private-prompt\"", "utf8")
+  ])]
+])("rejects %s as one bounded private protocol failure", async (_label, bytes) => {
+  const service = await streamService((response) => response.end(bytes));
+  try {
+    const error = await collectStream(service.socketPath).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentUnavailableError);
+    expect(error).toMatchObject({ code: "INVALID_RESPONSE_CONTRACT", failureCategory: "protocol-failure" });
+    expect(JSON.stringify(error)).not.toContain("private-prompt");
+  } finally { await service.close(); }
+});
+
+test.each(["terminated", "unterminated"] as const)("rejects an oversized %s NDJSON line", async (kind) => {
+  const maximumCanonicalFrameBytes =
+    AI_MAX_STRUCTURED_INPUT_QUESTIONS * AI_USER_CONTENT_MAX_BYTES * 6 + 256 * 1024;
+  const bytes = Buffer.alloc(maximumCanonicalFrameBytes + 1, 0x61);
+  const service = await streamService((response) => response.end(kind === "terminated" ? Buffer.concat([bytes, Buffer.from("\n")]) : bytes));
+  try {
+    await expect(collectStream(service.socketPath)).rejects.toMatchObject({
+      code: "INVALID_RESPONSE_CONTRACT",
+      failureCategory: "protocol-failure"
+    });
+  } finally { await service.close(); }
+});
+
+test("accepts an empty stream and cancellation destroys the underlying socket", async () => {
+  const empty = await streamService((response) => response.end());
+  try {
+    await expect(collectStream(empty.socketPath)).resolves.toEqual([]);
+  } finally { await empty.close(); }
+
+  let closed = false;
+  const hanging = await listen((request, response) => {
+    request.once("close", () => { closed = true; });
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.write(`${JSON.stringify(synchronizedFrame)}\n`);
+  });
+  const iterator = createAgentClient(hanging.socketPath).streamAiEvents(streamSessionId, 0)[Symbol.asyncIterator]();
+  await expect(iterator.next()).resolves.toEqual({ done: false, value: synchronizedFrame });
+  await iterator.return?.(undefined);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(closed).toBe(true);
+  await hanging.close();
+});
 
 test("constructs protocol headers and parses valid success envelopes", async () => {
   const service = await listen((request, response) => {

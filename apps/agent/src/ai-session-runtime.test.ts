@@ -759,6 +759,100 @@ describe("AI session runtime", () => {
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
   });
 
+  test("serializes Stop across admission so accepted and rejected turns have exact terminal behavior", async () => {
+    for (const outcome of ["accepted", "rejected"] as const) {
+      const stateRoot = await mkdtemp(join(tmpdir(), `devspace-ai-admission-stop-${outcome}-`));
+      let contextCalls = 0;
+      let releaseContext: (() => void) | undefined;
+      const admissionContext = new Promise<void>((resolve) => { releaseContext = resolve; });
+      const lifecycle: string[] = [];
+      const runtime = createAiSessionRuntime({
+        mode: "fake",
+        stateRoot,
+        managed: {
+          executionContext: async () => {
+            contextCalls += 1;
+            if (contextCalls === 1) return managedContext(stateRoot);
+            await admissionContext;
+            if (outcome === "rejected") throw new Error("managed-context-unavailable");
+            return managedContext(stateRoot);
+          }
+        } as never,
+        fakeProviderTestHooks: {
+          onSend: () => lifecycle.push("send"),
+          onStop: () => lifecycle.push("stop")
+        }
+      });
+      try {
+        const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+        const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+        await runtime.start(exactBinding);
+        const sending = runtime.sendTurn({
+          ...exactBinding, processGeneration: 1, turnId, content: { kind: "text", text: "hello" }
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        const stopping = runtime.stop({ ...exactBinding, processGeneration: 1 });
+        releaseContext?.();
+        const sendResult = await Promise.allSettled([sending, stopping]);
+        const events = await runtime.replay(sessionId, 0);
+        const turnEvents = events.filter((event) => event.turnId === turnId);
+        if (outcome === "accepted") {
+          expect(sendResult[0]?.status).toBe("fulfilled");
+          expect(turnEvents.filter((event) => event.eventType === "turn.accepted")).toHaveLength(1);
+          expect(turnEvents.filter((event) => event.eventType === "turn.quiesced" || event.eventType === "turn.failed")).toHaveLength(1);
+          expect(lifecycle.indexOf("send")).toBeGreaterThanOrEqual(0);
+          expect(lifecycle.indexOf("send")).toBeLessThan(lifecycle.indexOf("stop"));
+        } else {
+          expect(sendResult[0]?.status).toBe("rejected");
+          expect(turnEvents).toEqual([]);
+          expect(lifecycle).toEqual(["stop"]);
+        }
+        expect(events.filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
+        expect(events.filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
+      } finally {
+        await rm(stateRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test.each([1, 2] as const)("resolves a beginTurn fault after append %s according to canonical acceptance", async (turnAppend) => {
+    const stateRoot = await mkdtemp(join(tmpdir(), `devspace-ai-partial-begin-${turnAppend}-`));
+    let appendCalls = 0;
+    let failureAt = Number.MAX_SAFE_INTEGER;
+    const runtime = createAiSessionRuntime({
+      mode: "fake",
+      stateRoot,
+      outboxFaultHooks: {
+        beforeAppendWrite: () => {
+          appendCalls += 1;
+          if (appendCalls === failureAt) throw new Error("injected-turn-append-failure");
+        }
+      }
+    });
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      await runtime.start(exactBinding);
+      failureAt = appendCalls + turnAppend;
+      const sending = runtime.sendTurn({
+        ...exactBinding, processGeneration: 1, turnId, content: { kind: "text", text: "hello" }
+      });
+      if (turnAppend === 1) await expect(sending).rejects.toThrow();
+      else await expect(sending).resolves.toBeUndefined();
+      const events = await runtime.replay(sessionId, 0);
+      const turnEvents = events.filter((event) => event.turnId === turnId);
+      if (turnAppend === 1) {
+        expect(turnEvents).toEqual([]);
+        await runtime.stop({ ...exactBinding, processGeneration: 1 });
+      } else {
+        expect(turnEvents.map((event) => event.eventType)).toEqual(["turn.accepted", "turn.failed"]);
+        expect(events.filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
+      }
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   test("restarts one durable session across three unique process generations", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-restart-test-"));
     let providerStarts = 0;

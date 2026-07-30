@@ -20,6 +20,7 @@ import {
   utf8ByteLength
 } from "./ai-history.js";
 import { setupPrimaryWorkspace, type WorkspaceSetupAgent } from "./workspace-setup.js";
+import { AgentUnavailableError } from "./agent-client.js";
 
 const projectId = "018f0f00-0000-7000-8000-000000000001";
 const workspaceId = "018f0f00-0000-7000-8000-000000000002";
@@ -90,7 +91,7 @@ function fakeSessionDatabase() {
     ]),
     getAiTurn: vi.fn((_project: string, _workspace: string, requestedSessionId: string, requestedTurnId: string) =>
       requestedSessionId === sessionAId && requestedTurnId === turnId ? { id: turnId, sessionId: sessionAId, state: "running" } : null),
-    createAiTurn: vi.fn(() => undefined),
+    ensureAiTurnAccepted: vi.fn(() => undefined),
     commitAiEvent: vi.fn(() => "appended" as const)
   };
   return { agent, database };
@@ -101,7 +102,7 @@ test("binds a supplied older session instead of acting on the newer workspace se
   const database = {
     getAiSession: vi.fn((_project: string, _workspace: string, requestedSessionId?: string) =>
       requestedSessionId === sessionAId ? view(sessionAId) : view(sessionBId)),
-    createAiTurn: vi.fn(() => undefined)
+    ensureAiTurnAccepted: vi.fn(() => undefined)
   };
 
   await sendAiTurn(projectId, workspaceId, sessionAId, "use session A", {
@@ -122,17 +123,52 @@ test("binds a supplied older session instead of acting on the newer workspace se
 
 test.each(["stopped", "lost", "creating"] as const)("rejects a %s session before creating or sending a turn", async (state) => {
   const agent = fakeAgent();
-  const createAiTurn = vi.fn();
+  const ensureAiTurnAccepted = vi.fn();
   const database = {
     getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), state } })),
-    createAiTurn
+    ensureAiTurnAccepted
   };
 
   await expect(sendAiTurn(projectId, workspaceId, sessionAId, "must not persist", { database, agent } as never))
     .rejects.toMatchObject({ code: "AI_SESSION_CONFLICT" });
 
-  expect(createAiTurn).not.toHaveBeenCalled();
+  expect(ensureAiTurnAccepted).not.toHaveBeenCalled();
   expect(agent.sendAiTurn).not.toHaveBeenCalled();
+});
+
+test("definitive Agent rejection leaves no Web turn while success performs one exact post-receipt ensure", async () => {
+  const rejected = fakeSessionDatabase();
+  rejected.agent.sendAiTurn.mockRejectedValueOnce(new Error("definitive-rejection"));
+  await expect(sendAiTurn(projectId, workspaceId, sessionAId, "reject me", rejected as never)).rejects.toThrow("definitive-rejection");
+  expect(rejected.database.ensureAiTurnAccepted).not.toHaveBeenCalled();
+
+  const accepted = fakeSessionDatabase();
+  const result = await sendAiTurn(projectId, workspaceId, sessionAId, "accept me", accepted as never);
+  expect(accepted.agent.sendAiTurn).toHaveBeenCalledTimes(1);
+  expect(accepted.database.ensureAiTurnAccepted).toHaveBeenCalledWith({
+    projectId,
+    workspaceId,
+    sessionId: sessionAId,
+    turnId: result.turnId,
+    processGeneration: 1,
+    content: { kind: "text", text: "accept me" }
+  });
+  expect(accepted.agent.sendAiTurn.mock.invocationCallOrder[0])
+    .toBeLessThan(accepted.database.ensureAiTurnAccepted.mock.invocationCallOrder[0]!);
+});
+
+test("transport ambiguity returns the exact opaque turn ID without creating a Web-only row", async () => {
+  const fixture = fakeSessionDatabase();
+  fixture.agent.sendAiTurn.mockRejectedValueOnce(new AgentUnavailableError("AGENT_UNAVAILABLE", "transport-failure"));
+  const error = await sendAiTurn(projectId, workspaceId, sessionAId, "possibly accepted", fixture as never)
+    .catch((caught: unknown) => caught);
+  expect(error).toMatchObject({
+    name: "AiTurnOutcomeAmbiguousError",
+    code: "AI_SESSION_CONFLICT"
+  });
+  expect(typeof (error as { turnId?: unknown }).turnId).toBe("string");
+  expect(fixture.database.ensureAiTurnAccepted).not.toHaveBeenCalled();
+  expect(JSON.stringify(error)).not.toContain("possibly accepted");
 });
 
 test("restarts the exact stopped session without sending process generation authority", async () => {
@@ -339,7 +375,7 @@ test.each([
     database: {
       getAiSession: vi.fn((project: string, workspace: string, requestedSessionId?: string) =>
         project === projectId && workspace === workspaceId && requestedSessionId === sessionAId ? view(sessionAId) : null),
-      createAiTurn: vi.fn()
+      ensureAiTurnAccepted: vi.fn()
     },
     agent
   } as never)).rejects.toMatchObject({ code: "AI_SESSION_CONFLICT", message: "The AI session is no longer available." });
@@ -429,6 +465,21 @@ function outputEvent(sessionId: string, sequence: number, turnIdValue: string): 
     processGeneration: 1,
     eventType: "turn.output.delta",
     payload: { stream: "assistant", text: "x".repeat(65_536) }
+  };
+}
+
+function turnAcceptedEvent(sessionId: string, sequence: number, turnIdValue: string, text = "canonical prompt"): CanonicalAiEvent {
+  return {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f0f00-0000-7000-8000-${(sequence + 5_000).toString(16).padStart(12, "0")}`,
+    sessionId,
+    turnId: turnIdValue,
+    sequence,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.accepted",
+    payload: { content: { kind: "text", text } }
   };
 }
 
@@ -543,6 +594,79 @@ async function stoppedHistoryFixture() {
   return fixture;
 }
 
+describe("SQLite canonical turn acceptance convergence", () => {
+  function finishFixtureTurn(fixture: Awaited<ReturnType<typeof historyFixture>>): void {
+    const raw = new BetterSqlite3(fixture.databasePath);
+    raw.prepare("update ai_turns set state = 'completed', completed_at = ? where id = ?").run(timestamp, fixture.turnId);
+    raw.close();
+  }
+
+  test("stream-first and POST-first each converge to one exact turn row", async () => {
+    const streamFirst = await historyFixture();
+    finishFixtureTurn(streamFirst);
+    const streamTurnId = "018f0f00-0000-7000-8000-000000000090";
+    streamFirst.database.commitAiEvent({
+      projectId: streamFirst.projectId,
+      workspaceId: streamFirst.workspaceId,
+      event: turnAcceptedEvent(streamFirst.sessionId, 1, streamTurnId, "stream first")
+    });
+    streamFirst.database.ensureAiTurnAccepted({
+      projectId: streamFirst.projectId, workspaceId: streamFirst.workspaceId, sessionId: streamFirst.sessionId,
+      turnId: streamTurnId, processGeneration: 1, content: { kind: "text", text: "stream first" }
+    });
+    expect(streamFirst.database.getAiSession(streamFirst.projectId, streamFirst.workspaceId, streamFirst.sessionId)?.turns
+      .filter((turn) => turn.id === streamTurnId)).toHaveLength(1);
+
+    const postFirst = await historyFixture();
+    finishFixtureTurn(postFirst);
+    const postTurnId = "018f0f00-0000-7000-8000-000000000091";
+    postFirst.database.ensureAiTurnAccepted({
+      projectId: postFirst.projectId, workspaceId: postFirst.workspaceId, sessionId: postFirst.sessionId,
+      turnId: postTurnId, processGeneration: 1, content: { kind: "text", text: "post first" }
+    });
+    postFirst.database.commitAiEvent({
+      projectId: postFirst.projectId,
+      workspaceId: postFirst.workspaceId,
+      event: turnAcceptedEvent(postFirst.sessionId, 1, postTurnId, "post first")
+    });
+    expect(postFirst.database.getAiSession(postFirst.projectId, postFirst.workspaceId, postFirst.sessionId)?.turns
+      .filter((turn) => turn.id === postTurnId)).toHaveLength(1);
+  });
+
+  test("an exact duplicate accepted event repairs a missing row without advancing sequence twice", async () => {
+    const fixture = await historyFixture();
+    finishFixtureTurn(fixture);
+    const acceptedTurnId = "018f0f00-0000-7000-8000-000000000092";
+    const event = turnAcceptedEvent(fixture.sessionId, 1, acceptedTurnId);
+    expect(fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event })).toBe("appended");
+    const raw = new BetterSqlite3(fixture.databasePath);
+    raw.prepare("delete from ai_turns where id = ?").run(acceptedTurnId);
+    raw.close();
+    expect(fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event })).toBe("duplicate");
+    const view = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)!;
+    expect(view.session.lastSequence).toBe(1);
+    expect(view.turns.filter((turn) => turn.id === acceptedTurnId)).toHaveLength(1);
+  });
+
+  test("conflicting accepted content and exact identity or generation substitution fail closed", async () => {
+    const fixture = await historyFixture();
+    finishFixtureTurn(fixture);
+    const acceptedTurnId = "018f0f00-0000-7000-8000-000000000093";
+    fixture.database.ensureAiTurnAccepted({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,
+      turnId: acceptedTurnId, processGeneration: 1, content: { kind: "text", text: "original" }
+    });
+    expect(() => fixture.database.ensureAiTurnAccepted({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,
+      turnId: acceptedTurnId, processGeneration: 1, content: { kind: "text", text: "substituted" }
+    })).toThrow();
+    expect(() => fixture.database.ensureAiTurnAccepted({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, sessionId: fixture.sessionId,
+      turnId: acceptedTurnId, processGeneration: 2, content: { kind: "text", text: "original" }
+    })).toThrow();
+  });
+});
+
 describe("SQLite stopped-session restart fencing", () => {
   test("does not create a turn row for a stopped session", async () => {
     const fixture = await stoppedHistoryFixture();
@@ -573,6 +697,52 @@ describe("SQLite stopped-session restart fencing", () => {
     expect(after.turns).toEqual(before.turns);
     expect(after.events).toEqual(before.events);
     expect(after.session.title).toBe(before.session.title);
+  });
+
+  test("terminal-projects a provably noncanonical legacy orphan but preserves a canonical active turn blocker", async () => {
+    const orphan = await stoppedHistoryFixture();
+    const orphanTurnId = "018f0f00-0000-7000-8000-000000000094";
+    const orphanRaw = new BetterSqlite3(orphan.databasePath);
+    orphanRaw.prepare(`
+      insert into ai_turns
+        (id, session_id, state, content_json, output_text, output_truncated, changed_files_json, failure_json, created_at, updated_at, completed_at)
+      values (?, ?, 'accepted', ?, '', 0, ?, null, ?, ?, null)
+    `).run(orphanTurnId, orphan.sessionId, JSON.stringify({ kind: "text", text: "legacy intent" }),
+      JSON.stringify({ files: [], truncated: false }), timestamp, timestamp);
+    orphanRaw.close();
+    expect(() => orphan.database.prepareAiSessionRestart({
+      projectId: orphan.projectId, workspaceId: orphan.workspaceId, sessionId: orphan.sessionId,
+      profileId: "codex", profileRevision
+    })).not.toThrow();
+    expect(orphan.database.getAiSession(orphan.projectId, orphan.workspaceId, orphan.sessionId)?.turns
+      .find((turn) => turn.id === orphanTurnId)?.state).toBe("failed");
+
+    const canonical = await historyFixture();
+    canonical.database.commitAiEvent({
+      projectId: canonical.projectId, workspaceId: canonical.workspaceId,
+      event: turnAcceptedEvent(canonical.sessionId, 1, canonical.turnId, "produce a bounded answer")
+    });
+    canonical.database.commitAiEvent({
+      projectId: canonical.projectId, workspaceId: canonical.workspaceId,
+      event: sessionEvent(canonical.sessionId, 2, "session.stopping", 1)
+    });
+    canonical.database.commitAiEvent({
+      projectId: canonical.projectId, workspaceId: canonical.workspaceId,
+      event: sessionEvent(canonical.sessionId, 3, "session.stopped", 1)
+    });
+    const canonicalRaw = new BetterSqlite3(canonical.databasePath);
+    canonicalRaw.prepare(`
+      insert into runtime_stacks
+        (id, workspace_id, runtime_namespace, runtime_plan_hash, desired_state, observed_state, runtime_generation, created_at, updated_at)
+      select ?, workspace_id, 'workspace-runtime:' || workspace_id, runtime_plan_hash, 'running', 'running', runtime_generation, ?, ?
+      from ai_sessions where id = ?
+    `).run("018f0f00-0000-7000-8000-000000000097", timestamp, timestamp, canonical.sessionId);
+    canonicalRaw.close();
+    expect(() => canonical.database.prepareAiSessionRestart({
+      projectId: canonical.projectId, workspaceId: canonical.workspaceId, sessionId: canonical.sessionId,
+      profileId: "codex", profileRevision
+    })).toThrow();
+    expect(canonical.database.getAiSession(canonical.projectId, canonical.workspaceId, canonical.sessionId)?.turns[0]?.state).toBe("accepted");
   });
 
   test("rejects changed profile/runtime identity and process-generation overflow", async () => {

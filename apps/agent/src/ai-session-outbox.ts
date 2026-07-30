@@ -426,9 +426,23 @@ export class AiSessionOutbox {
       }
       this.activeTurnReservationOwned = true;
       this.activeTurnSlotsRemaining = ACTIVE_TURN_EVENT_RESERVE;
-      const accepted = await this.appendLocked({ turnId: input.turnId, eventType: "turn.accepted", payload: { content: input.content }, profile: input.profile, processGeneration: input.processGeneration, kind: "normal" }, true);
-      const started = await this.appendLocked({ turnId: input.turnId, eventType: "turn.started", payload: {}, profile: input.profile, processGeneration: input.processGeneration, kind: "normal" }, true);
-      return [accepted, started];
+      try {
+        const accepted = await this.appendLocked({ turnId: input.turnId, eventType: "turn.accepted", payload: { content: input.content }, profile: input.profile, processGeneration: input.processGeneration, kind: "normal" }, true);
+        const started = await this.appendLocked({ turnId: input.turnId, eventType: "turn.started", payload: {}, profile: input.profile, processGeneration: input.processGeneration, kind: "normal" }, true);
+        return [accepted, started];
+      } catch (error) {
+        const acceptedDurable = this.eventsValue.some((event) =>
+          event.turnId === input.turnId
+          && event.processGeneration === input.processGeneration
+          && event.eventType === "turn.accepted"
+          && JSON.stringify(event.payload.content) === JSON.stringify(input.content)
+        );
+        if (!acceptedDurable) {
+          this.activeTurnReservationOwned = false;
+          this.activeTurnSlotsRemaining = 0;
+        }
+        throw error;
+      }
     });
   }
 

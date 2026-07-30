@@ -1,6 +1,6 @@
 import { v7 as uuidv7 } from "uuid";
 import { uuidV7Schema, type AiEventStreamFrame, type AiProviderProfileProjection } from "@devspace/contracts";
-import type { FullAgentClient } from "./agent-client.js";
+import { AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { ProjectSetupConflictError, type ProjectDatabase } from "./database.js";
 import {
   AI_EVENT_STREAM_RESPONSE_MAX_BYTES,
@@ -17,6 +17,13 @@ import {
 export class AiSessionActionError extends Error {
   constructor(readonly code: "AI_NOT_CONFIGURED" | "AI_PROFILE_UNAVAILABLE" | "AI_SESSION_CONFLICT" | "AI_TURN_CONFLICT", message: string) {
     super(message); this.name = "AiSessionActionError";
+  }
+}
+
+export class AiTurnOutcomeAmbiguousError extends AiSessionActionError {
+  constructor(readonly turnId: string) {
+    super("AI_SESSION_CONFLICT", "The AI turn outcome is being reconciled. The selected session will be reloaded.");
+    this.name = "AiTurnOutcomeAmbiguousError";
   }
 }
 
@@ -240,17 +247,26 @@ export async function sendAiTurn(projectId: string, workspaceId: string, session
     throw new AiSessionActionError("AI_SESSION_CONFLICT", "The AI session is not accepting turns.");
   }
   const turnId = uuidv7();
+  const operationId = uuidv7();
+  const session = view.session;
   try {
-    dependencies.database.createAiTurn({ projectId, workspaceId, sessionId, turnId, content: { kind: "text", text } });
+    await dependencies.agent.sendAiTurn(operationId, { ...processBinding(projectId, session), turnId, content: { kind: "text", text } });
+  } catch (error) {
+    if (error instanceof AgentUnavailableError) throw new AiTurnOutcomeAmbiguousError(turnId);
+    throw error;
+  }
+  try {
+    dependencies.database.ensureAiTurnAccepted({
+      projectId, workspaceId, sessionId, turnId,
+      processGeneration: session.processGeneration,
+      content: { kind: "text", text }
+    });
   } catch (error) {
     if (error instanceof ProjectSetupConflictError) {
-      throw new AiSessionActionError("AI_SESSION_CONFLICT", "The AI session is no longer available.");
+      throw new AiSessionActionError("AI_SESSION_CONFLICT", "The accepted AI turn could not be reconciled safely.");
     }
     throw error;
   }
-  const operationId = uuidv7();
-  const session = view.session;
-  await dependencies.agent.sendAiTurn(operationId, { ...processBinding(projectId, session), turnId, content: { kind: "text", text } });
   return { turnId, operationId };
 }
 
