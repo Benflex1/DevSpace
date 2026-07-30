@@ -9,6 +9,7 @@ import {
   AI_SESSION_OUTPUT_MAX_BYTES,
   AI_SESSION_RESPONSE_MAX_BYTES,
   AI_TURN_OUTPUT_MAX_BYTES,
+  normalizeRetainedHistory,
   decodeUtf8Prefix,
   parseBoundedJson,
   serializedBytes,
@@ -436,7 +437,8 @@ export function openProjectDatabase(path: string, options: {
       else { responseTruncated = true; break; }
     }
     const finalSession = { ...sessionView, historyTruncated: sessionView.historyTruncated || responseTruncated };
-    return { session: finalSession, turns: retainedTurns, interactions: responseInteractions, events: retainedEvents };
+    const normalized = normalizeRetainedHistory({ session: finalSession, events: retainedEvents });
+    return { session: normalized.session, turns: retainedTurns, interactions: responseInteractions, events: normalized.events };
   };
   const listAiSessionSummaries = (projectId: string, workspaceId: string) => {
     assertAiWorkspace(projectId, workspaceId);

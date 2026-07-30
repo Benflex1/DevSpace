@@ -19,6 +19,55 @@ export const AI_SESSION_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 export const AI_EVENT_STREAM_RESPONSE_MAX_EVENTS = 512;
 export const AI_EVENT_STREAM_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 
+export type RetainedHistoryProjection = {
+  session: {
+    lastSequence: number;
+    historyStartSequence: number;
+    historyTruncated: boolean;
+  };
+  events: Array<{ sequence: number }>;
+};
+
+export function normalizeRetainedHistory<T extends RetainedHistoryProjection>(value: T): T {
+  const { lastSequence, historyStartSequence: originalHistoryStartSequence, historyTruncated } = value.session;
+  if (!Number.isSafeInteger(lastSequence) || lastSequence < 0
+    || !Number.isSafeInteger(originalHistoryStartSequence) || originalHistoryStartSequence < 1) {
+    throw new Error("The retained AI history boundary is invalid.");
+  }
+  let normalizedHistoryStartSequence: number;
+  if (value.events.length === 0) {
+    normalizedHistoryStartSequence = lastSequence + 1;
+    if (!Number.isSafeInteger(normalizedHistoryStartSequence)) throw new Error("The retained AI history boundary is invalid.");
+  } else {
+    const firstSequence = value.events[0]!.sequence;
+    if (!Number.isSafeInteger(firstSequence) || firstSequence < 1 || firstSequence > lastSequence) {
+      throw new Error("The retained AI event sequence is invalid.");
+    }
+    for (let index = 1; index < value.events.length; index += 1) {
+      const previous = value.events[index - 1]!.sequence;
+      const current = value.events[index]!.sequence;
+      if (!Number.isSafeInteger(current) || current !== previous + 1) {
+        throw new Error("The retained AI event sequence is not contiguous.");
+      }
+    }
+    const finalSequence = value.events.at(-1)!.sequence;
+    if (finalSequence !== lastSequence) throw new Error("The retained AI event suffix is not current.");
+    normalizedHistoryStartSequence = firstSequence;
+  }
+  if (normalizedHistoryStartSequence < originalHistoryStartSequence) {
+    throw new Error("The retained AI history boundary moved backwards.");
+  }
+  return {
+    ...value,
+    session: {
+      ...value.session,
+      historyStartSequence: normalizedHistoryStartSequence,
+      historyTruncated: historyTruncated || normalizedHistoryStartSequence > originalHistoryStartSequence
+    },
+    events: value.events
+  };
+}
+
 export function isJsonWithinBytes(value: string, maxBytes: number): boolean {
   return utf8ByteLength(value) <= maxBytes;
 }

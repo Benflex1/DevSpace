@@ -8,6 +8,7 @@ import {
   AI_SESSION_OUTPUT_MAX_BYTES,
   AI_SESSION_RESPONSE_MAX_BYTES,
   AI_TURN_OUTPUT_MAX_BYTES,
+  normalizeRetainedHistory,
   serializedBytes,
   truncateUtf8,
   utf8ByteLength
@@ -126,13 +127,13 @@ function newestPrefix<T>(items: readonly T[], build: (candidate: T[]) => unknown
 export function boundAiWorkbenchResponse(data: AiWorkbenchProjection, options: ResponseBoundsOptions = {}): AiWorkbenchProjection {
   const measure = options.measure ?? serializedBytes;
   const source = data.session;
-  let session: AiSelectedSession | null = source === null ? null : {
+  let session: AiSelectedSession | null = source === null ? null : normalizeRetainedHistory({
     ...source,
     session: { ...source.session },
     turns: boundResponseTurns(source.turns),
     interactions: [...source.interactions],
     events: [...source.events]
-  };
+  });
   let sessions = [...data.sessions];
   const originalTurnCount = session?.turns.length ?? 0;
   const build = (): AiWorkbenchProjection => ({ ...data, sessions, session });
@@ -154,6 +155,7 @@ export function boundAiWorkbenchResponse(data: AiWorkbenchProjection, options: R
     const historyStartSequence = events.length > 0 ? events[0]!.sequence : session.session.lastSequence + 1;
     session = { ...session, events, session: { ...session.session, historyTruncated: session.session.historyTruncated || events.length < originalEvents.length,
       historyStartSequence: events.length < originalEvents.length ? historyStartSequence : session.session.historyStartSequence } };
+    session = normalizeRetainedHistory(session);
   }
   if (session !== null && measure(build()) > AI_SESSION_RESPONSE_MAX_BYTES && session.interactions.length > 0) {
     const originalInteractions = session.interactions;
@@ -173,9 +175,7 @@ export function boundAiWorkbenchResponse(data: AiWorkbenchProjection, options: R
   if (measure(build()) > AI_SESSION_RESPONSE_MAX_BYTES && sessions.length > 0) {
     sessions = newestPrefix(sessions, (candidate) => ({ ...data, sessions: candidate, session }), measure);
   }
-  if (session !== null && session.events.length > 0) {
-    session = { ...session, session: { ...session.session, historyStartSequence: session.events[0]!.sequence } };
-  }
+  if (session !== null) session = normalizeRetainedHistory(session);
   return build();
 }
 

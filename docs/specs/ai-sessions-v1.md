@@ -281,9 +281,12 @@ the event insert and aggregate update. A failed compaction rolls back the event 
 Agent-private outbox acknowledgement unchanged, so replay remains available. Event retention is
 always a contiguous suffix; `historyStartSequence` identifies its first sequence and
 `historyTruncated` records a dropped prefix or byte/count compaction. Replay before that boundary
-returns the bounded gap/truncation outcome rather than a partial stream. Response truncation is
-deterministic and never claims complete output: `outputTruncated`, `historyTruncated`, the
-retained start sequence, and the complete/truncated interaction projection are explicit.
+returns the bounded gap/truncation outcome rather than a partial stream. Each public selected-session
+projection normalizes `historyStartSequence` to its first retained event, or to `lastSequence + 1`
+when no events remain; this response-only normalization never rewrites SQLite's persisted boundary.
+Response truncation is deterministic and never claims complete output: `outputTruncated`,
+`historyTruncated`, the retained start sequence, and the complete/truncated interaction projection
+are explicit.
 
 Legacy oversized SQLite text and JSON rows are length-checked before being loaded. JSON is parsed
 only when within its bound and re-serialized as a valid bounded projection; UTF-8 text is decoded

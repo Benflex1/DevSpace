@@ -143,6 +143,35 @@ test("complete response metadata advances past an event-empty retained suffix", 
   expect(serializedBytes(bounded)).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
 });
 
+function smallPublicProjection(lastSequence: number, historyStartSequence: number, events: number[], historyTruncated = false) {
+  return {
+    profile: { profileId: "codex", profileRevision, provider: "codex", displayName: "Codex", availability: { state: "available" }, capabilities: {} },
+    sessions: [],
+    session: {
+      session: { ...session(sessionAId), projectId, lastSequence, historyStartSequence, historyTruncated, interactionsTruncated: false },
+      turns: [], interactions: [], events: events.map((sequence) => ({ sequence }))
+    }
+  } as never;
+}
+
+test("normalizes an already-truncated under-limit response suffix", () => {
+  const bounded = boundAiWorkbenchResponse(smallPublicProjection(42, 1, [37, 38, 39, 40, 41, 42]));
+  expect(bounded.session?.session.historyStartSequence).toBe(37);
+  expect(bounded.session?.session.historyTruncated).toBe(true);
+});
+
+test("normalizes an already-empty under-limit response suffix", () => {
+  const bounded = boundAiWorkbenchResponse(smallPublicProjection(42, 1, []));
+  expect(bounded.session?.session.historyStartSequence).toBe(43);
+  expect(bounded.session?.session.historyTruncated).toBe(true);
+});
+
+test("does not mark a never-started under-limit response truncated", () => {
+  const bounded = boundAiWorkbenchResponse(smallPublicProjection(0, 1, []));
+  expect(bounded.session?.session.historyStartSequence).toBe(1);
+  expect(bounded.session?.session.historyTruncated).toBe(false);
+});
+
 test("bounds a maximum event collection with a logarithmic number of envelope measurements", () => {
   const events = Array.from({ length: AI_SESSION_EVENT_HISTORY_MAX_EVENTS }, (_, index) => ({
     eventId: `018f0f00-0000-7000-8000-${(10_000 + index).toString(16).padStart(12, "0")}`,
@@ -506,6 +535,59 @@ describe("SQLite AI aggregate bounds", () => {
       { database, agent: fakeAgent() } as never
     ).next()).rejects.toMatchObject({ code: "AI_SESSION_CONFLICT" });
     database.close();
+  }, 30_000);
+
+  test("normalizes the real inner response projection without rewriting SQLite history metadata", async () => {
+    const fixture = await historyFixture();
+    fixture.database.close();
+    const raw = new BetterSqlite3(fixture.databasePath);
+    const secondTurnId = "018f0f00-0000-7000-8000-000000000010";
+    const output = "x".repeat(1_800_000);
+    raw.prepare(`
+      insert into ai_turns (id, session_id, state, content_json, output_text, output_truncated, changed_files_json, failure_json, created_at, updated_at, completed_at)
+      values (?, ?, 'completed', ?, ?, 0, ?, null, ?, ?, ?)
+    `).run(secondTurnId, fixture.sessionId, JSON.stringify({ kind: "text", text: "second" }), output,
+      JSON.stringify({ files: [], truncated: false }), timestamp, timestamp, timestamp);
+    raw.prepare("update ai_turns set output_text = ?, output_truncated = 0 where id = ?")
+      .run(output, fixture.turnId);
+    const requestJson = JSON.stringify({ text: "x".repeat(120_000) });
+    const insertInteraction = raw.prepare(`
+      insert into ai_interaction_requests (id, session_id, turn_id, kind, state, request_json, response_json, created_at, updated_at)
+      values (?, ?, ?, 'input', 'pending', ?, null, ?, ?)
+    `);
+    for (let index = 0; index < 33; index += 1) {
+      const interactionId = `018f0f00-0000-7000-8000-${(40_000 + index).toString(16).padStart(12, "0")}`;
+      insertInteraction.run(interactionId, fixture.sessionId, fixture.turnId, requestJson, timestamp, timestamp);
+    }
+    const largeEvent = { ...outputEvent(fixture.sessionId, 42, fixture.turnId), payload: { stream: "assistant", text: "x".repeat(1_000_000) } };
+    raw.prepare(`
+      insert into ai_events (event_id, session_id, turn_id, sequence, event_type, event_json, observed_at)
+      values (?, ?, ?, ?, ?, ?, ?)
+    `).run(largeEvent.eventId, largeEvent.sessionId, largeEvent.turnId, largeEvent.sequence, largeEvent.eventType,
+      JSON.stringify(largeEvent), largeEvent.observedAt);
+    raw.prepare("update ai_sessions set last_sequence = 42, history_start_sequence = 1, history_truncated = 0 where id = ?")
+      .run(fixture.sessionId);
+    raw.close();
+
+    const reopened = openProjectDatabase(fixture.databasePath);
+    const loaded = reopened.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)!;
+    expect(loaded.session.id).toBe(fixture.sessionId);
+    expect(loaded.session.projectId).toBe(fixture.projectId);
+    expect(loaded.session.lastSequence).toBe(42);
+    expect(loaded.session.historyTruncated).toBe(true);
+    expect(serializedBytes(loaded)).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
+    if (loaded.events.length === 0) {
+      expect(loaded.session.historyStartSequence).toBe(43);
+    } else {
+      expect(loaded.events.at(-1)?.sequence).toBe(42);
+      expect(loaded.events[0]?.sequence).toBe(loaded.session.historyStartSequence);
+      expect(loaded.events.every((event, index) => index === 0 || event.sequence === loaded.events[index - 1]!.sequence + 1)).toBe(true);
+    }
+    const persisted = new BetterSqlite3(fixture.databasePath);
+    expect(persisted.prepare("select history_start_sequence from ai_sessions where id = ?").get(fixture.sessionId))
+      .toEqual({ history_start_sequence: 1 });
+    persisted.close();
+    reopened.close();
   }, 30_000);
 
   test("normalizes an oversized legacy output row on read and preserves it after reload", async () => {
