@@ -6,28 +6,43 @@ export const AI_SESSION_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
 export const AI_TURN_ACTIVITY_HISTORY_MAX_ROWS = 256;
 export const AI_TURN_ACTIVITY_HISTORY_MAX_BYTES = 256 * 1024;
 
-function utf8CharacterWidth(leadingByte: number): number {
-  if (leadingByte <= 0x7f) return 1;
-  if (leadingByte <= 0xdf) return 2;
-  if (leadingByte <= 0xef) return 3;
-  return 4;
-}
-
 function longestValidPrefix(value: Uint8Array, maxBytes: number): { readonly value: string; readonly truncated: boolean } {
-  let end = Math.max(0, Math.min(value.byteLength, Math.floor(maxBytes)));
-  if (end > 0 && end < value.byteLength) {
-    let characterStart = end - 1;
-    while (characterStart > 0 && (value[characterStart]! & 0xc0) === 0x80) characterStart -= 1;
-    if (utf8CharacterWidth(value[characterStart]!) > end - characterStart) end = characterStart;
-  }
-  for (let candidate = end; candidate >= 0; candidate -= 1) {
-    try {
-      return { value: decoder.decode(value.subarray(0, candidate)), truncated: candidate < value.byteLength };
-    } catch {
-      // Drop one byte at a time only for malformed legacy data; valid UTF-8 uses the boundary above.
+  const limit = Math.max(0, Math.min(value.byteLength, Math.floor(maxBytes)));
+  let offset = 0;
+  let validEnd = 0;
+  while (offset < limit) {
+    const leading = value[offset]!;
+    let width: number;
+    let codePoint: number;
+    if (leading <= 0x7f) {
+      width = 1; codePoint = leading;
+    } else if (leading >= 0xc2 && leading <= 0xdf) {
+      width = 2; codePoint = leading & 0x1f;
+    } else if (leading >= 0xe0 && leading <= 0xef) {
+      width = 3; codePoint = leading & 0x0f;
+    } else if (leading >= 0xf0 && leading <= 0xf4) {
+      width = 4; codePoint = leading & 0x07;
+    } else {
+      break;
     }
+    if (offset + width > limit || offset + width > value.byteLength) break;
+    let valid = true;
+    for (let index = 1; index < width; index += 1) {
+      const continuation = value[offset + index]!;
+      if ((continuation & 0xc0) !== 0x80) { valid = false; break; }
+      codePoint = (codePoint << 6) | (continuation & 0x3f);
+    }
+    if (!valid || (width === 2 && codePoint < 0x80) || (width === 3 && codePoint < 0x800)
+      || (width === 4 && codePoint < 0x10000) || codePoint > 0x10ffff
+      || (codePoint >= 0xd800 && codePoint <= 0xdfff)) break;
+    offset += width;
+    validEnd = offset;
   }
-  return { value: "", truncated: true };
+  try {
+    return { value: decoder.decode(value.subarray(0, validEnd)), truncated: validEnd < value.byteLength };
+  } catch {
+    return { value: "", truncated: true };
+  }
 }
 
 export function truncateUtf8(value: string, maxBytes: number): { readonly value: string; readonly truncated: boolean } {

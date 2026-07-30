@@ -10,7 +10,7 @@ import {
   type CanonicalAiEvent
 } from "@devspace/contracts";
 import { openProjectDatabase } from "./database.js";
-import { inspectAiWorkbench, interruptAiTurn, sendAiTurn, stopAiSession, streamAiEvents } from "./ai-sessions.js";
+import { boundAiWorkbenchResponse, inspectAiWorkbench, interruptAiTurn, sendAiTurn, stopAiSession, streamAiEvents } from "./ai-sessions.js";
 import {
   AI_SESSION_EVENT_HISTORY_MAX_EVENTS,
   AI_SESSION_OUTPUT_MAX_BYTES,
@@ -116,6 +116,62 @@ test("binds a supplied older session instead of acting on the newer workspace se
     aiSessionId: sessionAId
   });
   expect(typeof binding?.turnId).toBe("string");
+});
+
+test("complete response metadata advances past an event-empty retained suffix", () => {
+  const selected = {
+    session: { ...session(sessionAId), lastSequence: 42, historyStartSequence: 1, historyTruncated: false },
+    turns: Array.from({ length: 5 }, (_, index) => ({
+      id: `018f0f00-0000-7000-8000-${(200 + index).toString(16).padStart(12, "0")}`,
+      state: index === 4 ? "completed" : "active", content: { kind: "text" as const, text: "prompt" },
+      outputText: "x".repeat(AI_TURN_OUTPUT_MAX_BYTES), outputTruncated: false, activities: [],
+      changedFiles: { files: [], truncated: false }, failure: null, createdAt: timestamp, updatedAt: timestamp, completedAt: timestamp
+    })),
+    interactions: [],
+    events: [{ eventId: "018f0f00-0000-7000-8000-000000000099", sessionId: sessionAId, turnId, sequence: 42,
+      eventType: "turn.quiesced", observedAt: timestamp, schemaVersion: "devspace.ai-event/v1", profile: { profileId: "codex", profileRevision, provider: "codex" },
+      processGeneration: 1, payload: { outcome: "completed" } }]
+  };
+  const bounded = boundAiWorkbenchResponse({
+    profile: { profileId: "codex", profileRevision, provider: "codex", displayName: "Codex", availability: { state: "available" }, capabilities: {} },
+    sessions: [], session: selected
+  } as never);
+  expect(bounded.session?.events).toEqual([]);
+  expect(bounded.session?.session.historyTruncated).toBe(true);
+  expect(bounded.session?.session.historyStartSequence).toBe(43);
+  expect(bounded.session?.turns.at(-1)?.state).toBe("completed");
+  expect(serializedBytes(bounded)).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
+});
+
+test("bounds a maximum event collection with a logarithmic number of envelope measurements", () => {
+  const events = Array.from({ length: AI_SESSION_EVENT_HISTORY_MAX_EVENTS }, (_, index) => ({
+    eventId: `018f0f00-0000-7000-8000-${(10_000 + index).toString(16).padStart(12, "0")}`,
+    sessionId: sessionAId, turnId, sequence: index + 1, eventType: "turn.activity.started", observedAt: timestamp,
+    schemaVersion: "devspace.ai-event/v1" as const, profile: { profileId: "codex", profileRevision, provider: "codex" }, processGeneration: 1,
+    payload: { presentation: { summary: `activity-${index}` } }
+  }));
+  const selected = {
+    session: { ...session(sessionAId), lastSequence: AI_SESSION_EVENT_HISTORY_MAX_EVENTS, historyStartSequence: 1, historyTruncated: false },
+    turns: Array.from({ length: 4 }, (_, index) => ({
+      id: `018f0f00-0000-7000-8000-${(300 + index).toString(16).padStart(12, "0")}`,
+      state: index === 3 ? "completed" : "active", content: { kind: "text" as const, text: "prompt" },
+      outputText: "x".repeat(1_900_000), outputTruncated: false, activities: [], changedFiles: { files: [], truncated: false },
+      failure: null, createdAt: timestamp, updatedAt: timestamp, completedAt: timestamp
+    })),
+    interactions: [], events
+  };
+  const measure = vi.fn((value: unknown) => serializedBytes(value));
+  const bounded = boundAiWorkbenchResponse({
+    profile: { profileId: "codex", profileRevision, provider: "codex", displayName: "Codex", availability: { state: "available" }, capabilities: {} },
+    sessions: [], session: selected
+  } as never, { measure });
+  expect(measure.mock.calls.length).toBeLessThan(100);
+  expect(serializedBytes(bounded)).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
+  const retainedSequences = bounded.session?.events.map((event) => event.sequence) ?? [];
+  expect(retainedSequences.every((value, index) => index === 0 || value === retainedSequences[index - 1]! + 1)).toBe(true);
+  if (retainedSequences.length > 0) expect(bounded.session?.session.historyStartSequence).toBe(retainedSequences[0]);
+  else expect(bounded.session?.session.historyStartSequence).toBe(AI_SESSION_EVENT_HISTORY_MAX_EVENTS + 1);
+  expect(bounded.session?.turns.at(-1)?.state).toBe("completed");
 });
 
 test("uses the exact session for history, interrupt, stop, and Agent replay", async () => {

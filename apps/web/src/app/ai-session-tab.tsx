@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-base-to-string, @typescript-eslint/no-floating-promises */
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { appendAiTurnOutput, boundAiSessionTurns, type BrowserAiTurn } from "./ai-session-projection.js";
 import { consumeAiEventStream, type BrowserAiEvent } from "./ai-session-stream.js";
 import { AiHistoryTruncationNotice, AiOutputTruncationNotice } from "./ai-session-notices.js";
 import { replayAiEvents } from "./ai-session-replay.js";
+import { createAiSessionLoadCoordinator } from "./ai-session-load.js";
 
 type Profile = { profileId: string; profileRevision: string; displayName: string; availability: { state: "available" | "unavailable"; code?: string }; capabilities: { interrupt: boolean } };
 type FileSummary = BrowserAiTurn["changedFiles"];
@@ -23,20 +24,22 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const [loading, setLoading] = useState(true);
   const [reconnecting, setReconnecting] = useState(false);
   const lastSequence = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
   const selectedSessionId = useRef<string | null>(null);
   const terminal = useRef(false);
   const selectionGeneration = useRef(0);
+  const lastEventId = useRef<string | null>(null);
 
-  const applyEvent = useCallback((event: Event) => {
-    if (selectedSessionId.current !== event.sessionId) return;
+  const applyEvent = useCallback((event: Event): boolean => {
+    if (selectedSessionId.current !== event.sessionId) return false;
     if (event.eventType.startsWith("session.")) {
       if (event.eventType === "session.stopped") { terminal.current = true; setSession((current) => current === null ? null : { ...current, state: "stopped" }); }
       else if (event.eventType === "session.lost") { terminal.current = true; setSession((current) => current === null ? null : { ...current, state: "lost" }); }
       else if (event.eventType === "session.ready") setSession((current) => current === null ? null : { ...current, state: "active" });
-      return;
+      return true;
     }
-    if (event.turnId === null) return;
+    if (event.turnId === null) return true;
     const turnId = event.turnId;
     setTurns((current) => {
       const index = current.findIndex((turn) => turn.id === turnId);
@@ -54,69 +57,102 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
       if (event.eventType === "turn.output.delta") updated = appendAiTurnOutput(updated, turnId, String(event.payload.text ?? ""));
       return boundAiSessionTurns(updated);
     });
+    return true;
   }, []);
 
-  const load = useCallback(async (requestedSessionId?: string) => {
-    abortRef.current?.abort();
-    const generation = ++selectionGeneration.current;
-    setLoading(true);
-    try {
+  const loadCoordinator = useMemo(() => createAiSessionLoadCoordinator({
+    run: async (requestedSessionId: string | undefined, signal: AbortSignal, isCurrent: () => boolean) => {
+      const ensureCurrent = () => {
+        if (signal.aborted || !isCurrent()) throw new DOMException("The AI session load was superseded.", "AbortError");
+      };
       const query = new URLSearchParams({ workspaceId });
       if (requestedSessionId !== undefined) query.set("sessionId", requestedSessionId);
-      const response = await fetch(`/api/projects/${projectId}/ai?${query.toString()}`, { cache: "no-store" });
+      const response = await fetch(`/api/projects/${projectId}/ai?${query.toString()}`, { cache: "no-store", signal });
+      ensureCurrent();
       const body = await response.json() as {
         profile?: Profile;
         sessions?: SessionSummary[];
         session?: { session: SessionData; turns: Array<Omit<Turn, "activities"> & { changedFiles: FileSummary }>; events: Event[]; interactions?: unknown[] } | null;
         message?: string;
       };
+      ensureCurrent();
       if (!response.ok || body.profile === undefined) throw new Error(body.message ?? "Codex availability could not be inspected.");
-      setProfile(body.profile);
       let selected = body.session;
       const selectedId = requestedSessionId ?? body.sessions?.[0]?.id;
       if (selected === null && selectedId !== undefined) {
         const exactQuery = new URLSearchParams({ workspaceId, sessionId: selectedId });
-        const exactResponse = await fetch(`/api/projects/${projectId}/ai?${exactQuery.toString()}`, { cache: "no-store" });
+        const exactResponse = await fetch(`/api/projects/${projectId}/ai?${exactQuery.toString()}`, { cache: "no-store", signal });
+        ensureCurrent();
         const exactBody = await exactResponse.json() as typeof body;
+        ensureCurrent();
         if (!exactResponse.ok || exactBody.session === null || exactBody.session === undefined) {
           throw new Error(exactBody.message ?? "The selected AI session could not be loaded.");
         }
         selected = exactBody.session;
       }
-      if (generation !== selectionGeneration.current) return;
+      ensureCurrent();
+      return { profile: body.profile, selected };
+    },
+    apply: ({ profile: nextProfile, selected }) => {
+      setProfile(nextProfile);
+      setMessage(null);
       if (selected !== null && selected !== undefined) {
         selectedSessionId.current = selected.session.id;
         terminal.current = selected.session.state === "stopped" || selected.session.state === "lost";
         setSession(selected.session); lastSequence.current = selected.session.lastSequence;
+        const lastEvent = selected.events.at(-1);
+        lastEventId.current = lastEvent?.sequence === selected.session.lastSequence ? lastEvent.eventId : null;
         setTurns(replayAiEvents(selected.turns.map((turn) => ({ ...turn, activities: [] })), selected.events));
-      } else { selectedSessionId.current = null; terminal.current = false; setSession(null); setTurns([]); lastSequence.current = 0; }
-    } catch (error) { setMessage(error instanceof Error ? error.message : "AI session unavailable."); }
-    finally { setLoading(false); }
-  }, [projectId, workspaceId]);
+      } else {
+        selectedSessionId.current = null; terminal.current = false; setSession(null); setTurns([]); lastSequence.current = 0; lastEventId.current = null;
+      }
+    },
+    setLoading,
+    setMessage,
+    setController: (controller) => { loadAbortRef.current = controller; }
+  }), [projectId, workspaceId]);
 
-  useEffect(() => { void load(); return () => { abortRef.current?.abort(); selectionGeneration.current += 1; }; }, [load]);
+  const cancelWork = useCallback(() => {
+    selectionGeneration.current += 1;
+    streamAbortRef.current?.abort();
+    loadCoordinator.cancel();
+    loadAbortRef.current?.abort();
+  }, [loadCoordinator]);
+
+  const load = useCallback((requestedSessionId?: string) => {
+    cancelWork();
+    return loadCoordinator.load(requestedSessionId);
+  }, [cancelWork, loadCoordinator]);
+
+  useEffect(() => {
+    void load();
+    return () => { cancelWork(); };
+  }, [cancelWork, load]);
 
   useEffect(() => {
     if (!active || session === null || session.state === "stopped" || session.state === "lost") return;
-    const controller = new AbortController(); abortRef.current?.abort(); abortRef.current = controller; setReconnecting(false);
+    const controller = new AbortController(); streamAbortRef.current?.abort(); streamAbortRef.current = controller; setReconnecting(false);
     const sessionId = session.id;
     const generation = selectionGeneration.current;
     const run = async () => {
       try {
         await consumeAiEventStream({
           initialSequence: lastSequence.current,
+          initialEventId: lastEventId.current,
           sessionId,
           signal: controller.signal,
           open: (afterSequence, signal) => fetch(`/api/projects/${projectId}/ai/events?workspaceId=${encodeURIComponent(workspaceId)}&sessionId=${encodeURIComponent(sessionId)}&afterSequence=${afterSequence}`, { signal, cache: "no-store" }),
           apply: (event) => {
             if (generation !== selectionGeneration.current || selectedSessionId.current !== sessionId) { controller.abort(); return; }
-            applyEvent(event); lastSequence.current = event.sequence;
+            if (!applyEvent(event)) { controller.abort(); return false; }
+            lastSequence.current = event.sequence; lastEventId.current = event.eventId;
+            return true;
           },
           isTerminal: () => terminal.current || generation !== selectionGeneration.current || selectedSessionId.current !== sessionId
         });
       } catch (error) { if (!controller.signal.aborted) { setReconnecting(true); setMessage(error instanceof Error ? error.message : "The AI stream disconnected."); } }
     };
-    void run(); return () => controller.abort();
+    void run(); return () => { controller.abort(); if (streamAbortRef.current === controller) streamAbortRef.current = null; };
   }, [active, applyEvent, projectId, session?.id, workspaceId]);
 
   const post = async (body: Record<string, unknown>) => {
@@ -128,8 +164,8 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const create = async () => { try { await post({ action: "create", workspaceId }); await load(); setMessage(null); } catch (error) { setMessage(error instanceof Error ? error.message : "Session creation failed."); } };
   const send = async () => { const text = composer.trim(); if (!text || session === null) return; setComposer(""); try { await post({ action: "send", workspaceId, sessionId: session.id, content: { kind: "text", text } }); } catch (error) { setComposer(text); setMessage(error instanceof Error ? error.message : "Turn could not be sent."); } };
   const interrupt = async () => { const turn = turns.find((candidate) => candidate.state === "running"); if (turn === undefined || session === null) return; try { await post({ action: "interrupt", workspaceId, sessionId: session.id, turnId: turn.id }); } catch (error) { setMessage(error instanceof Error ? error.message : "Interrupt failed."); } };
-  const stop = async () => { if (session === null) return; try { await post({ action: "stop", workspaceId, sessionId: session.id }); await load(session.id); } catch (error) { setMessage(error instanceof Error ? error.message : "Stop failed."); } };
-  const restartWorkspace = async () => { try { await fetch(`/api/projects/${projectId}/runtime`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "start" }) }); await load(); } catch { setMessage("Workspace restart could not be requested."); } };
+  const stop = async () => { if (session === null) return; cancelWork(); try { await post({ action: "stop", workspaceId, sessionId: session.id }); await load(session.id); } catch (error) { setMessage(error instanceof Error ? error.message : "Stop failed."); } };
+  const restartWorkspace = async () => { cancelWork(); try { await fetch(`/api/projects/${projectId}/runtime`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "start" }) }); await load(); } catch { setMessage("Workspace restart could not be requested."); } };
 
   if (loading && profile === null) return <div className="ai-tab-surface" role="status">Inspecting Codex availability…</div>;
   const unavailable = profile?.availability.state === "unavailable";

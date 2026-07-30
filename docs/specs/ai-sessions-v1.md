@@ -618,16 +618,22 @@ The browser supplies `afterSequence`. Web replays SQLite-committed events, estab
 handoff under one Web session publication lock, sends `stream.synchronized` with the committed
 boundary, then sends live committed events. Each browser response is capped at 512 frames and
 8 MiB; a clean cap-induced EOF for a nonterminal session reconnects from the last successfully
-applied canonical sequence. Exact duplicates are ignored, sequence gaps fail closed, zero-progress
-EOFs use bounded backoff, and `session.stopped`/`session.lost` end continuation. Abort, unmount, or
-session replacement cancels the reader and pending retry; a stale response cannot update the new
-selection. A browser refresh reconnects from the same last applied sequence. Slow subscribers have
-bounded queues and are disconnected with a safe reconnect instruction; they do not apply backpressure
-to SQLite commit or Agent acknowledgement.
+applied canonical sequence. Only a repeated sequence with the exact previously applied event ID is
+ignored; an unknown or conflicting same-sequence identity, lower sequence, or gap fails closed.
+Zero-progress EOFs use bounded backoff, and `session.stopped`/`session.lost` end continuation. Abort,
+unmount, or session replacement cancels the reader and pending retry; stale snapshot requests are
+aborted independently and cannot mutate the replacement selection. A stale response cannot update
+the new selection. A browser refresh reconnects from the same last applied sequence. Slow subscribers
+have bounded queues and are disconnected with a safe reconnect instruction; they do not apply
+backpressure to SQLite commit or Agent acknowledgement.
 
 The browser projection enforces the same 2 MiB per-turn and 8 MiB newest-turn-first output bounds
 as SQLite, preserves sticky `outputTruncated`, and shows concise output/history notices. Refresh and
 replay retain the bounded projection rather than rebuilding an apparently complete turn from deltas.
+When complete-response envelope compaction removes every selected-session event, public
+`historyStartSequence` is `lastSequence + 1` and `historyTruncated` is true; when events remain it is
+the first retained contiguous suffix sequence. The newest retained aggregate turn and terminal state
+remain available, while interaction/history collection truncation is explicit.
 
 Web restart reconstructs replay entirely from SQLite. Agent disconnect does not remove committed
 history; session connection state becomes unavailable or lost according to identity evidence.

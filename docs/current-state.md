@@ -98,8 +98,11 @@ caller-supplied session identity is required for session-scoped operations, and 
 history uses explicit replay/truncation metadata. Browser stream continuation reconnects from the
 last applied sequence after bounded clean responses, and browser-visible output/history truncation
 is explicit. The 8 MiB Web AI response limit covers the complete HTTP envelope, not only the selected
-session. This does not claim the entire final review is complete; Checkpoint 2 and the other deferred
-concerns below remain out of scope.
+session. Snapshot loads are generation-bound and abort obsolete work without allowing stale success,
+error, or cleanup callbacks to mutate the selected session. Stream duplicate identity is exact: only
+the known event ID at the current sequence can be ignored; conflicts and gaps fail closed. This does
+not claim the entire final review is complete; Checkpoint 2 and the other deferred concerns below
+remain out of scope.
 
 ### Codex authority onboarding and recovery
 

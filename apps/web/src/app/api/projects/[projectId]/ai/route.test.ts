@@ -58,7 +58,10 @@ describe("complete AI workbench response bound", () => {
     expect(response.status).toBe(200);
     expect(body).toBeDefined();
     expect(serializedBytes(body)).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
-    expect(Buffer.byteLength(await response.text(), "utf8")).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
+    const responseText = await response.text();
+    expect(Buffer.byteLength(responseText, "utf8")).toBeLessThanOrEqual(AI_SESSION_RESPONSE_MAX_BYTES);
+    const parsed = JSON.parse(responseText) as { session?: { session?: { id?: string } } };
+    expect(parsed.session?.session?.id).toBe(ids.sessionId);
     spy.mockRestore();
   });
 });

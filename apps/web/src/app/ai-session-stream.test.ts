@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { consumeAiEventStream, type BrowserAiEvent } from "./ai-session-stream.js";
+import { consumeAiEventStream, sleepWithAbort, type BrowserAiEvent } from "./ai-session-stream.js";
 
 const event = (sequence: number, eventType = "turn.started"): BrowserAiEvent => ({
   schemaVersion: "devspace.ai-event/v1",
@@ -116,10 +116,88 @@ describe("bounded browser AI event continuation", () => {
       sessionId: "session-a",
       signal: controller.signal,
       open: () => Promise.resolve(response([{ ...event(1), sessionId: "session-b" }])),
-      apply: (frame) => applied.push(frame.sequence),
+      apply: (frame) => { applied.push(frame.sequence); },
       isTerminal: () => false,
       sleep: () => { controller.abort(); return Promise.resolve(); }
     })).rejects.toThrow("session identity changed");
     expect(applied).toEqual([]);
+  });
+
+  test("ignores only an exact duplicate sequence and event identity across continuation", async () => {
+    const controller = new AbortController();
+    const applied: number[] = [];
+    const first = event(1);
+    const second = event(2, "session.stopped");
+
+    await consumeAiEventStream({
+      initialSequence: 0,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open: vi.fn()
+        .mockResolvedValueOnce(response([first]))
+        .mockResolvedValueOnce(response([first, second])),
+      apply: (frame) => { applied.push(frame.sequence); },
+      isTerminal: () => applied.includes(2),
+      sleep: () => Promise.resolve()
+    });
+
+    expect(applied).toEqual([1, 2]);
+  });
+
+  test.each([
+    ["same sequence with another event ID", [event(1), { ...event(1), eventId: "conflict" }], "conflicting event identity"],
+    ["a lower sequence", [event(1)], "out-of-order"],
+    ["a sequence gap", [event(2)], "contiguous"]
+  ])("fails closed for %s", async (_label, frames, message) => {
+    const controller = new AbortController();
+    const applied: number[] = [];
+    await expect(consumeAiEventStream({
+      initialSequence: _label === "a lower sequence" ? 2 : 0,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open: () => Promise.resolve(response(frames)),
+      apply: (frame) => { applied.push(frame.sequence); },
+      isTerminal: () => false
+    })).rejects.toThrow(message);
+    expect(applied).toEqual(_label === "same sequence with another event ID" ? [1] : []);
+  });
+
+  test("does not advance the cursor when apply fails", async () => {
+    const controller = new AbortController();
+    const open = vi.fn(() => Promise.resolve(response([event(1)])));
+    await expect(consumeAiEventStream({
+      initialSequence: 0,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open,
+      apply: () => { throw new Error("apply failed"); },
+      isTerminal: () => false
+    })).rejects.toThrow("apply failed");
+    expect(open).toHaveBeenCalledWith(0, expect.any(AbortSignal));
+  });
+
+  test("cancels the active reader when parsing fails", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) { stream.enqueue(new TextEncoder().encode("not-json\n")); },
+      cancel() { cancelled = true; }
+    });
+    const controller = new AbortController();
+    await expect(consumeAiEventStream({
+      initialSequence: 0,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open: () => Promise.resolve(new Response(body, { status: 200 })),
+      apply: () => undefined,
+      isTerminal: () => false
+    })).rejects.toThrow();
+    expect(cancelled).toBe(true);
+  });
+
+  test("removes the default sleep abort listener after normal completion", async () => {
+    const controller = new AbortController();
+    await sleepWithAbort(0, controller.signal);
+    controller.abort();
+    expect(controller.signal.aborted).toBe(true);
   });
 });
