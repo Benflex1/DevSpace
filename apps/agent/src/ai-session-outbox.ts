@@ -13,8 +13,11 @@ import { v7 as uuidv7 } from "uuid";
 
 export const MAX_RETAINED_OUTBOX_EVENTS = 2_048;
 export const ACKNOWLEDGED_RETENTION_TAIL = 512;
-/** Two turn-start events plus the complete terminal lifecycle reserve. */
-export const TERMINAL_EVENT_RESERVE = 5;
+/** Complete active-turn and provider-generation finalization reserve. */
+export const PROVIDER_FINALIZATION_EVENT_RESERVE = 2;
+export const ACTIVE_TURN_EVENT_RESERVE = 4;
+export const TERMINAL_EVENT_RESERVE = PROVIDER_FINALIZATION_EVENT_RESERVE + ACTIVE_TURN_EVENT_RESERVE;
+const PROVIDER_STARTUP_EVENT_BUDGET = 2;
 const OUTBOX_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_MANIFEST_BYTES = 4 * 1024;
@@ -52,7 +55,7 @@ type OutboxAppendInput = Readonly<{
   readonly payload: unknown;
   readonly profile: CanonicalAiEvent["profile"];
   readonly processGeneration: number;
-  readonly kind?: "normal" | "terminal";
+  readonly kind?: "normal" | "turn-finalization" | "provider-finalization" | "terminal";
 }>;
 
 type TurnStartInput = Readonly<{
@@ -63,6 +66,7 @@ type TurnStartInput = Readonly<{
 }>;
 
 export type AiSessionOutboxFaultHooks = Readonly<{
+  readonly beforeAppend?: (input: Readonly<{ eventType: string; turnId: string | null; processGeneration: number }>) => void | Promise<void>;
   readonly beforeAppendWrite?: (pathname: string) => void | Promise<void>;
   readonly beforeAppendSync?: (pathname: string) => void | Promise<void>;
   readonly beforeAtomicRename?: (pathname: string) => void | Promise<void>;
@@ -315,7 +319,10 @@ export class AiSessionOutbox {
   private eventsValue: CanonicalAiEvent[];
   private manifestValue: AiSessionOutboxManifest;
   private byteSize: number;
-  private terminalReservation = false;
+  private providerReservationOwned = false;
+  private providerFinalizationSlotsRemaining = 0;
+  private activeTurnReservationOwned = false;
+  private activeTurnSlotsRemaining = 0;
 
   private constructor(
     private readonly stateRoot: string,
@@ -382,11 +389,43 @@ export class AiSessionOutbox {
     });
   }
 
+  async reserveProviderGeneration(): Promise<void> {
+    await this.enqueue(async () => {
+      await this.compactLocked();
+      if (this.providerReservationOwned || this.activeTurnReservationOwned
+        || this.eventsValue.length + PROVIDER_STARTUP_EVENT_BUDGET + PROVIDER_FINALIZATION_EVENT_RESERVE > MAX_RETAINED_OUTBOX_EVENTS) {
+        throw unavailable();
+      }
+      this.providerReservationOwned = true;
+      this.providerFinalizationSlotsRemaining = PROVIDER_FINALIZATION_EVENT_RESERVE;
+    });
+  }
+
+  async releaseProviderGeneration(): Promise<void> {
+    await this.enqueue(() => {
+      if (!this.providerReservationOwned || this.providerFinalizationSlotsRemaining !== 0 || this.activeTurnReservationOwned) throw unavailable();
+      this.providerReservationOwned = false;
+    });
+  }
+
+  async cancelProviderGenerationReservation(): Promise<void> {
+    await this.enqueue(() => {
+      if (!this.providerReservationOwned || this.providerFinalizationSlotsRemaining !== PROVIDER_FINALIZATION_EVENT_RESERVE
+        || this.activeTurnReservationOwned) throw unavailable();
+      this.providerReservationOwned = false;
+      this.providerFinalizationSlotsRemaining = 0;
+    });
+  }
+
   async beginTurn(input: TurnStartInput): Promise<readonly [CanonicalAiEvent, CanonicalAiEvent]> {
     return await this.enqueue(async () => {
       await this.compactLocked();
-      if (this.eventsValue.length + 2 + TERMINAL_EVENT_RESERVE > MAX_RETAINED_OUTBOX_EVENTS) throw unavailable();
-      this.terminalReservation = true;
+      if (!this.providerReservationOwned || this.activeTurnReservationOwned
+        || this.eventsValue.length + 2 + ACTIVE_TURN_EVENT_RESERVE + this.providerFinalizationSlotsRemaining > MAX_RETAINED_OUTBOX_EVENTS) {
+        throw unavailable();
+      }
+      this.activeTurnReservationOwned = true;
+      this.activeTurnSlotsRemaining = ACTIVE_TURN_EVENT_RESERVE;
       const accepted = await this.appendLocked({ turnId: input.turnId, eventType: "turn.accepted", payload: { content: input.content }, profile: input.profile, processGeneration: input.processGeneration, kind: "normal" }, true);
       const started = await this.appendLocked({ turnId: input.turnId, eventType: "turn.started", payload: {}, profile: input.profile, processGeneration: input.processGeneration, kind: "normal" }, true);
       return [accepted, started];
@@ -394,7 +433,11 @@ export class AiSessionOutbox {
   }
 
   async finishTurn(): Promise<void> {
-    await this.enqueue(() => { this.terminalReservation = false; });
+    await this.enqueue(() => {
+      if (!this.activeTurnReservationOwned) return;
+      this.activeTurnReservationOwned = false;
+      this.activeTurnSlotsRemaining = 0;
+    });
   }
 
   async acknowledge(input: AiEventAcknowledgement): Promise<AiEventAcknowledgement> {
@@ -442,8 +485,17 @@ export class AiSessionOutbox {
 
   private async appendLocked(input: OutboxAppendInput, preflighted: boolean): Promise<CanonicalAiEvent> {
     if (!preflighted) {
-      const limit = this.terminalReservation && input.kind !== "terminal"
-        ? MAX_RETAINED_OUTBOX_EVENTS - TERMINAL_EVENT_RESERVE : MAX_RETAINED_OUTBOX_EVENTS;
+      let reservedAfterAppend = this.providerFinalizationSlotsRemaining + this.activeTurnSlotsRemaining;
+      if (input.kind === "turn-finalization") {
+        if (!this.activeTurnReservationOwned || this.activeTurnSlotsRemaining === 0) throw unavailable();
+        reservedAfterAppend -= 1;
+      } else if (input.kind === "provider-finalization") {
+        if (!this.providerReservationOwned || this.providerFinalizationSlotsRemaining === 0) throw unavailable();
+        reservedAfterAppend -= 1;
+      } else if (input.kind === "terminal") {
+        reservedAfterAppend = 0;
+      }
+      const limit = MAX_RETAINED_OUTBOX_EVENTS - reservedAfterAppend;
       if (this.eventsValue.length + 1 > limit) throw unavailable();
     }
     const sequence = this.nextSequence;
@@ -457,6 +509,11 @@ export class AiSessionOutbox {
     if (this.byteSize + bytes.length > MAX_OUTBOX_BYTES) throw unavailable();
     let handle;
     try {
+      await this.faultHooks.beforeAppend?.({
+        eventType: input.eventType,
+        turnId: input.turnId,
+        processGeneration: input.processGeneration
+      });
       handle = await open(outboxPathForAiSession(this.stateRoot, this.binding.aiSessionId), constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
       const before = await handle.stat();
       assertPrivateStats(before, MAX_OUTBOX_BYTES);
@@ -477,6 +534,8 @@ export class AiSessionOutbox {
     }
     this.byteSize += bytes.length;
     this.eventsValue.push(event);
+    if (input.kind === "turn-finalization") this.activeTurnSlotsRemaining -= 1;
+    if (input.kind === "provider-finalization") this.providerFinalizationSlotsRemaining -= 1;
     for (const listener of this.listeners) {
       try { listener(event); } catch { /* delivery errors never poison the durable chain */ }
     }

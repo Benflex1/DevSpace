@@ -30,8 +30,13 @@ import {
   createAiSessionOutbox,
   openExistingAiSessionOutbox,
   type AiEventAcknowledgement,
-  type AiSessionOutbox
+  type AiSessionOutbox,
+  type AiSessionOutboxFaultHooks
 } from "./ai-session-outbox.js";
+import {
+  CODEX_NOTIFICATION_CATEGORY_REGISTRY,
+  validatePinnedCodexNotification
+} from "./codex-notification-schema-v0-145.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
@@ -92,6 +97,14 @@ export interface AiSessionRuntimeOptions {
   readonly codexReadbackHelperPath?: string;
   /** Agent-private bounded authority seam; the server never supplies this implementation. */
   readonly codexCredentialAuthority?: CodexCredentialAuthority;
+  /** Agent-private deterministic outbox seam; the server never supplies these hooks. */
+  readonly outboxFaultHooks?: AiSessionOutboxFaultHooks;
+  /** Agent-private deterministic fake-provider seam; the server never supplies these hooks. */
+  readonly fakeProviderTestHooks?: Readonly<{
+    readonly onStart?: () => void;
+    readonly onStop?: () => void;
+    readonly closeAfterTurn?: boolean;
+  }>;
 }
 
 export type CodexPrivateFailureObservation = Readonly<{
@@ -139,9 +152,12 @@ interface SessionRecord {
   adapter: ProviderAdapter | null;
   ready: boolean;
   activeTurnId: string | null;
-  finalizationPromise: Promise<ProviderFinalizationResult> | null;
-  finalizationState: "active" | "finalizing" | "finalized" | "cleanup-unproven";
+  activeTurnToken: object | null;
+  activeTurnPromise: Promise<void> | null;
+  finalizationPromise: Promise<void> | null;
+  finalizationState: "active" | "finalizing" | "cleanup-unproven" | "cleanup-proven-public-pending" | "finalized";
   finalizationReason: "user-request" | "provider-exited" | null;
+  cleanupProven: boolean;
   stoppingEmitted: boolean;
 }
 
@@ -346,8 +362,12 @@ class FakeProvider implements ProviderAdapter {
   private stopped = false;
   private releaseLongTurn: (() => void) | null = null;
   private longTurnTimer: ReturnType<typeof setTimeout> | null = null;
-  constructor(private readonly callbacks: AdapterCallbacks, private readonly worktreePath: string | null) {}
-  async start(): Promise<void> { return; }
+  constructor(
+    private readonly callbacks: AdapterCallbacks,
+    private readonly worktreePath: string | null,
+    private readonly testHooks: AiSessionRuntimeOptions["fakeProviderTestHooks"]
+  ) {}
+  async start(): Promise<void> { this.testHooks?.onStart?.(); }
   async sendTurn(_turnId: string, text: string): Promise<void> {
     this.interrupted = false;
     this.stopped = false;
@@ -365,6 +385,7 @@ class FakeProvider implements ProviderAdapter {
       if (this.longTurnTimer !== null) clearTimeout(this.longTurnTimer);
       this.longTurnTimer = null; this.releaseLongTurn = null;
       await this.callbacks.completed(this.interrupted || this.stopped ? "interrupted" : "completed");
+      if (this.testHooks?.closeAfterTurn === true) await this.callbacks.providerClosed();
       return;
     }
     const chunks = ["Hello from the deterministic provider."];
@@ -374,9 +395,11 @@ class FakeProvider implements ProviderAdapter {
       await this.callbacks.outputDelta(chunk);
     }
     await this.callbacks.completed("completed");
+    if (this.testHooks?.closeAfterTurn === true) await this.callbacks.providerClosed();
   }
   async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); }
   async stop(): Promise<ProviderFinalizationResult> {
+    this.testHooks?.onStop?.();
     this.stopped = true; this.releaseLongTurn?.();
     return { state: "finalized", synchronization: "unchanged-valid" };
   }
@@ -786,19 +809,21 @@ class CodexProvider implements ProviderAdapter {
     if (typeof message.method !== "string" || !Object.prototype.hasOwnProperty.call(message, "params")) { this.failProtocolOnce(); return; }
     const params = this.objectRecord(message.params);
     if (params === null) { this.failProtocolOnce(); return; }
-    this.enqueueNotification(message.method, params);
+    this.enqueueNotification(message, message.method, params);
   }
-  private enqueueNotification(method: string, params: Record<string, unknown>): void {
+  private enqueueNotification(notification: Record<string, unknown>, method: string, params: Record<string, unknown>): void {
     if (this.notificationQueueLength >= CODEX_MAX_NATIVE_NOTIFICATIONS) { this.failProtocolOnce(); return; }
     this.notificationQueueLength += 1;
     const previous = this.notificationChain;
     const current = previous.then(async () => {
-      if (!this.protocolFailureClaimed) await this.dispatchNotification(method, params);
+      if (!this.protocolFailureClaimed) await this.dispatchNotification(notification, method, params);
     }).finally(() => { this.notificationQueueLength -= 1; });
     this.notificationChain = current.then(() => undefined, () => undefined);
     void current.catch(() => { this.failProtocolOnce(); });
   }
-  private async dispatchNotification(method: string, params: Record<string, unknown>): Promise<void> {
+  private async dispatchNotification(notification: Record<string, unknown>, method: string, params: Record<string, unknown>): Promise<void> {
+    const category = validatePinnedCodexNotification(notification);
+    if (category === null) { this.failProtocolOnce(); return; }
     if (method === "error") {
       const error = this.objectRecord(params.error);
       if (!this.correlates(params, true) || error === null || typeof params.willRetry !== "boolean" || typeof error.message !== "string") { this.failProtocolOnce(); return; }
@@ -850,7 +875,10 @@ class CodexProvider implements ProviderAdapter {
       }
       this.nativeTurnState = "terminal-delivered";
       this.turnFailure = null;
+      return;
     }
+    if (category === "validated-and-ignored") return;
+    this.failProtocolOnce();
   }
   private correlates(params: Record<string, unknown>, requireTurn: boolean): boolean {
     if (this.nativeTurnState !== "active") return false;
@@ -954,9 +982,10 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (binding !== undefined && (cached.binding.projectId !== binding.projectId || cached.binding.workspaceId !== binding.workspaceId)) throw new Error("ai-identity-mismatch");
       return cached;
     }
+    const faultOptions = options.outboxFaultHooks === undefined ? {} : { faultHooks: options.outboxFaultHooks };
     const opened = binding === undefined
-      ? await openExistingAiSessionOutbox({ stateRoot, sessionId, createId, now })
-      : await createAiSessionOutbox({ stateRoot, binding, createId, now });
+      ? await openExistingAiSessionOutbox({ stateRoot, sessionId, createId, now, ...faultOptions })
+      : await createAiSessionOutbox({ stateRoot, binding, createId, now, ...faultOptions });
     outboxes.set(sessionId, opened);
     return opened;
   }
@@ -975,19 +1004,22 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const previousGeneration = outbox.events.length === 0 ? 1 : validateStoppedOutbox(outbox, binding);
     const record: SessionRecord = {
       binding, processGeneration: previousGeneration, outbox, turnBaselines: new Map(), privateFailures: new Map(), adapter: null, ready: false, activeTurnId: null,
-      finalizationPromise: null,
-      finalizationState: outbox.events.length === 0 ? "active" : "finalized", finalizationReason: null, stoppingEmitted: outbox.events.length > 0
+      activeTurnToken: null, activeTurnPromise: null, finalizationPromise: null,
+      finalizationState: outbox.events.length === 0 ? "active" : "finalized", finalizationReason: null,
+      cleanupProven: outbox.events.length > 0, stoppingEmitted: outbox.events.length > 0
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
 
   async function emit(record: SessionRecord, turnId: string | null, eventType: string, payload: unknown): Promise<CanonicalAiEvent> {
-    const terminal = new Set(["turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced", "turn.failed", "session.stopping", "session.stopped", "session.lost"]).has(eventType);
+    const turnFinalization = new Set(["turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced", "turn.failed"]).has(eventType);
+    const providerFinalization = eventType === "session.stopping" || eventType === "session.stopped";
     return await record.outbox.append({ turnId, eventType, payload, profile: {
       profileId: CODEX_PROFILE_ID,
       profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
       provider: CODEX_PROFILE_ID
-    }, processGeneration: record.processGeneration, kind: terminal ? "terminal" : "normal" });
+    }, processGeneration: record.processGeneration,
+    kind: turnFinalization ? "turn-finalization" : providerFinalization ? "provider-finalization" : eventType === "session.lost" ? "terminal" : "normal" });
   }
 
   function rememberPrivateFailure(record: SessionRecord, turnId: string, observation: CodexPrivateFailureObservation): CodexPrivateFailureObservation {
@@ -998,12 +1030,21 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     return observation;
   }
 
+  async function changedFilesForTurn(record: SessionRecord, turnId: string) {
+    if (options.managed === undefined) return { files: [], truncated: false };
+    const context = await options.managed.executionContext(record.binding.projectId, record.binding.workspaceId).catch(() => null);
+    if (context === null) return { files: [], truncated: false };
+    const before = record.turnBaselines.get(turnId) ?? new Set();
+    return await gitSummary(context.ownership.worktreePath, before).catch(() => ({ files: [], truncated: false }));
+  }
+
   async function failTurn(record: SessionRecord, turnId: string, observation: CodexPrivateFailureObservation): Promise<void> {
     if (record.activeTurnId !== turnId) return;
     const selected = rememberPrivateFailure(record, turnId, observation);
     record.activeTurnId = null; record.turnBaselines.delete(turnId); record.privateFailures.delete(turnId);
     const code = safeErrorCode(new CodexRequestFailure(selected));
     await emit(record, turnId, "turn.failed", { failure: { code, category: code === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure", incidentId: createId() } });
+    await record.outbox.finishTurn();
     await finalizeRecord(record, "provider-exited");
   }
 
@@ -1013,27 +1054,43 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       await record.finalizationPromise;
       return;
     }
-    const adapter = record.adapter;
-    if (adapter === null) return;
+    if (record.finalizationState === "active" && record.adapter === null && !record.cleanupProven) return;
     record.finalizationReason ??= reason;
     record.finalizationState = "finalizing";
     const finalizationReason = record.finalizationReason;
     const attempt = (async () => {
+      if (!record.cleanupProven) {
+        const adapter = record.adapter;
+        if (adapter === null) throw new ProviderFinalizationUnprovenError();
+        const result = await adapter.stop();
+        if (result.state !== "finalized") throw new ProviderFinalizationUnprovenError();
+        record.ready = false;
+        record.adapter = null;
+        record.cleanupProven = true;
+        record.finalizationState = "cleanup-proven-public-pending";
+      }
+      if (record.activeTurnId !== null) await record.activeTurnPromise?.catch(() => undefined);
+      if (record.activeTurnId !== null) {
+        const turnId = record.activeTurnId;
+        await emit(record, turnId, "turn.interrupted", { reason: "provider-confirmed" });
+        await emit(record, turnId, "turn.provider-completed", { outcome: "interrupted" });
+        await emit(record, turnId, "turn.files.changed", await changedFilesForTurn(record, turnId));
+        await emit(record, turnId, "turn.quiesced", { outcome: "interrupted" });
+        record.turnBaselines.delete(turnId);
+        record.privateFailures.delete(turnId);
+        record.activeTurnId = null;
+        await record.outbox.finishTurn();
+      }
       if (!record.stoppingEmitted) {
         await emit(record, null, "session.stopping", { reason: finalizationReason === "user-request" ? "user-request" : "runtime-stopping" });
         record.stoppingEmitted = true;
       }
-      const result = await adapter.stop();
-      if (result.state !== "finalized") throw new ProviderFinalizationUnprovenError();
-      record.ready = false;
       await emit(record, null, "session.stopped", { reason: finalizationReason === "user-request" ? "user-request" : "provider-exited" });
-      await record.outbox.finishTurn();
-      record.adapter = null;
+      await record.outbox.releaseProviderGeneration();
       record.finalizationState = "finalized";
-      return result;
     })();
-    const promise = attempt.then((result) => result, (error) => {
-      record.finalizationState = "cleanup-unproven";
+    const promise = attempt.then(() => undefined, (error) => {
+      record.finalizationState = record.cleanupProven ? "cleanup-proven-public-pending" : "cleanup-unproven";
       throw error;
     });
     record.finalizationPromise = promise;
@@ -1094,6 +1151,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         || (restarting && record.finalizationState !== "finalized")
         || (!restarting && record.finalizationState !== "active")) throw new Error("ai-session-state-conflict");
       if (restarting && validateStoppedOutbox(record.outbox, binding) !== record.processGeneration) throw new Error("ai-session-restart-unavailable");
+      await record.outbox.reserveProviderGeneration();
       const adapterGeneration = nextGeneration;
       let generationAdapter: ProviderAdapter | null = null;
       const currentGeneration = () => record.processGeneration === adapterGeneration && record.adapter === generationAdapter;
@@ -1105,14 +1163,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           if (!currentGeneration() || record.activeTurnId === null) return;
           const turnId = record.activeTurnId; if (outcome === "interrupted") await emit(record, turnId, "turn.interrupted", { reason: "provider-confirmed" });
           await emit(record, turnId, "turn.provider-completed", { outcome });
-          if (options.managed !== undefined) {
-            const ctx = await options.managed.executionContext(binding.projectId, binding.workspaceId).catch(() => null);
-            if (ctx !== null) {
-              const before = record.turnBaselines.get(turnId) ?? new Set();
-              const summary = await gitSummary(ctx.ownership.worktreePath, before).catch(() => ({ files: [], truncated: false }));
-              await emit(record, turnId, "turn.files.changed", summary);
-            }
-          } else await emit(record, turnId, "turn.files.changed", { files: [], truncated: false });
+          await emit(record, turnId, "turn.files.changed", await changedFilesForTurn(record, turnId));
           await emit(record, turnId, "turn.quiesced", { outcome }); record.turnBaselines.delete(turnId); record.activeTurnId = null;
           await record.outbox.finishTurn();
         },
@@ -1129,23 +1180,31 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         providerClosed: async () => { if (currentGeneration()) await finalizeRecord(record, "provider-exited").catch(() => undefined); }
       };
       let adapter: ProviderAdapter;
-      if (mode === "fake") {
-        const worktreePath = options.managed === undefined ? null : (await options.managed.executionContext(binding.projectId, binding.workspaceId)).ownership.worktreePath;
-        adapter = new FakeProvider(callbacks, worktreePath);
-      } else {
-        if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
-        if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
-        const readbackHelperBytes = await readCodexReadbackHelper(options);
-        const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
-        adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
-          authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot) });
+      try {
+        if (mode === "fake") {
+          const worktreePath = options.managed === undefined ? null : (await options.managed.executionContext(binding.projectId, binding.workspaceId)).ownership.worktreePath;
+          adapter = new FakeProvider(callbacks, worktreePath, options.fakeProviderTestHooks);
+        } else {
+          if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
+          if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
+          const readbackHelperBytes = await readCodexReadbackHelper(options);
+          const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
+          adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
+            authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot) });
+        }
+      } catch (error) {
+        await record.outbox.cancelProviderGenerationReservation().catch(() => undefined);
+        throw error;
       }
       generationAdapter = adapter;
       record.processGeneration = adapterGeneration;
       record.finalizationPromise = null;
       record.finalizationState = "active";
       record.finalizationReason = null;
+      record.cleanupProven = false;
       record.stoppingEmitted = false;
+      record.activeTurnToken = null;
+      record.activeTurnPromise = null;
       record.turnBaselines.clear();
       record.privateFailures.clear();
       record.adapter = adapter;
@@ -1176,10 +1235,20 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       record.activeTurnId = input.turnId;
       const adapter = record.adapter;
       const processGeneration = record.processGeneration;
-      void adapter.sendTurn(input.turnId, input.content.text).catch(async (error) => {
+      const turnPromise = adapter.sendTurn(input.turnId, input.content.text).catch(async (error) => {
         if (record.adapter !== adapter || record.processGeneration !== processGeneration) return;
         await failTurn(record, input.turnId, privateFailureFromError(error) ?? { stage: "request", kind: "Unknown", httpStatusCode: null });
       });
+      const turnToken = {};
+      const trackedTurnPromise = turnPromise.finally(() => {
+        if (record.activeTurnToken === turnToken) {
+          record.activeTurnToken = null;
+          record.activeTurnPromise = null;
+        }
+      });
+      record.activeTurnToken = turnToken;
+      record.activeTurnPromise = trackedTurnPromise;
+      void trackedTurnPromise.catch(() => undefined);
     },
     async interrupt(input) {
       const record = await recordFor(input);
@@ -1220,4 +1289,11 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   return runtime;
 }
 
-export { AI_EVENT_NDJSON_CONTENT_TYPE, CODEX_EXECUTABLE_SHA256, CODEX_STAGED_READBACK_HELPER_SHA256, CODEX_PROFILE_ID, CODEX_APP_SERVER_CLI_VERSION };
+export {
+  AI_EVENT_NDJSON_CONTENT_TYPE,
+  CODEX_EXECUTABLE_SHA256,
+  CODEX_STAGED_READBACK_HELPER_SHA256,
+  CODEX_PROFILE_ID,
+  CODEX_APP_SERVER_CLI_VERSION,
+  CODEX_NOTIFICATION_CATEGORY_REGISTRY
+};

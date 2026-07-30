@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { chmod, mkdir, open, lstat, readdir, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { Duplex } from "node:stream";
@@ -57,6 +57,21 @@ export type LeaseFileSystem = Readonly<{
 export type CodexCredentialAuthorityOptions = Readonly<{
   /** Agent-private deterministic filesystem seam; production uses the real fs operations. */
   readonly leaseFileSystem?: Partial<LeaseFileSystem>;
+  /** Agent-private deterministic descriptor-read seam; the server never supplies these hooks. */
+  readonly persistentReadTestHooks?: Readonly<{
+    readonly transformAfterSnapshot?: (snapshot: PersistentFileSnapshot) => PersistentFileSnapshot;
+    readonly transformBytes?: (bytes: Buffer) => Buffer;
+  }>;
+}>;
+
+type PersistentFileSnapshot = Readonly<{
+  readonly regularFile: boolean;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly size: bigint;
+  readonly mode: bigint;
+  readonly uid: bigint;
+  readonly nlink: bigint;
 }>;
 
 export type StagedSnapshot = Readonly<{
@@ -181,7 +196,28 @@ async function assertPrivateDirectory(directory: string): Promise<void> {
   }
 }
 
-async function readNoFollowFile(filePath: string): Promise<Buffer> {
+function persistentFileSnapshot(stats: BigIntStats): PersistentFileSnapshot {
+  return {
+    regularFile: stats.isFile(),
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mode: stats.mode,
+    uid: stats.uid,
+    nlink: stats.nlink
+  };
+}
+
+function validPersistentFileSnapshot(snapshot: PersistentFileSnapshot, uid: bigint | null): boolean {
+  return snapshot.regularFile && (snapshot.mode & 0o7777n) === 0o600n
+    && (uid === null || snapshot.uid === uid) && snapshot.nlink === 1n
+    && snapshot.size > 0n && snapshot.size <= BigInt(CODEX_AUTH_MAX_BYTES);
+}
+
+async function readNoFollowFile(
+  filePath: string,
+  hooks: CodexCredentialAuthorityOptions["persistentReadTestHooks"]
+): Promise<Buffer> {
   let handle;
   try {
     handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -189,14 +225,17 @@ async function readNoFollowFile(filePath: string): Promise<Buffer> {
     throw safeError("authority-file");
   }
   try {
-    const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || (before.mode & 0o777n) !== 0o600n || before.nlink !== 1n ||
-      (expectedUid() !== null && before.uid !== expectedUid()) || before.size === 0n || before.size > BigInt(CODEX_AUTH_MAX_BYTES)) {
-      throw safeError("authority-file");
-    }
-    const bytes = await handle.readFile();
-    const after = await handle.stat({ bigint: true });
-    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) throw safeError("authority-file");
+    const uid = expectedUid();
+    const before = persistentFileSnapshot(await handle.stat({ bigint: true }));
+    if (!validPersistentFileSnapshot(before, uid)) throw safeError("authority-file");
+    const readBytes = await handle.readFile();
+    const bytes = hooks?.transformBytes?.(readBytes) ?? readBytes;
+    const observedAfter = persistentFileSnapshot(await handle.stat({ bigint: true }));
+    const after = hooks?.transformAfterSnapshot?.(observedAfter) ?? observedAfter;
+    if (!validPersistentFileSnapshot(after, uid)
+      || after.regularFile !== before.regularFile || after.dev !== before.dev || after.ino !== before.ino
+      || after.size !== before.size || after.mode !== before.mode || after.uid !== before.uid || after.nlink !== before.nlink
+      || bytes.length !== Number(before.size)) throw safeError("authority-file");
     return bytes;
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("codex-")) throw error;
@@ -357,7 +396,7 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
   readonly leaseDir: string;
   readonly reauthMarkerPath: string;
   private readonly leaseFileSystem: LeaseFileSystem;
-  constructor(readonly authorityDir: string, options: CodexCredentialAuthorityOptions = {}) {
+  constructor(readonly authorityDir: string, private readonly options: CodexCredentialAuthorityOptions = {}) {
     this.authPath = path.join(authorityDir, CODEX_AUTH_FILE);
     this.leaseDir = path.join(authorityDir, CODEX_LEASE_DIRECTORY);
     this.reauthMarkerPath = path.join(authorityDir, CODEX_REAUTH_MARKER);
@@ -370,7 +409,7 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
   }
   async read(): Promise<ValidatedCodexAuthority> {
     await assertPrivateDirectory(this.authorityDir);
-    return validateCodexChatGptAuthority(await readNoFollowFile(this.authPath));
+    return validateCodexChatGptAuthority(await readNoFollowFile(this.authPath, this.options.persistentReadTestHooks));
   }
   async inspect(): Promise<void> {
     await assertPrivateDirectory(this.authorityDir);

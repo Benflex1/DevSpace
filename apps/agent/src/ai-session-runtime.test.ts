@@ -5,9 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { describe, expect, test, vi } from "vitest";
-import { CODEX_EXECUTABLE_SHA256, codexProfileRevisionForAuthority, createAiSessionRuntime } from "./ai-session-runtime.js";
+import {
+  CODEX_EXECUTABLE_SHA256,
+  CODEX_NOTIFICATION_CATEGORY_REGISTRY,
+  codexProfileRevisionForAuthority,
+  createAiSessionRuntime
+} from "./ai-session-runtime.js";
 import { createCodexCredentialAuthority, type CodexCredentialAuthority } from "./codex-credential-authority.js";
-import { createAiSessionOutbox } from "./ai-session-outbox.js";
+import { MAX_RETAINED_OUTBOX_EVENTS, createAiSessionOutbox, outboxPathForAiSession } from "./ai-session-outbox.js";
+import { canonicalAiEventSchema } from "@devspace/contracts";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 
@@ -227,6 +233,25 @@ async function flushNativeTurnStart(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+async function seedStoppedHistory(stateRoot: string, count: number): Promise<void> {
+  await createAiSessionOutbox({ stateRoot, binding });
+  const eventProfile = { profileId: "codex", profileRevision, provider: "codex" };
+  const events = Array.from({ length: count }, (_, index) => canonicalAiEventSchema.parse({
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f1f34-7000-7000-8000-${(index + 100).toString().padStart(12, "0")}`,
+    sessionId,
+    turnId: index < count - 2 ? turnId : null,
+    sequence: index + 1,
+    observedAt: "2026-07-29T00:00:00.000Z",
+    profile: eventProfile,
+    processGeneration: 1,
+    eventType: index === count - 2 ? "session.stopping" : index === count - 1 ? "session.stopped" : "turn.output.delta",
+    payload: index === count - 2 ? { reason: "user-request" } : index === count - 1
+      ? { reason: "user-request" } : { stream: "assistant", text: `seed-${index + 1}` }
+  }));
+  await writeFile(outboxPathForAiSession(stateRoot, sessionId), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, { mode: 0o600 });
+}
+
 async function startedCodexFixture(stateRoot: string, respond?: (request: { id?: number; method?: string }, emit: (message: unknown) => void) => void) {
   const protocol = createProtocolDocker([], respond);
   const executablePath = await createCodexTestExecutable(stateRoot);
@@ -269,6 +294,16 @@ const privateFixtureError = {
 };
 
 describe("AI session runtime", () => {
+  test("categorizes every pinned 0.145.0 server notification method exactly once", async () => {
+    const schema = await pinnedServerNotificationSchema();
+    const methods = (schema.oneOf as JsonSchema[]).map((candidate) =>
+      ((candidate.properties as JsonSchema).method as JsonSchema).enum[0] as string
+    ).sort();
+    expect(Object.keys(CODEX_NOTIFICATION_CATEGORY_REGISTRY).sort()).toEqual(methods);
+    expect(Object.values(CODEX_NOTIFICATION_CATEGORY_REGISTRY).every((category) => [
+      "projected-and-handled", "private-lifecycle", "validated-and-ignored"
+    ].includes(category))).toBe(true);
+  });
   test("malformed native JSON fails the turn without escaping the stream callback", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-malformed-json-test-"));
     const protocol = createProtocolDocker([], (request, emit) => {
@@ -492,7 +527,9 @@ describe("AI session runtime", () => {
       await startFixtureTurn(fixture);
       fixture.protocol.emit({ method: "item/agentMessage/delta", params: { delta: "first", itemId: "item-1", threadId: "thread-1", turnId: "turn-1" } });
       fixture.protocol.emit({ method: "item/agentMessage/delta", params: { delta: "second", itemId: "item-2", threadId: "thread-1", turnId: "turn-1" } });
-      fixture.protocol.emit({ method: "item/started", params: { item: {}, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1" } });
+      fixture.protocol.emit({ method: "item/started", params: {
+        item: { id: "item-activity", type: "agentMessage", text: "" }, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1"
+      } });
       const events = await fixture.runtime.collect(sessionId, 0, 100);
       const projected = events.filter((event) => event.eventType === "turn.output.delta" || event.eventType === "turn.activity.started");
       expect(projected.map((event) => event.eventType === "turn.output.delta" ? (event.payload as { text: string }).text : event.eventType)).toEqual([
@@ -567,10 +604,110 @@ describe("AI session runtime", () => {
       await startFixtureTurn(fixture);
       fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
       fixture.protocol.emit({ method: "item/agentMessage/delta", params: { delta: "late-private-output", itemId: "item-1", threadId: "thread-1", turnId: "turn-1" } });
-      fixture.protocol.emit({ method: "item/started", params: { item: {}, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1" } });
+      fixture.protocol.emit({ method: "item/started", params: {
+        item: { id: "item-late", type: "agentMessage", text: "" }, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1"
+      } });
       const events = await fixture.runtime.collect(sessionId, 0, 150);
       expect(JSON.stringify(events)).not.toContain("late-private-output");
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("one unknown notification fails the protocol immediately and privately exactly once", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-unknown-notification-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "pinned/unknown", params: { rawSecret: "must-remain-private" } });
+      fixture.protocol.emit({ method: "another/unknown", params: { rawSecret: "must-remain-private" } });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("must-remain-private");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a malformed intentionally ignored pinned notification", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-malformed-ignored-notification-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "thread/status/changed", params: { threadId: "thread-1" } });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a malformed projected pinned notification", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-malformed-handled-notification-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "item/agentMessage/delta", params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "item-1", delta: 42
+      } });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("applies pinned additionalProperties rules inside handled notifications", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-notification-extra-field-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "error", params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: false,
+        error: {
+          message: "private provider error",
+          codexErrorInfo: {
+            responseStreamConnectionFailed: { httpStatusCode: 503 },
+            unexpectedVariant: {}
+          }
+        }
+      } });
+      const events = await fixture.runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("private provider error");
+      expect(JSON.stringify(events)).not.toContain("unexpectedVariant");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts representative ignored thread, item, and token-usage notifications without projection", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-valid-ignored-notification-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    const usage = { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 2 };
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "idle" } } });
+      fixture.protocol.emit({ method: "item/plan/delta", params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "private-item-id", delta: "private-plan-content"
+      } });
+      fixture.protocol.emit({ method: "thread/tokenUsage/updated", params: {
+        threadId: "thread-1", turnId: "turn-1", tokenUsage: { last: usage, total: usage, modelContextWindow: 128_000 }
+      } });
+      fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
+      const events = await fixture.runtime.collect(sessionId, 0, 200);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(0);
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("private-item-id");
+      expect(JSON.stringify(events)).not.toContain("private-plan-content");
     } finally {
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
@@ -582,7 +719,10 @@ describe("AI session runtime", () => {
     const fixture = await startedCodexFixture(stateRoot);
     try {
       await startFixtureTurn(fixture);
-      for (let index = 0; index < 257; index += 1) fixture.protocol.emit({ method: "pinned/unknown", params: {} });
+      for (let index = 0; index < 257; index += 1) fixture.protocol.emit({
+        method: "thread/status/changed",
+        params: { threadId: "thread-1", status: { type: "idle" } }
+      });
       const events = await fixture.runtime.collect(sessionId, 0, 150);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
     } finally {
@@ -621,7 +761,12 @@ describe("AI session runtime", () => {
 
   test("restarts one durable session across three unique process generations", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-restart-test-"));
-    const runtime = createAiSessionRuntime({ mode: "fake", stateRoot });
+    let providerStarts = 0;
+    let providerStops = 0;
+    const runtime = createAiSessionRuntime({ mode: "fake", stateRoot, fakeProviderTestHooks: {
+      onStart: () => { providerStarts += 1; },
+      onStop: () => { providerStops += 1; }
+    } });
     const exactProfile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
     const exactBinding = { ...binding, profileRevision: exactProfile.profileRevision };
     const secondTurnId = "018f1f34-7000-7000-8000-000000000006";
@@ -649,7 +794,105 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "session.stopped").map((event) => event.processGeneration)).toEqual([1, 2]);
       expect(events.filter((event) => event.turnId === secondTurnId).every((event) => event.processGeneration === 2)).toBe(true);
       await runtime.stop({ ...exactBinding, processGeneration: 3 });
+      expect(providerStarts).toBe(3);
+      expect(providerStops).toBe(3);
+      const finalized = await runtime.replay(sessionId, 0);
+      for (const generation of [1, 2, 3]) {
+        const terminal = finalized.filter((event) => event.processGeneration === generation
+          && (event.eventType === "session.stopping" || event.eventType === "session.stopped"));
+        expect(terminal.map((event) => event.eventType)).toEqual(["session.stopping", "session.stopped"]);
+        expect(terminal[1]!.sequence).toBe(terminal[0]!.sequence + 1);
+      }
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  test("rejects restart before generation advance when finalization capacity is insufficient", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-restart-capacity-test-"));
+    let providerStarts = 0;
+    try {
+      await seedStoppedHistory(stateRoot, MAX_RETAINED_OUTBOX_EVENTS - 3);
+      const runtime = createAiSessionRuntime({
+        mode: "fake",
+        stateRoot,
+        fakeProviderTestHooks: { onStart: () => { providerStarts += 1; } }
+      } as never);
+      const before = await runtime.replay(sessionId, 0);
+      await expect(runtime.start(binding)).rejects.toThrow("AI_OUTBOX_UNAVAILABLE");
+      expect(providerStarts).toBe(0);
+      expect(await runtime.replay(sessionId, 0)).toEqual(before);
+      expect(before.filter((event) => event.eventType === "session.started")).toHaveLength(0);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("uses exact sufficient restart capacity for one complete provider generation", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-restart-exact-capacity-test-"));
+    let providerStarts = 0;
+    try {
+      await seedStoppedHistory(stateRoot, MAX_RETAINED_OUTBOX_EVENTS - 4);
+      const runtime = createAiSessionRuntime({
+        mode: "fake",
+        stateRoot,
+        fakeProviderTestHooks: { onStart: () => { providerStarts += 1; } }
+      } as never);
+      await runtime.start(binding);
+      await runtime.stop({ ...binding, processGeneration: 2 });
+      const generationTwo = (await runtime.replay(sessionId, 0)).filter((event) => event.processGeneration === 2);
+      expect(providerStarts).toBe(1);
+      expect(generationTwo.map((event) => event.eventType)).toEqual([
+        "session.started", "session.ready", "session.stopping", "session.stopped"
+      ]);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["normal completion followed by provider close", "hello", false, MAX_RETAINED_OUTBOX_EVENTS - 11, MAX_RETAINED_OUTBOX_EVENTS - 1,
+      ["turn.provider-completed", "turn.files.changed", "turn.quiesced"]],
+    ["interrupted completion followed by provider close", "long", true, MAX_RETAINED_OUTBOX_EVENTS - 14, MAX_RETAINED_OUTBOX_EVENTS,
+      ["turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced"]]
+  ] as const)("retains the complete %s at the maximum event boundary", async (_name, text, interruptTurn, retained, expectedLength, terminalTypes) => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-provider-close-boundary-test-"));
+    try {
+      await seedStoppedHistory(stateRoot, retained);
+      const runtime = createAiSessionRuntime({ mode: "fake", stateRoot, fakeProviderTestHooks: { closeAfterTurn: true } } as never);
+      await runtime.start(binding);
+      await runtime.sendTurn({ ...binding, processGeneration: 2, turnId, content: { kind: "text", text } });
+      if (interruptTurn) await runtime.interrupt({ ...binding, processGeneration: 2, turnId });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const events = await runtime.replay(sessionId, 0);
+      const generationTwo = events.filter((event) => event.processGeneration === 2);
+      expect(events).toHaveLength(expectedLength);
+      expect(generationTwo.filter((event) => event.turnId === turnId && terminalTypes.includes(event.eventType as never)).map((event) => event.eventType)).toEqual(terminalTypes);
+      expect(generationTwo.slice(-2).map((event) => event.eventType)).toEqual(["session.stopping", "session.stopped"]);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("explicit Stop completes an interrupted active turn at the maximum event boundary", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-stop-interrupted-boundary-test-"));
+    try {
+      await seedStoppedHistory(stateRoot, MAX_RETAINED_OUTBOX_EVENTS - 12);
+      const runtime = createAiSessionRuntime({ mode: "fake", stateRoot });
+      await runtime.start(binding);
+      await runtime.sendTurn({ ...binding, processGeneration: 2, turnId, content: { kind: "text", text: "long" } });
+      await new Promise((resolve) => setImmediate(resolve));
+      await runtime.stop({ ...binding, processGeneration: 2 });
+      const events = await runtime.replay(sessionId, 0);
+      const generationTwo = events.filter((event) => event.processGeneration === 2);
+      expect(events).toHaveLength(MAX_RETAINED_OUTBOX_EVENTS);
+      expect(generationTwo.filter((event) => event.turnId === turnId && [
+        "turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced"
+      ].includes(event.eventType)).map((event) => event.eventType)).toEqual([
+        "turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced"
+      ]);
+      expect(generationTwo.slice(-2).map((event) => event.eventType)).toEqual(["session.stopping", "session.stopped"]);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
   });
 
   test("cold Agent restart derives the next generation only from a clean terminal outbox", async () => {
@@ -1028,6 +1271,123 @@ describe("AI session runtime", () => {
       await runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
       expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
       await expect(authority.inspect()).resolves.toBeUndefined();
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a stopping append fault cannot prevent cleanup and a later retry completes terminal history once", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-stopping-append-fault-test-"));
+    const control = { inspectCalls: [] as string[] };
+    const protocol = createProtocolDocker([], undefined, control);
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const realAuthority = createCodexCredentialAuthority(stateRoot);
+    let releaseAttempts = 0;
+    let failStopping = true;
+    const authority = {
+      ...realAuthority,
+      read: realAuthority.read.bind(realAuthority),
+      inspect: realAuthority.inspect.bind(realAuthority),
+      synchronizeStaged: realAuthority.synchronizeStaged.bind(realAuthority),
+      replaceDurable: realAuthority.replaceDurable.bind(realAuthority),
+      markReauthenticationRequired: realAuthority.markReauthenticationRequired.bind(realAuthority),
+      acquire: async (metadata: Parameters<CodexCredentialAuthority["acquire"]>[0]) => {
+        const lease = await realAuthority.acquire(metadata);
+        return { release: async () => { releaseAttempts += 1; await lease.release(); } };
+      }
+    };
+    const runtime = createAiSessionRuntime({
+      mode: "codex",
+      stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker,
+      executablePath,
+      codexPreflight: () => undefined,
+      codexCredentialAuthority: authority,
+      outboxFaultHooks: {
+        beforeAppend: ({ eventType }: { eventType: string }) => {
+          if (eventType === "session.stopping" && failStopping) {
+            failStopping = false;
+            throw new Error("synthetic-stopping-append-fault");
+          }
+        }
+      }
+    } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      await runtime.start(exactBinding);
+      await expect(runtime.stop({ ...exactBinding, processGeneration: 1 })).rejects.toThrow("AI_OUTBOX_UNAVAILABLE");
+      expect(control.inspectCalls.filter((id) => id.startsWith("cleanup-"))).toHaveLength(1);
+      expect(control.inspectCalls.filter((id) => id.startsWith("readback-"))).toHaveLength(2);
+      expect(releaseAttempts).toBe(1);
+      await expect(realAuthority.inspect()).resolves.toBeUndefined();
+      expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopping" || event.eventType === "session.stopped")).toHaveLength(0);
+
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+      const terminal = (await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopping" || event.eventType === "session.stopped");
+      expect(terminal.map((event) => event.eventType)).toEqual(["session.stopping", "session.stopped"]);
+      expect(control.inspectCalls.filter((id) => id.startsWith("cleanup-"))).toHaveLength(1);
+      expect(control.inspectCalls.filter((id) => id.startsWith("readback-"))).toHaveLength(2);
+      expect(releaseAttempts).toBe(1);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a stopped append fault retries only public persistence after cleanup proof", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-stopped-append-fault-test-"));
+    const control = { inspectCalls: [] as string[] };
+    const protocol = createProtocolDocker([], undefined, control);
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const realAuthority = createCodexCredentialAuthority(stateRoot);
+    let releaseAttempts = 0;
+    let failStopped = true;
+    const authority = {
+      ...realAuthority,
+      read: realAuthority.read.bind(realAuthority),
+      inspect: realAuthority.inspect.bind(realAuthority),
+      synchronizeStaged: realAuthority.synchronizeStaged.bind(realAuthority),
+      replaceDurable: realAuthority.replaceDurable.bind(realAuthority),
+      markReauthenticationRequired: realAuthority.markReauthenticationRequired.bind(realAuthority),
+      acquire: async (metadata: Parameters<CodexCredentialAuthority["acquire"]>[0]) => {
+        const lease = await realAuthority.acquire(metadata);
+        return { release: async () => { releaseAttempts += 1; await lease.release(); } };
+      }
+    };
+    const runtime = createAiSessionRuntime({
+      mode: "codex",
+      stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker,
+      executablePath,
+      codexPreflight: () => undefined,
+      codexCredentialAuthority: authority,
+      outboxFaultHooks: {
+        beforeAppend: ({ eventType }: { eventType: string }) => {
+          if (eventType === "session.stopped" && failStopped) {
+            failStopped = false;
+            throw new Error("synthetic-stopped-append-fault");
+          }
+        }
+      }
+    } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      await runtime.start(exactBinding);
+      await expect(runtime.stop({ ...exactBinding, processGeneration: 1 })).rejects.toThrow("AI_OUTBOX_UNAVAILABLE");
+      expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
+      expect((await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopped")).toHaveLength(0);
+      expect(control.inspectCalls.filter((id) => id.startsWith("cleanup-"))).toHaveLength(1);
+      expect(releaseAttempts).toBe(1);
+      await expect(realAuthority.inspect()).resolves.toBeUndefined();
+
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+      const terminal = (await runtime.replay(sessionId, 0)).filter((event) => event.eventType === "session.stopping" || event.eventType === "session.stopped");
+      expect(terminal.map((event) => event.eventType)).toEqual(["session.stopping", "session.stopped"]);
+      expect(control.inspectCalls.filter((id) => id.startsWith("cleanup-"))).toHaveLength(1);
+      expect(releaseAttempts).toBe(1);
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }

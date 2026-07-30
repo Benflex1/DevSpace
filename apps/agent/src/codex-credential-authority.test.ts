@@ -29,9 +29,9 @@ const completeAuthority = () => JSON.stringify({
   last_refresh: "2026-07-29T10:00:00.000Z"
 });
 
-async function authorityFixture(): Promise<{ root: string; authority: CodexCredentialAuthority }> {
+async function authorityFixture(options: Parameters<typeof createCodexCredentialAuthority>[1] = {}): Promise<{ root: string; authority: CodexCredentialAuthority }> {
   const root = await mkdtemp(join(tmpdir(), "devspace-codex-authority-test-"));
-  const authority = createCodexCredentialAuthority(root);
+  const authority = createCodexCredentialAuthority(root, options);
   await mkdir(authority.authorityDir, { recursive: true, mode: 0o700 });
   await chmod(authority.authorityDir, 0o700);
   return { root, authority };
@@ -196,6 +196,40 @@ describe("Codex credential authority", () => {
       await expect(fixture.authority.read()).rejects.toThrow("authority-file");
       await writeAuthority(fixture.authority, "{malformed");
       await expect(fixture.authority.read()).rejects.toThrow("authority-json");
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["post-read mode change", { mode: 0o100644n }],
+    ["post-read link-count change", { nlink: 2n }],
+    ["post-read size change", { size: BigInt(Buffer.byteLength(completeAuthority())) + 1n }],
+    ["post-read device change", { dev: 999n }],
+    ["post-read inode change", { ino: 999n }]
+  ] as const)("rejects a stable-descriptor violation from a %s", async (_name, after) => {
+    const fixture = await authorityFixture({
+      persistentReadTestHooks: { transformAfterSnapshot: (snapshot: Record<string, unknown>) => ({ ...snapshot, ...after }) }
+    } as never);
+    try {
+      await writeAuthority(fixture.authority);
+      let rejected = false;
+      try { await fixture.authority.read(); } catch { rejected = true; }
+      expect(rejected).toBe(true);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a returned byte count that differs from the stable descriptor size", async () => {
+    const fixture = await authorityFixture({
+      persistentReadTestHooks: { transformBytes: (bytes: Buffer) => bytes.subarray(0, bytes.length - 1) }
+    });
+    try {
+      await writeAuthority(fixture.authority);
+      let rejected = false;
+      try { await fixture.authority.read(); } catch { rejected = true; }
+      expect(rejected).toBe(true);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }

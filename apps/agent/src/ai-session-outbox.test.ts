@@ -18,7 +18,7 @@ const sessionId = "018f1f34-7000-7000-8000-000000000003";
 const binding = { projectId, workspaceId, aiSessionId: sessionId };
 const profile = { profileId: "codex", profileRevision: `sha256-ai-profile-v1:${"a".repeat(64)}`, provider: "codex" };
 
-function eventInput(index: number, kind: "normal" | "terminal" = "normal") {
+function eventInput(index: number, kind: "normal" | "turn-finalization" | "provider-finalization" | "terminal" = "normal") {
   return {
     turnId: sessionId,
     eventType: "turn.output.delta" as const,
@@ -131,13 +131,33 @@ describe("Agent-private AI session outbox", () => {
       await rm(stateRoot, { recursive: true, force: true });
       const seededStateRoot = seeded.stateRoot;
       const seededOutbox = seeded.outbox;
+      await seededOutbox.reserveProviderGeneration();
       await expect(seededOutbox.beginTurn({ turnId: sessionId, profile, processGeneration: 1, content: { kind: "text", text: "hello" } }))
         .resolves.toHaveLength(2);
       await expect(seededOutbox.append(eventInput(fill + 3))).rejects.toMatchObject({ code: "AI_OUTBOX_UNAVAILABLE" });
-      for (let index = 0; index < TERMINAL_EVENT_RESERVE; index += 1) await seededOutbox.append(eventInput(fill + 4 + index, "terminal"));
+      for (let index = 0; index < 4; index += 1) await seededOutbox.append(eventInput(fill + 4 + index, "turn-finalization"));
+      await seededOutbox.finishTurn();
+      for (let index = 0; index < 2; index += 1) await seededOutbox.append(eventInput(fill + 8 + index, "provider-finalization"));
+      await seededOutbox.releaseProviderGeneration();
       expect(seededOutbox.events).toHaveLength(MAX_RETAINED_OUTBOX_EVENTS);
       await rm(seededStateRoot, { recursive: true, force: true });
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  test("rejects turn acceptance unless the worst turn terminal path fits beside provider finalization", async () => {
+    const seeded = await seededFixture(MAX_RETAINED_OUTBOX_EVENTS - 7);
+    try {
+      await seeded.outbox.reserveProviderGeneration();
+      await expect(seeded.outbox.beginTurn({
+        turnId: sessionId,
+        profile,
+        processGeneration: 1,
+        content: { kind: "text", text: "boundary" }
+      })).rejects.toMatchObject({ code: "AI_OUTBOX_UNAVAILABLE" });
+      expect(seeded.outbox.events).toHaveLength(MAX_RETAINED_OUTBOX_EVENTS - 7);
+    } finally {
+      await rm(seeded.stateRoot, { recursive: true, force: true });
+    }
   });
 
   test("compacts only acknowledged entries older than the retained acknowledgement tail", async () => {
