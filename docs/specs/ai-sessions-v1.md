@@ -274,7 +274,7 @@ The Web/SQLite projection is explicitly bounded. The current limits are:
 | retained canonical event rows per session | 2,048 rows / 16 MiB UTF-8 | one contiguous newest sequence suffix |
 | interaction rows per session | 256 rows / 4 MiB JSON bytes | newest rows first, deterministic `(createdAt,id)` order |
 | one interaction request or response JSON value | 128 KiB UTF-8 | oversized values are omitted from the bounded projection |
-| one session/history response | 8 MiB UTF-8 JSON | session state, retained terminal turn state, truncation metadata, then newest history |
+| complete Web AI GET response envelope | 8 MiB UTF-8 JSON | `profile`, bounded session summaries, selected session state, retained terminal turn state, truncation metadata, then newest history |
 
 SQLite applies output, turn, interaction, and canonical-event pruning in the same transaction as
 the event insert and aggregate update. A failed compaction rolls back the event and leaves the
@@ -610,14 +610,24 @@ the stream with a transport failure. It never drops a canonical event.
 
 Web later exposes a dedicated authenticated AI stream, not the terminal WebSocket protocol and not
 raw Agent NDJSON. It requires the existing application session, strict Origin validation, and
-authorization for the exact project/workspace/session.
+authorization for the exact project/workspace/session. Web completes exact identity and replay-gap
+preflight before returning HTTP 200, so foreign/nonexistent sessions and compacted-prefix requests
+receive the bounded conflict response without opening the Agent stream.
 
 The browser supplies `afterSequence`. Web replays SQLite-committed events, establishes replay/live
 handoff under one Web session publication lock, sends `stream.synchronized` with the committed
-boundary, then sends live committed events. A browser refresh reconnects from its last applied
-sequence. Duplicate exact events are ignored; conflict or gap closes the stream and requires a
-fresh session snapshot. Slow subscribers have bounded queues and are disconnected with a safe
-reconnect instruction; they do not apply backpressure to SQLite commit or Agent acknowledgement.
+boundary, then sends live committed events. Each browser response is capped at 512 frames and
+8 MiB; a clean cap-induced EOF for a nonterminal session reconnects from the last successfully
+applied canonical sequence. Exact duplicates are ignored, sequence gaps fail closed, zero-progress
+EOFs use bounded backoff, and `session.stopped`/`session.lost` end continuation. Abort, unmount, or
+session replacement cancels the reader and pending retry; a stale response cannot update the new
+selection. A browser refresh reconnects from the same last applied sequence. Slow subscribers have
+bounded queues and are disconnected with a safe reconnect instruction; they do not apply backpressure
+to SQLite commit or Agent acknowledgement.
+
+The browser projection enforces the same 2 MiB per-turn and 8 MiB newest-turn-first output bounds
+as SQLite, preserves sticky `outputTruncated`, and shows concise output/history notices. Refresh and
+replay retain the bounded projection rather than rebuilding an apparently complete turn from deltas.
 
 Web restart reconstructs replay entirely from SQLite. Agent disconnect does not remove committed
 history; session connection state becomes unavailable or lost according to identity evidence.

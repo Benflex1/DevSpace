@@ -399,7 +399,7 @@ export function openProjectDatabase(path: string, options: {
     const interactions = readAiInteractionRows(session.id);
     responseTruncated ||= interactions.truncated;
     const sessionView = {
-      id: session.id, workspaceId: session.workspaceId, title: session.title, state: session.state,
+      id: session.id, projectId, workspaceId: session.workspaceId, title: session.title, state: session.state,
       profileId: session.profileKey, profileRevision: session.profileRevision, revisionId: session.revisionId,
       runtimePlanHash: session.runtimePlanHash, runtimeGeneration: session.runtimeGeneration, processGeneration: session.processGeneration,
       lastSequence: session.lastSequence, historyStartSequence: session.historyStartSequence,

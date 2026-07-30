@@ -2,14 +2,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { appendAiTurnOutput, boundAiSessionTurns, type BrowserAiTurn } from "./ai-session-projection.js";
+import { consumeAiEventStream, type BrowserAiEvent } from "./ai-session-stream.js";
+import { AiHistoryTruncationNotice, AiOutputTruncationNotice } from "./ai-session-notices.js";
 import { replayAiEvents } from "./ai-session-replay.js";
 
 type Profile = { profileId: string; profileRevision: string; displayName: string; availability: { state: "available" | "unavailable"; code?: string }; capabilities: { interrupt: boolean } };
-type FileSummary = { files: Array<{ path: string; change: string; oldPath: string | null }>; truncated: boolean };
-type Turn = { id: string; state: string; content: { kind: "text"; text: string }; outputText: string; activities: string[]; changedFiles: FileSummary; createdAt: string };
+type FileSummary = BrowserAiTurn["changedFiles"];
+type Turn = BrowserAiTurn;
 type SessionData = { id: string; title: string; state: string; profileRevision: string; lastSequence: number; historyStartSequence: number; historyTruncated: boolean };
 type SessionSummary = Pick<SessionData, "id" | "title" | "state" | "lastSequence" | "historyStartSequence" | "historyTruncated"> & { workspaceId: string; createdAt: string; updatedAt: string };
-type Event = { eventType: string; eventId: string; sequence: number; turnId: string | null; payload: Record<string, unknown> };
+type Event = BrowserAiEvent;
 
 export function AiSessionTab({ projectId, workspaceId, active }: { projectId: string; workspaceId: string; active: boolean }) {
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -21,35 +24,41 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const [reconnecting, setReconnecting] = useState(false);
   const lastSequence = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const selectedSessionId = useRef<string | null>(null);
+  const terminal = useRef(false);
+  const selectionGeneration = useRef(0);
 
   const applyEvent = useCallback((event: Event) => {
-    lastSequence.current = Math.max(lastSequence.current, event.sequence);
+    if (selectedSessionId.current !== event.sessionId) return;
     if (event.eventType.startsWith("session.")) {
-      if (event.eventType === "session.stopped") setSession((current) => current === null ? null : { ...current, state: "stopped" });
-      else if (event.eventType === "session.lost") setSession((current) => current === null ? null : { ...current, state: "lost" });
+      if (event.eventType === "session.stopped") { terminal.current = true; setSession((current) => current === null ? null : { ...current, state: "stopped" }); }
+      else if (event.eventType === "session.lost") { terminal.current = true; setSession((current) => current === null ? null : { ...current, state: "lost" }); }
       else if (event.eventType === "session.ready") setSession((current) => current === null ? null : { ...current, state: "active" });
       return;
     }
     if (event.turnId === null) return;
+    const turnId = event.turnId;
     setTurns((current) => {
-      const index = current.findIndex((turn) => turn.id === event.turnId);
-      const existing = index < 0 ? { id: event.turnId!, state: "accepted", content: { kind: "text" as const, text: "" }, outputText: "", activities: [], changedFiles: { files: [], truncated: false }, createdAt: new Date().toISOString() } : current[index]!;
+      const index = current.findIndex((turn) => turn.id === turnId);
+      const existing = index < 0 ? { id: turnId, state: "accepted", content: { kind: "text" as const, text: "" }, outputText: "", outputTruncated: false, activities: [], changedFiles: { files: [], truncated: false }, createdAt: new Date().toISOString() } : current[index]!;
       const next = { ...existing };
       if (event.eventType === "turn.accepted") next.content = event.payload.content as Turn["content"];
       if (event.eventType === "turn.started") next.state = "running";
       if (event.eventType === "turn.activity.started" || event.eventType === "turn.output.delta") next.state = "running";
-      if (event.eventType === "turn.output.delta") next.outputText += String(event.payload.text ?? "");
       if (event.eventType === "turn.activity.started") next.activities = [...next.activities, String((event.payload.presentation as { summary?: unknown })?.summary ?? "Activity")];
       if (event.eventType === "turn.files.changed") next.changedFiles = event.payload as unknown as FileSummary;
       if (event.eventType === "turn.interrupted") next.state = "interrupted";
       if (event.eventType === "turn.quiesced") next.state = String(event.payload.outcome ?? "completed");
       if (event.eventType === "turn.failed") next.state = "failed";
-      if (index < 0) return [...current, next];
-      return current.map((turn, candidate) => candidate === index ? next : turn);
+      let updated = index < 0 ? [...current, next] : current.map((turn, candidate) => candidate === index ? next : turn);
+      if (event.eventType === "turn.output.delta") updated = appendAiTurnOutput(updated, turnId, String(event.payload.text ?? ""));
+      return boundAiSessionTurns(updated);
     });
   }, []);
 
   const load = useCallback(async (requestedSessionId?: string) => {
+    abortRef.current?.abort();
+    const generation = ++selectionGeneration.current;
     setLoading(true);
     try {
       const query = new URLSearchParams({ workspaceId });
@@ -64,9 +73,9 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
       if (!response.ok || body.profile === undefined) throw new Error(body.message ?? "Codex availability could not be inspected.");
       setProfile(body.profile);
       let selected = body.session;
-      const selectedSessionId = requestedSessionId ?? body.sessions?.[0]?.id;
-      if (selected === null && selectedSessionId !== undefined) {
-        const exactQuery = new URLSearchParams({ workspaceId, sessionId: selectedSessionId });
+      const selectedId = requestedSessionId ?? body.sessions?.[0]?.id;
+      if (selected === null && selectedId !== undefined) {
+        const exactQuery = new URLSearchParams({ workspaceId, sessionId: selectedId });
         const exactResponse = await fetch(`/api/projects/${projectId}/ai?${exactQuery.toString()}`, { cache: "no-store" });
         const exactBody = await exactResponse.json() as typeof body;
         if (!exactResponse.ok || exactBody.session === null || exactBody.session === undefined) {
@@ -74,35 +83,41 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
         }
         selected = exactBody.session;
       }
+      if (generation !== selectionGeneration.current) return;
       if (selected !== null && selected !== undefined) {
+        selectedSessionId.current = selected.session.id;
+        terminal.current = selected.session.state === "stopped" || selected.session.state === "lost";
         setSession(selected.session); lastSequence.current = selected.session.lastSequence;
         setTurns(replayAiEvents(selected.turns.map((turn) => ({ ...turn, activities: [] })), selected.events));
-      } else { setSession(null); setTurns([]); lastSequence.current = 0; }
+      } else { selectedSessionId.current = null; terminal.current = false; setSession(null); setTurns([]); lastSequence.current = 0; }
     } catch (error) { setMessage(error instanceof Error ? error.message : "AI session unavailable."); }
     finally { setLoading(false); }
   }, [projectId, workspaceId]);
 
-  useEffect(() => { void load(); return () => abortRef.current?.abort(); }, [load]);
+  useEffect(() => { void load(); return () => { abortRef.current?.abort(); selectionGeneration.current += 1; }; }, [load]);
 
   useEffect(() => {
-    if (!active || session === null || session.state === "stopped") return;
+    if (!active || session === null || session.state === "stopped" || session.state === "lost") return;
     const controller = new AbortController(); abortRef.current?.abort(); abortRef.current = controller; setReconnecting(false);
+    const sessionId = session.id;
+    const generation = selectionGeneration.current;
     const run = async () => {
       try {
-        const response = await fetch(`/api/projects/${projectId}/ai/events?workspaceId=${encodeURIComponent(workspaceId)}&sessionId=${encodeURIComponent(session.id)}&afterSequence=${lastSequence.current}`, { signal: controller.signal, cache: "no-store" });
-        if (!response.ok || response.body === null) throw new Error("The AI event stream could not be opened.");
-        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-        while (!controller.signal.aborted) {
-          const next = await reader.read(); if (next.done) break; buffer += decoder.decode(next.value, { stream: true });
-          let newline = buffer.indexOf("\n");
-          while (newline >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n"); if (!line) continue;
-            const frame = JSON.parse(line) as Event | { frameType: string }; if (!("frameType" in frame)) applyEvent(frame);
-          }
-        }
+        await consumeAiEventStream({
+          initialSequence: lastSequence.current,
+          sessionId,
+          signal: controller.signal,
+          open: (afterSequence, signal) => fetch(`/api/projects/${projectId}/ai/events?workspaceId=${encodeURIComponent(workspaceId)}&sessionId=${encodeURIComponent(sessionId)}&afterSequence=${afterSequence}`, { signal, cache: "no-store" }),
+          apply: (event) => {
+            if (generation !== selectionGeneration.current || selectedSessionId.current !== sessionId) { controller.abort(); return; }
+            applyEvent(event); lastSequence.current = event.sequence;
+          },
+          isTerminal: () => terminal.current || generation !== selectionGeneration.current || selectedSessionId.current !== sessionId
+        });
       } catch (error) { if (!controller.signal.aborted) { setReconnecting(true); setMessage(error instanceof Error ? error.message : "The AI stream disconnected."); } }
     };
     void run(); return () => controller.abort();
-  }, [active, applyEvent, projectId, session, workspaceId]);
+  }, [active, applyEvent, projectId, session?.id, workspaceId]);
 
   const post = async (body: Record<string, unknown>) => {
     const response = await fetch(`/api/projects/${projectId}/ai`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify(body) });
@@ -124,7 +139,8 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
       {session !== null && <div className="ai-tab-actions">{running && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}<button type="button" onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button></div>}</header>
     {message !== null && <p className="ai-message" role="status">{message}</p>}
     {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{unavailable ? "Codex unavailable" : "Start an AI session"}</h2><p>{unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : "Ask Codex to inspect, explain, or change files in this workspace."}</p>{!unavailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
-      <div className="ai-timeline" aria-live="polite">{turns.length === 0 && <p className="ai-empty-copy">Your conversation will appear here.</p>}{turns.map((turn) => <article className="ai-turn" key={turn.id}><div className="ai-turn-label">You <span>{turn.state}</span></div><p className="ai-user-text">{turn.content.text}</p>{turn.activities.length > 0 && <div className="ai-activities">{turn.activities.map((activity, index) => <span key={`${turn.id}-activity-${index}`}>{activity}</span>)}</div>}<div className="ai-assistant"><div className="ai-turn-label">Codex</div><p>{turn.outputText || (turn.state === "running" ? "Working…" : "")}</p></div>{turn.changedFiles.files.length > 0 && <div className="ai-files"><strong>Changed files</strong><ul>{turn.changedFiles.files.map((file) => <li key={`${file.change}:${file.path}`}>{file.change} <code>{file.path}</code>{file.oldPath !== null && <> from <code>{file.oldPath}</code></>}</li>)}</ul>{turn.changedFiles.truncated && <small>Additional files omitted.</small>}</div>}</article>)}</div>
+      {session.historyTruncated && <AiHistoryTruncationNotice historyStartSequence={session.historyStartSequence} />}
+      <div className="ai-timeline" aria-live="polite">{turns.length === 0 && <p className="ai-empty-copy">Your conversation will appear here.</p>}{turns.map((turn) => <article className="ai-turn" key={turn.id}><div className="ai-turn-label">You <span>{turn.state}</span></div><p className="ai-user-text">{turn.content.text}</p>{turn.activities.length > 0 && <div className="ai-activities">{turn.activities.map((activity, index) => <span key={`${turn.id}-activity-${index}`}>{activity}</span>)}</div>}<div className="ai-assistant"><div className="ai-turn-label">Codex</div><p>{turn.outputText || (turn.state === "running" ? "Working…" : "")}</p>{turn.outputTruncated && <AiOutputTruncationNotice />}</div>{turn.changedFiles.files.length > 0 && <div className="ai-files"><strong>Changed files</strong><ul>{turn.changedFiles.files.map((file) => <li key={`${file.change}:${file.path}`}>{file.change} <code>{file.path}</code>{file.oldPath !== null && <> from <code>{file.oldPath}</code></>}</li>)}</ul>{turn.changedFiles.truncated && <small>Additional files omitted.</small>}</div>}</article>)}</div>
       <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Codex…" aria-label="AI prompt" rows={3} disabled={running || session.state === "lost"} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} /><div><small>Ctrl/Cmd + Enter to send</small><button type="submit" disabled={running || composer.trim().length === 0 || session.state === "lost"}>Send</button></div></form>
       {session.state === "lost" && <div className="ai-degraded" role="alert"><strong>Live provider session lost.</strong><span>Committed history is preserved. Restart the workspace before creating a new live attachment.</span><button type="button" onClick={() => { void restartWorkspace(); }}>Restart workspace</button></div>}
     </>}

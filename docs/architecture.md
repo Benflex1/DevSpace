@@ -100,10 +100,12 @@ requested identity with a latest or active workspace session, and foreign/nonexi
 share one bounded public conflict response. SQLite applies bounded aggregate/history retention in
 the event transaction: 64 turns, 2 MiB per-turn output, 8 MiB total retained turn output, 2,048
 canonical events or 16 MiB, 256 interaction rows or 4 MiB, 128 KiB per interaction JSON value,
-and 8 MiB per session response. Canonical event rows are one contiguous suffix described by
-`historyStartSequence` and `historyTruncated`; legacy oversized values are length-checked and
-projected through valid bounded models. The Agent-private outbox remains the durable replay and
-acknowledgement source.
+and 8 MiB for the complete Web AI GET response envelope, including profile and session summaries.
+Canonical event rows are one contiguous suffix described by `historyStartSequence` and
+`historyTruncated`; legacy oversized values are length-checked and projected through valid bounded
+models. Browser stream responses are capped at 512 frames/8 MiB and clean cap EOF reconnects from
+the last applied sequence while the session is nonterminal. Browser output/history truncation is
+visible and sticky. The Agent-private outbox remains the durable replay and acknowledgement source.
 
 Web sends the exact inspected `sha256-ai-profile-v1` revision on start/resume; Agent re-hashes the
 deployment-owned authority document before acceptance. Content-bearing mutations use referenced

@@ -95,8 +95,11 @@ before replay can begin past a compacted prefix.
 This corrects only the Agent outbox and acknowledgement portion of P1-3. The separate Web
 session-binding and SQLite aggregate-history correction is now implemented on this branch: exact
 caller-supplied session identity is required for session-scoped operations, and bounded Web/SQLite
-history uses explicit replay/truncation metadata. This does not claim the entire final review is
-complete; Checkpoint 2 and the other deferred concerns below remain out of scope.
+history uses explicit replay/truncation metadata. Browser stream continuation reconnects from the
+last applied sequence after bounded clean responses, and browser-visible output/history truncation
+is explicit. The 8 MiB Web AI response limit covers the complete HTTP envelope, not only the selected
+session. This does not claim the entire final review is complete; Checkpoint 2 and the other deferred
+concerns below remain out of scope.
 
 ### Codex authority onboarding and recovery
 

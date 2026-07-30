@@ -1,12 +1,8 @@
-export type AiSessionReplayTurn = {
-  id: string;
-  state: string;
-  content: { kind: "text"; text: string };
-  outputText: string;
-  activities: string[];
-  changedFiles: { files: Array<{ path: string; change: string; oldPath: string | null }>; truncated: boolean };
-  createdAt: string;
-};
+import { boundAiSessionTurns, type BrowserAiTurn } from "./ai-session-projection.js";
+
+export type { BrowserAiTurn } from "./ai-session-projection.js";
+
+export type AiSessionReplayTurn = BrowserAiTurn;
 
 export type AiSessionReplayEvent = {
   eventType: string;
@@ -15,11 +11,11 @@ export type AiSessionReplayEvent = {
 };
 
 export function replayAiEvents(initial: readonly AiSessionReplayTurn[], events: readonly AiSessionReplayEvent[]): AiSessionReplayTurn[] {
-  return events.reduce((current, event) => {
+  const replayed = events.reduce((current, event) => {
     if (event.turnId === null) return current;
     const index = current.findIndex((turn) => turn.id === event.turnId);
     const existing = index < 0 ? {
-      id: event.turnId, state: "accepted", content: { kind: "text" as const, text: "" }, outputText: "", activities: [],
+      id: event.turnId, state: "accepted", content: { kind: "text" as const, text: "" }, outputText: "", outputTruncated: false, activities: [],
       changedFiles: { files: [], truncated: false }, createdAt: new Date().toISOString()
     } : current[index]!;
     const next = { ...existing };
@@ -37,5 +33,6 @@ export function replayAiEvents(initial: readonly AiSessionReplayTurn[], events: 
     if (event.eventType === "turn.failed") next.state = "failed";
     if (index < 0) return [...current, next];
     return current.map((turn, candidate) => candidate === index ? next : turn);
-  }, initial.map((turn) => ({ ...turn, activities: [...turn.activities] })));
+  }, initial.map((turn) => ({ ...turn, outputTruncated: turn.outputTruncated ?? false, activities: [...turn.activities] })));
+  return boundAiSessionTurns(replayed);
 }

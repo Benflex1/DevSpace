@@ -2,7 +2,16 @@ import { v7 as uuidv7 } from "uuid";
 import { uuidV7Schema, type AiEventStreamFrame, type AiProviderProfileProjection } from "@devspace/contracts";
 import type { FullAgentClient } from "./agent-client.js";
 import { ProjectSetupConflictError, type ProjectDatabase } from "./database.js";
-import { AI_EVENT_STREAM_RESPONSE_MAX_BYTES, AI_EVENT_STREAM_RESPONSE_MAX_EVENTS } from "./ai-history.js";
+import {
+  AI_EVENT_STREAM_RESPONSE_MAX_BYTES,
+  AI_EVENT_STREAM_RESPONSE_MAX_EVENTS,
+  AI_SESSION_OUTPUT_MAX_BYTES,
+  AI_SESSION_RESPONSE_MAX_BYTES,
+  AI_TURN_OUTPUT_MAX_BYTES,
+  serializedBytes,
+  truncateUtf8,
+  utf8ByteLength
+} from "./ai-history.js";
 
 export class AiSessionActionError extends Error {
   constructor(readonly code: "AI_NOT_CONFIGURED" | "AI_PROFILE_UNAVAILABLE" | "AI_SESSION_CONFLICT" | "AI_TURN_CONFLICT", message: string) {
@@ -23,7 +32,9 @@ function exactSession(projectId: string, workspaceId: string, sessionId: string,
     }
     throw error;
   }
-  if (view === null || view.session.id !== sessionId || view.session.workspaceId !== workspaceId) {
+  const boundProjectId = (view?.session as { projectId?: unknown } | undefined)?.projectId;
+  if (view === null || view.session.id !== sessionId || view.session.workspaceId !== workspaceId
+    || (boundProjectId !== undefined && boundProjectId !== projectId)) {
     throw new AiSessionActionError("AI_SESSION_CONFLICT", "The AI session is no longer available.");
   }
   return view;
@@ -58,6 +69,68 @@ export async function inspectAiWorkbench(projectId: string, workspaceId: string,
   const profile = await dependencies.agent.inspectAiProvider(projectId, workspaceId, "codex");
   const sessions = dependencies.database.listAiSessions(projectId, workspaceId);
   return { profile, sessions, session: selected };
+}
+
+type AiWorkbenchProjection = Awaited<ReturnType<typeof inspectAiWorkbench>>;
+type AiSelectedSession = NonNullable<AiWorkbenchProjection["session"]>;
+
+function boundResponseTurns(turns: AiSelectedSession["turns"]): AiSelectedSession["turns"] {
+  let remaining = AI_SESSION_OUTPUT_MAX_BYTES;
+  const bounded = turns.map((turn) => ({ ...turn }));
+  for (let index = bounded.length - 1; index >= 0; index -= 1) {
+    const turn = bounded[index]!;
+    const output = truncateUtf8(turn.outputText, Math.min(AI_TURN_OUTPUT_MAX_BYTES, remaining));
+    turn.outputText = output.value;
+    turn.outputTruncated = turn.outputTruncated || output.truncated;
+    remaining -= utf8ByteLength(output.value);
+  }
+  return bounded;
+}
+
+export function boundAiWorkbenchResponse(data: AiWorkbenchProjection): AiWorkbenchProjection {
+  const source = data.session;
+  let session: AiSelectedSession | null = source === null ? null : {
+    ...source,
+    session: { ...source.session },
+    turns: boundResponseTurns(source.turns),
+    interactions: [...source.interactions],
+    events: [...source.events]
+  };
+  let sessions = [...data.sessions];
+  const build = (): AiWorkbenchProjection => ({ ...data, sessions, session });
+  if (serializedBytes(build()) <= AI_SESSION_RESPONSE_MAX_BYTES) return build();
+
+  const markHistoryTruncated = () => {
+    if (session !== null) session = { ...session, session: { ...session.session, historyTruncated: true } };
+  };
+  const markInteractionsTruncated = () => {
+    if (session !== null) session = { ...session, session: { ...session.session, interactionsTruncated: true } };
+  };
+  while (serializedBytes(build()) > AI_SESSION_RESPONSE_MAX_BYTES) {
+    if (session !== null && session.events.length > 0) {
+      const events = session.events.slice(1);
+      const firstSequence = events[0]?.sequence;
+      session = { ...session, events, session: { ...session.session, historyTruncated: true,
+        historyStartSequence: firstSequence ?? session.session.historyStartSequence } };
+      continue;
+    }
+    if (session !== null && session.interactions.length > 0) {
+      session = { ...session, interactions: session.interactions.slice(1) };
+      markInteractionsTruncated();
+      continue;
+    }
+    if (session !== null && session.turns.length > 1) {
+      session = { ...session, turns: session.turns.slice(1) };
+      markHistoryTruncated();
+      continue;
+    }
+    if (sessions.length > 0) {
+      sessions = sessions.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  return build();
 }
 
 export async function createAiSession(projectId: string, workspaceId: string, actor: string, dependencies: Dependencies) {
@@ -104,11 +177,19 @@ export async function stopAiSession(projectId: string, workspaceId: string, sess
   return { operationId };
 }
 
-export async function* streamAiEvents(projectId: string, workspaceId: string, sessionId: string, afterSequence: number, dependencies: Dependencies): AsyncGenerator<AiEventStreamFrame> {
+export type AiEventStreamPreflight = ReturnType<typeof exactSession>;
+
+export function preflightAiEventStream(projectId: string, workspaceId: string, sessionId: string, afterSequence: number, dependencies: Dependencies): AiEventStreamPreflight {
   const view = exactSession(projectId, workspaceId, sessionId, dependencies.database);
   if (afterSequence < view.session.historyStartSequence - 1) {
     throw new AiSessionActionError("AI_SESSION_CONFLICT", "The requested AI event history is no longer retained.");
   }
+  return view;
+}
+
+export async function* streamAiEvents(projectId: string, workspaceId: string, sessionId: string, afterSequence: number, dependencies: Dependencies,
+  preflight?: AiEventStreamPreflight): AsyncGenerator<AiEventStreamFrame> {
+  const view = preflight ?? preflightAiEventStream(projectId, workspaceId, sessionId, afterSequence, dependencies);
   let frameCount = 0;
   let frameBytes = 0;
   const canYield = (frame: AiEventStreamFrame): boolean => {

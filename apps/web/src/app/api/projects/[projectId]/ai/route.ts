@@ -4,7 +4,7 @@ import { createAgentClient } from "../../../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../../../server/config.js";
 import { getProjectDatabase } from "../../../../../server/database.js";
-import { createAiSession, inspectAiWorkbench, interruptAiTurn, sendAiTurn, stopAiSession, toAiActionError } from "../../../../../server/ai-sessions.js";
+import { boundAiWorkbenchResponse, createAiSession, inspectAiWorkbench, interruptAiTurn, sendAiTurn, stopAiSession, toAiActionError } from "../../../../../server/ai-sessions.js";
 import { readBoundedJsonBody } from "../../../../../server/request-body.js";
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
@@ -35,7 +35,7 @@ export async function GET(request: Request, context: { params: Promise<{ project
     if (sessionId !== null && !uuidV7Schema.safeParse(sessionId).success) return json({ message: "The session identity is invalid." }, 422);
     const data = await inspectAiWorkbench(projectId, workspaceId, sessionId ?? undefined,
       { database: getProjectDatabase(config.databasePath), agent: createAgentClient(config.agentSocketPath) });
-    return json(data);
+    return json(boundAiWorkbenchResponse(data));
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     const safe = toAiActionError(error); return json({ message: safe.message, code: safe.code }, safe.code === "AI_PROFILE_UNAVAILABLE" ? 503 : 409);
