@@ -514,7 +514,7 @@ test("uses the exact session for history, interrupt, stop, and Agent replay", as
 
   expect(agent.interruptAiTurn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ aiSessionId: sessionAId, turnId }));
   expect(agent.stopAiSession).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ aiSessionId: sessionAId }));
-  expect(agent.streamAiEvents).toHaveBeenCalledWith(sessionAId, 0);
+  expect(agent.streamAiEvents).toHaveBeenCalledWith(sessionAId, 0, {});
   expect(database.getAiSession).toHaveBeenCalledWith(projectId, workspaceId, sessionAId);
   expect(frames).toEqual([{ schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId: sessionAId, throughSequence: 0 }]);
 });

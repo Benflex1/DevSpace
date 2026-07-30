@@ -322,6 +322,245 @@ test("accepts an empty stream and cancellation destroys the underlying socket", 
   await hanging.close();
 });
 
+test("aborting an idle established stream settles its pending read and promptly destroys the exact request and response", async () => {
+  let agentConnectionClosed = false;
+  const hanging = await listen((request, response) => {
+    request.once("close", () => { agentConnectionClosed = true; });
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.write(`${JSON.stringify(synchronizedFrame)}\n`);
+  });
+  const requestSpy = vi.spyOn(http, "request");
+  const abortController = new AbortController();
+  const iterator = createAgentClient(hanging.socketPath)
+    .streamAiEvents(streamSessionId, 0, { signal: abortController.signal })[Symbol.asyncIterator]();
+  try {
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: synchronizedFrame });
+    const activeRequest = requestSpy.mock.results.at(-1)?.value as http.ClientRequest;
+    const activeResponse = (activeRequest as http.ClientRequest & { res?: http.IncomingMessage }).res!;
+    const pending = iterator.next();
+
+    abortController.abort();
+
+    await expect(Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("pending-read-did-not-settle")), 100))
+    ])).resolves.toEqual({ done: true, value: undefined });
+    await vi.waitFor(() => {
+      expect(activeRequest.destroyed).toBe(true);
+      expect(activeResponse.destroyed).toBe(true);
+      expect(agentConnectionClosed).toBe(true);
+    }, { timeout: 100 });
+  } finally {
+    requestSpy.mockRestore();
+    await iterator.return?.(undefined);
+    await hanging.close();
+  }
+});
+
+test.each([
+  ["global", 4, 4, additionalStreamSessionIds.slice(0, 4), additionalStreamSessionIds[4]],
+  ["per-session", 4, 2, [streamSessionId, streamSessionId], streamSessionId]
+] as const)("recovers %s admission after aborting one idle established stream", async (
+  _scope,
+  globalLimit,
+  perSessionLimit,
+  sessionIds,
+  replacementSessionId
+) => {
+  const admission = createAiStreamAdmission({ globalLimit, perSessionLimit });
+  let opened = 0;
+  const service = await listen((request, response) => {
+    opened += 1;
+    const sessionId = /^\/v1\/ai-sessions\/([^/]+)\/events/u.exec(request.url ?? "")?.[1];
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.write(`${JSON.stringify({ ...synchronizedFrame, sessionId })}\n`);
+  });
+  const active: Array<{ abort: AbortController; iterator: AsyncIterator<unknown>; pending: Promise<IteratorResult<unknown>> }> = [];
+  try {
+    for (const sessionId of sessionIds) {
+      const abort = new AbortController();
+      const iterator = createAgentClient(service.socketPath, { aiStreamAdmission: admission })
+        .streamAiEvents(sessionId, 0, { signal: abort.signal })[Symbol.asyncIterator]();
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: { frameType: "stream.synchronized", sessionId }
+      });
+      active.push({ abort, iterator, pending: iterator.next() });
+    }
+    const denied = createAgentClient(service.socketPath, { aiStreamAdmission: admission })
+      .streamAiEvents(replacementSessionId, 0)[Symbol.asyncIterator]();
+    await expect(denied.next()).rejects.toBeInstanceOf(AgentUnavailableError);
+    expect(opened).toBe(sessionIds.length);
+
+    active[0]!.abort.abort();
+    await expect(active[0]!.pending).resolves.toEqual({ done: true, value: undefined });
+
+    const replacement = createAgentClient(service.socketPath, { aiStreamAdmission: admission })
+      .streamAiEvents(replacementSessionId, 0)[Symbol.asyncIterator]();
+    await expect(Promise.race([
+      replacement.next(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("admission-was-not-released")), 100))
+    ])).resolves.toMatchObject({ done: false, value: { frameType: "stream.synchronized" } });
+    await replacement.return?.(undefined);
+  } finally {
+    for (const entry of active) {
+      entry.abort.abort();
+      await entry.pending.catch(() => undefined);
+      await entry.iterator.return?.(undefined);
+    }
+    await service.close();
+  }
+});
+
+test("releases stream admission and generator cleanup exactly once when abort races iterator return", async () => {
+  let acquireCount = 0;
+  let releaseCount = 0;
+  const admission = {
+    tryAcquire: () => {
+      acquireCount += 1;
+      return () => { releaseCount += 1; };
+    }
+  };
+  const service = await streamService((response) => response.write(`${JSON.stringify(synchronizedFrame)}\n`));
+  const abort = new AbortController();
+  const addListenerSpy = vi.spyOn(abort.signal, "addEventListener");
+  const removeListenerSpy = vi.spyOn(abort.signal, "removeEventListener");
+  const iterator = createAgentClient(service.socketPath, { aiStreamAdmission: admission })
+    .streamAiEvents(streamSessionId, 0, { signal: abort.signal })[Symbol.asyncIterator]();
+  try {
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    const pending = iterator.next();
+    abort.abort();
+    const returned = iterator.return?.(undefined);
+    await expect(pending).resolves.toEqual({ done: true, value: undefined });
+    await expect(returned).resolves.toMatchObject({ done: true });
+    await expect(iterator.return?.(undefined)).resolves.toMatchObject({ done: true });
+    expect({ acquireCount, releaseCount }).toEqual({ acquireCount: 1, releaseCount: 1 });
+    expect(addListenerSpy).toHaveBeenCalledTimes(1);
+    expect(removeListenerSpy).toHaveBeenCalledTimes(1);
+  } finally {
+    addListenerSpy.mockRestore();
+    removeListenerSpy.mockRestore();
+    await service.close();
+  }
+});
+
+test.each([
+  ["a newly arriving valid frame", (response: http.ServerResponse) => {
+    response.write(`${JSON.stringify(synchronizedFrame)}\n`);
+  }],
+  ["parser failure", (response: http.ServerResponse) => {
+    response.write("{private-prompt}\n");
+  }],
+  ["Agent response close", (response: http.ServerResponse) => {
+    response.end("{\"partial\":");
+  }]
+])("consumer cancellation racing %s produces no public protocol error", async (_label, finishRace) => {
+  let race: (() => void) | undefined;
+  const service = await listen((_request, response) => {
+    response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+    response.write(`${JSON.stringify(synchronizedFrame)}\n`);
+    race = () => finishRace(response);
+  });
+  const abort = new AbortController();
+  const iterator = createAgentClient(service.socketPath)
+    .streamAiEvents(streamSessionId, 0, { signal: abort.signal })[Symbol.asyncIterator]();
+  try {
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    const pending = iterator.next();
+    race!();
+    abort.abort();
+    const result = await pending;
+    expect(result.done === true || result.value === synchronizedFrame).toBe(true);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  } finally {
+    abort.abort();
+    await iterator.return?.(undefined);
+    await service.close();
+  }
+});
+
+test("consumer cancellation racing the observation timeout remains normal private control flow", async () => {
+  const service = await listen(() => undefined);
+  const abort = new AbortController();
+  const iterator = createAgentClient(service.socketPath, { observationTimeoutMs: 50 })
+    .streamAiEvents(streamSessionId, 0, { signal: abort.signal })[Symbol.asyncIterator]();
+  const pending = iterator.next();
+  setTimeout(() => abort.abort(), 40);
+  try {
+    await expect(pending).resolves.toEqual({ done: true, value: undefined });
+  } finally {
+    await iterator.return?.(undefined);
+    await service.close();
+  }
+});
+
+test("an already-aborted stream opens no Agent request and retains no Web admission", async () => {
+  const admission = createAiStreamAdmission({ globalLimit: 1, perSessionLimit: 1 });
+  const requestSpy = vi.spyOn(http, "request");
+  const aborted = new AbortController();
+  aborted.abort();
+  const listenerSpy = vi.spyOn(aborted.signal, "addEventListener");
+  const allocationSpy = vi.spyOn(Buffer, "allocUnsafe");
+  const canceled = createAgentClient("/must-not-open.sock", { aiStreamAdmission: admission })
+    .streamAiEvents(streamSessionId, 0, { signal: aborted.signal })[Symbol.asyncIterator]();
+  await expect(canceled.next()).resolves.toEqual({ done: true, value: undefined });
+  expect(requestSpy).not.toHaveBeenCalled();
+  expect(listenerSpy).not.toHaveBeenCalled();
+  expect(allocationSpy).not.toHaveBeenCalled();
+  listenerSpy.mockRestore();
+  allocationSpy.mockRestore();
+
+  const service = await streamService((response) => response.end(`${JSON.stringify(synchronizedFrame)}\n`));
+  try {
+    const replacement = createAgentClient(service.socketPath, { aiStreamAdmission: admission })
+      .streamAiEvents(streamSessionId, 0)[Symbol.asyncIterator]();
+    await expect(replacement.next()).resolves.toEqual({ done: false, value: synchronizedFrame });
+    await replacement.return?.(undefined);
+  } finally {
+    requestSpy.mockRestore();
+    await service.close();
+  }
+});
+
+test.each([
+  ["connect establishment", false, Buffer.alloc(0)],
+  ["headers before a complete frame", true, Buffer.alloc(0)],
+  ["a retained partial frame", true, Buffer.from("{\"schemaVersion\":\"devspace.ai-stream/v1\"", "utf8")]
+])("consumer cancellation during %s is normal and releases admission exactly once", async (_label, sendHeaders, bytes) => {
+  const admission = createAiStreamAdmission({ globalLimit: 1, perSessionLimit: 1 });
+  let opened = 0;
+  const service = await listen((_request, response) => {
+    opened += 1;
+    if (sendHeaders) {
+      response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
+      response.flushHeaders();
+      if (bytes.length > 0) response.write(bytes);
+    }
+  });
+  const abortController = new AbortController();
+  const iterator = createAgentClient(service.socketPath, {
+    aiStreamAdmission: admission,
+    observationTimeoutMs: 5_000
+  }).streamAiEvents(streamSessionId, 0, { signal: abortController.signal })[Symbol.asyncIterator]();
+  const pending = iterator.next();
+  await vi.waitFor(() => expect(opened).toBe(1));
+  abortController.abort();
+  await expect(pending).resolves.toEqual({ done: true, value: undefined });
+  await expect(iterator.return?.(undefined)).resolves.toMatchObject({ done: true });
+
+  const replacementService = await streamService((response) => response.end(`${JSON.stringify(synchronizedFrame)}\n`));
+  try {
+    const replacement = createAgentClient(replacementService.socketPath, { aiStreamAdmission: admission })
+      .streamAiEvents(streamSessionId, 0)[Symbol.asyncIterator]();
+    await expect(replacement.next()).resolves.toEqual({ done: false, value: synchronizedFrame });
+    await replacement.return?.(undefined);
+  } finally {
+    await replacementService.close();
+    await service.close();
+  }
+});
+
 test("constructs protocol headers and parses valid success envelopes", async () => {
   const service = await listen((request, response) => {
     expect(request.headers["x-devspace-protocol-version"]).toBe("1");

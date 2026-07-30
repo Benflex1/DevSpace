@@ -7,7 +7,10 @@ const ids = {
   sessionId: "018f0f00-0000-7000-8000-000000000003"
 };
 const mocks = vi.hoisted(() => ({
-  agentStream: vi.fn(async function* () { await Promise.resolve(); yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 }; }),
+  agentStream: vi.fn(async function* (_sessionId: string, _afterSequence: number, _options?: { signal?: AbortSignal }) {
+    await Promise.resolve();
+    yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+  }),
   getSession: vi.fn(),
   getConfig: vi.fn(() => ({ databasePath: "test.sqlite", agentSocketPath: "test.sock", auth: { mode: "development", actor: "owner@example.invalid" } })),
   authenticate: vi.fn(() => Promise.resolve({ identity: "owner@example.invalid" }))
@@ -75,7 +78,7 @@ describe("AI event stream HTTP preflight", () => {
     expect(mocks.agentStream).not.toHaveBeenCalled();
   });
 
-  test("pulls one Agent frame at a time and cancellation returns the iterator", async () => {
+  test("aborts a pending Agent read before returning the iterator on browser cancellation", async () => {
     mocks.getSession.mockReturnValue({
       session: {
         id: ids.sessionId,
@@ -87,18 +90,30 @@ describe("AI event stream HTTP preflight", () => {
       turns: [], events: [], interactions: []
     });
     let yielded = 0;
-    let released = false;
-    mocks.agentStream.mockImplementationOnce(async function* () {
-      await Promise.resolve();
+    let abortObserved = false;
+    let cleanupCount = 0;
+    mocks.agentStream.mockImplementationOnce(async function* (
+      _sessionId: string,
+      _afterSequence: number,
+      options?: { signal?: AbortSignal }
+    ) {
       try {
         yielded += 1;
         yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+        await new Promise<void>((resolve) => {
+          if (options?.signal === undefined) return resolve();
+          if (options.signal.aborted) {
+            abortObserved = true;
+            return resolve();
+          }
+          options.signal.addEventListener("abort", () => {
+            abortObserved = true;
+            resolve();
+          }, { once: true });
+        });
         yielded += 1;
-        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
-        yielded += 1;
-        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
       } finally {
-        released = true;
+        cleanupCount += 1;
       }
     });
 
@@ -106,8 +121,92 @@ describe("AI event stream HTTP preflight", () => {
     const reader = response.body!.getReader();
     await expect(reader.read()).resolves.toMatchObject({ done: false });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(yielded).toBe(2);
+    expect(yielded).toBe(1);
     await reader.cancel();
-    expect(released).toBe(true);
+    expect(abortObserved).toBe(true);
+    expect(cleanupCount).toBe(1);
+    expect(yielded).toBe(2);
+  });
+
+  test("incoming Request abort interrupts a pending Agent read without producing a stream error", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    let abortObserved = false;
+    let cleanupCount = 0;
+    mocks.agentStream.mockImplementationOnce(async function* (
+      _sessionId: string,
+      _afterSequence: number,
+      options?: { signal?: AbortSignal }
+    ) {
+      try {
+        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+        await new Promise<void>((resolve) => {
+          options!.signal!.addEventListener("abort", () => {
+            abortObserved = true;
+            resolve();
+          }, { once: true });
+        });
+      } finally {
+        cleanupCount += 1;
+      }
+    });
+    const incoming = new AbortController();
+    const routeRequest = new Request(
+      `http://localhost/api/projects/${ids.projectId}/ai/events?workspaceId=${ids.workspaceId}&sessionId=${ids.sessionId}&afterSequence=0`,
+      { signal: incoming.signal }
+    );
+    const response = await GET(routeRequest, context);
+    const reader = response.body!.getReader();
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    const pending = reader.read();
+
+    incoming.abort();
+
+    await expect(Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("incoming-abort-did-not-settle")), 100))
+    ])).resolves.toEqual({ done: true, value: undefined });
+    expect(abortObserved).toBe(true);
+    expect(cleanupCount).toBe(1);
+  });
+
+  test("browser cancellation racing a valid frame does not enqueue that frame", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    let secondFrameProduced = false;
+    mocks.agentStream.mockImplementationOnce(async function* (
+      _sessionId: string,
+      _afterSequence: number,
+      options?: { signal?: AbortSignal }
+    ) {
+      yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+      await new Promise<void>((resolve) => options!.signal!.addEventListener("abort", () => resolve(), { once: true }));
+      secondFrameProduced = true;
+      yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 1 };
+    });
+    const response = await GET(request(0), context);
+    const reader = response.body!.getReader();
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await reader.cancel();
+
+    expect(secondFrameProduced).toBe(true);
   });
 });

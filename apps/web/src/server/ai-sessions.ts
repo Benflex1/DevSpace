@@ -379,7 +379,7 @@ export function preflightAiEventStream(projectId: string, workspaceId: string, s
 }
 
 export async function* streamAiEvents(projectId: string, workspaceId: string, sessionId: string, afterSequence: number, dependencies: Dependencies,
-  preflight?: AiEventStreamPreflight): AsyncGenerator<AiEventStreamFrame> {
+  preflight?: AiEventStreamPreflight, options: { signal?: AbortSignal } = {}): AsyncGenerator<AiEventStreamFrame> {
   const view = preflight ?? preflightAiEventStream(projectId, workspaceId, sessionId, afterSequence, dependencies);
   let frameCount = 0;
   let frameBytes = 0;
@@ -393,7 +393,7 @@ export async function* streamAiEvents(projectId: string, workspaceId: string, se
     if (!canYield(event)) return;
     yield event;
   }
-  for await (const frame of dependencies.agent.streamAiEvents(view.session.id, view.session.lastSequence)) {
+  for await (const frame of dependencies.agent.streamAiEvents(view.session.id, view.session.lastSequence, options)) {
     if ("frameType" in frame) {
       if (!canYield(frame)) return;
       yield frame; continue;

@@ -44,7 +44,8 @@ function streamProtocolFailure(requestId: string): AgentUnavailableError {
 
 async function* parseBoundedAiEventNdjson(
   response: http.IncomingMessage,
-  requestId: string
+  requestId: string,
+  signal?: AbortSignal
 ): AsyncGenerator<AiEventStreamFrame> {
   let segments: Buffer[] = [];
   let pendingBytes = 0;
@@ -102,6 +103,7 @@ async function* parseBoundedAiEventNdjson(
     if (pendingBytes !== 0) throw streamProtocolFailure(requestId);
   } catch (error) {
     response.destroy();
+    if (signal?.aborted === true) return;
     throw error instanceof AgentUnavailableError ? error : streamProtocolFailure(requestId);
   } finally {
     segments = [];
@@ -376,26 +378,51 @@ export function createAgentClient(socketPath: string, options: {
     interruptAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.interrupt", data, operationId) as MutationReceipt,
     stopAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.stop", data, operationId) as MutationReceipt,
     acknowledgeAiEvents: async (data: AcknowledgeAiEventsData): Promise<AcknowledgeAiEventsData> => await call("ai-session.events.acknowledge", data) as AcknowledgeAiEventsData,
-    streamAiEvents: async function* (sessionId: string, afterSequence: number): AsyncGenerator<AiEventStreamFrame> {
+    streamAiEvents: async function* (
+      sessionId: string,
+      afterSequence: number,
+      streamOptions: { signal?: AbortSignal } = {}
+    ): AsyncGenerator<AiEventStreamFrame> {
+      const signal = streamOptions.signal;
+      const isCancelled = (): boolean => signal?.aborted === true;
+      if (isCancelled()) return;
       const releaseAdmission = aiStreamAdmission.tryAcquire(sessionId);
       if (releaseAdmission === null) throw new AgentUnavailableError();
+      if (isCancelled()) {
+        releaseAdmission();
+        return;
+      }
+      let activeRequest: http.ClientRequest | null = null;
       let activeResponse: http.IncomingMessage | null = null;
-      let cleanupRequest: (() => void) | null = null;
+      const abortError = new Error("ai-event-stream-cancelled");
+      const destroyActive = (error?: Error): void => {
+        activeResponse?.destroy(error);
+        activeRequest?.destroy(error);
+      };
+      const abortDownstream = (): void => {
+        destroyActive(abortError);
+      };
+      signal?.addEventListener("abort", abortDownstream, { once: true });
       try {
+        if (isCancelled()) return;
         const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
         const requestId = createId();
         const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
           const request = http.request({ socketPath, path: endpoint.path.replace("{aiSessionId}", encodeURIComponent(sessionId)) + `?afterSequence=${afterSequence}`,
             method: "GET", headers: { "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION), "X-DevSpace-Request-Id": requestId,
               "X-DevSpace-Sent-At": now().toISOString(), Accept: endpoint.successContentType } }, (response) => {
+                activeResponse = response;
+                if (isCancelled()) {
+                  abortDownstream();
+                  return;
+                }
                 if (response.statusCode === endpoint.successStatus && response.headers["content-type"] === endpoint.successContentType) request.setTimeout(0);
                 resolve(response);
               });
-          cleanupRequest = () => request.destroy();
+          activeRequest = request;
           request.setTimeout(observationTimeoutMs, () => request.destroy(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure", requestId)));
           request.once("error", reject); request.end();
         });
-        activeResponse = response;
         if (response.statusCode !== endpoint.successStatus) {
           const chunks: Buffer[] = []; let bytes = 0;
           for await (const chunk of response) {
@@ -409,11 +436,15 @@ export function createAgentClient(socketPath: string, options: {
           } catch (error) { if (error instanceof AgentResponseError) throw error; throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId); }
         }
         if (response.headers["content-type"] !== endpoint.successContentType) throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
-        yield* parseBoundedAiEventNdjson(response, requestId);
+        yield* parseBoundedAiEventNdjson(response, requestId, signal);
+      } catch (error) {
+        if (isCancelled()) return;
+        throw error;
       } finally {
-        activeResponse?.destroy();
-        const cleanup = cleanupRequest as (() => void) | null;
-        if (cleanup !== null) cleanup();
+        signal?.removeEventListener("abort", abortDownstream);
+        destroyActive();
+        activeResponse = null;
+        activeRequest = null;
         releaseAdmission();
       }
     }

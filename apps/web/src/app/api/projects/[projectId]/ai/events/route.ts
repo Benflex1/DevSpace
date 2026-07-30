@@ -12,17 +12,62 @@ export async function GET(request: Request, context: { params: Promise<{ project
     if (workspaceId === null || sessionId === null || !uuidV7Schema.safeParse(workspaceId).success || !uuidV7Schema.safeParse(sessionId).success || !aiAfterSequenceSchema.safeParse(afterSequence).success) return new Response("The AI stream cursor is invalid.", { status: 422 });
     const dependencies = { database: getProjectDatabase(config.databasePath), agent: createAgentClient(config.agentSocketPath) };
     const preflight = preflightAiEventStream(projectId, workspaceId, sessionId, afterSequence, dependencies);
-    const iterator = streamAiEvents(projectId, workspaceId, sessionId, afterSequence, dependencies, preflight)[Symbol.asyncIterator]();
+    const downstreamCancellation = new AbortController();
+    const iterator = streamAiEvents(projectId, workspaceId, sessionId, afterSequence, dependencies, preflight,
+      { signal: downstreamCancellation.signal })[Symbol.asyncIterator]();
     const encoder = new TextEncoder();
+    let browserCancelled = false;
+    let iteratorCleanup: Promise<IteratorResult<unknown> | void> | null = null;
+    let requestAbortListening = false;
+    const removeRequestAbortListener = (): void => {
+      if (!requestAbortListening) return;
+      requestAbortListening = false;
+      request.signal.removeEventListener("abort", onRequestAbort);
+    };
+    const returnIterator = (): Promise<IteratorResult<unknown> | void> => {
+      iteratorCleanup ??= Promise.resolve(iterator.return?.(undefined)).catch(() => undefined);
+      return iteratorCleanup;
+    };
+    const abortDownstream = (): void => {
+      if (!downstreamCancellation.signal.aborted) downstreamCancellation.abort();
+    };
+    const onRequestAbort = (): void => {
+      abortDownstream();
+      void returnIterator().finally(removeRequestAbortListener).catch(() => undefined);
+    };
+    if (request.signal.aborted) abortDownstream();
+    else {
+      requestAbortListening = true;
+      request.signal.addEventListener("abort", onRequestAbort, { once: true });
+    }
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
           const next = await iterator.next();
-          if (next.done) controller.close(); else controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
-        } catch { controller.error(new Error("AI event stream unavailable.")); }
+          if (downstreamCancellation.signal.aborted) {
+            if (!browserCancelled) controller.close();
+            return;
+          }
+          if (next.done) {
+            removeRequestAbortListener();
+            controller.close();
+          } else controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
+        } catch {
+          if (downstreamCancellation.signal.aborted) return;
+          removeRequestAbortListener();
+          controller.error(new Error("AI event stream unavailable."));
+        }
       },
-      async cancel() { await iterator.return?.(undefined); }
+      async cancel() {
+        browserCancelled = true;
+        abortDownstream();
+        await returnIterator();
+        removeRequestAbortListener();
+      }
     });
+    if (request.signal.aborted && !browserCancelled) {
+      void returnIterator().finally(removeRequestAbortListener).catch(() => undefined);
+    }
     return new Response(stream, { status: 200, headers: { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE, "cache-control": "no-store" } });
   } catch (error) {
     if (error instanceof AuthenticationError) return new Response("Authentication is required.", { status: 403 });
