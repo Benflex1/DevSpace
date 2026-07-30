@@ -18,7 +18,9 @@ describe("stopped AI session recovery controls", () => {
       showInterrupt: false,
       showStop: false,
       showRestart: true,
-      restartDisabled: false
+      restartDisabled: false,
+      showInitialRetry: false,
+      initialRetryDisabled: true
     });
     expect(aiSessionMutationControls("lost", false, false)).toMatchObject({
       showHistory: true, showComposer: false, showInterrupt: false, showStop: false, showRestart: false
@@ -29,6 +31,25 @@ describe("stopped AI session recovery controls", () => {
     expect(aiSessionMutationControls("creating", false, false)).toMatchObject({
       showHistory: true, showComposer: false, showInterrupt: false, showStop: false, showRestart: false
     });
+  });
+
+  test("exposes initial startup retry only for an exact zero-sequence creating session", () => {
+    expect(aiSessionMutationControls("creating", false, false, 0, false)).toMatchObject({
+      showInitialRetry: true,
+      initialRetryDisabled: false,
+      showComposer: false,
+      showInterrupt: false,
+      showStop: false,
+      showRestart: false
+    });
+    expect(aiSessionMutationControls("creating", false, false, 0, true)).toMatchObject({
+      showInitialRetry: true,
+      initialRetryDisabled: true
+    });
+    expect(aiSessionMutationControls("creating", false, false, 1, false).showInitialRetry).toBe(false);
+    for (const state of ["active", "stopped", "lost"]) {
+      expect(aiSessionMutationControls(state, false, false, 0, false).showInitialRetry).toBe(false);
+    }
   });
 
   test("posts the exact selected session, fences duplicate clicks, cancels stale work, and reloads only that session", async () => {

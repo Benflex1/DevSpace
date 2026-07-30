@@ -6,6 +6,10 @@ import { appendAiTurnOutput, boundAiSessionTurns, type BrowserAiTurn } from "./a
 import { consumeAiEventStream, type BrowserAiEvent } from "./ai-session-stream.js";
 import { AiHistoryTruncationNotice, AiOutputTruncationNotice } from "./ai-session-notices.js";
 import { replayAiEvents } from "./ai-session-replay.js";
+import {
+  createAiSessionInitialRetryCoordinator,
+  type AiSessionInitialRetrySelection
+} from "./ai-session-initial-retry.js";
 import { createAiSessionLoadCoordinator } from "./ai-session-load.js";
 import { aiSessionMutationControls, createAiSessionRestartCoordinator } from "./ai-session-restart.js";
 import { createAiSessionSendReconciliation } from "./ai-session-send-reconciliation.js";
@@ -27,6 +31,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const [loading, setLoading] = useState(true);
   const [reconnecting, setReconnecting] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
+  const [initialRetryPending, setInitialRetryPending] = useState(false);
   const [sendReconciliationPending, setSendReconciliationPending] = useState(false);
   const [streamRevision, setStreamRevision] = useState(0);
   const lastSequence = useRef(0);
@@ -35,9 +40,11 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const selectedSessionId = useRef<string | null>(null);
   const terminal = useRef(false);
   const selectionGeneration = useRef(0);
+  const selectedSessionState = useRef<string | null>(null);
   const lastEventId = useRef<string | null>(null);
   const canonicalTurnIds = useRef<Set<string>>(new Set());
   const sendReconciliation = useRef<ReturnType<typeof createAiSessionSendReconciliation> | null>(null);
+  const initialRetryCoordinatorRef = useRef<ReturnType<typeof createAiSessionInitialRetryCoordinator> | null>(null);
   sendReconciliation.current ??= createAiSessionSendReconciliation({
     restoreDraft: setComposer,
     setPending: setSendReconciliationPending,
@@ -47,10 +54,10 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const applyEvent = useCallback((event: Event): boolean => {
     if (selectedSessionId.current !== event.sessionId) return false;
     if (event.eventType.startsWith("session.")) {
-      if (event.eventType === "session.started") { terminal.current = false; setSession((current) => current === null ? null : { ...current, state: "creating" }); }
-      else if (event.eventType === "session.stopped") { terminal.current = true; setSession((current) => current === null ? null : { ...current, state: "stopped" }); }
-      else if (event.eventType === "session.lost") { terminal.current = true; setSession((current) => current === null ? null : { ...current, state: "lost" }); }
-      else if (event.eventType === "session.ready") setSession((current) => current === null ? null : { ...current, state: "active" });
+      if (event.eventType === "session.started") { terminal.current = false; selectedSessionState.current = "creating"; setSession((current) => current === null ? null : { ...current, state: "creating", lastSequence: event.sequence }); }
+      else if (event.eventType === "session.stopped") { terminal.current = true; selectedSessionState.current = "stopped"; setSession((current) => current === null ? null : { ...current, state: "stopped", lastSequence: event.sequence }); }
+      else if (event.eventType === "session.lost") { terminal.current = true; selectedSessionState.current = "lost"; setSession((current) => current === null ? null : { ...current, state: "lost", lastSequence: event.sequence }); }
+      else if (event.eventType === "session.ready") { selectedSessionState.current = "active"; setSession((current) => current === null ? null : { ...current, state: "active", lastSequence: event.sequence }); }
       if (event.eventType === "session.stopped" || event.eventType === "session.lost") {
         sendReconciliation.current?.observe({
           sessionId: event.sessionId,
@@ -129,6 +136,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
       setMessage(null);
       if (selected !== null && selected !== undefined) {
         selectedSessionId.current = selected.session.id;
+        selectedSessionState.current = selected.session.state;
         terminal.current = selected.session.state === "stopped" || selected.session.state === "lost";
         setSession(selected.session); lastSequence.current = selected.session.lastSequence;
         const lastEvent = selected.events.at(-1);
@@ -142,7 +150,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
           canonicalTurnIds: canonicalTurnIds.current
         });
       } else {
-        selectedSessionId.current = null; terminal.current = false; setSession(null); setTurns([]); lastSequence.current = 0; lastEventId.current = null;
+        selectedSessionId.current = null; selectedSessionState.current = null; terminal.current = false; setSession(null); setTurns([]); lastSequence.current = 0; lastEventId.current = null;
         canonicalTurnIds.current = new Set();
       }
     },
@@ -153,6 +161,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
 
   const cancelWork = useCallback(() => {
     selectionGeneration.current += 1;
+    initialRetryCoordinatorRef.current?.invalidate();
     streamAbortRef.current?.abort();
     loadCoordinator.cancel();
     loadAbortRef.current?.abort();
@@ -205,6 +214,20 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     }
     return result;
   }, [projectId]);
+  const initialRetryCoordinator = useMemo(() => createAiSessionInitialRetryCoordinator({
+    workspaceId,
+    getSelection: () => selectedSessionId.current === null || selectedSessionState.current === null ? null : {
+      sessionId: selectedSessionId.current,
+      selectionGeneration: selectionGeneration.current,
+      state: selectedSessionState.current,
+      lastSequence: lastSequence.current
+    },
+    post,
+    load: async (sessionId) => { await loadCoordinator.load(sessionId); },
+    setPending: setInitialRetryPending,
+    setMessage
+  }), [loadCoordinator, post, workspaceId]);
+  initialRetryCoordinatorRef.current = initialRetryCoordinator;
   const restartCoordinator = useMemo(() => createAiSessionRestartCoordinator({
     workspaceId,
     post,
@@ -221,6 +244,16 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Session creation failed.");
     }
+  };
+  const retryInitialStart = async () => {
+    if (session === null) return;
+    const selected: AiSessionInitialRetrySelection = {
+      sessionId: session.id,
+      selectionGeneration: selectionGeneration.current,
+      state: session.state,
+      lastSequence: session.lastSequence
+    };
+    if (await initialRetryCoordinator.retry(selected)) setMessage(null);
   };
   const send = async () => {
     const text = composer.trim();
@@ -265,13 +298,20 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   if (loading && profile === null) return <div className="ai-tab-surface" role="status">Inspecting Codex availability…</div>;
   const unavailable = profile?.availability.state === "unavailable";
   const running = turns.some((turn) => turn.state === "running");
-  const controls = session === null ? null : aiSessionMutationControls(session.state, running, restartPending);
+  const controls = session === null ? null : aiSessionMutationControls(
+    session.state,
+    running,
+    restartPending,
+    session.lastSequence,
+    initialRetryPending
+  );
   return <section className="ai-tab-surface" aria-label="AI session">
     <header className="ai-tab-header"><div><strong>{session?.title ?? "AI session"}</strong><span className={`ai-status ${session?.state ?? (unavailable ? "unavailable" : "ready")}`}>{reconnecting ? "Reconnecting…" : session?.state ?? (unavailable ? "Unavailable" : "Ready")}</span></div>
       {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && <button type="button" onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
     {message !== null && <p className="ai-message" role="status">{message}</p>}
     {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{unavailable ? "Codex unavailable" : "Start an AI session"}</h2><p>{unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : "Ask Codex to inspect, explain, or change files in this workspace."}</p>{!unavailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
       {session.historyTruncated && <AiHistoryTruncationNotice historyStartSequence={session.historyStartSequence} />}
+      {controls?.showInitialRetry && <div className="ai-degraded" role="status"><strong>Codex did not finish starting.</strong><span>Retry startup for this exact session.</span><button type="button" disabled={controls.initialRetryDisabled} onClick={() => { void retryInitialStart(); }}>Retry starting Codex</button></div>}
       <div className="ai-timeline" aria-live="polite">{turns.length === 0 && <p className="ai-empty-copy">Your conversation will appear here.</p>}{turns.map((turn) => <article className="ai-turn" key={turn.id}><div className="ai-turn-label">You <span>{turn.state}</span></div><p className="ai-user-text">{turn.content.text}</p>{turn.activities.length > 0 && <div className="ai-activities">{turn.activities.map((activity, index) => <span key={`${turn.id}-activity-${index}`}>{activity}</span>)}</div>}<div className="ai-assistant"><div className="ai-turn-label">Codex</div><p>{turn.outputText || (turn.state === "running" ? "Working…" : "")}</p>{turn.outputTruncated && <AiOutputTruncationNotice />}</div>{turn.changedFiles.files.length > 0 && <div className="ai-files"><strong>Changed files</strong><ul>{turn.changedFiles.files.map((file) => <li key={`${file.change}:${file.path}`}>{file.change} <code>{file.path}</code>{file.oldPath !== null && <> from <code>{file.oldPath}</code></>}</li>)}</ul>{turn.changedFiles.truncated && <small>Additional files omitted.</small>}</div>}</article>)}</div>
       {controls?.showComposer && <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Codex…" aria-label="AI prompt" rows={3} disabled={running || sendReconciliationPending} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} /><div><small>Ctrl/Cmd + Enter to send</small><button type="submit" disabled={running || sendReconciliationPending || composer.trim().length === 0}>Send</button></div></form>}
       {controls?.showRestart && <div className="ai-degraded" role="status"><strong>Codex session stopped.</strong><span>Committed history is preserved. Start a new provider process for this exact session.</span><button type="button" disabled={controls.restartDisabled} onClick={() => { void restart(); }}>Start Codex again</button></div>}

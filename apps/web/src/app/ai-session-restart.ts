@@ -5,18 +5,29 @@ export type AiSessionMutationControls = Readonly<{
   showStop: boolean;
   showRestart: boolean;
   restartDisabled: boolean;
+  showInitialRetry: boolean;
+  initialRetryDisabled: boolean;
 }>;
 
-export function aiSessionMutationControls(state: string, running: boolean, restartPending: boolean): AiSessionMutationControls {
+export function aiSessionMutationControls(
+  state: string,
+  running: boolean,
+  restartPending: boolean,
+  lastSequence = -1,
+  initialRetryPending = false
+): AiSessionMutationControls {
   const active = state === "active";
   const stopped = state === "stopped";
+  const initialRecovery = state === "creating" && lastSequence === 0;
   return {
     showHistory: true,
     showComposer: active,
     showInterrupt: active && running,
     showStop: active,
     showRestart: stopped,
-    restartDisabled: !stopped || restartPending
+    restartDisabled: !stopped || restartPending,
+    showInitialRetry: initialRecovery,
+    initialRetryDisabled: !initialRecovery || initialRetryPending
   };
 }
 

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import { replayAiEvents, type AiSessionReplayEvent } from "./ai-session-replay.js";
 
@@ -16,5 +17,16 @@ describe("AI session browser hydration", () => {
 
     expect(hydrated?.outputText).toBe("Answer");
     expect(hydrated?.activities).toEqual(["Reading workspace"]);
+  });
+
+  test("renders explicit initial-start recovery through the Create coordinator", async () => {
+    const source = await readFile(new URL("./ai-session-tab.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("Codex did not finish starting.");
+    expect(source).toContain("Retry starting Codex");
+    expect(source).toContain("controls?.showInitialRetry");
+    expect(source).toContain("disabled={controls.initialRetryDisabled}");
+    expect(source).toContain("initialRetryCoordinator.retry(selected)");
+    expect(source).toContain("aiSessionMutationControls(");
   });
 });

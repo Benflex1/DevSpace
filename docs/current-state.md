@@ -86,6 +86,11 @@ Initial zero-sequence `creating` sessions now reconcile against an exact Agent
 `stream.synchronized` boundary. Canonical startup history is committed and acknowledged before the
 same durable session is retained; synchronized-empty history may claim an exact unchanged binding
 and retry the same session ID; unavailable replay returns only that durable session identity.
+For that exact `creating` / sequence-zero state, the browser now exposes one manually initiated
+`Retry starting Codex` action through the existing Create request. The action is duplicate-click
+and selection-generation fenced, loads only the same returned durable session identity, yields to
+canonical startup events, and introduces neither replacement-session behavior nor an automatic
+retry loop.
 Post-receipt turn-projection failures and Agent transport loss preserve the generated turn ID as
 ambiguous. The browser withholds that draft until the exact canonical turn appears or the exact
 session becomes stopped/lost without it.
