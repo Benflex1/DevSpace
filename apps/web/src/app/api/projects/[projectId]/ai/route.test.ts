@@ -111,6 +111,26 @@ describe("AI stopped-session restart route", () => {
   });
 
   test.each([
+    "sandbox",
+    "approvalPolicy",
+    "cwd",
+    "environment",
+    "executable",
+    "provider",
+    "processGeneration"
+  ])("rejects an additional top-level send field named %s", async (field) => {
+    const response = await POST(post({
+      action: "send",
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      content: { kind: "text", text: "private prompt" },
+      [field]: "forbidden"
+    }), context);
+    expect(response.status).toBe(422);
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  test.each([
     { action: "restart", workspaceId: ids.workspaceId },
     { action: "restart", workspaceId: ids.workspaceId, sessionId: "not-a-session" },
     { action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId, extra: true }

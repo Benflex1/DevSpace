@@ -489,7 +489,16 @@ const canonicalAiEventSchemas = [
 export const canonicalAiEventSchema = z.discriminatedUnion(
   "eventType",
   canonicalAiEventSchemas
-);
+).superRefine((event, context) => {
+  if (event.eventType === "session.started"
+    && event.payload.processGeneration !== event.processGeneration) {
+    context.addIssue({
+      code: "custom",
+      path: ["payload", "processGeneration"],
+      message: "Started generation must equal the canonical event generation"
+    });
+  }
+});
 export const canonicalAiEventTypes = Object.freeze(canonicalAiEventSchemas.map(
   (schema) => schema.shape.eventType.value
 ));

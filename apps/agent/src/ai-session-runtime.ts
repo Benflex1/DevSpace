@@ -161,7 +161,27 @@ interface SessionRecord {
   finalizationReason: "user-request" | "provider-exited" | null;
   cleanupProven: boolean;
   stoppingEmitted: boolean;
+  terminalClaim: TurnTerminalClaim | null;
+  terminalClaimPromise: Promise<TurnTerminalClaim | null> | null;
+  terminalDrivePromise: Promise<void> | null;
 }
+
+type TurnTerminalKind = "completed" | "interrupted" | "failed" | "lost";
+type TurnTerminalStep = Readonly<{
+  eventType: "turn.interrupted" | "turn.provider-completed" | "turn.files.changed" | "turn.quiesced" | "turn.failed" | "turn.lost";
+  payload: unknown;
+}>;
+type TurnTerminalClaim = {
+  readonly turnId: string;
+  readonly processGeneration: number;
+  readonly kind: TurnTerminalKind;
+  readonly finalOutcome: "completed" | "interrupted" | null;
+  readonly reason: string | null;
+  readonly changedFiles: Extract<CanonicalAiEvent, { eventType: "turn.files.changed" }>["payload"] | null;
+  readonly safeFailure: Extract<CanonicalAiEvent, { eventType: "turn.failed" }>["payload"] | null;
+  readonly steps: readonly TurnTerminalStep[];
+  stage: number;
+};
 
 type CredentialSynchronizationResult = "synchronized" | "unchanged-valid" | "rejected-and-reauth-required";
 type ProviderFinalizationResult =
@@ -912,6 +932,9 @@ class CodexProvider implements ProviderAdapter {
       new Promise<void>((resolve) => setTimeout(resolve, CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS))
     ]);
     this.rejectPending();
+    const observation = this.protocolObservation(this.nativeTurnState === "active" ? "turn" : "request");
+    try { this.input.callbacks.privateFailure(observation); } catch { /* diagnostics cannot alter terminalization */ }
+    await this.input.callbacks.failed(observation).catch(() => undefined);
     if (this.finalizationState === "active" && !this.providerClosedNotified) {
       this.providerClosedNotified = true;
       await this.input.callbacks.providerClosed().catch(() => undefined);
@@ -1009,7 +1032,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       binding, processGeneration: previousGeneration, outbox, turnBaselines: new Map(), privateFailures: new Map(), adapter: null, ready: false, activeTurnId: null,
       activeTurnToken: null, activeTurnPromise: null, admissionPromise: null, finalizationPromise: null,
       finalizationState: outbox.events.length === 0 ? "active" : "finalized", finalizationReason: null,
-      cleanupProven: outbox.events.length > 0, stoppingEmitted: outbox.events.length > 0
+      cleanupProven: outbox.events.length > 0, stoppingEmitted: outbox.events.length > 0,
+      terminalClaim: null, terminalClaimPromise: null, terminalDrivePromise: null
     };
     sessions.set(binding.aiSessionId, record); return record;
   }
@@ -1043,12 +1067,138 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
 
   async function failTurn(record: SessionRecord, turnId: string, observation: CodexPrivateFailureObservation): Promise<void> {
     if (record.activeTurnId !== turnId) return;
-    const selected = rememberPrivateFailure(record, turnId, observation);
-    record.activeTurnId = null; record.turnBaselines.delete(turnId); record.privateFailures.delete(turnId);
-    const code = safeErrorCode(new CodexRequestFailure(selected));
-    await emit(record, turnId, "turn.failed", { failure: { code, category: code === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure", incidentId: createId() } });
-    await record.outbox.finishTurn();
+    await establishTerminalClaim(record, "failed", { observation });
+    await driveTerminalClaim(record);
     await finalizeRecord(record, "provider-exited");
+  }
+
+  const terminalEventTypes = new Set([
+    "turn.interrupted",
+    "turn.provider-completed",
+    "turn.files.changed",
+    "turn.quiesced",
+    "turn.failed",
+    "turn.lost"
+  ]);
+
+  async function establishTerminalClaim(
+    record: SessionRecord,
+    kind: TurnTerminalKind,
+    options: {
+      readonly observation?: CodexPrivateFailureObservation;
+      readonly reason?: "provider-confirmed" | "provider-process-stopped";
+    } = {}
+  ): Promise<TurnTerminalClaim | null> {
+    if (record.terminalClaim !== null) return record.terminalClaim;
+    if (record.terminalClaimPromise !== null) return await record.terminalClaimPromise;
+    if (record.activeTurnId === null) return null;
+    const turnId = record.activeTurnId;
+    const generation = record.processGeneration;
+    const attempt = (async (): Promise<TurnTerminalClaim | null> => {
+      if (record.terminalClaim !== null) return record.terminalClaim;
+      if (record.activeTurnId !== turnId || record.processGeneration !== generation) return null;
+      let changedFiles: Extract<CanonicalAiEvent, { eventType: "turn.files.changed" }>["payload"] | null = null;
+      let safeFailure: Extract<CanonicalAiEvent, { eventType: "turn.failed" }>["payload"] | null = null;
+      let finalOutcome: "completed" | "interrupted" | null = null;
+      let reason: string | null = options.reason ?? null;
+      let steps: readonly TurnTerminalStep[];
+      if (kind === "completed" || kind === "interrupted") {
+        finalOutcome = kind;
+        changedFiles = await changedFilesForTurn(record, turnId);
+        steps = [
+          ...(kind === "interrupted" ? [{
+            eventType: "turn.interrupted" as const,
+            payload: { reason: options.reason ?? "provider-confirmed" }
+          }] : []),
+          { eventType: "turn.provider-completed", payload: { outcome: kind } },
+          { eventType: "turn.files.changed", payload: changedFiles },
+          { eventType: "turn.quiesced", payload: { outcome: kind } }
+        ];
+      } else if (kind === "failed") {
+        const selected = rememberPrivateFailure(
+          record,
+          turnId,
+          options.observation ?? { stage: "turn", kind: "Unknown", httpStatusCode: null }
+        );
+        const code = safeErrorCode(new CodexRequestFailure(selected));
+        safeFailure = {
+          failure: {
+            code,
+            category: code === "AI_PROVIDER_PROTOCOL_FAILURE" ? "protocol-failure" : "transport-failure",
+            incidentId: createId()
+          }
+        };
+        steps = [{ eventType: "turn.failed", payload: safeFailure }];
+      } else {
+        reason = "AGENT_RESTART";
+        steps = [{ eventType: "turn.lost", payload: { code: "AGENT_RESTART" } }];
+      }
+      const claim: TurnTerminalClaim = {
+        turnId,
+        processGeneration: generation,
+        kind,
+        finalOutcome,
+        reason,
+        changedFiles,
+        safeFailure,
+        steps,
+        stage: 0
+      };
+      record.terminalClaim = claim;
+      return claim;
+    })();
+    record.terminalClaimPromise = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (record.terminalClaimPromise === attempt) record.terminalClaimPromise = null;
+    }
+  }
+
+  function inspectTerminalClaim(record: SessionRecord, claim: TurnTerminalClaim): number {
+    if (record.processGeneration !== claim.processGeneration) throw new Error("ai-turn-terminal-generation-conflict");
+    const durable = record.outbox.events.filter((event) =>
+      event.turnId === claim.turnId
+      && event.processGeneration === claim.processGeneration
+      && terminalEventTypes.has(event.eventType)
+    );
+    if (durable.length > claim.steps.length) throw new Error("ai-turn-terminal-suffix-conflict");
+    for (const [index, event] of durable.entries()) {
+      const expected = claim.steps[index];
+      if (expected === undefined || event.eventType !== expected.eventType
+        || stablePrivateJson(event.payload) !== stablePrivateJson(expected.payload)) {
+        throw new Error("ai-turn-terminal-suffix-conflict");
+      }
+    }
+    return durable.length;
+  }
+
+  async function driveTerminalClaim(record: SessionRecord): Promise<void> {
+    if (record.terminalDrivePromise !== null) return await record.terminalDrivePromise;
+    const claim = record.terminalClaim;
+    if (claim === null) return;
+    const attempt = (async () => {
+      while (true) {
+        claim.stage = inspectTerminalClaim(record, claim);
+        const step = claim.steps[claim.stage];
+        if (step === undefined) break;
+        await emit(record, claim.turnId, step.eventType, step.payload);
+      }
+      claim.stage = inspectTerminalClaim(record, claim);
+      if (claim.stage !== claim.steps.length) throw new Error("ai-turn-terminal-suffix-incomplete");
+      if (record.activeTurnId !== claim.turnId) throw new Error("ai-turn-terminal-owner-conflict");
+      record.activeTurnId = null;
+      record.turnBaselines.delete(claim.turnId);
+      record.privateFailures.delete(claim.turnId);
+      await record.outbox.finishTurn();
+      if (record.terminalClaim === claim) record.terminalClaim = null;
+    })();
+    record.terminalDrivePromise = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (record.terminalDrivePromise === attempt) record.terminalDrivePromise = null;
+    }
   }
 
   async function finalizeRecord(record: SessionRecord, reason: "user-request" | "provider-exited"): Promise<void> {
@@ -1062,6 +1212,10 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     record.finalizationState = "finalizing";
     const finalizationReason = record.finalizationReason;
     const attempt = (async () => {
+      if (record.activeTurnId !== null) {
+        await establishTerminalClaim(record, "interrupted", { reason: "provider-process-stopped" });
+        await driveTerminalClaim(record);
+      }
       if (!record.cleanupProven) {
         const adapter = record.adapter;
         if (adapter === null) throw new ProviderFinalizationUnprovenError();
@@ -1071,18 +1225,6 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         record.adapter = null;
         record.cleanupProven = true;
         record.finalizationState = "cleanup-proven-public-pending";
-      }
-      if (record.activeTurnId !== null) await record.activeTurnPromise?.catch(() => undefined);
-      if (record.activeTurnId !== null) {
-        const turnId = record.activeTurnId;
-        await emit(record, turnId, "turn.interrupted", { reason: "provider-confirmed" });
-        await emit(record, turnId, "turn.provider-completed", { outcome: "interrupted" });
-        await emit(record, turnId, "turn.files.changed", await changedFilesForTurn(record, turnId));
-        await emit(record, turnId, "turn.quiesced", { outcome: "interrupted" });
-        record.turnBaselines.delete(turnId);
-        record.privateFailures.delete(turnId);
-        record.activeTurnId = null;
-        await record.outbox.finishTurn();
       }
       if (!record.stoppingEmitted) {
         await emit(record, null, "session.stopping", { reason: finalizationReason === "user-request" ? "user-request" : "runtime-stopping" });
@@ -1164,11 +1306,12 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           await emit(record, record.activeTurnId, "turn.activity.completed", { activityId, outcome: "succeeded" }); },
         completed: async (outcome) => {
           if (!currentGeneration() || record.activeTurnId === null) return;
-          const turnId = record.activeTurnId; if (outcome === "interrupted") await emit(record, turnId, "turn.interrupted", { reason: "provider-confirmed" });
-          await emit(record, turnId, "turn.provider-completed", { outcome });
-          await emit(record, turnId, "turn.files.changed", await changedFilesForTurn(record, turnId));
-          await emit(record, turnId, "turn.quiesced", { outcome }); record.turnBaselines.delete(turnId); record.activeTurnId = null;
-          await record.outbox.finishTurn();
+          await establishTerminalClaim(
+            record,
+            outcome === "failed" ? "failed" : outcome === "interrupted" ? "interrupted" : "completed",
+            outcome === "interrupted" ? { reason: "provider-confirmed" } : {}
+          );
+          await driveTerminalClaim(record);
         },
         privateFailure: (observation) => {
           if (!currentGeneration()) return;
@@ -1211,6 +1354,9 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       record.admissionPromise = null;
       record.turnBaselines.clear();
       record.privateFailures.clear();
+      record.terminalClaim = null;
+      record.terminalClaimPromise = null;
+      record.terminalDrivePromise = null;
       record.adapter = adapter;
       try {
         await emit(record, null, "session.started", { processGeneration: record.processGeneration });
@@ -1275,6 +1421,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           .then(async () => await admissionAdapter.sendTurn(input.turnId, input.content.text))
           .catch(async (error) => {
             if (record.adapter !== admissionAdapter || record.processGeneration !== admissionGeneration) return;
+            if (record.terminalClaim !== null) return;
             await failTurn(record, input.turnId,
               privateFailureFromError(error) ?? { stage: "request", kind: "Unknown", httpStatusCode: null });
           });
@@ -1316,6 +1463,31 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         const last = outbox.events.at(-1)!;
         const terminal = last.eventType === "session.stopped" || last.eventType === "session.lost";
         if (!terminal) {
+          const generationEvents = outbox.events.filter((event) => event.processGeneration === last.processGeneration);
+          const acceptedTurns = generationEvents.filter((event) => event.eventType === "turn.accepted");
+          const active = acceptedTurns.findLast((accepted) => {
+            const turnEvents = generationEvents.filter((event) => event.turnId === accepted.turnId);
+            return !turnEvents.some((event) =>
+              event.eventType === "turn.quiesced"
+              || event.eventType === "turn.failed"
+              || event.eventType === "turn.lost"
+            );
+          });
+          if (active !== undefined) {
+            const alreadyLost = generationEvents.some((event) =>
+              event.turnId === active.turnId && event.eventType === "turn.lost"
+            );
+            if (!alreadyLost) {
+              await outbox.append({
+                turnId: active.turnId,
+                eventType: "turn.lost",
+                payload: { code: "AGENT_RESTART" },
+                profile: last.profile,
+                processGeneration: last.processGeneration,
+                kind: "terminal"
+              });
+            }
+          }
           await outbox.append({ turnId: null, eventType: "session.lost", payload: { code: "AGENT_RESTART" }, profile: last.profile,
             processGeneration: last.processGeneration, kind: "terminal" });
         }

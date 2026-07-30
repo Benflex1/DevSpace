@@ -388,8 +388,9 @@ export function openProjectDatabase(path: string, options: {
       select sequence as sequence,
         case when length(cast(event_json as blob)) <= ? then event_json else null end as eventJson,
         length(cast(event_json as blob)) as eventBytes
-      from ai_events where session_id = ? order by sequence desc limit ?
-    `).all(AI_SESSION_EVENT_HISTORY_MAX_BYTES, session.id, AI_SESSION_EVENT_HISTORY_MAX_EVENTS + 1) as RawAiEventRow[];
+      from ai_events where session_id = ? and sequence >= ? order by sequence desc limit ?
+    `).all(AI_SESSION_EVENT_HISTORY_MAX_BYTES, session.id, session.historyStartSequence,
+      AI_SESSION_EVENT_HISTORY_MAX_EVENTS + 1) as RawAiEventRow[];
     const eventViews: CanonicalAiEvent[] = [];
     for (const row of rawEvents.slice(0, AI_SESSION_EVENT_HISTORY_MAX_EVENTS)) {
       const event = row.eventJson === null ? null : canonicalAiEventSchema.safeParse(parseBoundedJson(row.eventJson, AI_SESSION_EVENT_HISTORY_MAX_BYTES));
@@ -516,8 +517,8 @@ export function openProjectDatabase(path: string, options: {
     const total = client.prepare(`
       select count(*) as count, coalesce(sum(length(cast(event_json as blob))), 0) as bytes,
         coalesce(min(sequence), 0) as minimumSequence, coalesce(max(sequence), 0) as maximumSequence
-      from ai_events where session_id = ?
-    `).get(sessionId) as { count: number; bytes: number; minimumSequence: number; maximumSequence: number };
+      from ai_events where session_id = ? and sequence >= ?
+    `).get(sessionId, currentHistoryStartSequence) as { count: number; bytes: number; minimumSequence: number; maximumSequence: number };
     const contiguous = total.count === 0 || total.maximumSequence - total.minimumSequence + 1 === total.count;
     if (total.count <= AI_SESSION_EVENT_HISTORY_MAX_EVENTS && total.bytes <= AI_SESSION_EVENT_HISTORY_MAX_BYTES
       && contiguous && (total.count === 0 || total.minimumSequence === currentHistoryStartSequence)) {
@@ -525,8 +526,9 @@ export function openProjectDatabase(path: string, options: {
     }
     const candidates = client.prepare(`
       select sequence, length(cast(event_json as blob)) as eventBytes
-      from ai_events where session_id = ? order by sequence desc limit ?
-    `).all(sessionId, AI_SESSION_EVENT_HISTORY_MAX_EVENTS) as Array<{ sequence: number; eventBytes: number }>;
+      from ai_events where session_id = ? and sequence >= ? order by sequence desc limit ?
+    `).all(sessionId, currentHistoryStartSequence,
+      AI_SESSION_EVENT_HISTORY_MAX_EVENTS) as Array<{ sequence: number; eventBytes: number }>;
     let bytes = 0;
     let retained = 0;
     let historyStartSequence = lastSequence + 1;
@@ -541,9 +543,33 @@ export function openProjectDatabase(path: string, options: {
       expectedSequence -= 1;
     }
     if (retained === 0) {
-      client.prepare("delete from ai_events where session_id = ?").run(sessionId);
+      client.prepare(`
+        delete from ai_events
+        where session_id = ?
+          and not (
+            event_type = 'turn.accepted'
+            and exists (
+              select 1 from ai_turns
+              where ai_turns.id = ai_events.turn_id
+                and ai_turns.session_id = ai_events.session_id
+                and ai_turns.state in ('accepted', 'running')
+            )
+          )
+      `).run(sessionId);
     } else {
-      client.prepare("delete from ai_events where session_id = ? and sequence < ?").run(sessionId, historyStartSequence);
+      client.prepare(`
+        delete from ai_events
+        where session_id = ? and sequence < ?
+          and not (
+            event_type = 'turn.accepted'
+            and exists (
+              select 1 from ai_turns
+              where ai_turns.id = ai_events.turn_id
+                and ai_turns.session_id = ai_events.session_id
+                and ai_turns.state in ('accepted', 'running')
+            )
+          )
+      `).run(sessionId, historyStartSequence);
     }
     return {
       historyStartSequence,
@@ -587,6 +613,117 @@ export function openProjectDatabase(path: string, options: {
     };
     db.insert(aiTurns).values(turn).run();
     return turn;
+  };
+  const canonicalTurnContext = (event: CanonicalAiEvent) => {
+    if (event.turnId === null || event.eventType === "turn.accepted") return null;
+    const turn = db.select().from(aiTurns).where(and(
+      eq(aiTurns.id, event.turnId),
+      eq(aiTurns.sessionId, event.sessionId)
+    )).get();
+    if (turn === undefined) {
+      throw new ProjectSetupConflictError("The canonical AI turn does not exist.");
+    }
+    const acceptedRow = client.prepare(`
+      select event_json as eventJson
+      from ai_events
+      where session_id = ? and turn_id = ? and event_type = 'turn.accepted'
+      order by sequence asc
+      limit 1
+    `).get(event.sessionId, event.turnId) as { eventJson: string } | undefined;
+    if (acceptedRow === undefined) {
+      throw new ProjectSetupConflictError("The canonical AI turn acceptance does not exist.");
+    }
+    const accepted = canonicalAiEventSchema.parse(JSON.parse(acceptedRow.eventJson));
+    if (accepted.eventType !== "turn.accepted"
+      || accepted.turnId !== event.turnId
+      || accepted.processGeneration !== event.processGeneration
+      || turn.contentJson !== JSON.stringify(accepted.payload.content)) {
+      throw new ProjectSetupConflictError("The canonical AI turn acceptance conflicts with this event.");
+    }
+    const prior = (client.prepare(`
+      select event_json as eventJson
+      from ai_events
+      where session_id = ? and turn_id = ?
+      order by sequence asc
+    `).all(event.sessionId, event.turnId) as Array<{ eventJson: string }>)
+      .map((row) => canonicalAiEventSchema.parse(JSON.parse(row.eventJson)));
+    return { turn, prior };
+  };
+  const assertLegalTurnProgression = (
+    event: Exclude<CanonicalAiEvent, { eventType: "turn.accepted" }>,
+    context: NonNullable<ReturnType<typeof canonicalTurnContext>>
+  ): void => {
+    const types = context.prior.map((candidate) => candidate.eventType);
+    const has = (eventType: CanonicalAiEvent["eventType"]) => types.includes(eventType);
+    const hasTerminal = has("turn.failed") || has("turn.lost") || has("turn.quiesced");
+    if (hasTerminal) throw new ProjectSetupConflictError("The canonical AI turn is already terminal.");
+    const active = context.turn.state === "accepted" || context.turn.state === "running";
+    const providerCompleted = context.prior.find((candidate) => candidate.eventType === "turn.provider-completed");
+    if (event.eventType === "turn.started") {
+      if (!active || has("turn.started") || has("turn.interrupted") || providerCompleted !== undefined) {
+        throw new ProjectSetupConflictError("The AI turn cannot start from its canonical state.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.output.delta" || event.eventType === "turn.output.completed"
+      || event.eventType === "turn.activity.started" || event.eventType === "turn.approval.requested"
+      || event.eventType === "turn.input.requested" || event.eventType === "turn.interrupt.requested") {
+      if (!active || has("turn.interrupted") || providerCompleted !== undefined) {
+        throw new ProjectSetupConflictError("The AI turn cannot emit live activity after terminalization.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.activity.completed") {
+      const matchingStart = context.prior.some((candidate) => candidate.eventType === "turn.activity.started"
+        && candidate.payload.activityId === event.payload.activityId);
+      if (!active || !matchingStart || has("turn.interrupted") || providerCompleted !== undefined) {
+        throw new ProjectSetupConflictError("The AI activity completion has no active canonical owner.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.approval.responded" || event.eventType === "turn.input.responded") {
+      const requestedType = event.eventType === "turn.approval.responded" ? "turn.approval.requested" : "turn.input.requested";
+      const matchingRequest = context.prior.some((candidate) => candidate.eventType === requestedType
+        && candidate.payload.requestId === event.payload.requestId);
+      if (!active || !matchingRequest || has("turn.interrupted") || providerCompleted !== undefined) {
+        throw new ProjectSetupConflictError("The AI interaction response has no active canonical request.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.interrupted") {
+      if (!active || has("turn.interrupted") || providerCompleted !== undefined) {
+        throw new ProjectSetupConflictError("The AI turn interruption conflicts with retained history.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.provider-completed") {
+      if (providerCompleted !== undefined
+        || (event.payload.outcome === "interrupted") !== has("turn.interrupted")) {
+        throw new ProjectSetupConflictError("The provider outcome conflicts with retained turn history.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.files.changed") {
+      if (providerCompleted === undefined || has("turn.files.changed")) {
+        throw new ProjectSetupConflictError("Changed files are not the next canonical terminal stage.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.quiesced") {
+      if (providerCompleted === undefined || !has("turn.files.changed")
+        || providerCompleted.payload.outcome !== event.payload.outcome) {
+        throw new ProjectSetupConflictError("Turn quiescence conflicts with the canonical provider outcome.");
+      }
+      return;
+    }
+    if (event.eventType === "turn.lost") {
+      return;
+    }
+    if (event.eventType === "turn.failed") {
+      if (!active || has("turn.interrupted") || providerCompleted !== undefined || has("turn.files.changed")) {
+        throw new ProjectSetupConflictError("The terminal AI turn event conflicts with retained history.");
+      }
+    }
   };
   return {
     close: () => client.close(),
@@ -955,6 +1092,64 @@ export function openProjectDatabase(path: string, options: {
         return { session, created: true as const };
       }).immediate();
     },
+    prepareInitialAiSessionRetry(input: {
+      projectId: string;
+      workspaceId: string;
+      sessionId: string;
+      profileId: string;
+      profileRevision: string;
+      revisionId: string;
+      runtimePlanHash: string;
+      runtimeGeneration: number;
+      expectedUpdatedAt: string;
+      synchronizedEmpty: true;
+    }) {
+      return client.transaction(() => {
+        if (input.synchronizedEmpty !== true) {
+          throw new ProjectSetupConflictError("An exact synchronized-empty Agent history is required.");
+        }
+        const context = this.getRuntimeContext(input.projectId);
+        const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
+        const session = db.select().from(aiSessions).where(and(
+          eq(aiSessions.id, input.sessionId),
+          eq(aiSessions.workspaceId, input.workspaceId)
+        )).get();
+        const counts = client.prepare(`
+          select
+            (select count(*) from ai_events where session_id = ?) as events,
+            (select count(*) from ai_turns where session_id = ?) as turns,
+            (select count(*) from ai_interaction_requests where session_id = ?) as interactions
+        `).get(input.sessionId, input.sessionId, input.sessionId) as {
+          events: number;
+          turns: number;
+          interactions: number;
+        };
+        if (context.workspace.id !== input.workspaceId || session === undefined
+          || session.state !== "creating" || session.lastSequence !== 0 || session.processGeneration !== 1
+          || session.updatedAt !== input.expectedUpdatedAt
+          || session.profileKey !== input.profileId || session.profileRevision !== input.profileRevision
+          || session.revisionId !== input.revisionId || session.runtimePlanHash !== input.runtimePlanHash
+          || session.runtimeGeneration !== input.runtimeGeneration
+          || context.revision.id !== input.revisionId || context.revision.runtimePlanHash !== input.runtimePlanHash
+          || runtime === undefined || runtime.runtimeGeneration !== input.runtimeGeneration
+          || counts.events !== 0 || counts.turns !== 0 || counts.interactions !== 0) {
+          throw new ProjectSetupConflictError("The initial AI session cannot be retried under this exact binding.");
+        }
+        const timestamp = new Date(Math.max(now().valueOf(), Date.parse(session.updatedAt) + 1)).toISOString();
+        const result = db.update(aiSessions).set({ updatedAt: timestamp }).where(and(
+          eq(aiSessions.id, input.sessionId),
+          eq(aiSessions.workspaceId, input.workspaceId),
+          eq(aiSessions.state, "creating"),
+          eq(aiSessions.lastSequence, 0),
+          eq(aiSessions.processGeneration, 1),
+          eq(aiSessions.updatedAt, input.expectedUpdatedAt)
+        )).run();
+        if (result.changes !== 1) {
+          throw new ProjectSetupConflictError("The initial AI session retry claim changed concurrently.");
+        }
+        return { ...session, updatedAt: timestamp };
+      }).immediate();
+    },
     prepareAiSessionRestart(input: { projectId: string; workspaceId: string; sessionId: string; profileId: string; profileRevision: string }) {
       return client.transaction(() => {
         const context = this.getRuntimeContext(input.projectId);
@@ -1047,9 +1242,14 @@ export function openProjectDatabase(path: string, options: {
     commitAiEvent(input: { projectId: string; workspaceId: string; event: CanonicalAiEvent }): "appended" | "duplicate" {
       return client.transaction(() => {
         const event = canonicalAiEventSchema.parse(input.event);
+        if (event.eventType === "session.started"
+          && event.payload.processGeneration !== event.processGeneration) {
+          throw new ProjectSetupConflictError("The started AI provider generation is inconsistent.");
+        }
         const context = this.getRuntimeContext(input.projectId);
         const session = db.select().from(aiSessions).where(and(eq(aiSessions.id, event.sessionId), eq(aiSessions.workspaceId, input.workspaceId))).get();
         if (context.workspace.id !== input.workspaceId || session === undefined) throw new ProjectSetupConflictError("The AI event identity is not owned by this workspace.");
+        const turnContext = canonicalTurnContext(event);
         const existingAtSequence = db.select().from(aiEvents).where(and(eq(aiEvents.sessionId, event.sessionId), eq(aiEvents.sequence, event.sequence))).get();
         const existingById = db.select().from(aiEvents).where(eq(aiEvents.eventId, event.eventId)).get();
         const parseExisting = (row: typeof existingAtSequence) => row === undefined ? null : canonicalAiEventSchema.parse(JSON.parse(row.eventJson));
@@ -1064,6 +1264,9 @@ export function openProjectDatabase(path: string, options: {
           return "duplicate";
         }
         if (decision.kind !== "append") throw new ProjectSetupConflictError(decision.kind === "gap" ? "The AI event stream has a sequence gap." : "The AI event stream has a conflicting sequence.");
+        if (turnContext !== null && event.eventType !== "turn.accepted") {
+          assertLegalTurnProgression(event, turnContext);
+        }
         const previousEvent = session.lastSequence === 0 ? undefined : db.select().from(aiEvents).where(and(
           eq(aiEvents.sessionId, event.sessionId), eq(aiEvents.sequence, session.lastSequence)
         )).get();
@@ -1148,6 +1351,15 @@ export function openProjectDatabase(path: string, options: {
             }
             if (event.eventType === "turn.files.changed") { changedFilesJson = JSON.stringify(event.payload); }
             if (event.eventType === "turn.failed") { state = "failed"; failureJson = JSON.stringify(event.payload.failure); completedAt = timestamp; }
+            if (event.eventType === "turn.lost") {
+              state = "failed";
+              failureJson = JSON.stringify({
+                code: "AI_SESSION_STATE_CONFLICT",
+                category: "state-conflict",
+                incidentId: null
+              });
+              completedAt = timestamp;
+            }
             if (event.eventType === "turn.interrupted") { state = "interrupted"; completedAt = timestamp; }
             if (event.eventType === "turn.quiesced") { state = event.payload.outcome === "completed" ? "completed" : event.payload.outcome === "interrupted" ? "interrupted" : "failed"; completedAt = timestamp; }
             db.update(aiTurns).set({ state, ...(outputText === undefined ? {} : { outputText }), outputTruncated: outputWasTruncated, changedFilesJson, failureJson,

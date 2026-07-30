@@ -324,6 +324,26 @@ describe("canonical event envelope and append decisions", () => {
     }
   });
 
+  test.each([1, 2, 3])("requires session.started payload generation to equal envelope generation %i", (processGeneration) => {
+    const started = {
+      schemaVersion: "devspace.ai-event/v1",
+      eventId,
+      sessionId,
+      turnId: null,
+      sequence: 1,
+      observedAt: timestamp,
+      profile,
+      processGeneration,
+      eventType: "session.started",
+      payload: { processGeneration }
+    };
+    expect(canonicalAiEventSchema.safeParse(started).success).toBe(true);
+    expect(canonicalAiEventSchema.safeParse({
+      ...started,
+      payload: { processGeneration: processGeneration === 1 ? 2 : 1 }
+    }).success).toBe(false);
+  });
+
   test("bounds changed-file presentations and requires safe rename paths", () => {
     const base = {
       ...event({

@@ -853,6 +853,85 @@ describe("AI session runtime", () => {
     }
   });
 
+  test.each([
+    ["turn.interrupted", "interrupted"],
+    ["turn.provider-completed", "completed"],
+    ["turn.files.changed", "completed"],
+    ["turn.quiesced", "completed"],
+    ["turn.failed", "failed"]
+  ] as const)("retains and retries one terminal claim after a fault before %s", async (failedEventType, kind) => {
+    const stateRoot = await mkdtemp(join(tmpdir(), `devspace-ai-terminal-claim-${failedEventType.replaceAll(".", "-")}-`));
+    let injected = false;
+    let cleanupCalls = 0;
+    const runtime = createAiSessionRuntime({
+      mode: "fake",
+      stateRoot,
+      fakeProviderTestHooks: {
+        onSend: () => {
+          if (kind === "failed") throw new Error("synthetic-provider-send-failure");
+        },
+        onStop: () => {
+          cleanupCalls += 1;
+        }
+      },
+      outboxFaultHooks: {
+        beforeAppend: ({ eventType }: { eventType: string }) => {
+          if (!injected && eventType === failedEventType) {
+            injected = true;
+            throw new Error(`synthetic-${failedEventType}-fault`);
+          }
+        }
+      }
+    } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      await runtime.start(exactBinding);
+      await runtime.sendTurn({
+        ...exactBinding,
+        processGeneration: 1,
+        turnId,
+        content: { kind: "text", text: kind === "interrupted" ? "long" : "hello" }
+      });
+      if (kind === "interrupted") {
+        await new Promise((resolve) => setImmediate(resolve));
+        await expect(runtime.stop({ ...exactBinding, processGeneration: 1 })).rejects.toThrow();
+      } else {
+        for (let attempt = 0; attempt < 20 && !injected; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      expect(injected).toBe(true);
+      const beforeRetry = await runtime.replay(sessionId, 0);
+      expect(beforeRetry.filter((event) => event.eventType === failedEventType)).toHaveLength(0);
+      expect(beforeRetry.filter((event) => event.eventType === "session.stopping"
+        || event.eventType === "session.stopped")).toHaveLength(0);
+      expect(cleanupCalls).toBe(0);
+
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+
+      const events = await runtime.replay(sessionId, 0);
+      const terminal = events.filter((event) => event.turnId === turnId && [
+        "turn.interrupted",
+        "turn.provider-completed",
+        "turn.files.changed",
+        "turn.quiesced",
+        "turn.failed"
+      ].includes(event.eventType));
+      const expected = kind === "failed"
+        ? ["turn.failed"]
+        : kind === "interrupted"
+          ? ["turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced"]
+          : ["turn.provider-completed", "turn.files.changed", "turn.quiesced"];
+      expect(terminal.map((event) => event.eventType)).toEqual(expected);
+      expect(events.filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
+      expect(cleanupCalls).toBe(1);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   test("restarts one durable session across three unique process generations", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-restart-test-"));
     let providerStarts = 0;
@@ -1021,6 +1100,52 @@ describe("AI session runtime", () => {
       expect(events.at(-1)?.eventType).toBe("session.lost");
       expect(events.filter((event) => event.eventType === "session.started")).toHaveLength(1);
     } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  test("cold Agent reconstruction terminalizes an accepted turn before the session and never duplicates loss", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-runtime-cold-active-turn-test-"));
+    try {
+      const profile = await createAiSessionRuntime({ mode: "fake", stateRoot }).inspect({
+        projectId,
+        workspaceId,
+        profileId: "codex"
+      });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      const outbox = await createAiSessionOutbox({ stateRoot, binding: exactBinding });
+      const eventProfile = { profileId: "codex", profileRevision: profile.profileRevision, provider: "codex" };
+      await outbox.reserveProviderGeneration();
+      await outbox.append({
+        turnId: null,
+        eventType: "session.started",
+        payload: { processGeneration: 1 },
+        profile: eventProfile,
+        processGeneration: 1
+      });
+      await outbox.append({
+        turnId: null,
+        eventType: "session.ready",
+        payload: {},
+        profile: eventProfile,
+        processGeneration: 1
+      });
+      await outbox.beginTurn({
+        turnId,
+        profile: eventProfile,
+        processGeneration: 1,
+        content: { kind: "text", text: "long" }
+      });
+      const restarted = createAiSessionRuntime({ mode: "fake", stateRoot });
+      const firstReplay = await restarted.replay(sessionId, 0);
+      expect(firstReplay.slice(-2).map((event) => [event.eventType, event.turnId])).toEqual([
+        ["turn.lost", turnId],
+        ["session.lost", null]
+      ]);
+      const secondReplay = await restarted.replay(sessionId, 0);
+      expect(secondReplay.filter((event) => event.eventType === "turn.lost")).toHaveLength(1);
+      expect(secondReplay.filter((event) => event.eventType === "session.lost")).toHaveLength(1);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
   });
 
   test("cold Agent restart rejects overflow and conflicting retained generations", async () => {

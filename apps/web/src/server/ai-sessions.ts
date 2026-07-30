@@ -1,5 +1,6 @@
 import { v7 as uuidv7 } from "uuid";
 import { uuidV7Schema, type AiEventStreamFrame, type AiProviderProfileProjection } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import { AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { ProjectSetupConflictError, type ProjectDatabase } from "./database.js";
 import {
@@ -28,6 +29,8 @@ export class AiTurnOutcomeAmbiguousError extends AiSessionActionError {
 }
 
 interface Dependencies { readonly database: ProjectDatabase; readonly agent: FullAgentClient }
+const initialSessionAttempts = new Map<string, Promise<{ sessionId: string; operationId?: string | null }>>();
+const aiSessionLogger = createLogger({ component: "web", subsystem: "ai-sessions" });
 
 function exactSession(projectId: string, workspaceId: string, sessionId: string, database: ProjectDatabase) {
   uuidV7Schema.parse(projectId); uuidV7Schema.parse(workspaceId); uuidV7Schema.parse(sessionId);
@@ -192,12 +195,82 @@ export async function createAiSession(projectId: string, workspaceId: string, ac
   if (profile.availability.state !== "available") throw new AiSessionActionError("AI_PROFILE_UNAVAILABLE", "Codex is unavailable for this workspace.");
   const initial = dependencies.database.createInitialAiSession({ projectId, workspaceId, profileId: profile.profileId, profileRevision: profile.profileRevision });
   const created = initial.session;
-  if (!initial.created) return { sessionId: created.id, operationId: null };
-  const operationId = uuidv7();
-  const startBinding = { projectId, workspaceId, aiSessionId: created.id, revisionId: created.revisionId, runtimePlanHash: created.runtimePlanHash,
-    runtimeGeneration: created.runtimeGeneration, profileId: created.profileKey, profileRevision: created.profileRevision };
-  await dependencies.agent.startAiSession(operationId, startBinding);
-  return { sessionId: created.id, operationId };
+  if (created.state !== "creating" || created.lastSequence !== 0 || created.processGeneration !== 1) {
+    return { sessionId: created.id, operationId: null };
+  }
+  const active = initialSessionAttempts.get(created.id);
+  if (active !== undefined) return await active;
+  const attempt = (async (): Promise<{ sessionId: string; operationId?: string | null }> => {
+    const startBinding = {
+      projectId,
+      workspaceId,
+      aiSessionId: created.id,
+      revisionId: created.revisionId,
+      runtimePlanHash: created.runtimePlanHash,
+      runtimeGeneration: created.runtimeGeneration,
+      profileId: created.profileKey,
+      profileRevision: created.profileRevision
+    };
+    const reconcile = async (): Promise<"empty" | "canonical" | "unavailable"> => {
+      let sawCanonical = false;
+      let synchronized = false;
+      let throughSequence = 0;
+      try {
+        for await (const frame of dependencies.agent.streamAiEvents(created.id, 0)) {
+          if ("frameType" in frame) {
+            if (frame.sessionId !== created.id || frame.throughSequence !== throughSequence) return "unavailable";
+            synchronized = true;
+            break;
+          }
+          const result = dependencies.database.commitAiEvent({ projectId, workspaceId, event: frame });
+          if (result !== "appended" && result !== "duplicate") return "unavailable";
+          await dependencies.agent.acknowledgeAiEvents({
+            projectId,
+            workspaceId,
+            aiSessionId: created.id,
+            throughSequence: frame.sequence,
+            throughEventId: frame.eventId
+          });
+          sawCanonical = true;
+          throughSequence = frame.sequence;
+        }
+      } catch {
+        return "unavailable";
+      }
+      if (!synchronized) return "unavailable";
+      return sawCanonical ? "canonical" : "empty";
+    };
+    if (!initial.created) {
+      const outcome = await reconcile();
+      if (outcome !== "empty") return { sessionId: created.id };
+      dependencies.database.prepareInitialAiSessionRetry({
+        projectId,
+        workspaceId,
+        sessionId: created.id,
+        profileId: profile.profileId,
+        profileRevision: profile.profileRevision,
+        revisionId: created.revisionId,
+        runtimePlanHash: created.runtimePlanHash,
+        runtimeGeneration: created.runtimeGeneration,
+        expectedUpdatedAt: created.updatedAt,
+        synchronizedEmpty: true
+      });
+    }
+    const operationId = uuidv7();
+    try {
+      await dependencies.agent.startAiSession(operationId, startBinding);
+      return { sessionId: created.id, operationId };
+    } catch {
+      await reconcile();
+      return { sessionId: created.id };
+    }
+  })();
+  initialSessionAttempts.set(created.id, attempt);
+  try {
+    return await attempt;
+  } finally {
+    if (initialSessionAttempts.get(created.id) === attempt) initialSessionAttempts.delete(created.id);
+  }
 }
 
 export async function restartAiSession(projectId: string, workspaceId: string, sessionId: string, dependencies: Dependencies) {
@@ -262,10 +335,14 @@ export async function sendAiTurn(projectId: string, workspaceId: string, session
       content: { kind: "text", text }
     });
   } catch (error) {
-    if (error instanceof ProjectSetupConflictError) {
-      throw new AiSessionActionError("AI_SESSION_CONFLICT", "The accepted AI turn could not be reconciled safely.");
-    }
-    throw error;
+    aiSessionLogger.warn("ai.turn.acceptance_projection.ambiguous", "Agent accepted a turn whose local projection is unresolved", {
+      projectId,
+      workspaceId,
+      aiSessionId: sessionId,
+      turnId,
+      errorCategory: error instanceof ProjectSetupConflictError ? "state-conflict" : "database-failure"
+    });
+    throw new AiTurnOutcomeAmbiguousError(turnId);
   }
   return { turnId, operationId };
 }

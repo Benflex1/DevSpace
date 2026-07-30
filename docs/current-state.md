@@ -69,8 +69,8 @@ with `DEVSPACE_AI_PROVIDER_MODE=codex`, the dedicated rootless DevSpace Docker s
 dedicated persistent authority; the private GitHub source was represented by an exact-HEAD local
 HTTPS mirror because the Agent's credentialless Git boundary cannot inspect the private remote.
 
-Stopped-session recovery is now implemented on the final-review branch and awaits independent
-verification. The browser retains the exact stopped session and bounded history, removes prompt,
+Stopped-session recovery and the lifecycle recovery correction round are implemented on the
+final-review branch and await independent verification. The browser retains the exact stopped session and bounded history, removes prompt,
 Interrupt, and Stop controls, and offers one fenced `Start Codex again` action for that session ID.
 Web re-inspects the exact profile and unchanged configuration/runtime identity, compare-and-sets the
 same SQLite row to `creating`, and rolls back only an unchanged claim if Agent acceptance fails.
@@ -81,6 +81,25 @@ terminal retained outbox. SQLite advances its stored generation only on canonica
 staging removal, synchronization, and lease release. This is not provider-native resume, does not
 recover `lost` sessions across runtime identity changes, and received no new real-provider or browser
 validation in this correction round.
+
+Initial zero-sequence `creating` sessions now reconcile against an exact Agent
+`stream.synchronized` boundary. Canonical startup history is committed and acknowledged before the
+same durable session is retained; synchronized-empty history may claim an exact unchanged binding
+and retry the same session ID; unavailable replay returns only that durable session identity.
+Post-receipt turn-projection failures and Agent transport loss preserve the generated turn ID as
+ambiguous. The browser withholds that draft until the exact canonical turn appears or the exact
+session becomes stopped/lost without it.
+
+Turn terminalization is claim-once per turn and process generation. Completed, interrupted, and
+failed claims retain immutable outcome/reason, changed-files or safe-failure data, and durable
+suffix progress; retries inspect and reuse exact retained events before appending only missing
+stages. Cleanup and session stopping begin only after the turn suffix is complete. Cold Agent
+reconstruction appends one `turn.lost` before `session.lost` for an unfinished accepted turn.
+SQLite rejects every later turn event without the matching committed canonical acceptance and
+generation, rejects illegal post-terminal progression, and projects `turn.lost` terminally.
+`session.started` envelope/payload generations must match, and Web `send` actions reject every
+additional top-level key. Stream admission/backpressure and lazy parser allocation remain isolated
+follow-up work; Checkpoint 2 remains deferred.
 
 ### AI Session Beta Slice B — Checkpoint 1 evidence (2026-07-29)
 

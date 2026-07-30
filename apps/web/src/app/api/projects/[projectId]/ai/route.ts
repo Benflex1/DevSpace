@@ -30,7 +30,9 @@ function parseAction(input: unknown): AiAction | null {
     && uuidV7Schema.safeParse(value.sessionId).success) return { action, workspaceId, sessionId: value.sessionId };
   if (action === "interrupt" && typeof value.sessionId === "string" && typeof value.turnId === "string" && Object.keys(value).length === 4
     && uuidV7Schema.safeParse(value.sessionId).success && uuidV7Schema.safeParse(value.turnId).success) return { action, workspaceId, sessionId: value.sessionId, turnId: value.turnId };
-  if (action === "send" && typeof value.sessionId === "string" && uuidV7Schema.safeParse(value.sessionId).success && aiTurnContentSchema.safeParse(value.content).success) {
+  if (action === "send" && Object.keys(value).length === 4
+    && typeof value.sessionId === "string" && uuidV7Schema.safeParse(value.sessionId).success
+    && aiTurnContentSchema.safeParse(value.content).success) {
     return { action, workspaceId, sessionId: value.sessionId, content: value.content as { kind: "text"; text: string } };
   }
   return null;
