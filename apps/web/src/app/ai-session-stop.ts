@@ -8,8 +8,8 @@ type StopCoordinatorOptions = Readonly<{
   workspaceId: string;
   post: (body: StopRequest) => Promise<unknown>;
   setPending: (pending: boolean) => void;
-  isStreamUnavailable?: () => boolean;
-  reconcile?: () => void | Promise<void>;
+  isTerminalObserved: () => boolean;
+  reconcile: () => void | Promise<void>;
   setMessage?: (message: string) => void;
 }>;
 
@@ -23,7 +23,7 @@ export function createAiSessionStopCoordinator(options: StopCoordinatorOptions) 
       options.setPending(true);
       try {
         await options.post({ action: "stop", workspaceId: options.workspaceId, sessionId });
-        if (options.isStreamUnavailable?.() === true) await options.reconcile?.();
+        if (!options.isTerminalObserved()) await options.reconcile();
         return true;
       } catch (error) {
         options.setMessage?.(error instanceof Error ? error.message : "Stop failed.");

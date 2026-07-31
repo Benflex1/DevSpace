@@ -32,12 +32,13 @@ function event(sequence: number, eventType: BrowserAiEvent["eventType"]): Browse
 }
 
 describe("browser Stop canonical convergence", () => {
-  test("keeps the canonical stream alive while delayed Stop finalization commits and acknowledges terminal events", async () => {
+  test("keeps the canonical stream alive while delayed Stop finalization projects terminal events", async () => {
     const stopRequest = deferred<void>();
     const streamReady = deferred<void>();
     const finalFrames = deferred<string>();
-    const commits: number[] = [];
-    const acknowledgements: Array<{ sequence: number; eventId: string }> = [];
+    // This browser-level seam records projection/ack callbacks; route/server tests cover the real SQLite/Agent transaction.
+    const projectedSequences: number[] = [];
+    const acknowledgedFrames: Array<{ sequence: number; eventId: string }> = [];
     const staleLoads = vi.fn(() => Promise.resolve());
     let browserState = "active";
     const streamController = new AbortController();
@@ -54,7 +55,7 @@ describe("browser Stop canonical convergence", () => {
       workspaceId,
       post: () => stopRequest.promise,
       reconcile: staleLoads,
-      isStreamUnavailable: () => false,
+      isTerminalObserved: () => browserState === "stopped",
       setPending: vi.fn()
     });
 
@@ -64,11 +65,11 @@ describe("browser Stop canonical convergence", () => {
       signal: streamController.signal,
       open: (afterSequence) => {
         expect(afterSequence).toBe(10);
-        return new Response(eventBody, { status: 200, headers: { "content-type": "application/x-ndjson" } });
+        return Promise.resolve(new Response(eventBody, { status: 200, headers: { "content-type": "application/x-ndjson" } }));
       },
       apply: (canonical) => {
-        commits.push(canonical.sequence);
-        acknowledgements.push({ sequence: canonical.sequence, eventId: canonical.eventId });
+        projectedSequences.push(canonical.sequence);
+        acknowledgedFrames.push({ sequence: canonical.sequence, eventId: canonical.eventId });
         if (canonical.eventType === "session.stopped") browserState = "stopped";
       },
       isTerminal: () => browserState === "stopped"
@@ -81,8 +82,8 @@ describe("browser Stop canonical convergence", () => {
     expect(staleLoads).not.toHaveBeenCalled();
     finalFrames.resolve(`${[event(11, "session.stopping"), event(12, "session.stopped")].map((frame) => JSON.stringify(frame)).join("\n")}\n`);
     await stream;
-    expect(commits).toEqual([11, 12]);
-    expect(acknowledgements).toEqual([
+    expect(projectedSequences).toEqual([11, 12]);
+    expect(acknowledgedFrames).toEqual([
       { sequence: 11, eventId: "event-11" },
       { sequence: 12, eventId: "event-12" }
     ]);
@@ -99,7 +100,7 @@ describe("browser Stop canonical convergence", () => {
       workspaceId,
       post: () => Promise.reject(new Error("stop rejected")),
       reconcile: staleLoads,
-      isStreamUnavailable: () => false,
+      isTerminalObserved: () => false,
       setPending: vi.fn()
     });
 
@@ -108,19 +109,55 @@ describe("browser Stop canonical convergence", () => {
     expect(aiSessionMutationControls("active", false, false, 10).showRestart).toBe(false);
   });
 
-  test("restarts canonical replay only when the live stream was already unavailable", async () => {
-    const order: string[] = [];
-    const reconcile = vi.fn(() => { order.push("reconcile"); });
+  test("uses live terminal projection after stream loss during a pending Stop", async () => {
+    const stopRequest = deferred<void>();
+    // The old coordinator captured this render's false status and could not observe the later update.
+    const capturedReconnecting = false;
+    const streamStatus = { reconnecting: capturedReconnecting };
+    const legacyStreamStatus = { isStreamUnavailable: () => capturedReconnecting };
+    let terminalObserved = false;
+    const projectedSequences: number[] = [];
+    const acknowledgedFrames: Array<{ sequence: number; eventId: string }> = [];
+    const reconcile = vi.fn(async () => {
+      await consumeAiEventStream({
+        initialSequence: 10,
+        sessionId,
+        signal: new AbortController().signal,
+        open: () => Promise.resolve(new Response(`${[event(11, "session.stopping"), event(12, "session.stopped")].map((frame) => JSON.stringify(frame)).join("\n")}\n`, {
+          status: 200,
+          headers: { "content-type": "application/x-ndjson" }
+        })),
+        apply: (canonical) => {
+          projectedSequences.push(canonical.sequence);
+          acknowledgedFrames.push({ sequence: canonical.sequence, eventId: canonical.eventId });
+          if (canonical.eventType === "session.stopped") terminalObserved = true;
+        },
+        isTerminal: () => terminalObserved
+      });
+    });
     const coordinator = createAiSessionStopCoordinator({
       workspaceId,
-      post: () => { order.push("post"); return Promise.resolve(); },
-      isStreamUnavailable: () => true,
+      post: () => stopRequest.promise,
+      isTerminalObserved: () => terminalObserved,
       reconcile,
-      setPending: vi.fn()
+      setPending: vi.fn(),
+      ...legacyStreamStatus
     });
 
-    expect(await coordinator.stop(sessionId)).toBe(true);
-    expect(order).toEqual(["post", "reconcile"]);
+    const stop = coordinator.stop(sessionId);
+    await Promise.resolve();
+    streamStatus.reconnecting = true;
+    expect(await coordinator.stop(sessionId)).toBe(false);
+    expect(streamStatus.reconnecting).toBe(true);
+    stopRequest.resolve();
+    expect(await stop).toBe(true);
     expect(reconcile).toHaveBeenCalledOnce();
+    expect(projectedSequences).toEqual([11, 12]);
+    expect(acknowledgedFrames).toEqual([
+      { sequence: 11, eventId: "event-11" },
+      { sequence: 12, eventId: "event-12" }
+    ]);
+    expect(terminalObserved).toBe(true);
+    expect(aiSessionMutationControls("stopped", false, false, 12).showRestart).toBe(true);
   });
 });

@@ -219,11 +219,11 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const stopCoordinator = useMemo(() => createAiSessionStopCoordinator({
     workspaceId,
     post: async (body) => { await post(body); },
-    isStreamUnavailable: () => reconnecting,
+    isTerminalObserved: () => terminal.current,
     reconcile: () => { setStreamRevision((current) => current + 1); },
     setPending: setStopPending,
     setMessage
-  }), [post, reconnecting, workspaceId]);
+  }), [post, workspaceId]);
   const initialRetryCoordinator = useMemo(() => createAiSessionInitialRetryCoordinator({
     workspaceId,
     getSelection: () => selectedSessionId.current === null || selectedSessionState.current === null ? null : {
