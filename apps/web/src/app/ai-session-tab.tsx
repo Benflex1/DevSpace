@@ -13,6 +13,7 @@ import {
 import { createAiSessionLoadCoordinator } from "./ai-session-load.js";
 import { aiSessionMutationControls, createAiSessionRestartCoordinator } from "./ai-session-restart.js";
 import { createAiSessionSendReconciliation } from "./ai-session-send-reconciliation.js";
+import { createAiSessionStopCoordinator } from "./ai-session-stop.js";
 
 type Profile = { profileId: string; profileRevision: string; displayName: string; availability: { state: "available" | "unavailable"; code?: string }; capabilities: { interrupt: boolean } };
 type FileSummary = BrowserAiTurn["changedFiles"];
@@ -31,6 +32,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   const [loading, setLoading] = useState(true);
   const [reconnecting, setReconnecting] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
   const [initialRetryPending, setInitialRetryPending] = useState(false);
   const [sendReconciliationPending, setSendReconciliationPending] = useState(false);
   const [streamRevision, setStreamRevision] = useState(0);
@@ -214,6 +216,14 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     }
     return result;
   }, [projectId]);
+  const stopCoordinator = useMemo(() => createAiSessionStopCoordinator({
+    workspaceId,
+    post: async (body) => { await post(body); },
+    isStreamUnavailable: () => reconnecting,
+    reconcile: () => { setStreamRevision((current) => current + 1); },
+    setPending: setStopPending,
+    setMessage
+  }), [post, reconnecting, workspaceId]);
   const initialRetryCoordinator = useMemo(() => createAiSessionInitialRetryCoordinator({
     workspaceId,
     getSelection: () => selectedSessionId.current === null || selectedSessionState.current === null ? null : {
@@ -288,7 +298,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
     }
   };
   const interrupt = async () => { const turn = turns.find((candidate) => candidate.state === "running"); if (turn === undefined || session === null) return; try { await post({ action: "interrupt", workspaceId, sessionId: session.id, turnId: turn.id }); } catch (error) { setMessage(error instanceof Error ? error.message : "Interrupt failed."); } };
-  const stop = async () => { if (session === null) return; cancelWork(); try { await post({ action: "stop", workspaceId, sessionId: session.id }); await load(session.id); } catch (error) { setMessage(error instanceof Error ? error.message : "Stop failed."); } };
+  const stop = async () => { if (session === null) return; await stopCoordinator.stop(session.id); };
   const restart = async () => {
     if (session === null) return;
     if (await restartCoordinator.restart(session.id)) setMessage(null);
@@ -307,7 +317,7 @@ export function AiSessionTab({ projectId, workspaceId, active }: { projectId: st
   );
   return <section className="ai-tab-surface" aria-label="AI session">
     <header className="ai-tab-header"><div><strong>{session?.title ?? "AI session"}</strong><span className={`ai-status ${session?.state ?? (unavailable ? "unavailable" : "ready")}`}>{reconnecting ? "Reconnecting…" : session?.state ?? (unavailable ? "Unavailable" : "Ready")}</span></div>
-      {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && <button type="button" onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
+      {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && <button type="button" disabled={stopPending} onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
     {message !== null && <p className="ai-message" role="status">{message}</p>}
     {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{unavailable ? "Codex unavailable" : "Start an AI session"}</h2><p>{unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : "Ask Codex to inspect, explain, or change files in this workspace."}</p>{!unavailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
       {session.historyTruncated && <AiHistoryTruncationNotice historyStartSequence={session.historyStartSequence} />}
