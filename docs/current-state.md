@@ -107,9 +107,11 @@ ordinary environment values contain no reusable credential.
 Repository listing is serialized per connection and requests only `metadata: read`. The installation
 token is minted immediately before the bounded installation-repository request, never persisted,
 revoked immediately, and dropped from memory. Production HTTP reads inspect and conservatively
-validate `Content-Length`, consume Web Streams incrementally by byte count, cancel at the bound,
-and apply fatal UTF-8 decoding before JSON parsing. A mint response is definitive only when a
-complete bounded GitHub rejection proves no token; a transport failure, malformed/oversized
+validate `Content-Length`, prefer `Accept-Encoding: identity`, consume Web Streams incrementally by
+decoded byte count, cancel at the bound, and apply fatal UTF-8 decoding before JSON parsing. Exact
+length equality is required for identity responses; encoded responses retain the decoded cap while
+not comparing decoded bytes with encoded `Content-Length`. A mint response is definitive only when
+a complete bounded GitHub rejection proves no token; a transport failure, malformed/oversized
 response, or incomplete `201` response is uncertain. Uncertain minting retains a conservative
 nonsecret guard through the maximum token lifetime and blocks overlapping minting. The internal
 lifecycle records primary listing outcome, revocation outcome, lease settlement, and binding-health

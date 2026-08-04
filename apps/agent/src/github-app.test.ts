@@ -1,7 +1,9 @@
 import { generateKeyPairSync } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { chmod, link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { createGithubAppAuthority, type GithubHttpRequest } from "./github-app.js";
 import { durableJsonWriter, type AtomicJsonWriter } from "./private-state.js";
@@ -42,6 +44,35 @@ function fetchInputUrl(input: unknown): URL {
   if (input instanceof URL) return input;
   if (input instanceof Request) return new URL(input.url);
   throw new TypeError("unexpected fetch input");
+}
+function gzipJson(response: ServerResponse, body: unknown, status: number): { encodedLength: number; decodedLength: number } {
+  const decoded = Buffer.from(JSON.stringify(body));
+  const encoded = gzipSync(decoded);
+  response.writeHead(status, { "content-type": "application/json", "content-encoding": "gzip", "content-length": String(encoded.byteLength) });
+  response.end(encoded);
+  return { encodedLength: encoded.byteLength, decodedLength: decoded.byteLength };
+}
+async function withLocalGithubFetch<T>(handler: (request: IncomingMessage, response: ServerResponse) => void, action: (origin: string) => Promise<T>): Promise<T> {
+  const server = createServer((request, response) => { request.resume(); handler(request, response); });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("local server address unavailable");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const originalFetch = globalThis.fetch;
+  const actualFetch = originalFetch;
+  globalThis.fetch = (input, init) => {
+    const target = fetchInputUrl(input);
+    return actualFetch(`${origin}${target.pathname}${target.search}`, init);
+  };
+  try {
+    return await action(origin);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  }
 }
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
@@ -479,6 +510,115 @@ describe("GitHub App authority", () => {
       await bind(authority);
       await expect(authority.listRepositories({ connectionId, pageSize: 20 })).resolves.toMatchObject({ repositories: [], cleanupDegraded: false });
     });
+  });
+
+  it("accepts a gzip repository response whose decoded length differs from encoded Content-Length", async () => {
+    const { stateRoot } = await fixture();
+    const requests: Array<{ path: string; acceptEncoding: string | undefined }> = [];
+    let lengths: { encodedLength: number; decodedLength: number } | undefined;
+    await withLocalGithubFetch((request, response) => {
+      const requestPath = request.url ?? "";
+      requests.push({ path: requestPath, acceptEncoding: request.headers["accept-encoding"] });
+      if (requestPath.endsWith("/access_tokens")) {
+        const body = Buffer.from(JSON.stringify({ token: "gzip-repository-secret", expires_at: "2026-08-04T13:00:00.000Z" }));
+        response.writeHead(201, { "content-type": "application/json", "content-length": String(body.byteLength) });
+        response.end(body);
+      } else if (requestPath.startsWith("/installation/repositories?")) {
+        lengths = gzipJson(response, { repositories: [] }, 200);
+      } else {
+        response.writeHead(204);
+        response.end();
+      }
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).resolves.toMatchObject({ repositories: [], cleanupDegraded: false });
+    });
+    expect(lengths).toBeDefined();
+    expect(lengths?.decodedLength).not.toBe(lengths?.encodedLength);
+    expect(requests.map(({ path }) => path)).toEqual(["/app/installations/77/access_tokens", expect.stringContaining("/installation/repositories?"), "/installation/token"]);
+    expect(requests.every(({ acceptEncoding }) => acceptEncoding === "identity")).toBe(true);
+  });
+
+  it("completes a fully compressed mint, repository listing, and revocation flow", async () => {
+    const { stateRoot } = await fixture();
+    const requests: Array<{ path: string; acceptEncoding: string | undefined }> = [];
+    await withLocalGithubFetch((request, response) => {
+      const requestPath = request.url ?? "";
+      requests.push({ path: requestPath, acceptEncoding: request.headers["accept-encoding"] });
+      if (requestPath.endsWith("/access_tokens")) gzipJson(response, { token: "gzip-flow-secret", expires_at: "2026-08-04T13:00:00.000Z" }, 201);
+      else if (requestPath.startsWith("/installation/repositories?")) gzipJson(response, { repositories: [] }, 200);
+      else { response.writeHead(204); response.end(); }
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).resolves.toMatchObject({ repositories: [], cleanupDegraded: false });
+    });
+    expect(requests.map(({ path }) => path)).toEqual(["/app/installations/77/access_tokens", expect.stringContaining("/installation/repositories?"), "/installation/token"]);
+    expect(requests.every(({ acceptEncoding }) => acceptEncoding === "identity")).toBe(true);
+  });
+
+  it("rejects a compressed decoded response beyond the bound without persisting a token", async () => {
+    const { stateRoot } = await fixture();
+    let lengths: { encodedLength: number; decodedLength: number } | undefined;
+    await withLocalGithubFetch((request, response) => {
+      if ((request.url ?? "").endsWith("/access_tokens")) {
+        lengths = gzipJson(response, { token: "compressed-oversize-secret", oversized: "x".repeat(512 * 1024 + 1) }, 201);
+      } else {
+        response.writeHead(500);
+        response.end();
+      }
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+      expect(await readFile(path.join(stateRoot, "github-app", "token-leases", `${connectionId}.json`), "utf8")).not.toContain("compressed-oversize-secret");
+    });
+    expect(lengths?.encodedLength).toBeLessThan(512 * 1024);
+    expect(lengths?.decodedLength).toBeGreaterThan(512 * 1024);
+  });
+
+  it("retains the uncertain mint guard after a malformed gzip response and restart", async () => {
+    const { stateRoot } = await fixture();
+    let mintRequests = 0;
+    await withLocalGithubFetch((request, response) => {
+      if ((request.url ?? "").endsWith("/access_tokens")) {
+        mintRequests += 1;
+        const malformed = Buffer.from("not-a-gzip-stream");
+        response.writeHead(201, { "content-type": "application/json", "content-encoding": "GZip", "content-length": String(malformed.byteLength) });
+        response.end(malformed);
+      } else {
+        response.writeHead(500);
+        response.end();
+      }
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+      const restarted = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:30:00.000Z") });
+      await expect(restarted.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-lease-active");
+    });
+    expect(mintRequests).toBe(1);
+    expect(await readFile(path.join(stateRoot, "github-app", "token-leases", `${connectionId}.json`), "utf8")).not.toContain("not-a-gzip-stream");
+  });
+
+  it("retains identity Content-Length mismatch detection through the local HTTP server", async () => {
+    const { stateRoot } = await fixture();
+    await withLocalGithubFetch((request, response) => {
+      if ((request.url ?? "").endsWith("/access_tokens")) {
+        const body = Buffer.from(JSON.stringify({ token: "identity-mismatch-secret", expires_at: "2026-08-04T13:00:00.000Z" }));
+        response.writeHead(201, { "content-type": "application/json", "content-length": String(body.byteLength + 1), connection: "close" });
+        response.end(body);
+      } else {
+        response.writeHead(500);
+        response.end();
+      }
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+    });
+    expect(await readFile(path.join(stateRoot, "github-app", "token-leases", `${connectionId}.json`), "utf8")).not.toContain("identity-mismatch-secret");
   });
 
   it("counts multibyte chunks by bytes and cancels before crossing the limit", async () => {

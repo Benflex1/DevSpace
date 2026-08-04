@@ -112,6 +112,8 @@ async function cancelResponse(response: Response): Promise<void> {
 }
 async function readBoundedResponseBytes(response: Response): Promise<Buffer> {
   const rawContentLength = response.headers.get("content-length");
+  const rawContentEncoding = response.headers.get("content-encoding");
+  const encodedRepresentation = rawContentEncoding !== null && rawContentEncoding.trim().toLowerCase() !== "identity";
   let contentLength: number | null = null;
   if (rawContentLength !== null) {
     const normalized = rawContentLength.trim();
@@ -149,7 +151,7 @@ async function readBoundedResponseBytes(response: Response): Promise<Buffer> {
     if (error instanceof Error && error.message === "github-upstream-invalid") throw error;
     throw failure("upstream-invalid");
   }
-  if (contentLength !== null && total !== contentLength) throw failure("upstream-invalid");
+  if (!encodedRepresentation && contentLength !== null && total !== contentLength) throw failure("upstream-invalid");
   return Buffer.concat(chunks, total);
 }
 const defaultTransport: GithubHttpTransport = async (request) => {
@@ -157,7 +159,7 @@ const defaultTransport: GithubHttpTransport = async (request) => {
     method: request.method,
     redirect: "error",
     signal: AbortSignal.timeout(10_000),
-    headers: { Accept: "application/vnd.github+json", Authorization: request.authorization, "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    headers: { Accept: "application/vnd.github+json", "Accept-Encoding": "identity", Authorization: request.authorization, "X-GitHub-Api-Version": GITHUB_API_VERSION,
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }) },
     ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) })
   });
