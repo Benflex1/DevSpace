@@ -25,4 +25,19 @@ describe("GitHub connection state", () => {
     expect(() => database.claimGithubConnectionAttempt({ actor: "owner", stateHash: "a".repeat(64), installationId: "1" })).toThrow("GITHUB_STATE_EXPIRED");
     database.close();
   });
+
+  it("serializes concurrent callback claims through the compare-and-swap row version", async () => {
+    const database = openProjectDatabase(":memory:", { now: () => new Date("2026-08-04T12:00:00.000Z"),
+      createId: () => "018f0d84-7b39-7cc3-9d4a-0675d9162a11" });
+    const stateHash = "b".repeat(64);
+    database.createGithubConnectionAttempt({ actor: "owner", stateHash, expiresAt: "2026-08-04T12:10:00.000Z" });
+    const claims = await Promise.all([
+      Promise.resolve().then(() => database.claimGithubConnectionAttempt({ actor: "owner", stateHash, installationId: "77" })),
+      Promise.resolve().then(() => database.claimGithubConnectionAttempt({ actor: "owner", stateHash, installationId: "77" }))
+    ]);
+    expect(claims[0]?.status).toBe("claimed");
+    expect(claims[1]?.status).toBe("claimed");
+    expect(claims[0]?.rowVersion).toBe(claims[1]?.rowVersion);
+    database.close();
+  });
 });

@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated July 28, 2026.
+> Updated August 4, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -447,7 +447,7 @@ Stop rule:
 - ❌ Clone and fetch private repositories without embedding credentials in remote URLs
 - ❌ Push through an explicit user action
 - 🟡 Keep credentials and short-lived tokens Agent-private
-- ❌ Redact credentials from logs, errors, process arguments, and persisted public state
+- 🟡 Redact credentials from logs, errors, process arguments, and persisted public state
 - ❌ Revoke/disconnect access cleanly
 
 Sequencing decision:

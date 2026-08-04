@@ -14,7 +14,8 @@ export async function GET(request: Request) {
       return NextResponse.json(inspected, { headers: { "cache-control": "no-store" } });
     }
     const app = await createAgentClient(config.agentSocketPath).inspectGithubApp();
-    return NextResponse.json({ status: app.configured ? state?.attempt.status ?? "disconnected" : "unconfigured",
+    const status = state?.attempt.status === "claimed" ? "pending" : state?.attempt.status;
+    return NextResponse.json({ status: app.configured ? status ?? "disconnected" : "unconfigured",
       connectionId: state?.attempt.connectionId ?? null, expiresAt: state?.attempt.expiresAt ?? null }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     if (error instanceof AuthenticationError) return NextResponse.json({ message: "Authentication is required." }, { status: 403 });

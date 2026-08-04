@@ -16,12 +16,15 @@ import {
   type GithubRepositoriesListData,
   type GithubRepositoryPage
 } from "@devspace/contracts";
-import { durableJsonWriter, readStrictJson } from "./private-state.js";
+import { durableJsonWriter, parseStrictJsonBytes, type AtomicJsonWriter } from "./private-state.js";
 
 const MAX_CONFIG_BYTES = 16 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const GITHUB_API_VERSION = "2022-11-28";
+const MAX_INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+const CONSERVATIVE_UNKNOWN_MINT_LEASE_MS = 70 * 60 * 1000;
+const githubTokenExpirySchema = z.string().datetime({ offset: true });
 const bindingSchema = githubInstallationInspectionSchema.omit({ cleanupDegraded: true }).extend({ version: z.literal(1), cleanupDegraded: z.boolean() });
 const configSchema = z.strictObject({
   version: z.literal(1), appId: githubDecimalIdSchema, expectedAccountId: githubDecimalIdSchema,
@@ -46,6 +49,10 @@ export interface GithubHttpResponse { readonly status: number; readonly body: un
 export type GithubHttpTransport = (request: GithubHttpRequest) => Promise<GithubHttpResponse>;
 
 function failure(code: string): Error { return new Error(`github-${code}`); }
+function safePrimaryFailure(error: unknown): Error {
+  if (error instanceof Error && /^(?:github-(?:continuation-invalid|operation-failed|token-mint-failed|upstream-invalid))$/u.test(error.message)) return error;
+  return failure("upstream-invalid");
+}
 function decimal(value: unknown): string | null {
   if (typeof value === "bigint") return value >= 0n ? value.toString(10) : null;
   if (typeof value === "string") return githubDecimalIdSchema.safeParse(value).success ? value : null;
@@ -63,7 +70,7 @@ async function assertPrivateDirectory(directory: string): Promise<void> {
     || (uid !== undefined && stats.uid !== BigInt(uid))) throw failure("private-state-invalid");
 }
 
-async function readPrivateFile(file: string, maxBytes: number): Promise<Buffer> {
+async function readPrivateFile(file: string, maxBytes: number, afterRead?: () => Promise<void> | void): Promise<Buffer> {
   let handle;
   try { handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { throw failure("private-state-invalid"); }
   try {
@@ -71,9 +78,21 @@ async function readPrivateFile(file: string, maxBytes: number): Promise<Buffer> 
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || (before.mode & 0o7777n) !== 0o600n
       || before.size < 1n || before.size > BigInt(maxBytes) || (uid !== undefined && before.uid !== BigInt(uid))) throw failure("private-state-invalid");
-    const bytes = await handle.readFile();
+    const byteLength = Number(before.size);
+    const bytes = Buffer.allocUnsafe(byteLength);
+    let offset = 0;
+    while (offset < byteLength) {
+      const result = await handle.read(bytes, offset, byteLength - offset, null);
+      if (result.bytesRead === 0) throw failure("private-state-invalid");
+      offset += result.bytesRead;
+    }
+    await afterRead?.();
     const after = await handle.stat({ bigint: true });
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || bytes.length !== Number(before.size)) throw failure("private-state-invalid");
+    if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || (after.mode & 0o7777n) !== 0o600n
+      || after.size < 1n || after.size > BigInt(maxBytes) || (uid !== undefined && after.uid !== BigInt(uid))
+      || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mode !== after.mode || before.uid !== after.uid || before.nlink !== after.nlink
+      || bytes.length !== Number(before.size)) throw failure("private-state-invalid");
     return bytes;
   } finally { await handle.close().catch(() => undefined); }
 }
@@ -117,14 +136,21 @@ export interface GithubAppAuthority {
 
 export async function createGithubAppAuthority(options: {
   stateRoot: string; transport?: GithubHttpTransport; now?: () => Date; createId?: () => string;
+  writer?: AtomicJsonWriter;
+  removeLease?: (filePath: string) => Promise<void>;
+  privateReadAfterRead?: (filePath: string) => Promise<void> | void;
 }): Promise<GithubAppAuthority> {
   const appRoot = path.join(path.resolve(options.stateRoot), "github-app");
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? randomUUID;
   const transport = options.transport ?? defaultTransport;
+  const writer = options.writer ?? durableJsonWriter;
+  const removeLease = options.removeLease ?? unlink;
   const bindingsRoot = path.join(appRoot, "installations");
   const leasesRoot = path.join(appRoot, "token-leases");
   const locks = new Map<string, Promise<void>>();
+  const leaseBlocks = new Map<string, number>();
+  const degradedBindings = new Set<string>();
   const configured = await lstat(appRoot).then(() => true).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return false;
     throw failure("private-state-invalid");
@@ -133,9 +159,11 @@ export async function createGithubAppAuthority(options: {
   let privateKey: Buffer | null = null;
   if (configured) try {
     await assertPrivateDirectory(appRoot);
-    const configBytes = await readPrivateFile(path.join(appRoot, "config.json"), MAX_CONFIG_BYTES);
-    config = configSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(configBytes)));
-    privateKey = await readPrivateFile(path.join(appRoot, "private-key.pem"), MAX_KEY_BYTES);
+    const configPath = path.join(appRoot, "config.json");
+    const configBytes = await readPrivateFile(configPath, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(configPath));
+    config = parseStrictJsonBytes(configBytes, configPath, configSchema);
+    const keyPath = path.join(appRoot, "private-key.pem");
+    privateKey = await readPrivateFile(keyPath, MAX_KEY_BYTES, () => options.privateReadAfterRead?.(keyPath));
     const parsedKey = createPrivateKey(privateKey);
     if (parsedKey.type !== "private" || (parsedKey.asymmetricKeyType !== "rsa" && parsedKey.asymmetricKeyType !== "rsa-pss")) {
       throw failure("private-state-invalid");
@@ -146,13 +174,17 @@ export async function createGithubAppAuthority(options: {
     }
     for (const name of await readdir(bindingsRoot)) {
       if (!/^[0-9a-f-]{36}\.json$/u.test(name)) throw failure("private-state-invalid");
-      await readPrivateFile(path.join(bindingsRoot, name), MAX_CONFIG_BYTES);
-      await readStrictJson(path.join(bindingsRoot, name), bindingSchema);
+      const file = path.join(bindingsRoot, name);
+      const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+      parseStrictJsonBytes(bytes, file, bindingSchema);
     }
     for (const name of await readdir(leasesRoot)) {
       if (!/^[0-9a-f-]{36}\.json$/u.test(name)) throw failure("private-state-invalid");
-      await readPrivateFile(path.join(leasesRoot, name), MAX_CONFIG_BYTES);
-      await readStrictJson(path.join(leasesRoot, name), leaseSchema);
+      const file = path.join(leasesRoot, name);
+      const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+      const lease = parseStrictJsonBytes(bytes, file, leaseSchema);
+      const expiresAt = new Date(lease.expiresAt).valueOf();
+      if (expiresAt > now().valueOf()) leaseBlocks.set(lease.connectionId, expiresAt);
     }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("github-")) throw error;
@@ -164,7 +196,7 @@ export async function createGithubAppAuthority(options: {
   };
   const bindingFile = (connectionId: string) => path.join(bindingsRoot, `${githubInstallationVerifyDataSchema.shape.connectionId.parse(connectionId)}.json`);
   const leaseFile = (connectionId: string) => path.join(leasesRoot, `${githubInstallationVerifyDataSchema.shape.connectionId.parse(connectionId)}.json`);
-  const persist = async (binding: GithubInstallationInspection) => durableJsonWriter.write(bindingFile(binding.connectionId), { version: 1, ...binding });
+  const persist = async (binding: GithubInstallationInspection) => writer.write(bindingFile(binding.connectionId), { version: 1, ...binding });
   const inspect = async (connectionId: string) => {
     requireConfig();
     const file = bindingFile(connectionId);
@@ -173,10 +205,17 @@ export async function createGithubAppAuthority(options: {
       throw failure("private-state-invalid");
     });
     if (entry === null) throw failure("connection-not-found");
-    await readPrivateFile(file, MAX_CONFIG_BYTES);
-    const value = await readStrictJson(file, bindingSchema).catch(() => { throw failure("private-state-invalid"); });
+    const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+    const value = parseStrictJsonBytes(bytes, file, bindingSchema);
     const { version: _version, ...inspection } = value;
     return githubInstallationInspectionSchema.parse(inspection);
+  };
+  const readLease = async (file: string) => {
+    const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+    return parseStrictJsonBytes(bytes, file, leaseSchema);
+  };
+  const writeLease = async (file: string, value: { connectionId: string; operationId: string; expiresAt: string; phase: "minting" | "active" | "cleanup-degraded"; createdAt: string }) => {
+    await writer.write(file, { version: 1, ...value });
   };
   const locked = async <T>(connectionId: string, action: () => Promise<T>): Promise<T> => {
     const previous = locks.get(connectionId) ?? Promise.resolve(); let release!: () => void;
@@ -213,6 +252,7 @@ export async function createGithubAppAuthority(options: {
         if (!/^[a-z_]{1,64}$/u.test(name) || (level !== "read" && level !== "write")) throw failure("authority-invalid");
         permissions[name] = level;
       }
+      if (permissions.metadata !== "read" && permissions.metadata !== "write") throw failure("authority-invalid");
       const binding = githubInstallationInspectionSchema.parse({ connectionId: input.connectionId, installationId: input.installationId,
         accountId: current.config.expectedAccountId, accountType: current.config.expectedAccountType, accountLogin: account.login,
         repositorySelection: installation.repository_selection, permissions, status: "connected", verifiedAt: now().toISOString(), cleanupDegraded: false });
@@ -223,66 +263,175 @@ export async function createGithubAppAuthority(options: {
     listRepositories: async (raw) => {
       const input = githubRepositoriesListDataSchema.parse(raw);
       return await locked(input.connectionId, async () => {
-        const binding = await inspect(input.connectionId); const current = requireConfig();
+        const binding = await inspect(input.connectionId);
+        const current = requireConfig();
         const leasePath = leaseFile(input.connectionId);
+        const currentTime = now().valueOf();
+        const inProcessExpiry = leaseBlocks.get(input.connectionId);
+        if (inProcessExpiry !== undefined) {
+          if (inProcessExpiry > currentTime) throw failure("token-lease-active");
+          leaseBlocks.delete(input.connectionId);
+        }
         const leaseEntry = await lstat(leasePath).catch((error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT") return null;
           throw failure("private-state-invalid");
         });
-        const existingLease = leaseEntry === null ? null : await (async () => {
-          await readPrivateFile(leasePath, MAX_CONFIG_BYTES);
-          return await readStrictJson(leasePath, leaseSchema).catch(() => { throw failure("private-state-invalid"); });
-        })();
-        if (existingLease !== null) {
-          if (new Date(existingLease.expiresAt).valueOf() > now().valueOf()) throw failure("token-lease-active");
-          await unlink(leasePath);
+        if (leaseEntry !== null) {
+          const existingLease = await readLease(leasePath);
+          const existingExpiry = new Date(existingLease.expiresAt).valueOf();
+          if (existingExpiry > currentTime) {
+            leaseBlocks.set(input.connectionId, existingExpiry);
+            throw failure("token-lease-active");
+          }
+          try { await removeLease(leasePath); } catch {
+            leaseBlocks.set(input.connectionId, existingExpiry);
+            throw failure("token-lease-active");
+          }
         }
-        const createdAt = now().toISOString(); const operationId = createId();
-        await durableJsonWriter.write(leasePath, { version: 1, connectionId: input.connectionId, operationId,
-          expiresAt: new Date(now().valueOf() + 60 * 60 * 1000).toISOString(), phase: "minting", createdAt });
-        let token: string | null = null; let expiresAt = new Date(now().valueOf() + 60 * 60 * 1000).toISOString();
-        let primaryPage: GithubRepositoryPage | null = null; let primaryError: Error | null = null;
+        const createdAt = now().toISOString();
+        const operationId = createId();
+        const conservativeExpiryMs = currentTime + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS;
+        let guardExpiryMs = conservativeExpiryMs;
+        const guardExpiresAt = () => new Date(guardExpiryMs).toISOString();
+        try {
+          await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "minting", createdAt });
+        } catch {
+          leaseBlocks.set(input.connectionId, conservativeExpiryMs);
+          throw failure("private-state-invalid");
+        }
+        leaseBlocks.set(input.connectionId, conservativeExpiryMs);
+
+        let token: string | null = null;
+        let mintState: "token" | "definitive-rejection" | "uncertain" = "uncertain";
+        let primaryPage: GithubRepositoryPage | null = null;
+        let primaryError: Error | null = null;
+        let primaryOutcome: "pending" | "succeeded" | "failed" = "pending";
+        let bindingHealthPersistenceOutcome: "not-needed" | "succeeded" | "failed" = "not-needed";
         try {
           const appToken = jwt(current.privateKey, current.config.appId, now());
-          const minted = await transport({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: { permissions: { metadata: "read" } } });
-          const mintedBody = record(minted.body);
-          const mintedExpiry = typeof mintedBody?.expires_at === "string" ? Date.parse(mintedBody.expires_at) : Number.NaN;
-          if (minted.status !== 201 || typeof mintedBody?.token !== "string" || mintedBody.token.length < 1
-            || !Number.isFinite(mintedExpiry) || mintedExpiry <= now().valueOf() || mintedExpiry > now().valueOf() + 65 * 60 * 1000) {
-            throw failure("token-mint-failed");
+          let minted: GithubHttpResponse;
+          try {
+            minted = await transport({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: { permissions: { metadata: "read" } } });
+          } catch {
+            primaryError = failure("token-mint-failed");
+            mintState = "uncertain";
+            throw primaryError;
           }
-          token = mintedBody.token; expiresAt = new Date(mintedExpiry).toISOString();
-          await durableJsonWriter.write(leasePath, { version: 1, connectionId: input.connectionId, operationId, expiresAt, phase: "active", createdAt });
-          const page = input.continuation === undefined ? 1 : Number(Buffer.from(input.continuation, "base64url").toString("ascii"));
-          if (!Number.isInteger(page) || page < 1 || page > 1_000_000) throw failure("continuation-invalid");
-          const listed = await transport({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
-          const listedBody = record(listed.body);
-          if (listed.status !== 200 || !Array.isArray(listedBody?.repositories) || listedBody.repositories.length > input.pageSize) throw failure("upstream-invalid");
-          const repositories = listedBody.repositories.map((rawRepository) => {
-            const repository = record(rawRepository); const owner = record(repository?.owner); const repositoryId = decimal(repository?.id);
-            if (repositoryId === null || typeof owner?.login !== "string" || typeof repository?.name !== "string" || typeof repository.full_name !== "string"
-              || typeof repository.default_branch !== "string" || typeof repository.private !== "boolean" || typeof repository.archived !== "boolean" || typeof repository.disabled !== "boolean") throw failure("upstream-invalid");
-            return { repositoryId, ownerLogin: owner.login, name: repository.name, fullName: repository.full_name,
-              cleanHttpsUrl: `https://github.com/${owner.login}/${repository.name}.git`, defaultBranch: repository.default_branch,
-              private: repository.private, archived: repository.archived, disabled: repository.disabled };
-          });
-          primaryPage = githubRepositoryPageSchema.parse({ repositories,
-            continuation: repositories.length === input.pageSize ? Buffer.from(String(page + 1), "ascii").toString("base64url") : null, cleanupDegraded: false });
-        } catch (error) { primaryError = error instanceof Error ? error : failure("operation-failed"); }
-        let revoked = token === null;
+          const mintedBody = record(minted.body);
+          const candidateToken = typeof mintedBody?.token === "string" && mintedBody.token.length > 0 && mintedBody.token.length <= 16 * 1024
+            ? mintedBody.token : null;
+          if (minted.status === 201) {
+            if (candidateToken !== null) token = candidateToken;
+            const mintedExpiry = typeof mintedBody?.expires_at === "string" && githubTokenExpirySchema.safeParse(mintedBody.expires_at).success
+              ? Date.parse(mintedBody.expires_at) : Number.NaN;
+            if (candidateToken === null || !Number.isFinite(mintedExpiry) || mintedExpiry <= currentTime
+              || mintedExpiry > currentTime + MAX_INSTALLATION_TOKEN_LIFETIME_MS + 5 * 60 * 1000) {
+              primaryError = failure("token-mint-failed");
+              mintState = "uncertain";
+            } else {
+              mintState = "token";
+              guardExpiryMs = mintedExpiry;
+              try {
+                await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "active", createdAt });
+                leaseBlocks.set(input.connectionId, mintedExpiry);
+              } catch {
+                primaryError = failure("token-mint-failed");
+                mintState = "uncertain";
+                guardExpiryMs = conservativeExpiryMs;
+                leaseBlocks.set(input.connectionId, conservativeExpiryMs);
+              }
+            }
+          } else if ([400, 401, 403, 404, 422].includes(minted.status)
+            && record(minted.body) !== null && typeof record(minted.body)?.message === "string"
+            && (record(minted.body)?.message as string).length <= 512) {
+            mintState = "definitive-rejection";
+            primaryError = failure("token-mint-failed");
+          } else {
+            if (candidateToken !== null) token = candidateToken;
+            mintState = "uncertain";
+            primaryError = failure("token-mint-failed");
+          }
+
+          if (mintState === "token" && token !== null && primaryError === null) {
+            let page = 1;
+            if (input.continuation !== undefined) {
+              try { page = Number(Buffer.from(input.continuation, "base64url").toString("ascii")); } catch { throw failure("continuation-invalid"); }
+            }
+            if (!Number.isInteger(page) || page < 1 || page > 1_000_000) throw failure("continuation-invalid");
+            const listed = await transport({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
+            const listedBody = record(listed.body);
+            if (listed.status !== 200 || !Array.isArray(listedBody?.repositories) || listedBody.repositories.length > input.pageSize) throw failure("upstream-invalid");
+            const repositories = listedBody.repositories.map((rawRepository) => {
+              const repository = record(rawRepository); const owner = record(repository?.owner); const repositoryId = decimal(repository?.id);
+              const ownerLogin = owner?.login; const name = repository?.name; const fullName = repository?.full_name;
+              if (repository === null || owner === null || repositoryId === null || typeof ownerLogin !== "string" || !/^[A-Za-z0-9_.-]{1,255}$/u.test(ownerLogin)
+                || typeof name !== "string" || !/^[A-Za-z0-9_.-]{1,255}$/u.test(name) || typeof fullName !== "string" || fullName !== `${ownerLogin}/${name}`
+                || typeof repository.default_branch !== "string" || repository.default_branch.length < 1 || repository.default_branch.length > 255
+                || typeof repository.private !== "boolean" || typeof repository.archived !== "boolean" || typeof repository.disabled !== "boolean") throw failure("upstream-invalid");
+              return { repositoryId, ownerLogin, name, fullName,
+                cleanHttpsUrl: `https://github.com/${ownerLogin}/${name}.git`, defaultBranch: repository.default_branch,
+                private: repository.private, archived: repository.archived, disabled: repository.disabled };
+            });
+            primaryPage = githubRepositoryPageSchema.parse({ repositories,
+              continuation: repositories.length === input.pageSize ? Buffer.from(String(page + 1), "ascii").toString("base64url") : null, cleanupDegraded: false });
+            primaryOutcome = "succeeded";
+          }
+        } catch (error) {
+          if (primaryError === null) primaryError = safePrimaryFailure(error);
+          primaryOutcome = "failed";
+        }
+
+        let revocation: "succeeded" | "failed" | "not-needed" | "uncertain" = "uncertain";
         if (token !== null) {
-          try { revoked = (await transport({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204; }
-          catch { revoked = false; }
-        }
+          try {
+            revocation = (await transport({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204 ? "succeeded" : "failed";
+          } catch { revocation = "uncertain"; }
+        } else if (mintState === "definitive-rejection") revocation = "not-needed";
         token = null; // eslint-disable-line no-useless-assignment -- explicitly drop credential authority before returning
-        if (revoked) await unlink(leasePath).catch(() => undefined);
-        else {
-          await durableJsonWriter.write(leasePath, { version: 1, connectionId: input.connectionId, operationId, expiresAt, phase: "cleanup-degraded", createdAt });
-          await persist({ ...binding, status: "degraded", cleanupDegraded: true });
+
+        let leaseSettled = false;
+        if (revocation === "succeeded" || revocation === "not-needed") {
+          try {
+            await removeLease(leasePath);
+            leaseSettled = true;
+            leaseBlocks.delete(input.connectionId);
+          } catch {
+            leaseBlocks.set(input.connectionId, guardExpiryMs);
+          }
+        } else {
+          try {
+            await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt });
+          } catch {
+            // The already-written minting/active guard remains the conservative restart barrier.
+          }
+          leaseBlocks.set(input.connectionId, guardExpiryMs);
         }
-        if (primaryError !== null) throw primaryError;
+
+        let cleanupDegraded = !leaseSettled;
+        if (!leaseSettled) {
+          try {
+            await persist({ ...binding, status: "degraded", cleanupDegraded: true });
+            bindingHealthPersistenceOutcome = "succeeded";
+          } catch {
+            degradedBindings.add(input.connectionId);
+            bindingHealthPersistenceOutcome = "failed";
+          }
+          cleanupDegraded = true;
+        } else if (primaryPage !== null && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId))) {
+          try {
+            await persist({ ...binding, status: "connected", cleanupDegraded: false });
+            degradedBindings.delete(input.connectionId);
+            bindingHealthPersistenceOutcome = "succeeded";
+          } catch {
+            degradedBindings.add(input.connectionId);
+            cleanupDegraded = true;
+            bindingHealthPersistenceOutcome = "failed";
+          }
+        }
+        const outcomes = { primary: primaryOutcome, revocation, leaseSettlement: leaseSettled ? "proven" : "degraded", bindingHealthPersistence: bindingHealthPersistenceOutcome } as const;
+        if (primaryError !== null || outcomes.primary === "failed") throw primaryError ?? failure("operation-failed");
         if (primaryPage === null) throw failure("operation-failed");
-        return revoked ? primaryPage : { ...primaryPage, cleanupDegraded: true };
+        return { ...primaryPage, cleanupDegraded: cleanupDegraded || outcomes.bindingHealthPersistence === "failed" };
       });
     }
   };

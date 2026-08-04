@@ -76,12 +76,44 @@ Avoid generic `shared` or `utils` packages. Put logic with the domain that owns 
 - Normal features and straightforward schema/code work do not automatically require an
   implement-review-correction-re-review cycle.
 
-## Model policy
+## Model roles
 
-- Mechanical changes and documentation: Luna Medium.
-- Clear bounded implementation: Luna High.
-- Investigation or broad repository context: Terra Medium/High.
-- Security, ownership, secrets, recovery, and architecture boundaries: Sol Medium/High.
+| Phase | Model |
+| --- | --- |
+| Implementation | Luna |
+| Debugging and preflight | Terra |
+| Planning and architecture | Sol |
+
+### Luna — implementation
+
+- Luna High: normal implementation.
+- Luna XHigh: complex implementation.
+- Luna Max: critical or especially demanding implementation.
+
+### Terra — debugging and preflight
+
+- Terra Medium: normal and complex investigation.
+- Terra High: critical, broad, or difficult investigations.
+
+### Sol — planning
+
+- Sol Medium: complex planning and architectural decisions.
+- Sol High: critical, high-blast-radius, or difficult-to-reverse planning.
+
+Criticality considers consequences as well as technical complexity. A difficult isolated
+implementation may use Luna XHigh; moderately difficult authentication or migration work may
+require Luna Max because failure is costly.
+
+Clear task → Luna
+
+Unclear task or unknown root cause → Terra preflight/debugging → Luna implementation
+
+Complex architectural decision → Sol planning → Luna implementation
+
+Critical architecture → Sol High planning → Luna Max implementation → independent review
+
+All three models must not be used automatically. Sol is introduced only for a real planning or
+architectural decision.
 
 ## Chat rotation
 
