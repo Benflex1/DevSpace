@@ -9,10 +9,11 @@ import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
+import { AiSessionTab } from "./ai-session-tab.js";
 import { IncidentReference } from "./incident-reference.js";
 import { useTransientNotice } from "./transient-notice.js";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
+  activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 
 type Task = { key: string; displayName: string };
@@ -239,6 +240,9 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const openPreviewTab = useCallback((preview: PreviewLifecycleView) => {
     setTabs((current) => openWorkbenchTab(current, { id: previewTabId(preview.id), kind: "preview", previewId: preview.id }));
   }, []);
+  const openAiTab = useCallback(() => {
+    setTabs((current) => openWorkbenchTab(current, { id: aiTabId(workspaceId), kind: "ai", sessionId: workspaceId }));
+  }, [workspaceId]);
   const createTerminal = async () => {
     if (!actionsAvailable) return;
     showNotice("Creating terminal…", "pending");
@@ -287,7 +291,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       retryStart={retryStart} />
     <div className="workbench-body">
       <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
-        previews={previews} onOpenPreview={openPreviewTab}
+        previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => showNotice("Task action failed.", "error")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
@@ -328,10 +332,10 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview,
+function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
-  previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void;
+  previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void; onOpenAi: () => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
   return <aside className="workbench-sidebar" aria-label="Project navigation">
@@ -339,10 +343,9 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable,
     <nav className="workbench-nav" aria-label="Workbench tools">
       <button type="button" className="workbench-nav-item active"><span aria-hidden="true">▸</span> Terminals <span className="nav-count">{terminals.length}</span></button>
       <button type="button" className="workbench-nav-item"><span aria-hidden="true">≡</span> Tasks <span className="nav-count">{tasks.length}</span></button>
-      {["Files", "Git", "AI"].map((item) =>
-        <button type="button" className="workbench-nav-item future" disabled key={item} title={`${item} is planned for a later milestone`}>
-          <span aria-hidden="true">·</span> {item}<span className="nav-future">Soon</span>
-        </button>)}
+      <button type="button" className="workbench-nav-item" onClick={onOpenAi}>
+        <span aria-hidden="true">✦</span> AI<span className="nav-future">Beta</span>
+      </button>
       <button type="button" className="workbench-nav-item" onClick={() => { const first = previews[0]; if (first !== undefined) onOpenPreview(first); }}>
         <span aria-hidden="true">▾</span> Previews <span className="nav-count">{previews.length}</span>
       </button>
@@ -421,7 +424,7 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
-      })() : null)}
+      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} /> : null)}
   </div>;
 }
 

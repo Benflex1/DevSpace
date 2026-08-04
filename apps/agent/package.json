@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --dir ../.. exec tsx apps/agent/src/cli.ts",
+    "dev": "pnpm run build:helper && pnpm --dir ../.. exec tsx apps/agent/src/cli.ts",
     "start": "node dist/cli.js",
     "test": "pnpm --dir ../.. exec vitest run --project @devspace/agent",
     "verify:runtime:real": "pnpm --dir ../.. exec tsx apps/agent/test/verify-real-rootless.ts",
     "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",
-    "build": "tsc --build tsconfig.build.json --force --pretty false"
+    "build:helper": "node ../../tooling/build-staged-readback-helper.mjs",
+    "build": "pnpm run build:helper && tsc --build tsconfig.build.json --force --pretty false"
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",

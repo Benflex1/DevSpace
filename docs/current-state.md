@@ -14,12 +14,154 @@ equivalent explicit relative path aliases, and WebSocket terminal frames now cop
 18.19/18.56/18.41 seconds (TypeScript 7.0.2); default native parallelism was retained rather than
 pinning checker/builder counts. No product or runtime authority boundary changed.
 
-AI Session Foundation Slice 0 now defines the accepted post-M1 architecture and executable
-contracts only: ADR 015, AI Sessions v1, separate structured session/process/turn/interaction
-graphs, the F11 Agent API extension, canonical per-session events, a durable acknowledged Agent
-outbox decision, and a Codex app-server 0.145.0 non-TTY stdio adapter pin. Provider execution,
-supervisor/Stop, SQLite migration, credentials, Agent/Web handlers, browser streaming, and
-Workbench UI remain unimplemented.
+AI Session Foundation Slice 0 established the accepted post-M1 architecture and executable
+contracts. Checkpoint 1 of AI Session Beta Slice B is complete after dedicated authority onboarding,
+private Probe A and Probe B, and the real browser validation recorded below. One Agent-owned persistent Codex 0.145.0
+authority is derived from the configured state root: production defaults to
+`/srv/devspace/state/codex-auth/codex/auth.json`. It contains only the validated pinned ChatGPT
+authority, never the user's normal Codex home or a general-purpose Codex home. A global atomic
+`.lease` directory serializes all beta Codex providers; a stale lease is unavailable until an
+operator verifies that no provider remains and removes that exact lease directory. The
+`reauth-required` marker preserves the last-known-good authority while making inspection
+unavailable.
+
+After lease acquisition, the Agent validates the complete authority through a no-follow descriptor,
+uploads the pinned executable and complete `auth.json` into an exact-container ephemeral
+`CODEX_HOME`, and starts app-server with the existing fixed `never` / `danger-full-access` and
+external-sandbox network policy. Every executable, credential-upload, readback, and staging-cleanup
+exec requires bounded stream closure plus `Running === false` and `ExitCode === 0`; provider exit
+requires an independent bounded inspection proof. On finalization it performs two stable bounded
+Docker reads through an Agent-built, integrity-bound no-follow helper. Each read proves regular-file
+type, mode `0600`, exact helper execution UID, `nlink === 1`, device, inode, and bounded size before
+and after reading through one descriptor; private length framing carries the proof and bytes without
+delimiters. Synchronization requires two complete equal proofs before complete validation and atomic
+same-directory fsync-and-rename writeback. Lease release tracks the owned release path explicitly and
+is retryable after a partial rename/removal, with both paths proven absent before success. Failed turns
+and Unauthorized failures automatically enter this path.
+Unproven cleanup keeps the lease and suppresses `session.stopped`; a later bounded Stop retries the
+remaining safe stages. Container root can read the staged credential during the provider lifetime;
+the repository is trusted owner-controlled code, and hostile descendant containment is not claimed
+in this beta. Credentials never enter Project Options, SQLite, canonical events, public errors,
+diagnostics, logs, Docker labels, arguments, or browser data.
+
+The native Codex stdio JSONL boundary is strict and bounded: Docker multiplex headers and
+payloads, retained partial frames, retained JSONL lines, complete native messages, and queued
+notifications have explicit private limits derived from the existing AI content bounds. Stdout is
+decoded with a fatal streaming UTF-8 decoder; stderr remains private. Malformed framing, invalid
+UTF-8, invalid JSON or message shapes, NULs, truncation, and bound exhaustion are contained as one
+private protocol failure with safe `AI_PROVIDER_PROTOCOL_FAILURE` classification. Provider-native
+notifications are serialized in receive order, and native terminal processing is claimed once;
+identical same-turn duplicates are ignored while conflicting or late terminal/output/activity
+notifications fail closed without projection. Native thread and turn IDs remain Agent-private.
+
+Final-review Round B makes canonical `turn.accepted` the sole turn-admission authority. Agent
+validates managed execution context and baseline before reserving and appending acceptance, while
+Stop serializes across the admission owner and partial accepted/started outbox faults resolve
+according to what became durable. Web no longer inserts a turn before the Agent call; canonical
+events and the post-receipt exact SQLite ensure converge stream-first or POST-first without a
+Web-only accepted row. The Web Agent event reader now uses lazy 64 KiB slabs under one shared legal
+frame bound, fatal UTF-8 decoding, strict frame validation, and rejects malformed or partial EOF
+framing. Process-global Web and per-Agent-server admission independently cap streams at four
+globally and two per session. Agent replay, synchronization, and one serialized live writer honor
+HTTP backpressure with a bounded timeout; each live subscriber has a 32-event, byte-bounded FIFO and
+is disconnected independently on overflow without affecting durable append.
+
+The Workbench AI tab still supports the implemented fake-provider workflow, while approvals and
+structured questions remain explicitly in progress for Checkpoint 2. The fake-provider suite was not
+used as live-validation evidence. The real browser run used an isolated branch-local Web/Agent pair
+with `DEVSPACE_AI_PROVIDER_MODE=codex`, the dedicated rootless DevSpace Docker socket, and the
+dedicated persistent authority; the private GitHub source was represented by an exact-HEAD local
+HTTPS mirror because the Agent's credentialless Git boundary cannot inspect the private remote.
+
+Stopped-session recovery and the lifecycle recovery correction round are implemented on the
+final-review branch and await independent verification. The browser retains the exact stopped session and bounded history, removes prompt,
+Interrupt, and Stop controls, and offers one fenced `Start Codex again` action for that session ID.
+Web re-inspects the exact profile and unchanged configuration/runtime identity, compare-and-sets the
+same SQLite row to `creating`, and rolls back only an unchanged claim if Agent acceptance fails.
+Agent reuses the same durable outbox and event sequence but creates a new provider process with the
+next safe process generation, derived either from the finalized in-memory record or the exact
+terminal retained outbox. SQLite advances its stored generation only on canonical
+`session.started`. Each successful generation repeats credential staging, provider-exit proof,
+staging removal, synchronization, and lease release. This is not provider-native resume, does not
+recover `lost` sessions across runtime identity changes, and received no new real-provider or browser
+validation in this correction round.
+
+Initial zero-sequence `creating` sessions now reconcile against an exact Agent
+`stream.synchronized` boundary. Canonical startup history is committed and acknowledged before the
+same durable session is retained; synchronized-empty history may claim an exact unchanged binding
+and retry the same session ID; unavailable replay returns only that durable session identity.
+For that exact `creating` / sequence-zero state, the browser now exposes one manually initiated
+`Retry starting Codex` action through the existing Create request. The action is duplicate-click
+and selection-generation fenced, loads only the same returned durable session identity, yields to
+canonical startup events, and introduces neither replacement-session behavior nor an automatic
+retry loop.
+Post-receipt turn-projection failures and Agent transport loss preserve the generated turn ID as
+ambiguous. The browser withholds that draft until the exact canonical turn appears or the exact
+session becomes stopped/lost without it.
+
+Turn terminalization is claim-once per turn and process generation. Completed, interrupted, and
+failed claims retain immutable outcome/reason, changed-files or safe-failure data, and durable
+suffix progress; retries inspect and reuse exact retained events before appending only missing
+stages. Cleanup and session stopping begin only after the turn suffix is complete. Cold Agent
+reconstruction appends one `turn.lost` before `session.lost` for an unfinished accepted turn.
+SQLite rejects every later turn event without the matching committed canonical acceptance and
+generation, rejects illegal post-terminal progression, and projects `turn.lost` terminally.
+`session.started` envelope/payload generations must match, and Web `send` actions reject every
+additional top-level key. The isolated stream-resource correction is complete without new
+real-provider or browser validation; Checkpoint 2 remains deferred.
+
+### AI Session Beta Slice B — Checkpoint 1 evidence (2026-07-29)
+
+- ✅ Probe A and Probe B had already passed, including provider exit, staged credential
+  synchronization, staging removal, lease release, and post-stop authority availability.
+- ✅ Real browser validation passed with project `019fadd5-be82-753b-a0f5-661b71e56cd6`, workspace
+  `019fadd6-17b9-728e-bf3c-8ebf501e8265`, revision `019fadd6-17b7-7056-aba0-46cad86961ae`,
+  runtime generation `g1`, container
+  `c462a5bb2354063074420f5ff5af243d11baf5626577641dc16c7d272f3479ee`, and a clean initial
+  managed worktree at the expected branch head.
+- ✅ The browser showed Codex available, created exactly one session, streamed the exact file-
+  changing turn, presented the exact untracked changed-file payload, refreshed and replayed without
+  duplicate event identities, completed the exact read-only turn with an empty changed-files result,
+  and interrupted the third read-only turn truthfully.
+- ✅ Browser Stop produced one user-request stopping/stopped pair. Provider exit, synchronization,
+  exact staging removal, lease release, finalization, and authority availability were verified;
+  normal workspace Stop then exited the dedicated container with code `0`.
+- ✅ Credential material was absent from browser artifacts, SQLite, canonical events, public errors,
+  Docker command/label/env surfaces, Git changes, and the draft PR text. Baseline Codex process
+  names and baseline running containers remained unaffected.
+- ✅ Checkpoint 1 is complete. Checkpoint 2 remains approvals and structured questions.
+
+### Agent outbox and acknowledgement correction (2026-07-29)
+
+The Agent-private canonical-event outbox now uses a strict owner-only
+`devspace.ai-outbox-state/v1` manifest beside the session JSONL. Exact project/workspace/session
+acknowledgements persist the greatest `(throughSequence, throughEventId)` atomically; append,
+acknowledgement, compaction, replay-boundary checks, and live handoff share one recoverable
+per-session chain. Retention keeps the newest 512 acknowledged events and every unacknowledged
+event within the 2,048-event bound, with a fixed terminal-lifecycle reserve and `AI_EVENT_GAP`
+before replay can begin past a compacted prefix.
+
+This corrects only the Agent outbox and acknowledgement portion of P1-3. The separate Web
+session-binding and SQLite aggregate-history correction is now implemented on this branch: exact
+caller-supplied session identity is required for session-scoped operations, and bounded Web/SQLite
+history uses explicit replay/truncation metadata. Browser stream continuation reconnects from the
+last applied sequence after bounded clean responses, and browser-visible output/history truncation
+is explicit. The 8 MiB Web AI response limit covers the complete HTTP envelope, not only the selected
+session. Snapshot loads are generation-bound and abort obsolete work without allowing stale success,
+error, or cleanup callbacks to mutate the selected session. Stream duplicate identity is exact: only
+the known event ID at the current sequence can be ignored; conflicts and gaps fail closed. This does
+not claim the entire final review is complete; Checkpoint 2 and the other deferred concerns below
+remain out of scope.
+
+### Codex authority onboarding and recovery
+
+The deployment owner must authenticate the dedicated authority with the pinned executable using the
+literal command supplied in the implementation handoff. The command must run as the Agent OS user,
+with `OPENAI_API_KEY`, organization, and project environment variables removed. It must not read or
+print `auth.json`; it fixes directory/file modes and removes `reauth-required` only after successful
+`codex login status`. If a stale `.lease` exists, first verify that no provider process remains,
+then remove only that exact `.lease` directory before login. This is operational device-code login,
+not browser/F11/app-server login orchestration.
 
 Milestone 1 is closed after PR #38. The verified M1 path covers browser onboarding and Web-owned
 SQLite persistence, private contract-validated Web-to-Agent transport, managed repository and
@@ -259,17 +401,17 @@ but its corrected hands-on verdict is **blocked**. The proof demonstrates authen
 after the original exec attachment is gone and stable `/proc` process-start identity. It also
 demonstrates that process-group signalling works for a cooperative fixture but is not a race-safe
 production Stop authority: the dedicated rootless environment exposes no writable delegated
-cgroup or equivalent atomic descendant-tree boundary. Production provider launch therefore
-remains blocked pending the prerequisite described in
-`docs/research/ai-session-supervisor-capability-proof.md`. Production AI execution, supervisor
-integration, durable ownership, credentials, F11 handlers, event persistence, Web routes, SQLite
-data, and UI remain absent. The opt-in executable now conditions this blocked result on the
-reviewed cgroup probe tuple; a stronger or malformed future environment yields an explicit
-review-required or probe-failed result instead of replaying the static blocker matrix.
+cgroup or equivalent atomic descendant-tree boundary. The owner-only beta provider lifecycle is
+implemented through the exact managed workspace container and dedicated authority above, but it
+does not claim hostile-descendant containment. Checkpoint 2 approvals, structured questions, and
+broader multi-provider support remain absent. The opt-in executable now conditions this blocked
+supervisor result on the reviewed cgroup probe tuple; a stronger or malformed future environment
+yields an explicit review-required or probe-failed result instead of replaying the static blocker
+matrix.
 
 Supporting services, Dockerfile/preset builds, setup steps, named-volume mounting, secret/host or
 generated task-environment binding resolution, task output streaming, full Project Options revision
-editing, rebuild, and AI sessions remain intentionally unimplemented. Preview service-target
+editing, and rebuild remain intentionally unimplemented. Preview service-target
 execution, automatic long-running dev-task startup, multiple parallel workspaces, preview
 sharing/public controls, and the general logging overhaul remain deferred. Preview sharing and
 public controls are not implied by the canonical hostname; the current path is an authenticated

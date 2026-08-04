@@ -91,4 +91,12 @@ export {
 } from "./f10-endpoints.js";
 export * from "./terminal.js";
 export * from "./ai-sessions.js";
+export {
+  CODEX_APP_SERVER_CLI_VERSION,
+  CODEX_APP_SERVER_VERSION_OUTPUT,
+  codexAppServerProtocolMethods,
+  codexAppServerFixtureManifestSchema,
+  type CodexAppServerPrivateLaunch,
+  type CodexAppServerPrivateCorrelation
+} from "./provider-adapters/codex-app-server-v0-145.js";
 export { generateAgentApiV1JsonSchema, type AgentApiV1JsonSchema } from "./json-schema.js";

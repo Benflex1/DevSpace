@@ -1,0 +1,1 @@
+ALTER TABLE `ai_sessions` ADD `interaction_history_truncated` integer DEFAULT false NOT NULL;

@@ -294,15 +294,19 @@ describe("canonical event envelope and append decisions", () => {
     "turn.interrupted": { reason: "provider-confirmed" },
     "turn.provider-completed": { outcome: "completed" },
     "turn.quiesced": { outcome: "completed" },
+    "turn.files.changed": {
+      files: [{ change: "added", path: "devspace-ai-beta-check.txt", oldPath: null }],
+      truncated: false
+    },
     "turn.failed": {
       failure: { code: "AI_PROVIDER_PROTOCOL_FAILURE", category: "protocol-failure", incidentId }
     },
     "turn.lost": { code: "AGENT_RESTART" }
   };
 
-  test("has the exact closed 22-event family with session/turn identity rules", () => {
+  test("has the exact closed 23-event family with session/turn identity rules", () => {
     expect(canonicalAiEventTypes).toEqual(Object.keys(payloadByType));
-    expect(canonicalAiEventTypes).toHaveLength(22);
+    expect(canonicalAiEventTypes).toHaveLength(23);
     for (const eventType of canonicalAiEventTypes) {
       const sessionScoped = eventType.startsWith("session.");
       expect(canonicalAiEventSchema.safeParse({
@@ -318,6 +322,48 @@ describe("canonical event envelope and append decisions", () => {
         payload: payloadByType[eventType]
       }).success, eventType).toBe(true);
     }
+  });
+
+  test.each([1, 2, 3])("requires session.started payload generation to equal envelope generation %i", (processGeneration) => {
+    const started = {
+      schemaVersion: "devspace.ai-event/v1",
+      eventId,
+      sessionId,
+      turnId: null,
+      sequence: 1,
+      observedAt: timestamp,
+      profile,
+      processGeneration,
+      eventType: "session.started",
+      payload: { processGeneration }
+    };
+    expect(canonicalAiEventSchema.safeParse(started).success).toBe(true);
+    expect(canonicalAiEventSchema.safeParse({
+      ...started,
+      payload: { processGeneration: processGeneration === 1 ? 2 : 1 }
+    }).success).toBe(false);
+  });
+
+  test("bounds changed-file presentations and requires safe rename paths", () => {
+    const base = {
+      ...event({
+        eventType: "turn.files.changed",
+        payload: {
+          files: [{ change: "renamed", path: "src/new.ts", oldPath: "src/old.ts" }],
+          truncated: false
+        }
+      }),
+      turnId
+    };
+    expect(base).toBeDefined();
+    expect(canonicalAiEventSchema.safeParse({
+      ...base,
+      payload: { files: [{ change: "renamed", path: "src/new.ts", oldPath: null }], truncated: false }
+    }).success).toBe(false);
+    expect(canonicalAiEventSchema.safeParse({
+      ...base,
+      payload: { files: [{ change: "modified", path: "../secret", oldPath: null }], truncated: false }
+    }).success).toBe(false);
   });
 
   test("rejects unknown envelope and payload fields", () => {

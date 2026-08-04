@@ -3,8 +3,14 @@ import {
   AGENT_API_VERSION,
   agentApiV1EndpointByOperation,
   f10AgentApiV1EndpointByOperation,
+  f11AiAgentApiV1EndpointByOperation,
+  aiEventStreamFrameSchema,
+  AI_EVENT_STREAM_FRAME_MAX_BYTES,
+  type AiEventStreamFrame,
+  type AiProviderProfileProjection,
   type AgentSnapshotData,
   type ActivatePreviewData,
+  type AcknowledgeAiEventsData,
   type ConfigurationRevisionData,
   type ConfigurationRuntimePlanData,
   type CreateManagedStoreData,
@@ -22,8 +28,89 @@ import {
   classifyFailureCode, createLogger, type FailureCategory, type LogContext, type StructuredLogger
 } from "@devspace/diagnostics";
 import { v7 as uuidv7 } from "uuid";
+import {
+  processAiStreamAdmission,
+  type AiStreamAdmission
+} from "./ai-stream-admission.js";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
+const AI_EVENT_STREAM_PARSER_SLAB_BYTES = 64 * 1024;
+const AI_EVENT_STREAM_PARSER_MAX_SEGMENTS =
+  Math.ceil(AI_EVENT_STREAM_FRAME_MAX_BYTES / AI_EVENT_STREAM_PARSER_SLAB_BYTES);
+
+function streamProtocolFailure(requestId: string): AgentUnavailableError {
+  return new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
+}
+
+async function* parseBoundedAiEventNdjson(
+  response: http.IncomingMessage,
+  requestId: string,
+  signal?: AbortSignal
+): AsyncGenerator<AiEventStreamFrame> {
+  let segments: Buffer[] = [];
+  let pendingBytes = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const append = (bytes: Buffer, start: number, end: number): void => {
+    const length = end - start;
+    if (pendingBytes + length > AI_EVENT_STREAM_FRAME_MAX_BYTES) throw streamProtocolFailure(requestId);
+    let offset = start;
+    while (offset < end) {
+      let segment = segments.at(-1);
+      const used = pendingBytes % AI_EVENT_STREAM_PARSER_SLAB_BYTES;
+      if (segment === undefined || used === 0) {
+        if (segments.length >= AI_EVENT_STREAM_PARSER_MAX_SEGMENTS) throw streamProtocolFailure(requestId);
+        segment = Buffer.allocUnsafe(AI_EVENT_STREAM_PARSER_SLAB_BYTES);
+        segments.push(segment);
+      }
+      const copied = Math.min(end - offset, AI_EVENT_STREAM_PARSER_SLAB_BYTES - used);
+      bytes.copy(segment, used, offset, offset + copied);
+      pendingBytes += copied;
+      offset += copied;
+    }
+  };
+  const finishFrame = (): AiEventStreamFrame => {
+    if (pendingBytes === 0) throw streamProtocolFailure(requestId);
+    const length = pendingBytes;
+    const retained = segments;
+    segments = [];
+    pendingBytes = 0;
+    const encoded = retained.length === 1
+      ? retained[0]!.subarray(0, length)
+      : Buffer.concat(retained.map((segment, index) => segment.subarray(
+        0,
+        index === retained.length - 1 ? length - index * AI_EVENT_STREAM_PARSER_SLAB_BYTES : undefined
+      )), length);
+    try {
+      return aiEventStreamFrameSchema.parse(JSON.parse(decoder.decode(encoded)));
+    } catch {
+      throw streamProtocolFailure(requestId);
+    }
+  };
+  try {
+    for await (const chunk of response) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const newline = bytes.indexOf(0x0a, offset);
+        const end = newline < 0 ? bytes.length : newline;
+        append(bytes, offset, end);
+        if (newline < 0) break;
+        const frame = finishFrame();
+        yield frame;
+        offset = newline + 1;
+      }
+    }
+    if (pendingBytes !== 0) throw streamProtocolFailure(requestId);
+  } catch (error) {
+    response.destroy();
+    if (signal?.aborted === true) return;
+    throw error instanceof AgentUnavailableError ? error : streamProtocolFailure(requestId);
+  } finally {
+    segments = [];
+    pendingBytes = 0;
+  }
+}
+
 export class AgentUnavailableError extends Error {
   readonly retryable = true;
   readonly incidentId: string | undefined = undefined;
@@ -66,6 +153,7 @@ export function createAgentClient(socketPath: string, options: {
   createId?: () => string; now?: () => Date;
   logger?: StructuredLogger;
   previewFailureDiagnostics?: "terminal" | "deferred";
+  aiStreamAdmission?: AiStreamAdmission;
 } = {}) {
   const defaultTimeoutMs = options.timeoutMs ?? 5_000;
   const mutationReceiptTimeoutMs = options.mutationReceiptTimeoutMs ?? defaultTimeoutMs;
@@ -73,11 +161,14 @@ export function createAgentClient(socketPath: string, options: {
   const createId = options.createId ?? uuidv7;
   const now = options.now ?? (() => new Date());
   const logger = options.logger ?? createLogger({ component: "web", subsystem: "agent-client", now });
+  const aiStreamAdmission = options.aiStreamAdmission ?? processAiStreamAdmission;
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
-    | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get";
+    | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
+    | "ai-provider.inspect" | "ai-session.start" | "ai-session.resume" | "ai-session.turn.send" | "ai-session.turn.interrupt"
+    | "ai-session.approval.respond" | "ai-session.input.respond" | "ai-session.stop" | "ai-session.events.acknowledge";
 
   async function call(
     operation: SupportedOperation,
@@ -85,9 +176,11 @@ export function createAgentClient(socketPath: string, options: {
     operationId?: string,
     diagnosticOperationId = operationId
   ): Promise<unknown> {
-    const endpoint = operation === "snapshot.get"
-      ? f10AgentApiV1EndpointByOperation["snapshot.get"]
-      : agentApiV1EndpointByOperation[operation];
+    const endpoint = operation === "snapshot.get" ? f10AgentApiV1EndpointByOperation["snapshot.get"]
+      : operation.startsWith("ai-") ? f11AiAgentApiV1EndpointByOperation[operation as keyof typeof f11AiAgentApiV1EndpointByOperation]
+      : agentApiV1EndpointByOperation[operation as keyof typeof agentApiV1EndpointByOperation];
+    if (endpoint === undefined) throw new Error("agent-operation-endpoint-missing");
+    if (endpoint.successBodySchema === null) throw new Error("stream-operation-requires-stream-client");
     const requestId = createId();
     const callStartedAt = Date.now();
     const resource = data !== null && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
@@ -278,6 +371,83 @@ export function createAgentClient(socketPath: string, options: {
     ): Promise<PreviewInspectionData> =>
       await call("preview.inspect", { projectId, workspaceId, revisionId, previewId }, undefined, diagnosticOperationId) as PreviewInspectionData,
     snapshot: async (): Promise<AgentSnapshotData> => await call("snapshot.get") as AgentSnapshotData
+    ,inspectAiProvider: async (projectId: string, workspaceId: string, profileId = "codex"): Promise<AiProviderProfileProjection> =>
+      await call("ai-provider.inspect", { projectId, workspaceId, profileId }) as AiProviderProfileProjection,
+    startAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.start", data, operationId) as MutationReceipt,
+    sendAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.send", data, operationId) as MutationReceipt,
+    interruptAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.interrupt", data, operationId) as MutationReceipt,
+    stopAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.stop", data, operationId) as MutationReceipt,
+    acknowledgeAiEvents: async (data: AcknowledgeAiEventsData): Promise<AcknowledgeAiEventsData> => await call("ai-session.events.acknowledge", data) as AcknowledgeAiEventsData,
+    streamAiEvents: async function* (
+      sessionId: string,
+      afterSequence: number,
+      streamOptions: { signal?: AbortSignal } = {}
+    ): AsyncGenerator<AiEventStreamFrame> {
+      const signal = streamOptions.signal;
+      const isCancelled = (): boolean => signal?.aborted === true;
+      if (isCancelled()) return;
+      const releaseAdmission = aiStreamAdmission.tryAcquire(sessionId);
+      if (releaseAdmission === null) throw new AgentUnavailableError();
+      if (isCancelled()) {
+        releaseAdmission();
+        return;
+      }
+      let activeRequest: http.ClientRequest | null = null;
+      let activeResponse: http.IncomingMessage | null = null;
+      const abortError = new Error("ai-event-stream-cancelled");
+      const destroyActive = (error?: Error): void => {
+        activeResponse?.destroy(error);
+        activeRequest?.destroy(error);
+      };
+      const abortDownstream = (): void => {
+        destroyActive(abortError);
+      };
+      signal?.addEventListener("abort", abortDownstream, { once: true });
+      try {
+        if (isCancelled()) return;
+        const endpoint = f11AiAgentApiV1EndpointByOperation["ai-session.events.stream"];
+        const requestId = createId();
+        const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
+          const request = http.request({ socketPath, path: endpoint.path.replace("{aiSessionId}", encodeURIComponent(sessionId)) + `?afterSequence=${afterSequence}`,
+            method: "GET", headers: { "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION), "X-DevSpace-Request-Id": requestId,
+              "X-DevSpace-Sent-At": now().toISOString(), Accept: endpoint.successContentType } }, (response) => {
+                activeResponse = response;
+                if (isCancelled()) {
+                  abortDownstream();
+                  return;
+                }
+                if (response.statusCode === endpoint.successStatus && response.headers["content-type"] === endpoint.successContentType) request.setTimeout(0);
+                resolve(response);
+              });
+          activeRequest = request;
+          request.setTimeout(observationTimeoutMs, () => request.destroy(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure", requestId)));
+          request.once("error", reject); request.end();
+        });
+        if (response.statusCode !== endpoint.successStatus) {
+          const chunks: Buffer[] = []; let bytes = 0;
+          for await (const chunk of response) {
+            const data = Buffer.from(chunk as Uint8Array); bytes += data.length;
+            if (bytes > MAX_RESPONSE_BYTES) throw new AgentUnavailableError("AGENT_RESPONSE_TOO_LARGE", "transport-failure", requestId);
+            chunks.push(data);
+          }
+          try {
+            const parsed = endpoint.errorSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8"))) as { error: { code: string; message: string; retryable: boolean } };
+            throw new AgentResponseError(parsed.error.code, parsed.error.message, parsed.error.retryable, undefined, classifyFailureCode(parsed.error.code), requestId);
+          } catch (error) { if (error instanceof AgentResponseError) throw error; throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId); }
+        }
+        if (response.headers["content-type"] !== endpoint.successContentType) throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId);
+        yield* parseBoundedAiEventNdjson(response, requestId, signal);
+      } catch (error) {
+        if (isCancelled()) return;
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", abortDownstream);
+        destroyActive();
+        activeResponse = null;
+        activeRequest = null;
+        releaseAdmission();
+      }
+    }
   };
 }
 

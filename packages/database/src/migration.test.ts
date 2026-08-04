@@ -381,4 +381,54 @@ describe("forward SQLite migration runner", () => {
       return Promise.resolve();
     });
   });
+
+  test("adds AI history metadata compatibly to an existing beta database", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const legacyMigrationsFolder = join(directory, "legacy-migrations");
+      await cp(migrationsFolder, legacyMigrationsFolder, { recursive: true });
+      const legacyJournalPath = join(legacyMigrationsFolder, "meta", "_journal.json");
+      const legacyJournal = JSON.parse(await readFile(legacyJournalPath, "utf8")) as { entries: unknown[] };
+      legacyJournal.entries = legacyJournal.entries.slice(0, 4);
+      await writeFile(legacyJournalPath, `${JSON.stringify(legacyJournal, null, 2)}\n`);
+
+      const database = new Database(`${directory}/ai-history-legacy.sqlite`);
+      try {
+        migrateDatabase(database, { migrationsFolder: legacyMigrationsFolder });
+        const projectId = id(200); const revisionId = id(201); const workspaceId = id(202);
+        const sessionId = id(203); const turnId = id(204);
+        insertProject(database, projectId, "legacy-ai-history");
+        insertRevision(database, revisionId, projectId, 1, "active");
+        insertWorkspace(database, workspaceId, projectId, revisionId, "primary", "stopped", "legacy-ai-history-primary");
+        database.prepare(`
+          update projects set active_config_revision_id = ?, primary_workspace_id = ?, state = 'ready' where id = ?
+        `).run(revisionId, workspaceId, projectId);
+        database.prepare(`
+          insert into ai_sessions (
+            id, workspace_id, provider_key, profile_key, profile_revision, revision_id, runtime_plan_hash,
+            runtime_generation, process_generation, last_sequence, title, state, created_at, updated_at
+          ) values (?, ?, 'codex', 'codex', ?, ?, ?, 1, 1, 7, 'Legacy session', 'active', ?, ?)
+        `).run(sessionId, workspaceId, `sha256-ai-profile-v1:${"a".repeat(64)}`, revisionId,
+          `sha256-jcs-v1:${"b".repeat(64)}`, timestamp, timestamp);
+        database.prepare(`
+          insert into ai_turns (id, session_id, state, content_json, output_text, changed_files_json, created_at, updated_at)
+          values (?, ?, 'accepted', '{"kind":"text","text":"legacy"}', '', '{"files":[],"truncated":false}', ?, ?)
+        `).run(turnId, sessionId, timestamp, timestamp);
+
+        migrateDatabase(database, { migrationsFolder });
+
+        const sessionColumns = database.prepare("pragma table_info('ai_sessions')").all() as Array<{ name: string }>;
+        const turnColumns = database.prepare("pragma table_info('ai_turns')").all() as Array<{ name: string }>;
+        expect(sessionColumns.map((column) => column.name)).toContain("history_start_sequence");
+        expect(sessionColumns.map((column) => column.name)).toContain("history_truncated");
+        expect(sessionColumns.map((column) => column.name)).toContain("interaction_history_truncated");
+        expect(turnColumns.map((column) => column.name)).toContain("output_truncated");
+        expect(database.prepare("select history_start_sequence, history_truncated, interaction_history_truncated from ai_sessions where id = ?")
+          .get(sessionId)).toEqual({ history_start_sequence: 1, history_truncated: 0, interaction_history_truncated: 0 });
+        expect(database.prepare("select output_truncated from ai_turns where id = ?").get(turnId))
+          .toEqual({ output_truncated: 0 });
+      } finally {
+        database.close();
+      }
+    });
+  });
 });

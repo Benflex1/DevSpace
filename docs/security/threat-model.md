@@ -215,6 +215,16 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - Agent assigns a durable per-session canonical-event sequence and retains an acknowledged private
   outbox; Web checks both sequence and global event-ID ownership, validates, and commits each event
   before browser delivery;
+- Web resolves every session-scoped request against the exact `(projectId, workspaceId, aiSessionId)`
+  tuple, and every turn-scoped request against that tuple plus its exact `turnId`; it rejects
+  foreign/nonexistent identities with the same bounded public conflict and never substitutes a
+  latest or active session;
+- Web/SQLite aggregate retention is enforced transactionally at persistence boundaries: 64 retained
+  turns, 2 MiB per-turn output, 8 MiB session output, a 2,048-row/16 MiB contiguous event suffix,
+  256 interaction rows/4 MiB, 128 KiB per interaction JSON value, and 8 MiB for the complete HTTP
+  response envelope including profile and session summaries; truncation and replay-boundary metadata
+  are explicit, legacy oversized values are bounded before parsing or public projection, and browser
+  continuation reconnects only from the last applied canonical sequence with bounded backoff;
 - prompts and structured-input answers are durably fenced only through referenced, restrictive
   Agent-private AI intent records; the generic operation journal retains a keyed fingerprint and
   opaque reference, never the content;

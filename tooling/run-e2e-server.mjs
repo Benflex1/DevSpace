@@ -84,6 +84,7 @@ const environment = {
   DEVSPACE_DEPS_PREPARED: "1",
   DEVSPACE_DATABASE_PATH: databasePath, DEVSPACE_AGENT_SOCKET_PATH: path.join(runtimeDirectory, "agent.sock"),
   DEVSPACE_MANAGED_ROOT: managedRoot, DEVSPACE_GIT_CA_FILE: certificate,
+  DEVSPACE_AI_PROVIDER_MODE: "fake",
   DEVSPACE_DOCKER_SOCKET_PATH: path.join(runtimeDirectory, "docker-engine.sock"),
   DEVSPACE_PREVIEW_BASES: JSON.stringify([{ id: "local", domain: "localhost", labelSuffix: "-preview" }]),
   DEVSPACE_PREVIEW_GATEWAY_PROTOCOL: "http:", DEVSPACE_PREVIEW_GATEWAY_PORT: String(gatewayPort),

@@ -7,8 +7,12 @@ architecture decision. `@devspace/domain` owns executable lifecycle edges.
 `@devspace/contracts` owns executable public schemas and the Agent API F11 extension. The pinned
 Codex adapter boundary is internal to Agent and is not a public provider protocol.
 
-Slice 0 defines architecture and contracts only. It adds no provider process, supervisor, route
-handler, Web API, SQLite migration, credential delivery, browser stream, or Workbench UI.
+Historical Foundation Slice 0 defined architecture and contracts only; that slice itself added no
+provider process, supervisor, route handler, Web API, SQLite migration, credential delivery, browser
+stream, or Workbench UI. The current Beta Slice B implementation now includes the F11 handlers,
+Agent-owned Codex runtime, Web routes, Web-owned SQLite session/turn/event storage, exact
+acknowledgement, credential staging, browser event streaming, and the Workbench AI tab. Approvals and
+structured questions remain Checkpoint 2.
 
 The authority path is:
 
@@ -40,7 +44,7 @@ The content plane is authorized session content: prompts, assistant text, code, 
 presentations, workspace-relative path presentations, approval descriptions, questions, and
 answers. Content:
 
-- may be persisted later only in dedicated AI-session storage;
+- is persisted only in dedicated AI-session storage;
 - may be shown only to the authenticated owner authorized for the exact project/workspace/session;
 - is strictly typed, valid Unicode, NUL-free, and UTF-8 byte-bounded;
 - is never placed in structured diagnostics, incident details, audit summaries, generic safe
@@ -216,27 +220,103 @@ runtime profile. The v1 wire shape and revision hashes do not change in this sli
 ### Credential policy
 
 The deployment profile names an Agent-owned credential-source handle, never a value or host path.
-An existing administrator Codex login may back that source only if Agent can read it without
-revealing its location and can project the minimum required values into the exact provider exec.
-Mounting the host's `~/.codex`, a credential directory, or any other host credential path into the
-general workspace container is not acceptable.
+For the approved Codex beta profile, that handle is one persistent authority rooted at
+`<stateRoot>/codex-auth/codex/` and containing only the validated `auth.json` plus Agent-private
+control files. It is not seeded from or backed by another Codex client's home. The user's normal
+Codex home, `~/.codex`, and any other host credential path are never read by the production runtime
+or mounted into a workspace container.
 
-The runtime slice must choose process-scoped delivery supported by the pinned Codex version:
-either a minimal Docker-exec environment value or supervisor-created ephemeral in-container
-credential material delivered over the private channel, mode-restricted, bound to this process
-generation, and removed on exit. Values never appear in Project Options, SQLite, operation
-fingerprints, Docker labels, command arguments, logs, diagnostics, safe failures, or browser
-payloads. Because v1 does not assume a dedicated provider user, other same-user processes in the
-same trusted-owner workspace may remain a residual process-inspection risk; cross-workspace
-credential sharing is still prohibited. If Codex 0.145.0 cannot authenticate without a broad
-ambient mount in the target image, the profile is `unavailable` and credential delivery blocks
-the runtime slice.
+The Codex profile revision binds the credential-source identity, persistent-authority policy version,
+exclusive-lease policy version, and staged-writeback policy version, alongside the existing provider,
+sandbox, approval, and capability authority. It never binds the authority path, token content or
+digest, account identity, file metadata, lease holder, or authentication generation.
+
+The beta acquires one atomic filesystem lease under that authority before reading or staging, and
+holds it for the complete provider lifetime. It delivers the complete validated authority into a
+new exact-container ephemeral `CODEX_HOME`, mode-restricted and removed on exit. Codex may update
+that staged file. Finalization performs bounded shutdown, two bounded stable Docker reads, complete
+pinned validation, fsync-backed same-directory atomic replacement of the durable file, exact
+container cleanup, and lease release. Each staged read uses one Agent-controlled fixed helper
+process that opens the private pathname with `O_RDONLY | O_NOFOLLOW`, obtains before metadata with
+`fstat`, performs a bounded descriptor read, and obtains after metadata with `fstat`. The proof
+requires a regular file, mode `0600`, the exact helper execution UID, `nlink === 1`, stable device,
+inode, size, mode, UID, and link count, and `0 < size <= CODEX_AUTH_MAX_BYTES`; two complete reads
+must also have equal bytes and equal descriptor identity. The private length-framed response is
+bounded and carries metadata and bytes without delimiter ambiguity. Every credential-related Docker
+exec requires both bounded stream closure and a successful post-closure exec inspection. Provider
+exit, staging removal, and lease release are independent proofs; lease release is retryable after a
+partial rename/removal and succeeds only after both `.lease` and the owned release path are proven
+absent. Missing proof leaves the lease held and suppresses the public stopped event until a later
+bounded retry succeeds. Values never appear in Project Options, SQLite, operation fingerprints,
+Docker labels, command arguments, logs, diagnostics, safe failures, or browser payloads. A stale
+lease fails closed and is not automatically broken. During provider lifetime, trusted managed-container
+root can read the staged credential; hostile descendant containment is deferred. If the authority is
+missing, invalid, marked for reauthentication, or leased, the profile is `unavailable`.
 
 ### AI session
 
 Web owns one durable session identity and its committed history. A session is bound to one project,
 workspace, safe profile identity, and configuration/runtime identity. It can acquire successive
 provider-process generations. Provider-native resume identity is not the DevSpace session ID.
+
+Every session-scoped Web read or mutation resolves the caller-supplied `(projectId, workspaceId,
+aiSessionId)` as one exact tuple. A turn-scoped operation additionally requires the supplied
+`turnId` to belong to that exact session. Web rejects missing, foreign, stale, and nonexistent
+identities through one bounded public conflict shape and passes only the verified tuple to F11;
+it never substitutes the latest workspace session, the only active session, or a cached session.
+Workspace-level creation and bounded session listing remain workspace-scoped. Exact binding applies
+to session snapshots/history, replay and polling, turn submission, interruption, Stop, changed-file
+and status projections, and turn lookups.
+
+A stopped session can be started again only through the strict Web action
+`{ action: "restart", workspaceId, sessionId }`. Web resolves that exact stopped session, re-inspects
+the profile, verifies the unchanged configuration revision, runtime-plan hash, workspace runtime
+generation, profile ID, and profile revision, and compare-and-sets the row from `stopped` to
+`creating`. Existing turns, events, interactions, title, durable session ID, history bounds, and
+event sequence remain in place. A failure before Agent acceptance restores only the exact claimed
+row and only if its state, event sequence, stored generation, and claim timestamp have not advanced.
+Initial workspace-level creation remains independently idempotent and never substitutes for this
+restart action.
+
+Agent remains process-generation authority; the public F11 start command does not carry a process
+generation. An in-memory restart requires a completely finalized current generation and an exact
+durable terminal `session.stopped`. A cold Agent requires a contiguous retained outbox ending in that
+same terminal event and derives the next safe generation from it. Each successful restart emits one
+new-generation `session.started` and `session.ready` on the existing outbox sequence. Web atomically
+advances SQLite generation only when it commits that exact `session.started`; later events must match
+the stored generation. This starts a new provider process for the same DevSpace session and committed
+history. It is not provider-native thread resume.
+
+The Web/SQLite projection is explicitly bounded. The current limits are:
+
+| Projection | Maximum | Retention/meaning |
+| --- | ---: | --- |
+| retained turns per session | 64 turns | newest turns; older turns and their event rows are retired |
+| one turn's assembled assistant output | 2 MiB UTF-8 | deterministic UTF-8 prefix; `outputTruncated` is true when compacted |
+| all retained turn output per session | 8 MiB UTF-8 | newest turns receive the remaining budget; older output is truncated |
+| retained canonical event rows per session | 2,048 rows / 16 MiB UTF-8 | one contiguous newest sequence suffix |
+| interaction rows per session | 256 rows / 4 MiB JSON bytes | newest rows first, deterministic `(createdAt,id)` order |
+| one interaction request or response JSON value | 128 KiB UTF-8 | oversized values are omitted from the bounded projection |
+| complete Web AI GET response envelope | 8 MiB UTF-8 JSON | `profile`, bounded session summaries, selected session state, retained terminal turn state, truncation metadata, then newest history |
+
+SQLite applies output, turn, interaction, and canonical-event pruning in the same transaction as
+the event insert and aggregate update. A failed compaction rolls back the event and leaves the
+Agent-private outbox acknowledgement unchanged, so replay remains available. Event retention is
+always a contiguous suffix; `historyStartSequence` identifies its first sequence and
+`historyTruncated` records a dropped prefix or byte/count compaction. Replay before that boundary
+returns the bounded gap/truncation outcome rather than a partial stream. Each public selected-session
+projection normalizes `historyStartSequence` to its first retained event, or to `lastSequence + 1`
+when no events remain; this response-only normalization never rewrites SQLite's persisted boundary.
+Response truncation is deterministic and never claims complete output: `outputTruncated`,
+`historyTruncated`, the retained start sequence, and the complete/truncated interaction projection
+are explicit.
+
+Legacy oversized SQLite text and JSON rows are length-checked before being loaded. JSON is parsed
+only when within its bound and re-serialized as a valid bounded projection; UTF-8 text is decoded
+through a character-safe prefix, never by cutting serialized JSON bytes. Legacy rows remain
+readable through the bounded projection and are normalized on the next transactional persistence
+boundary. The Agent-private durable canonical-event outbox remains the source for replay and
+acknowledgement; SQLite is the Web-owned committed public projection.
 
 ```text
 creating -> ready | stopping | unavailable | lost
@@ -249,7 +329,7 @@ interrupting -> ready | stopping | lost
 stopping -> stopped | lost
 stopped -> creating
 unavailable -> creating | stopping | lost
-lost -> creating | stopping
+lost -> terminal
 ```
 
 Only one nonterminal turn may exist. `waiting-for-approval`, `waiting-for-input`, and
@@ -458,12 +538,22 @@ Agent owns sequence assignment. For each DevSpace session it durably stores:
 - the greatest assigned sequence;
 - each unacknowledged strict canonical event;
 - the exact event ID at each sequence; and
-- the greatest exact Web acknowledgement.
+- the greatest exact Web acknowledgement in an Agent-private manifest.
+
+The manifest is a strict `devspace.ai-outbox-state/v1` object containing only
+`projectId`, `workspaceId`, `aiSessionId`, `acknowledgedThrough`, and
+`acknowledgedEventId`. The acknowledgement pair is exact: sequence zero has a null event ID,
+and every positive acknowledgement names the retained canonical event UUID. The manifest and
+JSONL outbox are owner-only regular files with no-follow reads, bounded UTF-8/JSON, and atomic
+same-directory replacement where replacement is followed by file and directory synchronization.
 
 The sequence starts at 1 and is continuous for the lifetime of the DevSpace session. Agent boots
-and provider-process generations do not reset it. Assignment and outbox append complete before
-delivery. Provider event order is serialized by the one adapter reader for that process and
-canonical events are appended in that order.
+and provider-process generations do not reset it. Sequence allocation, capacity checks, append,
+acknowledgement, manifest persistence, compaction, replay boundary, and live-listener attachment
+run through one recoverable per-session serialization chain. An append opens the exact outbox
+with no-follow append semantics, validates its descriptor, writes one complete JSONL record, fsyncs
+the file, closes successfully, then updates memory and delivers listeners. A failed append does
+not allocate its sequence or deliver it.
 
 Web maintains unique constraints on `(session_id, sequence)` and `event_id` in the later SQLite
 schema. Before classifying an incoming event, Web reads both the event at its
@@ -482,12 +572,23 @@ duplicate equality is RFC 8785/JCS equality after strict canonical schema parsin
 object-key order or timestamps.
 
 Web delivers only committed events to the browser. After commit it acknowledges exact
-`(sessionId, throughSequence, throughEventId)`. A Web restart before commit causes replay from the
-last commit. A restart after commit but before acknowledgement causes an exact duplicate. An Agent
-restart reloads the private outbox/counter; corrupt or missing non-acknowledged history fails
-closed. Outbox retention may remove only acknowledged entries older than its bounded policy.
-Capacity exhaustion makes start/send unavailable until safe acknowledgement/retention advances; it
-does not silently drop or reorder.
+`(projectId, workspaceId, sessionId, throughSequence, throughEventId)`. A Web restart before commit causes replay from the
+last commit. A restart after commit but before acknowledgement causes an exact duplicate. Agent
+restart reloads and proves the private manifest/outbox pair: strict event schemas, exact session
+identity, unique IDs, continuous retained sequences, the exact acknowledged pair, and all
+unacknowledged history must be present. A corrupt, foreign, missing, or impossible retained
+boundary fails closed; Agent never reconstructs missing events. Retention is bounded at 2,048
+retained events and keeps the newest 512 acknowledged entries plus every unacknowledged event.
+Acknowledgement persistence is atomic and durable before JSONL compaction; compaction is an atomic
+same-directory replacement, so a crash may leave extra acknowledged records but cannot remove an
+unacknowledged one. Capacity exhaustion makes start/send unavailable until safe acknowledgement/
+retention advances; it does not silently drop or reorder.
+
+Before a turn is accepted, Agent reserves room for `turn.accepted`, `turn.started`, the mandatory
+terminal path (`turn.provider-completed` or `turn.failed`, `turn.files.changed` when applicable,
+`turn.quiesced` when applicable, `session.stopping`, and `session.stopped`). Ordinary output and
+activity events cannot consume that fixed reserve. If the terminal path itself cannot be durably
+written, Agent reports outbox unavailability and never fabricates terminal success.
 
 The alternatives rejected by ADR 015 are Web-assigned sequence plus delivery IDs, an undurable
 Agent sequence, and Web-leased ranges.
@@ -516,9 +617,12 @@ than `afterSequence`, then one:
 ```
 
 It then emits live events. Agent establishes the replay boundary and attaches live delivery under
-one session lock: an event is in replay or live, never omitted. Exact duplicates may occur only
-across reconnect and are handled above. The stream uses ordinary single-line UTF-8 JSON plus LF,
-with no blank lines or unterminated committed final line.
+the same per-session serialization chain: an event is in replay or live, never omitted. A request
+older than a compacted acknowledged prefix returns `AI_EVENT_GAP`; a request at the retained
+boundary returns every retained event after that sequence. Exact duplicates may occur only across
+reconnect and are handled above. The stream uses ordinary single-line UTF-8 JSON plus LF, with no
+blank lines or unterminated committed final line. Replay validation completes before the stream
+can send HTTP 200.
 
 Web acknowledges committed progress using the non-journaled idempotent F11 acknowledgement
 operation. Acknowledgement affects only private outbox retention and cannot trigger provider or
@@ -530,16 +634,32 @@ the stream with a transport failure. It never drops a canonical event.
 
 ### Web to browser
 
-Web later exposes a dedicated authenticated AI stream, not the terminal WebSocket protocol and not
+Web exposes a dedicated authenticated AI stream, not the terminal WebSocket protocol and not
 raw Agent NDJSON. It requires the existing application session, strict Origin validation, and
-authorization for the exact project/workspace/session.
+authorization for the exact project/workspace/session. Web completes exact identity and replay-gap
+preflight before returning HTTP 200, so foreign/nonexistent sessions and compacted-prefix requests
+receive the bounded conflict response without opening the Agent stream.
 
 The browser supplies `afterSequence`. Web replays SQLite-committed events, establishes replay/live
 handoff under one Web session publication lock, sends `stream.synchronized` with the committed
-boundary, then sends live committed events. A browser refresh reconnects from its last applied
-sequence. Duplicate exact events are ignored; conflict or gap closes the stream and requires a
-fresh session snapshot. Slow subscribers have bounded queues and are disconnected with a safe
-reconnect instruction; they do not apply backpressure to SQLite commit or Agent acknowledgement.
+boundary, then sends live committed events. Each browser response is capped at 512 frames and
+8 MiB; a clean cap-induced EOF for a nonterminal session reconnects from the last successfully
+applied canonical sequence. Only a repeated sequence with the exact previously applied event ID is
+ignored; an unknown or conflicting same-sequence identity, lower sequence, or gap fails closed.
+Zero-progress EOFs use bounded backoff, and `session.stopped`/`session.lost` end continuation. Abort,
+unmount, or session replacement cancels the reader and pending retry; stale snapshot requests are
+aborted independently and cannot mutate the replacement selection. A stale response cannot update
+the new selection. A browser refresh reconnects from the same last applied sequence. Slow subscribers
+have bounded queues and are disconnected with a safe reconnect instruction; they do not apply
+backpressure to SQLite commit or Agent acknowledgement.
+
+The browser projection enforces the same 2 MiB per-turn and 8 MiB newest-turn-first output bounds
+as SQLite, preserves sticky `outputTruncated`, and shows concise output/history notices. Refresh and
+replay retain the bounded projection rather than rebuilding an apparently complete turn from deltas.
+When complete-response envelope compaction removes every selected-session event, public
+`historyStartSequence` is `lastSequence + 1` and `historyTruncated` is true; when events remain it is
+the first retained contiguous suffix sequence. The newest retained aggregate turn and terminal state
+remain available, while interaction/history collection truncation is explicit.
 
 Web restart reconstructs replay entirely from SQLite. Agent disconnect does not remove committed
 history; session connection state becomes unavailable or lost according to identity evidence.
@@ -574,7 +694,8 @@ paths with replacement bounded shapes and adds:
 
 Mutation success is the existing `202 MutationReceipt`; it means durable operation acceptance only.
 Profile inspection returns the safe projection. Acknowledgement echoes the exact acknowledged
-identity. All F11 objects are strict. Route handlers are absent in Slice 0.
+identity. All F11 objects are strict. The Agent event stream and acknowledgement route validate
+replay/storage failures before success begins.
 
 F11 endpoint descriptors declare one of two operation-journal policies:
 
@@ -747,24 +868,30 @@ deployment profile and runtime authorization. It does not forward browser-suppli
 cwd, environment, permissions, sandbox, executable, arguments, or native IDs. Raw JSON-RPC stays
 inside Agent.
 
-## Later persistence shape (not implemented here)
+## Implemented persistence shape
 
-The persistence slice should use a hybrid model:
+Beta Slice B uses a hybrid model:
 
 - append-only canonical events as the durable ordered content/activity record;
 - normalized sessions, turns, and interaction-request read models for invariants and queries; and
-- a private encrypted/opaque resume-metadata record whose values are never public.
+- a reserved private resume-metadata table whose values are never public; provider-native resume is
+  not enabled by the current Codex profile.
 
-Minimum later tables are `ai_sessions`, `ai_turns`, `ai_events`, `ai_interaction_requests`, and
+The implemented tables are `ai_sessions`, `ai_turns`, `ai_events`, `ai_interaction_requests`, and
 `ai_provider_resume_metadata`. Web remains the sole writer. Required uniqueness includes one
 session sequence, global event ID, one nonterminal turn per session, and one response per request.
-The existing dormant `ai_sessions` table requires a forward migration; Slice 0 deliberately does
-not change it. Existing non-AI tables and lifecycles are not event sourced.
+The historical Slice 0 decision deliberately did not change the dormant `ai_sessions` table; the
+subsequent Beta migrations now provide this storage. Existing non-AI tables and lifecycles are not
+event sourced.
 
 ## Explicit exclusions
 
-AI Sessions v1 Slice 0 does not implement multiple providers, arbitrary executable configuration,
-host AI execution, terminal-backed first-class sessions, database changes, credentials, provider
-runtime, Agent/Web handlers, browser UI, file editor, Git staging/publish, checkpoints, autonomous
-orchestration, persistent generic terminals, multiple workspaces, authentication replacement,
-automatic merge, production deployment, or broad event sourcing.
+Historical AI Sessions v1 Slice 0 did not implement multiple providers, arbitrary executable
+configuration, host AI execution, terminal-backed first-class sessions, database changes,
+credentials, provider runtime, Agent/Web handlers, browser UI, file editor, Git staging/publish,
+checkpoints, autonomous orchestration, persistent generic terminals, multiple workspaces,
+authentication replacement, automatic merge, production deployment, or broad event sourcing.
+Current Beta Slice B implements the Codex-only runtime, storage, handlers, stream, credentials, and
+Workbench path described above. It still excludes multiple providers, provider-native resume,
+approvals, structured questions, hostile-descendant containment, automatic merge, and production
+deployment.
