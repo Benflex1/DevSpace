@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   agentApiV1EndpointByOperation,
+  githubAgentApiV1EndpointByOperation,
   executableAgentErrorCodes,
   executableAgentErrorRegistry,
   executableAgentErrorSchema
@@ -12,10 +13,10 @@ const envelope = (code: string, retryable: boolean, details: object) => ({
   meta, error: { code, message: "Operator-safe message", retryable, details }
 });
 
-describe("executable F09 error registry", () => {
-  test("contains exactly the 23 accepted executable errors", () => {
-    expect(executableAgentErrorCodes).toHaveLength(23);
-    expect(new Set(executableAgentErrorCodes).size).toBe(23);
+describe("executable Agent error registry", () => {
+  test("contains exactly the accepted executable errors", () => {
+    expect(executableAgentErrorCodes).toHaveLength(26);
+    expect(new Set(executableAgentErrorCodes).size).toBe(26);
     expect(executableAgentErrorCodes).not.toContain("EVENT_SNAPSHOT_REQUIRED");
     expect(executableAgentErrorCodes).not.toContain("EVENT_CURSOR_INVALID");
     expect(executableAgentErrorCodes.join(" ")).not.toMatch(/RUNTIME_PLAN|ATTACHMENT_GRANT|REQUEST_HASH/u);
@@ -41,7 +42,7 @@ describe("executable F09 error registry", () => {
 
   test("all endpoint references resolve and every registry code is used", () => {
     const used = new Set<string>();
-    for (const endpoint of Object.values(agentApiV1EndpointByOperation)) {
+    for (const endpoint of [...Object.values(agentApiV1EndpointByOperation), ...Object.values(githubAgentApiV1EndpointByOperation)]) {
       expect(endpoint.errors.length).toBeGreaterThan(0);
       for (const error of endpoint.errors) {
         expect(executableAgentErrorCodes).toContain(error.code);

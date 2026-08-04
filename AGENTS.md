@@ -43,7 +43,8 @@
   editing.
 - Browser actions reference task, preview, service, or AI-profile IDs. They never provide
   executable commands or host paths.
-- AI integrations begin as PTY-based CLIs inside the workspace container.
+- AI integrations use provider-neutral, bounded PTY or strict bounded stdio protocols inside the
+  workspace container.
 - Preview routing is delegated to Caddy through a narrow adapter.
 - Never auto-merge or deploy production changes.
 
@@ -77,12 +78,10 @@ Avoid generic `shared` or `utils` packages. Put logic with the domain that owns 
 
 ## Model policy
 
-- Commits, renames, and tiny changes: Luna Medium/High.
-- Normal scoped implementation: Luna XHigh.
-- Unclear repository exploration: Terra Medium.
-- Architecture, security, migrations, and complex boundaries: Sol Medium.
-- A failed focused Terra/Sol attempt: Sol High/Max.
-- Sol Ultra: never.
+- Mechanical changes and documentation: Luna Medium.
+- Clear bounded implementation: Luna High.
+- Investigation or broad repository context: Terra Medium/High.
+- Security, ownership, secrets, recovery, and architecture boundaries: Sol Medium/High.
 
 ## Chat rotation
 

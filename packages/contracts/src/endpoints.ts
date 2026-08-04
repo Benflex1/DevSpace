@@ -92,7 +92,7 @@ function dirtyWorkspaceDetails(requestedAction: "archive" | "remove") {
   return z.strictObject({ workspaceId: uuidV7Schema, requestedAction: z.literal(requestedAction) });
 }
 
-function e(code: ExecutableAgentErrorCode, detailsSchema?: z.ZodType): ErrorInput {
+export function e(code: ExecutableAgentErrorCode, detailsSchema?: z.ZodType): ErrorInput {
   return detailsSchema === undefined ? { code } : { code, detailsSchema };
 }
 
@@ -105,7 +105,7 @@ type ResolvedSuccessDataSchema<
     ? typeof mutationReceiptSchema
     : never;
 
-function endpoint<
+export function endpoint<
   const Operation extends string,
   const Method extends AgentHttpMethod,
   const Path extends `/v1${string}`,

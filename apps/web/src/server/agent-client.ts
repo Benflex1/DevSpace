@@ -4,6 +4,7 @@ import {
   agentApiV1EndpointByOperation,
   f10AgentApiV1EndpointByOperation,
   f11AiAgentApiV1EndpointByOperation,
+  githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
   AI_EVENT_STREAM_FRAME_MAX_BYTES,
   type AiEventStreamFrame,
@@ -22,7 +23,10 @@ import {
   type RuntimeStatusData,
   type SourceInspectionData,
   type ProcessInspectionData,
-  type WorkspaceInspectionData
+  type WorkspaceInspectionData,
+  type GithubAppInspection,
+  type GithubInstallationInspection,
+  type GithubRepositoryPage
 } from "@devspace/contracts";
 import {
   classifyFailureCode, createLogger, type FailureCategory, type LogContext, type StructuredLogger
@@ -164,6 +168,7 @@ export function createAgentClient(socketPath: string, options: {
   const aiStreamAdmission = options.aiStreamAdmission ?? processAiStreamAdmission;
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
+    | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.repositories.list"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
     | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
@@ -178,6 +183,7 @@ export function createAgentClient(socketPath: string, options: {
   ): Promise<unknown> {
     const endpoint = operation === "snapshot.get" ? f10AgentApiV1EndpointByOperation["snapshot.get"]
       : operation.startsWith("ai-") ? f11AiAgentApiV1EndpointByOperation[operation as keyof typeof f11AiAgentApiV1EndpointByOperation]
+      : operation.startsWith("github.") ? githubAgentApiV1EndpointByOperation[operation as keyof typeof githubAgentApiV1EndpointByOperation]
       : agentApiV1EndpointByOperation[operation as keyof typeof agentApiV1EndpointByOperation];
     if (endpoint === undefined) throw new Error("agent-operation-endpoint-missing");
     if (endpoint.successBodySchema === null) throw new Error("stream-operation-requires-stream-client");
@@ -314,6 +320,13 @@ export function createAgentClient(socketPath: string, options: {
   return {
     health: async (): Promise<HealthData> => await call("agent.health.get") as HealthData,
     runtimeStatus: async (): Promise<RuntimeStatusData> => await call("agent.runtime-status.get") as RuntimeStatusData,
+    inspectGithubApp: async (): Promise<GithubAppInspection> => await call("github.app.inspect") as GithubAppInspection,
+    verifyGithubInstallation: async (connectionId: string, installationId: string): Promise<GithubInstallationInspection> =>
+      await call("github.installation.verify", { connectionId, installationId }) as GithubInstallationInspection,
+    inspectGithubInstallation: async (connectionId: string): Promise<GithubInstallationInspection> =>
+      await call("github.installation.inspect", { connectionId }) as GithubInstallationInspection,
+    listGithubRepositories: async (connectionId: string, pageSize: number, continuation?: string): Promise<GithubRepositoryPage> =>
+      await call("github.repositories.list", { connectionId, pageSize, ...(continuation === undefined ? {} : { continuation }) }) as GithubRepositoryPage,
     inspectSource: async (url: string): Promise<SourceInspectionData> => await call(
       "project.source.inspect", { source: { kind: "remote", url } }
     ) as SourceInspectionData,

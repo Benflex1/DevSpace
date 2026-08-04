@@ -17,3 +17,12 @@ test("registers and reloads a persisted project through the real Web and Agent s
   await expect(project.getByRole("heading", { name: "Rocket" })).toBeVisible();
   await expect(project.getByText("Registered — workspace setup pending")).toBeVisible();
 });
+
+test("shows bounded unconfigured GitHub App UI without credential or onboarding actions", async ({ page }) => {
+  await page.goto("/");
+  const card = page.getByRole("region", { name: "Private GitHub repositories" });
+  await expect(card.getByRole("status")).toHaveText("unconfigured");
+  await expect(card.getByText("has not been configured by the administrator")).toBeVisible();
+  await expect(card.locator("input")).toHaveCount(0);
+  await expect(card.getByRole("button", { name: /clone|create project|disconnect/i })).toHaveCount(0);
+});

@@ -4,6 +4,7 @@ import { AddProjectForm } from "./project-form.js";
 import { authenticateHeaders } from "../server/auth.js";
 import { readWebRuntimeConfig } from "../server/config.js";
 import { loadDashboardData } from "../server/project-workspace.js";
+import { GithubAppCard } from "./github-app-card.js";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,7 @@ export default async function HomePage() {
       <p>Inspect a remote Git source through the private Agent before registering it.</p>
       <AddProjectForm agentReachable={agentReachable} />
     </section>
+    <GithubAppCard />
     <footer>Signed in as {actor.identity}</footer>
   </main>;
 }

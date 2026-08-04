@@ -27,10 +27,12 @@ import {
   type WorkspaceInspectionData
 } from "@devspace/contracts";
 import { mkdirSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import pathModule from "node:path";
 import {
   auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
   previews, workspaceServices, workspaces, aiSessions, aiTurns, aiEvents,
+  githubConnectionAttempts, githubConnections,
   type Operation, type Preview, type Project, type ProjectConfigRevision
 } from "@devspace/database";
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
@@ -1751,6 +1753,67 @@ export function openProjectDatabase(path: string, options: {
       const result = this.listManagedProjects().find((project) => project.id === input.projectId);
       if (result === undefined) throw new ProjectSetupConflictError("The finalized project could not be read.");
       return result;
+    },
+    createGithubConnectionAttempt(input: { actor: string; stateHash: string; expiresAt: string }) {
+      const timestamp = now().toISOString();
+      const attempt = { connectionId: createId(), stateHash: input.stateHash, status: "pending" as const,
+        expiresAt: input.expiresAt, claimedInstallationId: null, createdBy: input.actor,
+        createdAt: timestamp, updatedAt: timestamp, failureClassification: null, rowVersion: 1 };
+      db.insert(githubConnectionAttempts).values(attempt).run();
+      return attempt;
+    },
+    claimGithubConnectionAttempt(input: { actor: string; stateHash: string; installationId: string }) {
+      return client.transaction(() => {
+        const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.stateHash, input.stateHash)).get();
+        if (attempt === undefined || attempt.createdBy !== input.actor) throw new Error("GITHUB_STATE_INVALID");
+        if (!timingSafeEqual(Buffer.from(attempt.stateHash, "hex"), Buffer.from(input.stateHash, "hex"))) throw new Error("GITHUB_STATE_INVALID");
+        if (Date.parse(attempt.expiresAt) <= now().valueOf()) throw new Error("GITHUB_STATE_EXPIRED");
+        if (attempt.status === "failed") throw new Error("GITHUB_STATE_CONSUMED");
+        if (attempt.status === "claimed" || attempt.status === "connected") {
+          if (attempt.claimedInstallationId !== input.installationId) throw new Error("GITHUB_INSTALLATION_CONFLICT");
+          return attempt;
+        }
+        const updatedAt = now().toISOString();
+        const result = db.update(githubConnectionAttempts).set({ status: "claimed", claimedInstallationId: input.installationId,
+          updatedAt, rowVersion: attempt.rowVersion + 1 }).where(and(
+            eq(githubConnectionAttempts.connectionId, attempt.connectionId), eq(githubConnectionAttempts.status, "pending"),
+            eq(githubConnectionAttempts.rowVersion, attempt.rowVersion))).run();
+        if (result.changes !== 1) throw new Error("GITHUB_STATE_CONCURRENT");
+        return { ...attempt, status: "claimed" as const, claimedInstallationId: input.installationId, updatedAt, rowVersion: attempt.rowVersion + 1 };
+      }).immediate();
+    },
+    connectGithubInstallation(input: {
+      connectionId: string; installationId: string; accountId: string; accountType: "User" | "Organization";
+      accountLogin: string; repositorySelection: "all" | "selected"; permissions: Record<string, "read" | "write">;
+      status: "connected" | "degraded"; verifiedAt: string;
+    }) {
+      return client.transaction(() => {
+        const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.connectionId, input.connectionId)).get();
+        if (attempt === undefined || attempt.claimedInstallationId !== input.installationId
+          || (attempt.status !== "claimed" && attempt.status !== "connected")) throw new Error("GITHUB_ATTEMPT_NOT_CLAIMED");
+        const timestamp = now().toISOString();
+        const existing = db.select().from(githubConnections).where(eq(githubConnections.connectionId, input.connectionId)).get();
+        const value = { connectionId: input.connectionId, installationId: input.installationId, accountId: input.accountId,
+          accountType: input.accountType, accountLogin: input.accountLogin, repositorySelection: input.repositorySelection,
+          permissionsJson: JSON.stringify(input.permissions), status: input.status, verifiedAt: input.verifiedAt,
+          createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp, rowVersion: (existing?.rowVersion ?? 0) + 1 };
+        db.insert(githubConnections).values(value).onConflictDoUpdate({ target: githubConnections.connectionId,
+          set: { installationId: value.installationId, accountId: value.accountId, accountType: value.accountType,
+            accountLogin: value.accountLogin, repositorySelection: value.repositorySelection, permissionsJson: value.permissionsJson,
+            status: value.status, verifiedAt: value.verifiedAt, updatedAt: value.updatedAt, rowVersion: value.rowVersion } }).run();
+        if (attempt.status !== "connected") db.update(githubConnectionAttempts).set({ status: "connected", updatedAt: timestamp,
+          rowVersion: attempt.rowVersion + 1 }).where(and(eq(githubConnectionAttempts.connectionId, attempt.connectionId),
+            eq(githubConnectionAttempts.rowVersion, attempt.rowVersion))).run();
+        return { ...value, permissions: input.permissions };
+      }).immediate();
+    },
+    getGithubConnectionState(actor: string) {
+      const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.createdBy, actor))
+        .orderBy(desc(githubConnectionAttempts.createdAt)).get();
+      if (attempt === undefined) return null;
+      const connection = db.select().from(githubConnections).where(eq(githubConnections.connectionId, attempt.connectionId)).get();
+      return { attempt, connection: connection === undefined ? null : { ...connection,
+        permissions: JSON.parse(connection.permissionsJson) as Record<string, "read" | "write"> } };
     },
     listOperations: () => db.select().from(operations).orderBy(operations.createdAt, operations.operationId).all(),
     listRuntimeOperations: (projectId: string, workspaceId: string) => db.select().from(operations).where(and(
