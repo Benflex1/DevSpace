@@ -5,6 +5,7 @@ import path from "node:path";
 import * as z from "zod";
 import {
   githubAppInspectionSchema,
+  githubConnectionIdSchema,
   githubDecimalIdSchema,
   githubInstallationInspectionSchema,
   githubInstallationVerifyDataSchema,
@@ -35,7 +36,7 @@ const configSchema = z.strictObject({
   })
 });
 const leaseSchema = z.strictObject({
-  version: z.literal(1), connectionId: z.string().uuid(), operationId: z.string().uuid(),
+  version: z.literal(1), connectionId: githubConnectionIdSchema, operationId: z.string().uuid(),
   expiresAt: z.string().datetime({ offset: true }), phase: z.enum(["minting", "active", "cleanup-degraded"]), createdAt: z.string().datetime({ offset: true })
 });
 
@@ -61,6 +62,12 @@ function decimal(value: unknown): string | null {
 }
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+function filenameConnectionId(name: string): string {
+  if (!name.endsWith(".json")) throw failure("private-state-invalid");
+  const result = githubConnectionIdSchema.safeParse(name.slice(0, -5));
+  if (!result.success) throw failure("private-state-invalid");
+  return result.data;
 }
 
 async function assertPrivateDirectory(directory: string): Promise<void> {
@@ -100,6 +107,51 @@ async function readPrivateFile(file: string, maxBytes: number, afterRead?: () =>
 function parseLosslessGithubJson(text: string): unknown {
   return JSON.parse(text.replace(/("(?:id|app_id)"\s*:\s*)([0-9]{1,32})(?=\s*[,}])/gu, "$1\"$2\""));
 }
+async function cancelResponse(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+async function readBoundedResponseBytes(response: Response): Promise<Buffer> {
+  const rawContentLength = response.headers.get("content-length");
+  let contentLength: number | null = null;
+  if (rawContentLength !== null) {
+    const normalized = rawContentLength.trim();
+    if (!/^\d+$/u.test(normalized)) {
+      await cancelResponse(response);
+      throw failure("upstream-invalid");
+    }
+    const parsed = Number(normalized);
+    if (!Number.isSafeInteger(parsed) || parsed > MAX_RESPONSE_BYTES) {
+      await cancelResponse(response);
+      throw failure("upstream-invalid");
+    }
+    contentLength = parsed;
+  }
+  if (response.body === null) {
+    if (contentLength !== null && contentLength !== 0) throw failure("upstream-invalid");
+    return Buffer.alloc(0);
+  }
+  const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      const value = result.value;
+      if (value === undefined || value.byteLength > MAX_RESPONSE_BYTES - total) {
+        await reader.cancel().catch(() => undefined);
+        throw failure("upstream-invalid");
+      }
+      chunks.push(Buffer.from(value));
+      total += value.byteLength;
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "github-upstream-invalid") throw error;
+    throw failure("upstream-invalid");
+  }
+  if (contentLength !== null && total !== contentLength) throw failure("upstream-invalid");
+  return Buffer.concat(chunks, total);
+}
 const defaultTransport: GithubHttpTransport = async (request) => {
   const response = await fetch(`https://api.github.com${request.path}`, {
     method: request.method,
@@ -109,10 +161,13 @@ const defaultTransport: GithubHttpTransport = async (request) => {
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }) },
     ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) })
   });
-  const text = await response.text();
-  if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) throw failure("upstream-invalid");
+  const bytes = await readBoundedResponseBytes(response);
   let body: unknown = {};
-  if (text !== "") try { body = parseLosslessGithubJson(text); } catch { throw failure("upstream-invalid"); }
+  if (bytes.length !== 0) {
+    let text: string;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw failure("upstream-invalid"); }
+    try { body = parseLosslessGithubJson(text); } catch { throw failure("upstream-invalid"); }
+  }
   return { status: response.status, body };
 };
 
@@ -151,6 +206,8 @@ export async function createGithubAppAuthority(options: {
   const locks = new Map<string, Promise<void>>();
   const leaseBlocks = new Map<string, number>();
   const degradedBindings = new Set<string>();
+  const recoveredUncertainConnections = new Set<string>();
+  const ownedLeaseConnections = new Set<string>();
   const configured = await lstat(appRoot).then(() => true).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return false;
     throw failure("private-state-invalid");
@@ -172,19 +229,29 @@ export async function createGithubAppAuthority(options: {
       await mkdir(directory, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
       await assertPrivateDirectory(directory);
     }
+    const bindingIds = new Set<string>();
     for (const name of await readdir(bindingsRoot)) {
-      if (!/^[0-9a-f-]{36}\.json$/u.test(name)) throw failure("private-state-invalid");
+      const filenameId = filenameConnectionId(name);
+      if (bindingIds.has(filenameId)) throw failure("private-state-invalid");
+      bindingIds.add(filenameId);
       const file = path.join(bindingsRoot, name);
       const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
-      parseStrictJsonBytes(bytes, file, bindingSchema);
+      const binding = parseStrictJsonBytes(bytes, file, bindingSchema);
+      if (binding.connectionId !== filenameId) throw failure("private-state-invalid");
     }
+    const leaseIds = new Set<string>();
     for (const name of await readdir(leasesRoot)) {
-      if (!/^[0-9a-f-]{36}\.json$/u.test(name)) throw failure("private-state-invalid");
+      const filenameId = filenameConnectionId(name);
+      if (leaseIds.has(filenameId)) throw failure("private-state-invalid");
       const file = path.join(leasesRoot, name);
       const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
       const lease = parseStrictJsonBytes(bytes, file, leaseSchema);
+      if (lease.connectionId !== filenameId) throw failure("private-state-invalid");
+      leaseIds.add(filenameId);
+      recoveredUncertainConnections.add(filenameId);
       const expiresAt = new Date(lease.expiresAt).valueOf();
-      if (expiresAt > now().valueOf()) leaseBlocks.set(lease.connectionId, expiresAt);
+      if (!Number.isFinite(expiresAt)) throw failure("private-state-invalid");
+      if (expiresAt > now().valueOf()) leaseBlocks.set(filenameId, expiresAt);
     }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("github-")) throw error;
@@ -194,12 +261,14 @@ export async function createGithubAppAuthority(options: {
     if (!configured || config === null || privateKey === null) throw failure("app-unconfigured");
     return { config, privateKey };
   };
-  const bindingFile = (connectionId: string) => path.join(bindingsRoot, `${githubInstallationVerifyDataSchema.shape.connectionId.parse(connectionId)}.json`);
-  const leaseFile = (connectionId: string) => path.join(leasesRoot, `${githubInstallationVerifyDataSchema.shape.connectionId.parse(connectionId)}.json`);
+  const bindingFile = (connectionId: string) => path.join(bindingsRoot, `${githubConnectionIdSchema.parse(connectionId)}.json`);
+  const leaseFile = (connectionId: string) => path.join(leasesRoot, `${githubConnectionIdSchema.parse(connectionId)}.json`);
   const persist = async (binding: GithubInstallationInspection) => writer.write(bindingFile(binding.connectionId), { version: 1, ...binding });
-  const inspect = async (connectionId: string) => {
+  const readBinding = async (expectedConnectionId: string) => {
     requireConfig();
-    const file = bindingFile(connectionId);
+    const connection = githubConnectionIdSchema.safeParse(expectedConnectionId);
+    if (!connection.success) throw failure("private-state-invalid");
+    const file = bindingFile(connection.data);
     const entry = await lstat(file).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw failure("private-state-invalid");
@@ -207,12 +276,33 @@ export async function createGithubAppAuthority(options: {
     if (entry === null) throw failure("connection-not-found");
     const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
     const value = parseStrictJsonBytes(bytes, file, bindingSchema);
+    if (value.connectionId !== connection.data) throw failure("private-state-invalid");
     const { version: _version, ...inspection } = value;
     return githubInstallationInspectionSchema.parse(inspection);
   };
-  const readLease = async (file: string) => {
+  const readLease = async (expectedConnectionId: string) => {
+    const connection = githubConnectionIdSchema.safeParse(expectedConnectionId);
+    if (!connection.success) throw failure("private-state-invalid");
+    const file = leaseFile(connection.data);
     const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
-    return parseStrictJsonBytes(bytes, file, leaseSchema);
+    const lease = parseStrictJsonBytes(bytes, file, leaseSchema);
+    if (lease.connectionId !== connection.data) throw failure("private-state-invalid");
+    return lease;
+  };
+  const readLeaseIfPresent = async (expectedConnectionId: string) => {
+    const file = leaseFile(expectedConnectionId);
+    const entry = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw failure("private-state-invalid");
+    });
+    return entry === null ? null : await readLease(expectedConnectionId);
+  };
+  const inspectEffective = async (connectionId: string) => {
+    const binding = await readBinding(connectionId);
+    const lease = await readLeaseIfPresent(connectionId);
+    const leaseUncertain = !ownedLeaseConnections.has(connectionId) && lease !== null;
+    if (!degradedBindings.has(connectionId) && !recoveredUncertainConnections.has(connectionId) && !leaseUncertain) return binding;
+    return { ...binding, status: "degraded" as const, cleanupDegraded: true };
   };
   const writeLease = async (file: string, value: { connectionId: string; operationId: string; expiresAt: string; phase: "minting" | "active" | "cleanup-degraded"; createdAt: string }) => {
     await writer.write(file, { version: 1, ...value });
@@ -220,7 +310,12 @@ export async function createGithubAppAuthority(options: {
   const locked = async <T>(connectionId: string, action: () => Promise<T>): Promise<T> => {
     const previous = locks.get(connectionId) ?? Promise.resolve(); let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; }); locks.set(connectionId, current); await previous;
-    try { return await action(); } finally { release(); if (locks.get(connectionId) === current) locks.delete(connectionId); }
+    ownedLeaseConnections.add(connectionId);
+    try { return await action(); } finally {
+      ownedLeaseConnections.delete(connectionId);
+      release();
+      if (locks.get(connectionId) === current) locks.delete(connectionId);
+    }
   };
   return {
     inspectApp: async () => await Promise.resolve(githubAppInspectionSchema.parse(configured && config !== null
@@ -228,7 +323,7 @@ export async function createGithubAppAuthority(options: {
       : { configured: false, appId: null, expectedAccountId: null, expectedAccountType: null, installationUrl: null })),
     verifyInstallation: async (raw) => {
       const input = githubInstallationVerifyDataSchema.parse(raw); const current = requireConfig();
-      const existing = await inspect(input.connectionId).catch((error: unknown) => {
+      const existing = await readBinding(input.connectionId).catch((error: unknown) => {
         if (error instanceof Error && error.message === "github-connection-not-found") return null;
         throw error instanceof Error ? error : failure("private-state-invalid");
       });
@@ -258,12 +353,12 @@ export async function createGithubAppAuthority(options: {
         repositorySelection: installation.repository_selection, permissions, status: "connected", verifiedAt: now().toISOString(), cleanupDegraded: false });
       await persist(binding); return binding;
     },
-    inspectInstallation: inspect,
+    inspectInstallation: inspectEffective,
     persistBindingForTest: persist,
     listRepositories: async (raw) => {
       const input = githubRepositoriesListDataSchema.parse(raw);
       return await locked(input.connectionId, async () => {
-        const binding = await inspect(input.connectionId);
+        const binding = await readBinding(input.connectionId);
         const current = requireConfig();
         const leasePath = leaseFile(input.connectionId);
         const currentTime = now().valueOf();
@@ -277,7 +372,7 @@ export async function createGithubAppAuthority(options: {
           throw failure("private-state-invalid");
         });
         if (leaseEntry !== null) {
-          const existingLease = await readLease(leasePath);
+          const existingLease = await readLease(input.connectionId);
           const existingExpiry = new Date(existingLease.expiresAt).valueOf();
           if (existingExpiry > currentTime) {
             leaseBlocks.set(input.connectionId, existingExpiry);
@@ -409,6 +504,7 @@ export async function createGithubAppAuthority(options: {
 
         let cleanupDegraded = !leaseSettled;
         if (!leaseSettled) {
+          recoveredUncertainConnections.add(input.connectionId);
           try {
             await persist({ ...binding, status: "degraded", cleanupDegraded: true });
             bindingHealthPersistenceOutcome = "succeeded";
@@ -417,13 +513,41 @@ export async function createGithubAppAuthority(options: {
             bindingHealthPersistenceOutcome = "failed";
           }
           cleanupDegraded = true;
-        } else if (primaryPage !== null && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId))) {
+        } else if (primaryPage === null && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
           try {
-            await persist({ ...binding, status: "connected", cleanupDegraded: false });
-            degradedBindings.delete(input.connectionId);
+            await persist({ ...binding, status: "degraded", cleanupDegraded: true });
             bindingHealthPersistenceOutcome = "succeeded";
           } catch {
             degradedBindings.add(input.connectionId);
+            recoveredUncertainConnections.add(input.connectionId);
+            const recoveryLeaseExpiry = Math.max(guardExpiryMs, now().valueOf() + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS);
+            guardExpiryMs = recoveryLeaseExpiry;
+            leaseBlocks.set(input.connectionId, recoveryLeaseExpiry);
+            try {
+              await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt });
+            } catch {
+              // The in-memory degraded marker remains fail-closed when durable re-marking is unavailable.
+            }
+            bindingHealthPersistenceOutcome = "failed";
+          }
+          cleanupDegraded = true;
+        } else if (primaryPage !== null && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
+          try {
+            await persist({ ...binding, status: "connected", cleanupDegraded: false });
+            degradedBindings.delete(input.connectionId);
+            recoveredUncertainConnections.delete(input.connectionId);
+            bindingHealthPersistenceOutcome = "succeeded";
+          } catch {
+            degradedBindings.add(input.connectionId);
+            recoveredUncertainConnections.add(input.connectionId);
+            const recoveryLeaseExpiry = Math.max(guardExpiryMs, now().valueOf() + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS);
+            guardExpiryMs = recoveryLeaseExpiry;
+            leaseBlocks.set(input.connectionId, recoveryLeaseExpiry);
+            try {
+              await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt });
+            } catch {
+              // The in-memory degraded marker remains fail-closed when durable re-marking is unavailable.
+            }
             cleanupDegraded = true;
             bindingHealthPersistenceOutcome = "failed";
           }

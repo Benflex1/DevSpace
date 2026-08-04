@@ -97,32 +97,43 @@ The existing Agent-private conventions are reused: Agent-owned `0700` directorie
 descriptor reads; regular, single-link, owner-owned `0600` files; bounded nonzero sizes; stable
 device/inode/size/mode/owner/link-count checks before and after reading; exact-byte UTF-8 and schema
 parsing; and same-directory atomic fsync/rename writes. Startup validates configuration, key,
-bindings, and nonsecret leases before exposing GitHub authority. The private key and all tokens stay
+bindings, and nonsecret leases before exposing GitHub authority. Every installation and lease record
+is bound to its exact path identity: the canonical UUIDv7 filename stem, embedded `connectionId`,
+and requested connection ID must agree; malformed names or mismatches fail closed at startup and at
+runtime. The private key and all tokens stay
 inside Agent memory/private storage; SQLite, browser responses, logs, errors, URLs, arguments, and
 ordinary environment values contain no reusable credential.
 
 Repository listing is serialized per connection and requests only `metadata: read`. The installation
 token is minted immediately before the bounded installation-repository request, never persisted,
-revoked immediately, and dropped from memory. A mint response is definitive only when a complete
-bounded GitHub rejection proves no token; a transport failure, malformed/oversized response, or
-incomplete `201` response is uncertain. Uncertain minting retains a conservative nonsecret guard
-through the maximum token lifetime and blocks overlapping minting. The internal lifecycle records
-primary listing outcome, revocation outcome, lease settlement, and binding-health persistence
-separately. A successful page remains successful when cleanup is degraded; the response carries only
-bounded `cleanupDegraded` state, while a stale guard remains until proven cleanup or expiry.
+revoked immediately, and dropped from memory. Production HTTP reads inspect and conservatively
+validate `Content-Length`, consume Web Streams incrementally by byte count, cancel at the bound,
+and apply fatal UTF-8 decoding before JSON parsing. A mint response is definitive only when a
+complete bounded GitHub rejection proves no token; a transport failure, malformed/oversized
+response, or incomplete `201` response is uncertain. Uncertain minting retains a conservative
+nonsecret guard through the maximum token lifetime and blocks overlapping minting. The internal
+lifecycle records primary listing outcome, revocation outcome, lease settlement, and binding-health
+persistence separately. A successful page remains successful when cleanup is degraded; the response
+carries only bounded `cleanupDegraded` state, while a stale guard remains until proven cleanup or
+expiry.
 
-After a guard expires (or cleanup is otherwise proven), a later successful listing with proven
-revocation and local settlement may persist a degraded binding back to `connected`; failed lease or
-binding settlement leaves it degraded. The browser can connect, retry, view the verified identity,
-list safe repository metadata, and paginate with bounded opaque continuations. Private inspection,
+Inspection derives effective health from the durable binding and lease state. A lease recovered at
+startup, a persisted cleanup-degraded lease, an unproven local settlement, or a binding-health write
+failure reports `degraded` even when the durable binding still says `connected`; a safely owned
+in-process lease does not by itself change ordinary status inspection. After a guard expires (or
+cleanup is otherwise proven), only a later successful listing with proven revocation, local
+settlement, and binding restoration may persist `degraded` back to `connected`; expiry alone does not.
+The browser can connect, retry, view the verified identity, list safe repository metadata, and
+paginate with bounded opaque continuations. Private inspection,
 clone, fetch, workspace creation, onboarding selection, credential brokering, push, disconnect, and
 webhooks are not part of this checkpoint.
 
 The focused suite covers App/account authority, minimum permissions, ambiguous mint results and
-restart blocking, cleanup persistence failures, degraded recovery, validated-byte parsing, callback
-claim concurrency, Web persistence retry, public status projection, strict contracts, malformed
-upstream repository identities, and the browser-safe connection/listing surface. It uses ephemeral
-keys, temporary private state, injected transport, and deterministic failure seams only; no real
+restart blocking, bounded production response reads, exact record/path identity, cleanup persistence
+failures, degraded recovery across restart, validated-byte parsing, callback claim concurrency, Web
+persistence retry, public status projection, strict contracts, malformed upstream repository
+identities, and the browser-safe connection/listing surface. It uses ephemeral keys, temporary
+private state, injected transport/response seams, and deterministic failure seams only; no real
 GitHub credentials or network are required.
 
 ## Limitations and deferred work

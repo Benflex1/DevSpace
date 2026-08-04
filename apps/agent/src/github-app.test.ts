@@ -21,6 +21,28 @@ async function fixture() {
   await writeFile(path.join(appRoot, "config.json"), JSON.stringify({ version: 1, appId: "123", expectedAccountId: "9007199254740993", expectedAccountType: "Organization", installationUrl: "https://github.com/apps/devspace-test/installations/new" }), { mode: 0o600 });
   return { stateRoot, appRoot };
 }
+function streamedResponse(chunks: Uint8Array[], status: number, headers: Record<string, string> = {}) {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks.shift();
+      if (chunk !== undefined) controller.enqueue(chunk);
+    },
+    cancel() { cancelled = true; }
+  });
+  return { response: { status, headers: new Headers(headers), body } as Response, wasCancelled: () => cancelled };
+}
+async function withFetch<T>(fetchImpl: typeof fetch, action: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try { return await action(); } finally { globalThis.fetch = original; }
+}
+function fetchInputUrl(input: unknown): URL {
+  if (typeof input === "string") return new URL(input);
+  if (input instanceof URL) return input;
+  if (input instanceof Request) return new URL(input.url);
+  throw new TypeError("unexpected fetch input");
+}
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
 describe("GitHub App authority", () => {
@@ -119,6 +141,66 @@ describe("GitHub App authority", () => {
       const { stateRoot, appRoot } = await fixture(); await mutate(appRoot);
       await expect(createGithubAppAuthority({ stateRoot })).rejects.toThrow("github-private-state-invalid");
     }
+  });
+
+  it("rejects private records whose filename identity differs from the embedded connection", async () => {
+    const { stateRoot, appRoot } = await fixture();
+    const foreignConnectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a12";
+    const binding = { version: 1, connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" }, status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false };
+    await mkdir(path.join(appRoot, "installations"), { mode: 0o700, recursive: true });
+    await writeFile(path.join(appRoot, "installations", `${foreignConnectionId}.json`), JSON.stringify(binding), { mode: 0o600 });
+    await expect(createGithubAppAuthority({ stateRoot })).rejects.toThrow("github-private-state-invalid");
+  });
+
+  it("rejects a token lease whose filename identity differs from its embedded connection at startup", async () => {
+    const { stateRoot, appRoot } = await fixture();
+    const foreignConnectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a12";
+    await mkdir(path.join(appRoot, "token-leases"), { mode: 0o700, recursive: true });
+    await writeFile(path.join(appRoot, "token-leases", `${connectionId}.json`), JSON.stringify({ version: 1, connectionId: foreignConnectionId, operationId: "018f0d84-7b39-7cc3-9d4a-0675d9162a13", expiresAt: "2026-08-04T13:00:00.000Z", phase: "active", createdAt: "2026-08-04T12:00:00.000Z" }), { mode: 0o600 });
+    await expect(createGithubAppAuthority({ stateRoot })).rejects.toThrow("github-private-state-invalid");
+  });
+
+  it("rejects a 36-character non-UUIDv7 private filename at startup", async () => {
+    const { stateRoot, appRoot } = await fixture();
+    const malformedConnectionId = "018f0d84-7b39-4cc3-9d4a-0675d9162a11";
+    const binding = { version: 1, connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" }, status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false };
+    await mkdir(path.join(appRoot, "installations"), { mode: 0o700, recursive: true });
+    await writeFile(path.join(appRoot, "installations", `${malformedConnectionId}.json`), JSON.stringify(binding), { mode: 0o600 });
+    await expect(createGithubAppAuthority({ stateRoot })).rejects.toThrow("github-private-state-invalid");
+  });
+
+  it("fails runtime inspection closed when a binding is replaced with a foreign record", async () => {
+    const { stateRoot, appRoot } = await fixture();
+    const authority = await createGithubAppAuthority({ stateRoot });
+    const foreignConnectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a12";
+    const binding = { version: 1, connectionId: foreignConnectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" }, status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false };
+    await mkdir(path.join(appRoot, "installations"), { mode: 0o700, recursive: true });
+    await writeFile(path.join(appRoot, "installations", `${connectionId}.json`), JSON.stringify(binding), { mode: 0o600 });
+    await expect(authority.inspectInstallation(connectionId)).rejects.toThrow("github-private-state-invalid");
+  });
+
+  it("rejects a foreign binding before repository listing can make a GitHub request", async () => {
+    const { stateRoot, appRoot } = await fixture();
+    const calls: GithubHttpRequest[] = [];
+    const authority = await createGithubAppAuthority({ stateRoot, transport: (request) => { calls.push(request); return Promise.resolve({ status: 500, body: {} }); } });
+    const foreignConnectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a12";
+    const binding = { version: 1, connectionId: foreignConnectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" }, status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false };
+    await mkdir(path.join(appRoot, "installations"), { mode: 0o700, recursive: true });
+    await writeFile(path.join(appRoot, "installations", `${connectionId}.json`), JSON.stringify(binding), { mode: 0o600 });
+    await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-private-state-invalid");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a foreign lease before repository listing can make a GitHub request", async () => {
+    const { stateRoot, appRoot } = await fixture();
+    const calls: GithubHttpRequest[] = [];
+    const authority = await createGithubAppAuthority({ stateRoot, transport: (request) => { calls.push(request); return Promise.resolve({ status: 500, body: {} }); } });
+    await bind(authority);
+    const foreignConnectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a12";
+    await mkdir(path.join(appRoot, "token-leases"), { mode: 0o700, recursive: true });
+    await writeFile(path.join(appRoot, "token-leases", `${connectionId}.json`), JSON.stringify({ version: 1, connectionId: foreignConnectionId, operationId: "018f0d84-7b39-7cc3-9d4a-0675d9162a13", expiresAt: "2026-08-04T13:00:00.000Z", phase: "active", createdAt: "2026-08-04T12:00:00.000Z" }), { mode: 0o600 });
+    await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-private-state-invalid");
+    expect(calls).toHaveLength(0);
   });
 
   it("preserves primary listing success when revocation fails and blocks minting through restart until expiry", async () => {
@@ -265,9 +347,14 @@ describe("GitHub App authority", () => {
     const authority = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T12:00:00.000Z") });
     await bind(authority);
     expect((await authority.listRepositories({ connectionId, pageSize: 20 })).cleanupDegraded).toBe(true);
-    expect((await authority.inspectInstallation(connectionId)).status).toBe("connected");
+    const inspection = await authority.inspectInstallation(connectionId);
+    expect(inspection.status).toBe("degraded");
+    expect(inspection.cleanupDegraded).toBe(true);
     expect(await readFile(path.join(appRoot, "token-leases", `${connectionId}.json`), "utf8")).toContain('"phase":"cleanup-degraded"');
     const restarted = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T12:30:00.000Z") });
+    const restartedInspection = await restarted.inspectInstallation(connectionId);
+    expect(restartedInspection.status).toBe("degraded");
+    expect(restartedInspection.cleanupDegraded).toBe(true);
     await expect(restarted.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-lease-active");
   });
 
@@ -306,8 +393,156 @@ describe("GitHub App authority", () => {
     await expect(blocked.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-lease-active");
     revoke = true;
     const recovered = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T13:01:00.000Z") });
+    expect((await recovered.inspectInstallation(connectionId)).status).toBe("degraded");
     expect((await recovered.listRepositories({ connectionId, pageSize: 20 })).cleanupDegraded).toBe(false);
     expect((await recovered.inspectInstallation(connectionId)).status).toBe("connected");
+  });
+
+  it("does not project a safely owned in-process lease as permanent degraded health", async () => {
+    const { stateRoot } = await fixture();
+    let releaseListing!: () => void;
+    let markListingStarted!: () => void;
+    const listingStarted = new Promise<void>((resolve) => { markListingStarted = resolve; });
+    const listingHeld = new Promise<void>((resolve) => { releaseListing = resolve; });
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      if (request.path.endsWith("/access_tokens")) return { status: 201, body: { token: "owned-operation-secret", expires_at: "2026-08-04T13:00:00.000Z" } };
+      if (request.path.startsWith("/installation/repositories?")) {
+        markListingStarted();
+        await listingHeld;
+        return { status: 200, body: { repositories: [] } };
+      }
+      if (request.path === "/installation/token") return { status: 204, body: {} };
+      return { status: 500, body: {} };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await bind(authority);
+    const listing = authority.listRepositories({ connectionId, pageSize: 20 });
+    await listingStarted;
+    expect((await authority.inspectInstallation(connectionId)).status).toBe("connected");
+    releaseListing();
+    await listing;
+  });
+
+  it("rejects an oversized Content-Length before retaining the mint response and cancels it", async () => {
+    const { stateRoot } = await fixture();
+    const oversized = streamedResponse([Buffer.from('{"token":"bounded-secret"}')], 201, { "content-length": String(512 * 1024 + 1) });
+    const fetchImpl: typeof fetch = () => Promise.resolve(oversized.response);
+    await withFetch(fetchImpl, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+      expect(await readFile(path.join(stateRoot, "github-app", "token-leases", `${connectionId}.json`), "utf8")).not.toContain("bounded-secret");
+      const restarted = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:30:00.000Z") });
+      await expect(restarted.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-lease-active");
+    });
+    expect(oversized.wasCancelled()).toBe(true);
+  });
+
+  it("rejects malformed or conflicting Content-Length conservatively", async () => {
+    const { stateRoot } = await fixture();
+    const malformed = streamedResponse([Buffer.from('{"token":"header-secret"}')], 201, { "content-length": "10, 10" });
+    await withFetch(() => Promise.resolve(malformed.response), async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+    });
+    expect(malformed.wasCancelled()).toBe(true);
+  });
+
+  it("cancels a chunked mint response when cumulative bytes cross the bound", async () => {
+    const { stateRoot } = await fixture();
+    const oversized = streamedResponse([Buffer.alloc(512 * 1024 - 1, 0x20), Buffer.from("xx")], 201);
+    await withFetch(() => Promise.resolve(oversized.response), async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(oversized.wasCancelled()).toBe(true);
+  });
+
+  it("accepts an exact byte-limit repository response", async () => {
+    const { stateRoot } = await fixture();
+    const repositoryJson = JSON.stringify({ repositories: [] });
+    const exact = `${repositoryJson}${" ".repeat(512 * 1024 - Buffer.byteLength(repositoryJson))}`;
+    const fetchImpl: typeof fetch = async (input) => {
+      await Promise.resolve();
+      const pathname = fetchInputUrl(input).pathname;
+      if (pathname.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "exact-limit-secret", expires_at: "2026-08-04T13:00:00.000Z" }), { status: 201 });
+      if (pathname === "/installation/repositories") return new Response(exact, { status: 200, headers: { "content-length": String(Buffer.byteLength(exact)) } });
+      if (pathname === "/installation/token") return new Response(null, { status: 204 });
+      return new Response("", { status: 500 });
+    };
+    await withFetch(fetchImpl, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).resolves.toMatchObject({ repositories: [], cleanupDegraded: false });
+    });
+  });
+
+  it("counts multibyte chunks by bytes and cancels before crossing the limit", async () => {
+    const { stateRoot } = await fixture();
+    const oversized = streamedResponse([Buffer.alloc(512 * 1024 - 1, 0x20), Buffer.from("😀")], 201);
+    await withFetch(() => Promise.resolve(oversized.response), async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(oversized.wasCancelled()).toBe(true);
+  });
+
+  it("treats a truncated response as an uncertain mint and keeps the restart guard", async () => {
+    const { stateRoot } = await fixture();
+    const tokenBody = Buffer.from(JSON.stringify({ token: "truncated-secret", expires_at: "2026-08-04T13:00:00.000Z" }));
+    const truncated = new Response(tokenBody, { status: 201, headers: { "content-length": String(tokenBody.byteLength + 10) } });
+    await withFetch(async (input) => {
+      await Promise.resolve();
+      return fetchInputUrl(input).pathname.endsWith("/access_tokens") ? truncated : new Response("", { status: 500 });
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+      expect(await readFile(path.join(stateRoot, "github-app", "token-leases", `${connectionId}.json`), "utf8")).not.toContain("truncated-secret");
+      const restarted = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:30:00.000Z") });
+      await expect(restarted.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-lease-active");
+    });
+  });
+
+  it("rejects malformed UTF-8 in a mint response before using the candidate token", async () => {
+    const { stateRoot } = await fixture();
+    const malformed = new Response(Buffer.concat([Buffer.from('{"token":"secret-'), Buffer.from([0xff]), Buffer.from('","expires_at":"2026-08-04T13:00:00.000Z"}')]), { status: 201 });
+    const paths: string[] = [];
+    await withFetch(async (input) => {
+      await Promise.resolve();
+      const pathname = fetchInputUrl(input).pathname;
+      paths.push(pathname);
+      return pathname.endsWith("/access_tokens") ? malformed : new Response("", { status: 500 });
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+    });
+    expect(paths).toEqual(["/app/installations/77/access_tokens"]);
+  });
+
+  it("rejects malformed JSON from the production mint reader without exposing response content", async () => {
+    const { stateRoot } = await fixture();
+    const secret = "response-secret-must-not-escape";
+    const malformed = new Response(`{"token":"${secret}`, { status: 201 });
+    await withFetch(async () => {
+      await Promise.resolve();
+      return malformed;
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await bind(authority);
+      const error = await authority.listRepositories({ connectionId, pageSize: 20 }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("github-token-mint-failed");
+      expect((error as Error).message).not.toContain(secret);
+      expect(await readFile(path.join(stateRoot, "github-app", "token-leases", `${connectionId}.json`), "utf8")).not.toContain(secret);
+    });
   });
 
   it("does not restore connected status when recovery binding settlement fails", async () => {
@@ -335,6 +570,35 @@ describe("GitHub App authority", () => {
     const recovered = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T13:01:00.000Z") });
     expect((await recovered.listRepositories({ connectionId, pageSize: 20 })).cleanupDegraded).toBe(true);
     expect((await recovered.inspectInstallation(connectionId)).status).toBe("degraded");
+    const restartedAfterFailure = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T13:30:00.000Z") });
+    expect((await restartedAfterFailure.inspectInstallation(connectionId)).status).toBe("degraded");
+  });
+
+  it("keeps a recovered connection degraded across restart when the recovery listing fails", async () => {
+    const { stateRoot } = await fixture();
+    let recovery = false;
+    const writer: AtomicJsonWriter = {
+      async write(filePath, value) {
+        if (typeof value === "object" && value !== null && (value as { status?: unknown }).status === "degraded") throw new Error("degraded-binding-write-failed");
+        await durableJsonWriter.write(filePath, value);
+      }
+    };
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      if (request.path.endsWith("/access_tokens")) return { status: 201, body: { token: "recovery-failure-secret", expires_at: recovery ? "2026-08-04T14:00:00.000Z" : "2026-08-04T13:00:00.000Z" } };
+      if (request.path.startsWith("/installation/repositories?")) return recovery ? { status: 502, body: {} } : { status: 200, body: { repositories: [] } };
+      if (request.path === "/installation/token") return recovery ? { status: 204, body: {} } : { status: 503, body: {} };
+      return { status: 500, body: {} };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await bind(authority);
+    await authority.listRepositories({ connectionId, pageSize: 20 });
+    recovery = true;
+    const recovered = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T13:01:00.000Z") });
+    await expect(recovered.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-upstream-invalid");
+    expect((await recovered.inspectInstallation(connectionId)).status).toBe("degraded");
+    const restarted = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T13:30:00.000Z") });
+    expect((await restarted.inspectInstallation(connectionId)).status).toBe("degraded");
   });
 
   it("parses the exact bytes from the validated descriptor and rejects metadata mutation", async () => {
