@@ -43,7 +43,8 @@
   editing.
 - Browser actions reference task, preview, service, or AI-profile IDs. They never provide
   executable commands or host paths.
-- AI integrations begin as PTY-based CLIs inside the workspace container.
+- AI integrations use provider-neutral, bounded PTY or strict bounded stdio protocols inside the
+  workspace container.
 - Preview routing is delegated to Caddy through a narrow adapter.
 - Never auto-merge or deploy production changes.
 
@@ -75,14 +76,44 @@ Avoid generic `shared` or `utils` packages. Put logic with the domain that owns 
 - Normal features and straightforward schema/code work do not automatically require an
   implement-review-correction-re-review cycle.
 
-## Model policy
+## Model roles
 
-- Commits, renames, and tiny changes: Luna Medium/High.
-- Normal scoped implementation: Luna XHigh.
-- Unclear repository exploration: Terra Medium.
-- Architecture, security, migrations, and complex boundaries: Sol Medium.
-- A failed focused Terra/Sol attempt: Sol High/Max.
-- Sol Ultra: never.
+| Phase | Model |
+| --- | --- |
+| Implementation | Luna |
+| Debugging and preflight | Terra |
+| Planning and architecture | Sol |
+
+### Luna — implementation
+
+- Luna High: normal implementation.
+- Luna XHigh: complex implementation.
+- Luna Max: critical or especially demanding implementation.
+
+### Terra — debugging and preflight
+
+- Terra Medium: normal and complex investigation.
+- Terra High: critical, broad, or difficult investigations.
+
+### Sol — planning
+
+- Sol Medium: complex planning and architectural decisions.
+- Sol High: critical, high-blast-radius, or difficult-to-reverse planning.
+
+Criticality considers consequences as well as technical complexity. A difficult isolated
+implementation may use Luna XHigh; moderately difficult authentication or migration work may
+require Luna Max because failure is costly.
+
+Clear task → Luna
+
+Unclear task or unknown root cause → Terra preflight/debugging → Luna implementation
+
+Complex architectural decision → Sol planning → Luna implementation
+
+Critical architecture → Sol High planning → Luna Max implementation → independent review
+
+All three models must not be used automatically. Sol is introduced only for a real planning or
+architectural decision.
 
 ## Chat rotation
 

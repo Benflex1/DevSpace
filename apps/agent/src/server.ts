@@ -9,6 +9,7 @@ import {
   extractDevSpaceProtocolHeaders,
   f10AgentApiV1EndpointByOperation,
   f11AiAgentApiV1EndpointByOperation,
+  githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
   parseEventCursor,
   type AgentExecutionFailure,
@@ -31,6 +32,7 @@ import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
 import { AiOutboxError } from "./ai-session-outbox.js";
 import { createAiStreamAdmission } from "./ai-stream-admission.js";
+import { createGithubAppAuthority, type GithubAppAuthority } from "./github-app.js";
 import {
   AI_STREAM_BACKPRESSURE_TIMEOUT_MS,
   AI_STREAM_LIVE_QUEUE_MAX_BYTES,
@@ -67,6 +69,7 @@ export interface AgentServerOptions {
   readonly createId?: () => string;
   readonly logger?: StructuredLogger;
   readonly aiRuntime?: AiSessionRuntime;
+  readonly githubAuthority?: GithubAppAuthority;
   /** Internal test seams may only lower stream admission and queue limits. */
   readonly aiStreamGlobalLimit?: number;
   readonly aiStreamPerSessionLimit?: number;
@@ -316,6 +319,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
     mode: process.env.DEVSPACE_AI_PROVIDER_MODE === "fake" ? "fake" : "codex" });
+  let githubAuthority = options.githubAuthority ?? null;
   const aiStreamAdmission = createAiStreamAdmission({
     globalLimit: Math.max(0, Math.min(options.aiStreamGlobalLimit ?? 4, 4)),
     perSessionLimit: Math.max(0, Math.min(options.aiStreamPerSessionLimit ?? 2, 2))
@@ -350,9 +354,13 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const)
       .map((operation) => f11AiAgentApiV1EndpointByOperation[operation]!)
       .find((endpoint) => url.pathname === endpoint.path);
+    const githubEndpoint = (["github.app.inspect", "github.installation.verify", "github.installation.inspect", "github.repositories.list"] as const)
+      .map((operation) => githubAgentApiV1EndpointByOperation[operation])
+      .find((endpoint) => request.method === endpoint.method && url.pathname === endpoint.path);
     const selectedEndpoint = request.method === "GET" && url.pathname === healthEndpoint.path ? healthEndpoint
       : request.method === "GET" && url.pathname === runtimeStatusEndpoint.path ? runtimeStatusEndpoint
       : request.method === "POST" && url.pathname === inspectEndpoint.path ? inspectEndpoint
+      : githubEndpoint !== undefined ? githubEndpoint
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["configuration-revision.register"].path ? agentApiV1EndpointByOperation["configuration-revision.register"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["configuration-runtime-plan.register"].path ? agentApiV1EndpointByOperation["configuration-runtime-plan.register"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.managed-store.create"].path ? agentApiV1EndpointByOperation["project.managed-store.create"]
@@ -410,6 +418,38 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     if (url.pathname !== eventEndpoint.path && !isAiStreamPath && url.search !== "") return requestError(response, requestId, now, {
       location: "query", field: null, reason: "unknown"
     });
+
+    if (githubEndpoint !== undefined) {
+      try {
+        let data: unknown;
+        if (githubEndpoint.requestDataSchema === null) {
+          if ((request.headers["content-length"] ?? "0") !== "0" || request.headers["transfer-encoding"] !== undefined) {
+            return requestError(response, requestId, now, { location: "body", field: null, reason: "inconsistent" });
+          }
+        } else {
+          let body: unknown;
+          try { body = await readJsonBody(request); } catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+          const parsed = githubEndpoint.requestBodySchema.safeParse(body);
+          if (!parsed.success) return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
+          data = parsed.data.data;
+        }
+        if (githubAuthority === null) throw new Error("github-app-unconfigured");
+        const result = githubEndpoint.operation === "github.app.inspect" ? await githubAuthority.inspectApp()
+          : githubEndpoint.operation === "github.installation.verify" ? await githubAuthority.verifyInstallation(data as never)
+          : githubEndpoint.operation === "github.installation.inspect" ? await githubAuthority.inspectInstallation((data as { connectionId: string }).connectionId)
+          : await githubAuthority.listRepositories(data as never);
+        return sendJson(response, 200, githubEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data: result }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        const selected = message === "github-connection-not-found" ? { status: 404, code: "GITHUB_CONNECTION_NOT_FOUND", retryable: false, details: {} }
+          : message === "github-token-lease-active" ? { status: 503, code: "GITHUB_TOKEN_LEASE_ACTIVE", retryable: true, details: {} }
+          : { status: message === "github-authority-invalid" || message === "github-installation-conflict" ? 422 : 503,
+              code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: message === "github-app-unconfigured" ? "unconfigured" : message === "github-authority-invalid" || message === "github-installation-conflict" ? "mismatch" : "upstream-unavailable" } };
+        return sendJson(response, selected.status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code: selected.code, message: "GitHub App authority could not be established safely.", retryable: selected.retryable, details: selected.details
+        } }));
+      }
+    }
 
     const aiStreamMatch = /^\/v1\/ai-sessions\/([0-9a-f-]+)\/events$/u.exec(url.pathname);
     if (request.method === "GET" && aiStreamMatch !== null) {
@@ -886,6 +926,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     async start() {
       if (started) return;
       startupPreviewReconciliationHealthy = true;
+      githubAuthority ??= await createGithubAppAuthority({ stateRoot: managedRoots.state, now, createId });
       await managed.initialize();
       await journal.initialize();
       if (managed.isHealthy) await execution.initialize();

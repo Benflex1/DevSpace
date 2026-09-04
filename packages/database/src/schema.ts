@@ -41,6 +41,8 @@ const processKinds = ["task", "terminal", "ai", "system"] as const;
 const previewProtocols = ["http"] as const;
 const previewTargetKinds = ["workspace", "service"] as const;
 const portLeaseStates = ["reserved", "active", "released", "stale"] as const;
+const githubConnectionAttemptStates = ["pending", "claimed", "connected", "failed"] as const;
+const githubConnectionStates = ["connected", "degraded", "failed"] as const;
 
 function quotedValues(values: readonly string[]): SQL {
   return sql.raw(values.map((value) => `'${value.replaceAll("'", "''")}'`).join(", "));
@@ -65,6 +67,10 @@ function uuidV7Check(name: string, column: SQLiteColumn) {
 
 function nullableUuidV7Check(name: string, column: SQLiteColumn) {
   return check(name, sql`${column} is null or (${uuidV7Expression(column)})`);
+}
+
+function decimalIdExpression(column: SQLiteColumn): SQL {
+  return sql`length(${column}) between 1 and 32 and ${column} not glob '*[^0-9]*' and (${column} = '0' or substr(${column}, 1, 1) <> '0')`;
 }
 
 function timestampCheck(name: string, column: SQLiteColumn, nullable = false) {
@@ -683,6 +689,56 @@ export const auditEvents = sqliteTable("audit_events", {
   timestampCheck("audit_events_created_at_timestamp_check", table.createdAt)
 ]);
 
+export const githubConnectionAttempts = sqliteTable("github_connection_attempts", {
+  connectionId: text("connection_id").primaryKey(),
+  stateHash: text("state_hash").notNull().unique("github_connection_attempts_state_hash_unique"),
+  status: text("status", { enum: githubConnectionAttemptStates }).notNull(),
+  expiresAt: text("expires_at").notNull(),
+  claimedInstallationId: text("claimed_installation_id"),
+  createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  failureClassification: text("failure_classification"),
+  rowVersion: integer("row_version").notNull().default(1)
+}, (table) => [
+  uuidV7Check("github_connection_attempts_connection_id_uuid_v7_check", table.connectionId),
+  check("github_connection_attempts_state_hash_check", sql`length(${table.stateHash}) = 64 and ${table.stateHash} not glob '*[^0-9a-f]*'`),
+  enumCheck("github_connection_attempts_status_check", table.status, githubConnectionAttemptStates),
+  timestampCheck("github_connection_attempts_expires_at_timestamp_check", table.expiresAt),
+  timestampCheck("github_connection_attempts_created_at_timestamp_check", table.createdAt),
+  timestampCheck("github_connection_attempts_updated_at_timestamp_check", table.updatedAt),
+  check("github_connection_attempts_claimed_installation_id_check", sql`${table.claimedInstallationId} is null or (${decimalIdExpression(table.claimedInstallationId)})`),
+  check("github_connection_attempts_row_version_check", sql`${table.rowVersion} >= 1`)
+]);
+
+export const githubConnections = sqliteTable("github_connections", {
+  connectionId: text("connection_id").primaryKey(),
+  installationId: text("installation_id").notNull(),
+  accountId: text("account_id").notNull(),
+  accountType: text("account_type", { enum: ["User", "Organization"] }).notNull(),
+  accountLogin: text("account_login").notNull(),
+  repositorySelection: text("repository_selection", { enum: ["all", "selected"] }).notNull(),
+  permissionsJson: text("permissions_json").notNull(),
+  status: text("status", { enum: githubConnectionStates }).notNull(),
+  verifiedAt: text("verified_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  rowVersion: integer("row_version").notNull().default(1)
+}, (table) => [
+  uuidV7Check("github_connections_connection_id_uuid_v7_check", table.connectionId),
+  unique("github_connections_installation_id_unique").on(table.installationId),
+  check("github_connections_installation_id_check", decimalIdExpression(table.installationId)),
+  check("github_connections_account_id_check", decimalIdExpression(table.accountId)),
+  enumCheck("github_connections_account_type_check", table.accountType, ["User", "Organization"]),
+  enumCheck("github_connections_repository_selection_check", table.repositorySelection, ["all", "selected"]),
+  jsonCheck("github_connections_permissions_json_check", table.permissionsJson),
+  enumCheck("github_connections_status_check", table.status, githubConnectionStates),
+  timestampCheck("github_connections_verified_at_timestamp_check", table.verifiedAt),
+  timestampCheck("github_connections_created_at_timestamp_check", table.createdAt),
+  timestampCheck("github_connections_updated_at_timestamp_check", table.updatedAt),
+  check("github_connections_row_version_check", sql`${table.rowVersion} >= 1`)
+]);
+
 export const schema = {
   projects,
   projectConfigRevisions,
@@ -700,7 +756,9 @@ export const schema = {
   aiProviderResumeMetadata,
   taskRuns,
   operations,
-  auditEvents
+  auditEvents,
+  githubConnectionAttempts,
+  githubConnections
 } as const;
 
 export const applicationTableNames = [
@@ -720,7 +778,9 @@ export const applicationTableNames = [
   "ai_provider_resume_metadata",
   "task_runs",
   "operations",
-  "audit_events"
+  "audit_events",
+  "github_connection_attempts",
+  "github_connections"
 ] as const;
 
 export type Project = typeof projects.$inferSelect;
@@ -755,3 +815,5 @@ export type Operation = typeof operations.$inferSelect;
 export type NewOperation = typeof operations.$inferInsert;
 export type AuditEvent = typeof auditEvents.$inferSelect;
 export type NewAuditEvent = typeof auditEvents.$inferInsert;
+export type GithubConnectionAttempt = typeof githubConnectionAttempts.$inferSelect;
+export type GithubConnection = typeof githubConnections.$inferSelect;

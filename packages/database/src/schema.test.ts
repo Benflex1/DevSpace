@@ -18,8 +18,8 @@ function rows<T>(database: Database.Database, sql: string): T[] {
 }
 
 describe("database schema metadata", () => {
-  test("exports exactly the accepted AI session application tables", () => {
-    expect(Object.keys(schema)).toHaveLength(17);
+  test("exports exactly the accepted application tables", () => {
+    expect(Object.keys(schema)).toHaveLength(19);
     expect(Object.values(schema).map(getTableName)).toEqual(applicationTableNames);
   });
 

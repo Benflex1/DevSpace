@@ -137,11 +137,13 @@ describe("Agent API v1 executable endpoint inventory", () => {
     expect(generated.description).toContain("Structural JSON Schema projection");
     expect(generated.$comment).toContain("Authoritative runtime Zod validation");
     expect(generated.$comment).toContain("semantic refinements");
-    expect(generated["x-devspace-endpoint-count"]).toBe(38);
+    expect(generated["x-devspace-endpoint-count"]).toBe(42);
     const definitions = generated.$defs as Record<string, unknown>;
     expect(definitions["operation.workspace.create.requestBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.successBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.errors"]).toBeDefined();
+    expect(definitions["operation.github.installation.verify.requestBody"]).toBeDefined();
+    expect(definitions["operation.github.repositories.list.successBody"]).toBeDefined();
     expect(definitions["operation.terminal.stream.requestBody"]).toBeUndefined();
     expect(definitions.EventCursor).toBeDefined();
     expect(definitions.EventSequence).toBeDefined();

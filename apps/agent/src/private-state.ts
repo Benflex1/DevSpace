@@ -139,6 +139,19 @@ export async function readStrictJson<Schema extends z.ZodType>(filePath: string,
   return result.data;
 }
 
+/** Parses the exact bytes already read through a validated private descriptor. */
+export function parseStrictJsonBytes<Schema extends z.ZodType>(bytes: Uint8Array, filePath: string, schema: Schema): z.infer<Schema> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new PrivateStateCorruptionError(filePath, "invalid JSON");
+  }
+  const result = schema.safeParse(parsed);
+  if (!result.success) throw new PrivateStateCorruptionError(filePath, "runtime schema validation failed");
+  return result.data;
+}
+
 export function assertContained(root: string, candidate: string): string {
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(candidate);

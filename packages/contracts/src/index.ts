@@ -91,6 +91,8 @@ export {
 } from "./f10-endpoints.js";
 export * from "./terminal.js";
 export * from "./ai-sessions.js";
+export * from "./github-app.js";
+export * from "./github-app-endpoints.js";
 export {
   CODEX_APP_SERVER_CLI_VERSION,
   CODEX_APP_SERVER_VERSION_OUTPUT,

@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated July 28, 2026.
+> Updated August 4, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -62,11 +62,14 @@ Agent-managed workspace; and no host/Coolify Docker socket is exposed.
 
 The next product target is a coherent semi-finished beta, not another foundation-only milestone.
 
-TypeScript 7 acceleration is complete. The active next product slice is AI Session Beta Slice B;
-the remaining beta path prioritizes:
+Milestones 0 and 1, TypeScript 7 acceleration, and PR #43 / AI Session Beta Checkpoint 1 are
+complete and merged. The current objective is the finished owner-controlled MVP. Private GitHub
+repository access is the active slice; this branch implements its Checkpoint 1 connection and
+repository-listing foundation, but that checkpoint is not merged or generally complete until the
+branch is reviewed and merged. The remaining path prioritizes:
 
-1. a browser-usable Codex-first AI session flow;
-2. private GitHub repository access;
+1. private GitHub repository access Checkpoints 1–3;
+2. the remaining browser-usable Codex approvals and structured-question flow;
 3. project creation from scratch;
 4. essential files, Git, task, Project Options, and Workbench UX;
 5. focused stabilization and visual polish based on real use.
@@ -402,12 +405,13 @@ Stop rule:
    - ✅ owner device-code onboarding and bounded real-provider browser validation passed; Checkpoint 1
      is complete
 
-2. ⏳ **Private GitHub repository access**
-   - make real private repositories usable through onboarding, clone/fetch, and push;
-   - keep credentials Agent-private, redacted, revocable, and out of repository URLs/logs;
-   - prefer a GitHub App when its setup remains bounded, with a fine-grained-token fallback for the
-     owner-only beta;
-   - support one GitHub account/install first rather than designing a generic provider platform.
+2. 🟡 **Private GitHub repository access**
+   - Checkpoint 1 is implemented on `feat/private-github-access`, pending review and merge: App-only
+     connection, configured numeric account authority, Agent-private state and token lifecycle,
+     repository listing, and minimal browser UI;
+   - Checkpoint 2 remains private inspect/clone/fetch/workspace creation and credential brokering;
+   - Checkpoint 3 remains explicit push and disconnect/revocation behavior;
+   - no OAuth, PAT, or fine-grained-token fallback is planned for this authority model.
 
 3. ⏳ **Create a project from scratch**
    - create a local managed Git repository and primary workspace without a remote;
@@ -436,19 +440,19 @@ Stop rule:
 
 ### Private GitHub repository access
 
-**Status: ❌ Not started — beta gate after the first AI slice**
+**Status: 🟡 Checkpoint 1 implemented on this branch; not yet merged**
 
-- ❌ Authenticate one owner-controlled GitHub account/installation
-- ❌ List/select authorized private repositories during onboarding
+- 🟡 Authenticate the administrator-configured owner account/installation through a GitHub App
+- 🟡 List authorized repositories outside project onboarding
 - ❌ Clone and fetch private repositories without embedding credentials in remote URLs
 - ❌ Push through an explicit user action
-- ❌ Keep credentials and short-lived tokens Agent-private
-- ❌ Redact credentials from logs, errors, process arguments, and persisted public state
+- 🟡 Keep credentials and short-lived tokens Agent-private
+- 🟡 Redact credentials from logs, errors, process arguments, and persisted public state
 - ❌ Revoke/disconnect access cleanly
 
 Sequencing decision:
 
-- Implement immediately after AI Session Beta Slice B.
+- Checkpoint 1 is the active branch; Checkpoints 2 and 3 remain pending.
 - It is required before inviting external beta users because most real development repositories are
   private.
 - Do not delay the first AI vertical slice for a generic multi-provider source-control abstraction.
@@ -491,7 +495,7 @@ This replaces the current Docker-exec PTY limitation where an Agent restart lose
 
 # Milestone 2 — High-quality Semi-finished Beta
 
-**Status: 🟡 Starting**
+**Status: 🟡 Active — owner-controlled MVP delivery**
 
 Goal: make DevSpace a coherent daily-use development product as quickly as possible without turning it
 into a VS Code clone or requiring production-grade handling of every theoretical edge case.
@@ -528,8 +532,8 @@ Completed: TypeScript 7 acceleration.
 
 Remaining delivery order:
 
-1. AI Session Beta Slice B
-2. Private GitHub repository access
+1. Private GitHub repository access Checkpoints 1–3
+2. AI Session Beta Checkpoint 2 approvals and structured questions
 3. Create project from scratch
 4. Files and Git essentials
 5. Tasks, Project Options, Workbench integration, and beta polish
@@ -572,7 +576,7 @@ AI Session Beta Slice B — Checkpoint 1:
 - ✅ Bounded changed-files summary after terminal turns
 - ✅ Clear degraded-session and restart-workspace fallback
 - ✅ Exact stopped-session restart with one durable history/event chain and monotonically increasing
-  Agent-owned provider-process generations (final-review correction awaiting independent verification)
+  Agent-owned provider-process generations
 - 🟡 One global Codex provider at a time remains the beta limitation
 - ✅ Checkpoint 1 passed: private Probe A, private Probe B, and the real browser first-write/read-
   only/interrupt/replay/Stop flow all used the Agent-owned Codex provider; provider exit, staging,
@@ -614,7 +618,7 @@ Deferred until later:
 
 ## Additional vertical slices
 
-- ❌ Private GitHub repository access
+- 🟡 Private GitHub repository access Checkpoint 1 implemented on this branch; Checkpoints 2/3 pending
 - ❌ Create project from scratch
 - ❌ Persistent terminals
 
