@@ -79,6 +79,10 @@ export const executableAgentErrorRegistry = Object.freeze({
     reason: z.enum(["unconfigured", "invalid", "mismatch", "suspended", "upstream-unavailable"])
   }) },
   GITHUB_TOKEN_LEASE_ACTIVE: { statuses: [503], retryable: true, detailsSchema: emptyDetailsSchema },
+  GITHUB_CONTENTS_PERMISSION_REQUIRED: { statuses: [403, 422], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_INSTALLATION_UNAVAILABLE: { statuses: [503], retryable: true, detailsSchema: emptyDetailsSchema },
+  GITHUB_REPOSITORY_NOT_AUTHORIZED: { statuses: [403, 404], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_GIT_AUTHENTICATION_FAILED: { statuses: [502, 503], retryable: false, detailsSchema: emptyDetailsSchema },
   ROOTLESS_RUNTIME_UNAVAILABLE: { statuses: [503], retryable: true, detailsSchema: z.strictObject({ component: z.literal("docker") }) },
   AGENT_INTERNAL_ERROR: { statuses: [500], retryable: true, detailsSchema: z.strictObject({ incidentId: uuidV7Schema }) }
 } as const);

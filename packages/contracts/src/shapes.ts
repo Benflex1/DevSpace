@@ -23,6 +23,7 @@ import {
   utcTimestampMsSchema,
   uuidV7Schema
 } from "./primitives.js";
+import { githubConnectionIdSchema, githubDecimalIdSchema, githubRepositorySchema } from "./github-app.js";
 
 export const configurationDocumentSchema = z.strictObject({
   format: z.literal("devspace.project-options/v1"),
@@ -52,7 +53,8 @@ export const revisionIdentitySchema = z.strictObject({
 
 export const sourceLocatorSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("registered-local"), sourceId: uuidV7Schema }),
-  z.strictObject({ kind: z.literal("remote"), url: remoteRepositoryUrlSchema })
+  z.strictObject({ kind: z.literal("remote"), url: remoteRepositoryUrlSchema }),
+  z.strictObject({ kind: z.literal("github-app"), connectionId: githubConnectionIdSchema, repositoryId: githubDecimalIdSchema })
 ]);
 export const inspectSourceDataSchema = z.strictObject({ source: sourceLocatorSchema });
 export const createManagedStoreDataSchema = z.strictObject({
@@ -162,7 +164,7 @@ export const configurationValidationDataSchema = z.strictObject({
   configurationHash: projectOptionsRevisionHashSchema
 });
 
-export const sourceInspectionDataSchema = z.strictObject({
+const publicSourceInspectionDataSchema = z.strictObject({
   sourceKind: z.enum(["registered-local", "remote"]),
   isGitRepository: z.boolean(),
   defaultBranch: gitBranchNameSchema.nullable(),
@@ -172,6 +174,22 @@ export const sourceInspectionDataSchema = z.strictObject({
     context.addIssue({ code: "custom", message: "Non-Git sources cannot have branch or commit data" });
   }
 });
+export const githubSourceInspectionDataSchema = z.strictObject({
+  sourceKind: z.literal("github-app"),
+  isGitRepository: z.boolean(),
+  defaultBranch: gitBranchNameSchema.nullable(),
+  headCommit: gitObjectIdSchema.nullable(),
+  repository: githubRepositorySchema,
+  cleanupDegraded: z.boolean()
+}).superRefine((data, context) => {
+  if (!data.isGitRepository && (data.defaultBranch !== null || data.headCommit !== null)) {
+    context.addIssue({ code: "custom", message: "Non-Git sources cannot have branch or commit data" });
+  }
+});
+export const sourceInspectionDataSchema = z.discriminatedUnion("sourceKind", [
+  publicSourceInspectionDataSchema,
+  githubSourceInspectionDataSchema
+]);
 
 export const gitInspectionDataSchema = z.strictObject({
   projectId: uuidV7Schema,

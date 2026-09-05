@@ -16,6 +16,15 @@ export const githubInstallationVerifyDataSchema = z.strictObject({
 });
 export type GithubInstallationVerifyData = z.infer<typeof githubInstallationVerifyDataSchema>;
 
+export const githubInstallationRefreshDataSchema = z.strictObject({ connectionId: githubConnectionIdSchema });
+export type GithubInstallationRefreshData = z.infer<typeof githubInstallationRefreshDataSchema>;
+
+export const githubRepositoryResolveDataSchema = z.strictObject({
+  connectionId: githubConnectionIdSchema,
+  repositoryId: githubDecimalIdSchema
+});
+export type GithubRepositoryResolveData = z.infer<typeof githubRepositoryResolveDataSchema>;
+
 export const githubConnectionInspectDataSchema = z.strictObject({ connectionId: githubConnectionIdSchema });
 export const githubAppInspectionSchema = z.strictObject({
   configured: z.boolean(),
@@ -48,6 +57,9 @@ export const githubRepositoriesListDataSchema = z.strictObject({
 });
 export type GithubRepositoriesListData = z.infer<typeof githubRepositoriesListDataSchema>;
 
+const githubOwnerLoginSchema = z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u);
+const githubRepositoryNameSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/u);
+
 const cleanGithubUrlSchema = z.string().min(1).max(2_048).superRefine((value, context) => {
   try {
     const url = new URL(value);
@@ -60,12 +72,23 @@ const cleanGithubUrlSchema = z.string().min(1).max(2_048).superRefine((value, co
 
 export const githubRepositorySchema = z.strictObject({
   repositoryId: githubDecimalIdSchema,
-  ownerLogin: z.string().min(1).max(255),
-  name: z.string().min(1).max(255),
-  fullName: z.string().min(3).max(512),
+  ownerLogin: githubOwnerLoginSchema,
+  name: githubRepositoryNameSchema,
+  fullName: z.string().min(3).max(140),
   cleanHttpsUrl: cleanGithubUrlSchema,
   defaultBranch: z.string().min(1).max(255),
   private: z.boolean(), archived: z.boolean(), disabled: z.boolean()
+}).superRefine((value, context) => {
+  if (value.fullName !== `${value.ownerLogin}/${value.name}`) {
+    context.addIssue({ code: "custom", path: ["fullName"], message: "Full name must match owner and repository name." });
+  }
+  if (value.cleanHttpsUrl !== `https://github.com/${value.fullName}.git`) {
+    context.addIssue({ code: "custom", path: ["cleanHttpsUrl"], message: "Clean URL must match owner and repository name." });
+  }
+});
+export const githubRepositoryResolutionSchema = z.strictObject({
+  repository: githubRepositorySchema,
+  cleanupDegraded: z.boolean()
 });
 export const githubRepositoryPageSchema = z.strictObject({
   repositories: z.array(githubRepositorySchema).max(100),
@@ -73,3 +96,4 @@ export const githubRepositoryPageSchema = z.strictObject({
   cleanupDegraded: z.boolean()
 });
 export type GithubRepositoryPage = z.infer<typeof githubRepositoryPageSchema>;
+export type GithubRepositoryResolution = z.infer<typeof githubRepositoryResolutionSchema>;
