@@ -247,13 +247,15 @@ export class ExternalExecutionFence {
     readonly operationId: string;
     readonly projectId: string;
     readonly role: ExternalExecutionRole;
+    /** An operation-local execution identity may be allocated before spawn so an askpass capability can bind to it. */
+    readonly executionId?: string;
     readonly args: readonly string[];
     readonly timeoutMs: number;
     readonly maxOutputBytes: number;
     readonly env: NodeJS.ProcessEnv;
   }): Promise<ExternalExecutionResult> {
     await this.awaitProject(input.projectId);
-    const executionId = this.createId();
+    const executionId = input.executionId ?? this.createId();
     const createdAt = this.now();
     let marker: ExternalExecutionMarker = reservedMarkerSchema.parse({
       version: 1, phase: "reserved", operationId: input.operationId, projectId: input.projectId,

@@ -253,6 +253,33 @@ complete-v1 endpoint composition. The remaining 26 rows are unchanged and author
 The only F09 path parameter is `terminalId`. It is one decoded path segment and must be a `UuidV7`;
 percent-encoded or non-canonical UUID spellings are rejected.
 
+## Active GitHub App endpoint extension
+
+The active complete-v1 composition contains the historical Agent endpoints plus the six GitHub App
+operations below (44 endpoint descriptors in the generated contract inventory). The browser never
+calls these endpoints directly; Web authenticates the actor, proves connection ownership, and calls
+the Agent over its existing contract transport.
+
+| Stable operation name | Method | Exact path | Body data schema | Class | Success |
+| --- | --- | --- | --- | --- | --- |
+| `github.app.inspect` | GET | `/v1/github/app/inspect` | none | non-mutating | `200 GithubAppInspection` |
+| `github.installation.verify` | POST | `/v1/github/installations/verify` | `GithubInstallationVerifyData` | non-mutating | `200 GithubInstallationInspection` |
+| `github.installation.inspect` | POST | `/v1/github/installations/inspect` | `GithubConnectionInspectData` | non-mutating | `200 GithubInstallationInspection` |
+| `github.installation.refresh` | POST | `/v1/github/installations/refresh` | `GithubInstallationRefreshData` | non-mutating | `200 GithubInstallationInspection` |
+| `github.repositories.list` | POST | `/v1/github/repositories/list` | `GithubRepositoriesListData` | non-mutating | `200 GithubRepositoryPage` |
+| `github.repositories.resolve` | POST | `/v1/github/repositories/resolve` | `GithubRepositoryResolveData` | non-mutating | `200 GithubRepositoryResolution` |
+
+`GithubDecimalId` is a canonical decimal string with no leading zero except `0`, retained as a
+string internally even when the upstream JSON representation is numeric. `GithubRepository` is
+safe metadata only: `{ repositoryId, ownerLogin, name, fullName, cleanHttpsUrl, defaultBranch,
+private, archived, disabled }`. `cleanHttpsUrl` is derived and validated as
+`https://github.com/<owner>/<name>.git`; it is never an authority input for a GitHub App source.
+
+`github.installation.refresh` repeats App and exact-installation proof and atomically refreshes the
+safe installation permission snapshot. `github.repositories.resolve` accepts only
+`{ connectionId, repositoryId }`; it resolves current installation metadata by immutable ID. A
+browser cannot submit a repository URL, owner, name, or full name for this source variant.
+
 ## Request data schemas
 
 Every object and union variant below is strict. Every displayed field is required and non-null
@@ -306,6 +333,11 @@ SourceLocator =
       kind: "remote",
       url: RemoteRepositoryUrl
     }
+  | {
+      kind: "github-app",
+      connectionId: GithubConnectionId,
+      repositoryId: GithubDecimalId
+    }
 
 InspectSourceData = {
   source: SourceLocator
@@ -320,6 +352,11 @@ ProjectIdentityData = {
   projectId: UuidV7
 }
 
+ProjectFetchData = {
+  projectId: UuidV7,
+  source?: SourceLocator
+}
+
 InspectGitData = {
   projectId: UuidV7,
   workspaceId: UuidV7 | null
@@ -327,8 +364,10 @@ InspectGitData = {
 ```
 
 A `registered-local` source ID names one administrator-configured source location. Requests never
-carry its host path. A remote URL must contain no embedded credential. `workspaceId: null` asks for
-the managed project store; a UUID asks for that project's workspace worktree.
+carry its host path. A remote URL must contain no embedded credential. A `github-app` source is
+authorized only by the exact `{ connectionId, repositoryId }` pair; its URL/name fields are
+refreshable metadata and are not request authority. `workspaceId: null` asks for the managed project
+store; a UUID asks for that project's workspace worktree.
 
 ### Workspace shapes
 
@@ -533,17 +572,29 @@ echo them merely for convenience.
 ### Inspection response shapes
 
 ```text
-SourceInspectionData = {
+PublicSourceInspectionData = {
   sourceKind: "registered-local" | "remote",
   isGitRepository: boolean,
   defaultBranch: GitBranchName | null,
   headCommit: GitObjectId | null
 }
+
+GithubSourceInspectionData = {
+  sourceKind: "github-app",
+  isGitRepository: boolean,
+  defaultBranch: GitBranchName | null,
+  headCommit: GitObjectId | null,
+  repository: GithubRepository,
+  cleanupDegraded: boolean
+}
+
+SourceInspectionData = PublicSourceInspectionData | GithubSourceInspectionData
 ```
 
 `defaultBranch` and `headCommit` are both null when `isGitRepository` is false. A Git repository
 may have an unborn default branch, in which case `defaultBranch` is non-null and `headCommit` is
-null.
+null. The GitHub variant also returns validated safe metadata and cleanup-degraded status; it uses
+the exact scoped read token and bounded askpass path for `git ls-remote --symref … HEAD`.
 
 ```text
 GitInspectionData = {
@@ -642,7 +693,8 @@ independent readiness signal and must be false when the observed state is `inact
 
 ## Stable error registry
 
-The executable F09 registry contains **23 codes**. Retryability is a literal part of each code's
+The executable registry contains **30 codes**: the historical F09 errors plus the seven GitHub App
+authority/credential errors below. Retryability is a literal part of each code's
 schema. `EmptyDetails` means the exact strict object `{}`. F10 error names retained later in this
 document are not members of this registry, F09 runtime schemas, exports, or fixtures.
 
@@ -669,6 +721,13 @@ document are not members of this registry, F09 runtime schemas, exports, or fixt
 | `AI_NOT_CONFIGURED` | The workspace's registered Project Options revision has `aiProfile: null`. | `422` | false | `{ workspaceId: UuidV7, revisionId: UuidV7 }` | route-specific |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | The Web-materialized preview hostname is malformed, outside the approved domain registry, or inconsistent with the exact revision pattern and identity. | `422` | false | `{ previewId: UuidV7 }` | route-specific |
 | `GATEWAY_UPDATE_FAILED` | The narrow preview gateway adapter could not apply the derived route update. | `503` | true | `{ previewId: UuidV7 }` | route-specific |
+| `GITHUB_CONNECTION_NOT_FOUND` | The requested retained GitHub connection is absent from Agent-private state. | `404` | false | `{}` | GitHub routes |
+| `GITHUB_AUTHORITY_INVALID` | App or installation identity/configuration proof failed. | `409`, `422`, or `503` | false | `{ reason: one of ("unconfigured", "invalid", "mismatch", "suspended", "upstream-unavailable") }` | GitHub routes |
+| `GITHUB_TOKEN_LEASE_ACTIVE` | A prior or concurrent token transaction remains conservatively blocked. | `503` | true | `{}` | GitHub/private Git routes |
+| `GITHUB_CONTENTS_PERMISSION_REQUIRED` | The live installation lacks effective Contents permission for private Git. | `403` or `422` | false | `{}` | GitHub/private Git routes |
+| `GITHUB_INSTALLATION_UNAVAILABLE` | The bound installation is missing, suspended, or unavailable. | `503` | true | `{}` | GitHub/private Git routes |
+| `GITHUB_REPOSITORY_NOT_AUTHORIZED` | The exact repository ID is missing, unselected, foreign, or not returned by scoped mint validation. | `403` or `404` | false | `{}` | GitHub/private Git routes |
+| `GITHUB_GIT_AUTHENTICATION_FAILED` | Git rejected a freshly delivered exact-repository credential. | `502` or `503` | false | `{}` | private Git routes |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | The dedicated rootless runtime required by the route is unavailable. | `503` | true | `{ component: "docker" }` | route-specific |
 | `AGENT_INTERNAL_ERROR` | An unexpected redacted Agent failure occurred. | `500` | true | `{ incidentId: UuidV7 }` | global |
 
@@ -695,9 +754,15 @@ except the already-exact `G` protocol-version mapping.
 | `configuration-revision.validate` | `G`; `CONFIGURATION_INVALID (422)` |
 | `configuration-revision.register` | `G`; `M`; `CONFIGURATION_INVALID (422)` |
 | `configuration-runtime-plan.register` | `G`; `M`; `CONFIGURATION_NOT_REGISTERED (422)`; `CONFIGURATION_INVALID (422)`; `RUNTIME_POLICY_VIOLATION (422; policy runtime-plan-mismatch)` |
-| `project.source.inspect` | `G`; `SOURCE_NOT_FOUND (404)`; `SOURCE_UNAVAILABLE (503)`; `RUNTIME_POLICY_VIOLATION (422)` |
-| `project.managed-store.create` | `G`; `M`; `RESOURCE_STATE_CONFLICT` (409; type `project`); `SOURCE_NOT_FOUND (404)`; `SOURCE_INVALID (422)`; `SOURCE_UNAVAILABLE (503)`; `RUNTIME_POLICY_VIOLATION (422)` |
-| `project.fetch` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `SOURCE_UNAVAILABLE (503)` |
+| `project.source.inspect` | `G`; `SOURCE_NOT_FOUND (404)`; `SOURCE_UNAVAILABLE (503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_REPOSITORY_NOT_AUTHORIZED (403/404)`; `GITHUB_CONTENTS_PERMISSION_REQUIRED (403/422)`; `GITHUB_GIT_AUTHENTICATION_FAILED (502/503)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)`; `RUNTIME_POLICY_VIOLATION (422)` |
+| `project.managed-store.create` | `G`; `M`; `RESOURCE_STATE_CONFLICT` (409; type `project`); `SOURCE_NOT_FOUND (404)`; `SOURCE_INVALID (422)`; `SOURCE_UNAVAILABLE (503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_REPOSITORY_NOT_AUTHORIZED (403/404)`; `GITHUB_CONTENTS_PERMISSION_REQUIRED (403/422)`; `GITHUB_GIT_AUTHENTICATION_FAILED (502/503)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)`; `RUNTIME_POLICY_VIOLATION (422)` |
+| `project.fetch` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `SOURCE_UNAVAILABLE (503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_REPOSITORY_NOT_AUTHORIZED (403/404)`; `GITHUB_CONTENTS_PERMISSION_REQUIRED (403/422)`; `GITHUB_GIT_AUTHENTICATION_FAILED (502/503)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)` |
+| `github.app.inspect` | `G`; `GITHUB_AUTHORITY_INVALID (409/422/503)` |
+| `github.installation.verify` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)` |
+| `github.installation.inspect` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)` |
+| `github.installation.refresh` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)` |
+| `github.repositories.list` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)` |
+| `github.repositories.resolve` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_REPOSITORY_NOT_AUTHORIZED (403/404)`; `GITHUB_CONTENTS_PERMISSION_REQUIRED (403/422)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)` |
 | `project.git.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `SOURCE_UNAVAILABLE (503)` |
 | `workspace.create` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `CONFIGURATION_NOT_REGISTERED (422)`; `WORKSPACE_STATE_CONFLICT (409)`; `RUNTIME_POLICY_VIOLATION (422)`; `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
 | `workspace.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
@@ -1043,7 +1108,7 @@ that can arise after a mutation has already been durably accepted and returned H
 not the F09 route-error union and has no response `meta` wrapper.
 
 Every variant is the strict object `{ code, message: ErrorMessage, retryable, details }`.
-`code` discriminates the exact 18-member union below. Retryability and details reuse the existing
+`code` discriminates the exact 23-member union below. Retryability and details reuse the existing
 F09 contracts exactly:
 
 | Allowed code | Retryable | Exact strict details |
@@ -1055,6 +1120,11 @@ F09 contracts exactly:
 | `SOURCE_NOT_FOUND` | false | `{ sourceId: UuidV7 }` |
 | `SOURCE_INVALID` | false | `{ reason: one of ("not-a-git-repository", "unsupported-repository-format") }` |
 | `SOURCE_UNAVAILABLE` | true | `{}` |
+| `GITHUB_CONTENTS_PERMISSION_REQUIRED` | false | `{}` |
+| `GITHUB_INSTALLATION_UNAVAILABLE` | true | `{}` |
+| `GITHUB_REPOSITORY_NOT_AUTHORIZED` | false | `{}` |
+| `GITHUB_GIT_AUTHENTICATION_FAILED` | false | `{}` |
+| `GITHUB_TOKEN_LEASE_ACTIVE` | true | `{}` |
 | `WORKSPACE_STATE_CONFLICT` | false | `{ workspaceId: UuidV7, desiredState: WorkspaceDesiredState, observedState: WorkspaceObservedState, action: one of ("create", "start", "stop", "rebuild", "archive", "remove", "run-task", "create-terminal", "activate-preview", "start-ai-session") }` |
 | `RESOURCE_STATE_CONFLICT` | false | `{ resource: ResourceReference, action: one of ("create", "start", "stop", "close", "attach", "activate", "deactivate", "interrupt", "resume") }` |
 | `DIRTY_WORKSPACE_REQUIRES_ACTION` | false | `{ workspaceId: UuidV7, requestedAction: one of ("archive", "remove") }` |
@@ -1067,8 +1137,9 @@ F09 contracts exactly:
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | true | `{ component: "docker" }` |
 | `AGENT_INTERNAL_ERROR` | true | `{ incidentId: UuidV7 }` |
 
-Unknown fields, arbitrary details, F10 cursor errors, and the five pre-acceptance-only F09 errors
-are rejected. For an execution failure, `retryable: true` means a caller may submit a new operation
+Unknown fields, arbitrary details, F10 cursor errors, and route-only pre-acceptance errors such as
+`GITHUB_CONNECTION_NOT_FOUND` and `GITHUB_AUTHORITY_INVALID` are rejected. For an execution failure,
+`retryable: true` means a caller may submit a new operation
 with a new operation ID after the transient condition changes or is addressed. It never causes
 replay of the same operation ID to execute again; same-ID replay remains governed by F09 durable
 idempotency and returns the retained outcome without retrying execution.
@@ -1109,8 +1180,8 @@ wire failure does not duplicate the operation name.
 | --- | --- |
 | `configuration-revision.register` | `AGENT_INTERNAL_ERROR` |
 | `configuration-runtime-plan.register` | `CONFIGURATION_NOT_REGISTERED`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
-| `project.managed-store.create` | `RESOURCE_STATE_CONFLICT`; `SOURCE_NOT_FOUND`; `SOURCE_INVALID`; `SOURCE_UNAVAILABLE`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
-| `project.fetch` | `PROJECT_NOT_FOUND`; `SOURCE_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
+| `project.managed-store.create` | `RESOURCE_STATE_CONFLICT`; `SOURCE_NOT_FOUND`; `SOURCE_INVALID`; `SOURCE_UNAVAILABLE`; `GITHUB_CONTENTS_PERMISSION_REQUIRED`; `GITHUB_INSTALLATION_UNAVAILABLE`; `GITHUB_REPOSITORY_NOT_AUTHORIZED`; `GITHUB_GIT_AUTHENTICATION_FAILED`; `GITHUB_TOKEN_LEASE_ACTIVE`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
+| `project.fetch` | `PROJECT_NOT_FOUND`; `SOURCE_UNAVAILABLE`; `GITHUB_CONTENTS_PERMISSION_REQUIRED`; `GITHUB_INSTALLATION_UNAVAILABLE`; `GITHUB_REPOSITORY_NOT_AUTHORIZED`; `GITHUB_GIT_AUTHENTICATION_FAILED`; `GITHUB_TOKEN_LEASE_ACTIVE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.create` | `PROJECT_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.start` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.stop` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |

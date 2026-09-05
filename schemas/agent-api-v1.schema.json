@@ -528,6 +528,30 @@
       "properties": {},
       "additionalProperties": false
     },
+    "error.GITHUB_CONTENTS_PERMISSION_REQUIRED.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "error.GITHUB_INSTALLATION_UNAVAILABLE.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "error.GITHUB_REPOSITORY_NOT_AUTHORIZED.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "error.GITHUB_GIT_AUTHENTICATION_FAILED.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
     "error.ROOTLESS_RUNTIME_UNAVAILABLE.details": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -1069,6 +1093,151 @@
             "code": {
               "type": "string",
               "const": "SOURCE_UNAVAILABLE"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": true
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": true
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GITHUB_TOKEN_LEASE_ACTIVE"
             },
             "message": {
               "type": "string",
@@ -1973,6 +2142,151 @@
                     "code": {
                       "type": "string",
                       "const": "SOURCE_UNAVAILABLE"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GITHUB_TOKEN_LEASE_ACTIVE"
                     },
                     "message": {
                       "type": "string",
@@ -4245,6 +4559,151 @@
                         "properties": {
                           "code": {
                             "type": "string",
+                            "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GITHUB_TOKEN_LEASE_ACTIVE"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
                             "const": "WORKSPACE_STATE_CONFLICT"
                           },
                           "message": {
@@ -5758,6 +6217,151 @@
                         "code": {
                           "type": "string",
                           "const": "SOURCE_UNAVAILABLE"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GITHUB_TOKEN_LEASE_ACTIVE"
                         },
                         "message": {
                           "type": "string",
@@ -16785,6 +17389,316 @@
               "properties": {
                 "code": {
                   "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_TOKEN_LEASE_ACTIVE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
                   "const": "RUNTIME_POLICY_VIOLATION"
                 },
                 "message": {
@@ -16871,6 +17785,31 @@
                     "url"
                   ],
                   "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "github-app"
+                    },
+                    "connectionId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "repositoryId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32,
+                      "pattern": "^(?:0|[1-9][0-9]*)$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "connectionId",
+                    "repositoryId"
+                  ],
+                  "additionalProperties": false
                 }
               ]
             }
@@ -16914,47 +17853,155 @@
           "additionalProperties": false
         },
         "data": {
-          "type": "object",
-          "properties": {
-            "sourceKind": {
-              "type": "string",
-              "enum": [
-                "registered-local",
-                "remote"
-              ]
-            },
-            "isGitRepository": {
-              "type": "boolean"
-            },
-            "defaultBranch": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "headCommit": {
-              "anyOf": [
-                {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "sourceKind": {
                   "type": "string",
-                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                  "enum": [
+                    "registered-local",
+                    "remote"
+                  ]
                 },
-                {
-                  "type": "null"
+                "isGitRepository": {
+                  "type": "boolean"
+                },
+                "defaultBranch": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "headCommit": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
-              ]
+              },
+              "required": [
+                "sourceKind",
+                "isGitRepository",
+                "defaultBranch",
+                "headCommit"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sourceKind": {
+                  "type": "string",
+                  "const": "github-app"
+                },
+                "isGitRepository": {
+                  "type": "boolean"
+                },
+                "defaultBranch": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "headCommit": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "repository": {
+                  "type": "object",
+                  "properties": {
+                    "repositoryId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32,
+                      "pattern": "^(?:0|[1-9][0-9]*)$"
+                    },
+                    "ownerLogin": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 39,
+                      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100,
+                      "pattern": "^[A-Za-z0-9_.-]+$"
+                    },
+                    "fullName": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 140
+                    },
+                    "cleanHttpsUrl": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048
+                    },
+                    "defaultBranch": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "private": {
+                      "type": "boolean"
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    },
+                    "disabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "repositoryId",
+                    "ownerLogin",
+                    "name",
+                    "fullName",
+                    "cleanHttpsUrl",
+                    "defaultBranch",
+                    "private",
+                    "archived",
+                    "disabled"
+                  ],
+                  "additionalProperties": false
+                },
+                "cleanupDegraded": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sourceKind",
+                "isGitRepository",
+                "defaultBranch",
+                "headCommit",
+                "repository",
+                "cleanupDegraded"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "sourceKind",
-            "isGitRepository",
-            "defaultBranch",
-            "headCommit"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       "required": [
@@ -17733,6 +18780,316 @@
               "properties": {
                 "code": {
                   "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_TOKEN_LEASE_ACTIVE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
                   "const": "RUNTIME_POLICY_VIOLATION"
                 },
                 "message": {
@@ -17821,6 +19178,31 @@
                   "required": [
                     "kind",
                     "url"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "github-app"
+                    },
+                    "connectionId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "repositoryId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32,
+                      "pattern": "^(?:0|[1-9][0-9]*)$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "connectionId",
+                    "repositoryId"
                   ],
                   "additionalProperties": false
                 }
@@ -18458,6 +19840,316 @@
             "error"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_TOKEN_LEASE_ACTIVE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -18471,6 +20163,70 @@
             "projectId": {
               "type": "string",
               "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "source": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "registered-local"
+                    },
+                    "sourceId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "sourceId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "remote"
+                    },
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "url"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "github-app"
+                    },
+                    "connectionId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "repositoryId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32,
+                      "pattern": "^(?:0|[1-9][0-9]*)$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "connectionId",
+                    "repositoryId"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
             }
           },
           "required": [
@@ -35250,6 +37006,151 @@
                             "properties": {
                               "code": {
                                 "type": "string",
+                                "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": true
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GITHUB_GIT_AUTHENTICATION_FAILED"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GITHUB_TOKEN_LEASE_ACTIVE"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": true
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
                                 "const": "WORKSPACE_STATE_CONFLICT"
                               },
                               "message": {
@@ -48900,6 +50801,68 @@
             "error"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -49472,6 +51435,68 @@
             "error"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -49499,6 +51524,633 @@
       "additionalProperties": false
     },
     "operation.github.installation.inspect.successBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "respondedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "requestId",
+            "respondedAt"
+          ],
+          "additionalProperties": false
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "connectionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "installationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?:0|[1-9][0-9]*)$"
+            },
+            "accountId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?:0|[1-9][0-9]*)$"
+            },
+            "accountType": {
+              "type": "string",
+              "enum": [
+                "User",
+                "Organization"
+              ]
+            },
+            "accountLogin": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "repositorySelection": {
+              "type": "string",
+              "enum": [
+                "all",
+                "selected"
+              ]
+            },
+            "permissions": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z_]+$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              }
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "connected",
+                "degraded"
+              ]
+            },
+            "verifiedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            "cleanupDegraded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "connectionId",
+            "installationId",
+            "accountId",
+            "accountType",
+            "accountLogin",
+            "repositorySelection",
+            "permissions",
+            "status",
+            "verifiedAt",
+            "cleanupDegraded"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "meta",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.github.installation.refresh.headers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "X-DevSpace-Protocol-Version": {
+          "type": "string",
+          "const": "1"
+        },
+        "X-DevSpace-Request-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "X-DevSpace-Sent-At": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At"
+      ],
+      "additionalProperties": false
+    },
+    "operation.github.installation.refresh.pathParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "operation.github.installation.refresh.errors": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROTOCOL_VERSION_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "supportedProtocolVersion": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "receivedProtocolVersion": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "supportedProtocolVersion",
+                    "receivedProtocolVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "REQUEST_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "enum": [
+                        "headers",
+                        "path",
+                        "query",
+                        "body"
+                      ]
+                    },
+                    "field": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9.[\\]_-]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "missing",
+                        "malformed",
+                        "unknown",
+                        "inconsistent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "field",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AGENT_INTERNAL_ERROR"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "incidentId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_CONNECTION_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_AUTHORITY_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "unconfigured",
+                        "invalid",
+                        "mismatch",
+                        "suspended",
+                        "upstream-unavailable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation.github.installation.refresh.requestBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "connectionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "required": [
+            "connectionId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.github.installation.refresh.successBody": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
@@ -50069,6 +52721,68 @@
               "properties": {
                 "code": {
                   "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
                   "const": "GITHUB_TOKEN_LEASE_ACTIVE"
                 },
                 "message": {
@@ -50182,17 +52896,19 @@
                   "ownerLogin": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 255
+                    "maxLength": 39,
+                    "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
                   },
                   "name": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 255
+                    "maxLength": 100,
+                    "pattern": "^[A-Za-z0-9_.-]+$"
                   },
                   "fullName": {
                     "type": "string",
                     "minLength": 3,
-                    "maxLength": 512
+                    "maxLength": 140
                   },
                   "cleanHttpsUrl": {
                     "type": "string",
@@ -50258,10 +52974,819 @@
         "data"
       ],
       "additionalProperties": false
+    },
+    "operation.github.repositories.resolve.headers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "X-DevSpace-Protocol-Version": {
+          "type": "string",
+          "const": "1"
+        },
+        "X-DevSpace-Request-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "X-DevSpace-Sent-At": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At"
+      ],
+      "additionalProperties": false
+    },
+    "operation.github.repositories.resolve.pathParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "operation.github.repositories.resolve.errors": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROTOCOL_VERSION_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "supportedProtocolVersion": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "receivedProtocolVersion": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "supportedProtocolVersion",
+                    "receivedProtocolVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "REQUEST_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "enum": [
+                        "headers",
+                        "path",
+                        "query",
+                        "body"
+                      ]
+                    },
+                    "field": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9.[\\]_-]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "missing",
+                        "malformed",
+                        "unknown",
+                        "inconsistent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "field",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AGENT_INTERNAL_ERROR"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "incidentId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_CONNECTION_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_AUTHORITY_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "unconfigured",
+                        "invalid",
+                        "mismatch",
+                        "suspended",
+                        "upstream-unavailable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_INSTALLATION_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_REPOSITORY_NOT_AUTHORIZED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GITHUB_TOKEN_LEASE_ACTIVE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation.github.repositories.resolve.requestBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "connectionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "repositoryId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?:0|[1-9][0-9]*)$"
+            }
+          },
+          "required": [
+            "connectionId",
+            "repositoryId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.github.repositories.resolve.successBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "respondedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "requestId",
+            "respondedAt"
+          ],
+          "additionalProperties": false
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "object",
+              "properties": {
+                "repositoryId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32,
+                  "pattern": "^(?:0|[1-9][0-9]*)$"
+                },
+                "ownerLogin": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 39,
+                  "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100,
+                  "pattern": "^[A-Za-z0-9_.-]+$"
+                },
+                "fullName": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 140
+                },
+                "cleanHttpsUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "defaultBranch": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255
+                },
+                "private": {
+                  "type": "boolean"
+                },
+                "archived": {
+                  "type": "boolean"
+                },
+                "disabled": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "repositoryId",
+                "ownerLogin",
+                "name",
+                "fullName",
+                "cleanHttpsUrl",
+                "defaultBranch",
+                "private",
+                "archived",
+                "disabled"
+              ],
+              "additionalProperties": false
+            },
+            "cleanupDegraded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "repository",
+            "cleanupDegraded"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "meta",
+        "data"
+      ],
+      "additionalProperties": false
     }
   },
   "x-devspace-protocol-version": 1,
-  "x-devspace-endpoint-count": 42,
+  "x-devspace-endpoint-count": 44,
   "x-devspace-operations": {
     "agent.health.get": {
       "method": "GET",
@@ -50688,6 +54213,39 @@
           ]
         },
         {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_REPOSITORY_NOT_AUTHORIZED",
+          "statuses": [
+            403,
+            404
+          ]
+        },
+        {
+          "code": "GITHUB_CONTENTS_PERMISSION_REQUIRED",
+          "statuses": [
+            403,
+            422
+          ]
+        },
+        {
+          "code": "GITHUB_GIT_AUTHENTICATION_FAILED",
+          "statuses": [
+            502,
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_TOKEN_LEASE_ACTIVE",
+          "statuses": [
+            503
+          ]
+        },
+        {
           "code": "RUNTIME_POLICY_VIOLATION",
           "statuses": [
             422
@@ -50783,6 +54341,39 @@
           ]
         },
         {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_REPOSITORY_NOT_AUTHORIZED",
+          "statuses": [
+            403,
+            404
+          ]
+        },
+        {
+          "code": "GITHUB_CONTENTS_PERMISSION_REQUIRED",
+          "statuses": [
+            403,
+            422
+          ]
+        },
+        {
+          "code": "GITHUB_GIT_AUTHENTICATION_FAILED",
+          "statuses": [
+            502,
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_TOKEN_LEASE_ACTIVE",
+          "statuses": [
+            503
+          ]
+        },
+        {
           "code": "RUNTIME_POLICY_VIOLATION",
           "statuses": [
             422
@@ -50861,6 +54452,39 @@
         },
         {
           "code": "SOURCE_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_REPOSITORY_NOT_AUTHORIZED",
+          "statuses": [
+            403,
+            404
+          ]
+        },
+        {
+          "code": "GITHUB_CONTENTS_PERMISSION_REQUIRED",
+          "statuses": [
+            403,
+            422
+          ]
+        },
+        {
+          "code": "GITHUB_GIT_AUTHENTICATION_FAILED",
+          "statuses": [
+            502,
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_TOKEN_LEASE_ACTIVE",
           "statuses": [
             503
           ]
@@ -53639,6 +57263,12 @@
             422,
             503
           ]
+        },
+        {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
         }
       ]
     },
@@ -53703,6 +57333,84 @@
           "statuses": [
             409,
             422,
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        }
+      ]
+    },
+    "github.installation.refresh": {
+      "method": "POST",
+      "path": "/v1/github/installations/refresh",
+      "classification": "non-mutating",
+      "operationJournalPolicy": null,
+      "requiredDevSpaceHeaders": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At"
+      ],
+      "successStatus": 200,
+      "successContentType": "application/json",
+      "responseKind": "json-envelope",
+      "errorsAfterSuccessBegins": false,
+      "headers": {
+        "$ref": "#/$defs/operation.github.installation.refresh.headers"
+      },
+      "pathParameters": {
+        "$ref": "#/$defs/operation.github.installation.refresh.pathParameters"
+      },
+      "query": false,
+      "requestBody": {
+        "$ref": "#/$defs/operation.github.installation.refresh.requestBody"
+      },
+      "successBody": {
+        "$ref": "#/$defs/operation.github.installation.refresh.successBody"
+      },
+      "errorSchema": {
+        "$ref": "#/$defs/operation.github.installation.refresh.errors"
+      },
+      "errors": [
+        {
+          "code": "PROTOCOL_VERSION_UNSUPPORTED",
+          "statuses": [
+            400,
+            426
+          ]
+        },
+        {
+          "code": "REQUEST_INVALID",
+          "statuses": [
+            400
+          ]
+        },
+        {
+          "code": "AGENT_INTERNAL_ERROR",
+          "statuses": [
+            500
+          ]
+        },
+        {
+          "code": "GITHUB_CONNECTION_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "GITHUB_AUTHORITY_INVALID",
+          "statuses": [
+            409,
+            422,
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
             503
           ]
         }
@@ -53770,6 +57478,104 @@
             409,
             422,
             503
+          ]
+        },
+        {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_TOKEN_LEASE_ACTIVE",
+          "statuses": [
+            503
+          ]
+        }
+      ]
+    },
+    "github.repositories.resolve": {
+      "method": "POST",
+      "path": "/v1/github/repositories/resolve",
+      "classification": "non-mutating",
+      "operationJournalPolicy": null,
+      "requiredDevSpaceHeaders": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At"
+      ],
+      "successStatus": 200,
+      "successContentType": "application/json",
+      "responseKind": "json-envelope",
+      "errorsAfterSuccessBegins": false,
+      "headers": {
+        "$ref": "#/$defs/operation.github.repositories.resolve.headers"
+      },
+      "pathParameters": {
+        "$ref": "#/$defs/operation.github.repositories.resolve.pathParameters"
+      },
+      "query": false,
+      "requestBody": {
+        "$ref": "#/$defs/operation.github.repositories.resolve.requestBody"
+      },
+      "successBody": {
+        "$ref": "#/$defs/operation.github.repositories.resolve.successBody"
+      },
+      "errorSchema": {
+        "$ref": "#/$defs/operation.github.repositories.resolve.errors"
+      },
+      "errors": [
+        {
+          "code": "PROTOCOL_VERSION_UNSUPPORTED",
+          "statuses": [
+            400,
+            426
+          ]
+        },
+        {
+          "code": "REQUEST_INVALID",
+          "statuses": [
+            400
+          ]
+        },
+        {
+          "code": "AGENT_INTERNAL_ERROR",
+          "statuses": [
+            500
+          ]
+        },
+        {
+          "code": "GITHUB_CONNECTION_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "GITHUB_AUTHORITY_INVALID",
+          "statuses": [
+            409,
+            422,
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_INSTALLATION_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GITHUB_REPOSITORY_NOT_AUTHORIZED",
+          "statuses": [
+            403,
+            404
+          ]
+        },
+        {
+          "code": "GITHUB_CONTENTS_PERMISSION_REQUIRED",
+          "statuses": [
+            403,
+            422
           ]
         },
         {

@@ -5,17 +5,18 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  inspectApp: vi.fn(), verify: vi.fn(), inspect: vi.fn(), list: vi.fn()
+  inspectApp: vi.fn(), verify: vi.fn(), inspect: vi.fn(), refresh: vi.fn(), list: vi.fn()
 }));
 vi.mock("../../../../server/agent-client.js", () => ({ createAgentClient: () => ({
   inspectGithubApp: mocks.inspectApp, verifyGithubInstallation: mocks.verify,
-  inspectGithubInstallation: mocks.inspect, listGithubRepositories: mocks.list
+  inspectGithubInstallation: mocks.inspect, refreshGithubInstallation: mocks.refresh, listGithubRepositories: mocks.list
 }) }));
 
 import { POST as begin } from "./connection-attempts/route.js";
 import { GET as setup } from "./setup/route.js";
 import { GET as connection } from "./connection/route.js";
 import { GET as repositories } from "./repositories/route.js";
+import { POST as refresh } from "./refresh/route.js";
 import { getProjectDatabase } from "../../../../server/database.js";
 
 const directories: string[] = [];
@@ -45,6 +46,11 @@ describe("GitHub Web routes", () => {
     const callback = await setup(new Request(`http://localhost:3000/api/integrations/github/setup?state=${rawState}&installation_id=77&setup_action=install`));
     expect(callback.status).toBe(303); expect(callback.headers.get("location")).toBe("http://localhost:3000/?github=connected");
     expect(mocks.verify).toHaveBeenCalledWith(startBody.connectionId, "77");
+    mocks.refresh.mockResolvedValue({ ...verified, permissions: { metadata: "read", contents: "read" } });
+    const refreshed = await refresh(new Request("http://localhost:3000/api/integrations/github/refresh", {
+      method: "POST", headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1" }
+    }));
+    expect(refreshed.status).toBe(200); expect(mocks.refresh).toHaveBeenCalledWith(startBody.connectionId);
     expect((await connection(new Request("http://localhost:3000/api/integrations/github/connection"))).status).toBe(200);
     const listed = await repositories(new Request("http://localhost:3000/api/integrations/github/repositories?pageSize=25"));
     expect(listed.status).toBe(200); expect(mocks.list).toHaveBeenCalledWith(startBody.connectionId, 25, undefined);

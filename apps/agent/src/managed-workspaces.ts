@@ -7,7 +7,9 @@ import {
   createManagedStoreDataSchema,
   createWorkspaceDataSchema,
   gitInspectionDataSchema,
+  githubSourceInspectionDataSchema,
   projectOptionsRevisionHashSchema,
+  remoteRepositoryUrlSchema,
   sourceLocatorSchema,
   uuidV7Schema,
   workspaceInspectionDataSchema,
@@ -18,7 +20,8 @@ import {
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
-  type WorkspaceInspectionData
+  type WorkspaceInspectionData,
+  type SourceLocator
 } from "@devspace/contracts";
 import {
   canonicalizeProjectOptionsV1, hashProjectOptionsV1, parseProjectOptionsV1,
@@ -27,8 +30,10 @@ import {
 } from "@devspace/project-options";
 import * as z from "zod";
 import { v7 as uuidv7 } from "uuid";
-import { runBoundedProcess } from "./git-inspector.js";
+import { parseLsRemoteOutput, runBoundedProcess } from "./git-inspector.js";
 import { ExternalExecutionFence, type ExternalExecutionRole } from "./external-execution.js";
+import { createGithubAskpassBroker, type AskpassCapability, type GithubAskpassBroker } from "./github-askpass.js";
+import type { GithubAppAuthority } from "./github-app.js";
 import {
   PrivateStateCorruptionError,
   assertContained,
@@ -58,11 +63,17 @@ const revisionRecordSchema = z.strictObject({
   version: z.literal(1), data: configurationRevisionDataSchema,
   runtimePlan: configurationRuntimePlanDataSchema.shape.runtimePlan.nullable().default(null)
 });
-const storeOwnershipSchema = z.strictObject({
+const storeOwnershipV1Schema = z.strictObject({
   version: z.literal(1), projectId: uuidV7Schema, repositoryPath: absolutePathSchema,
   identity: fileIdentitySchema, source: sourceLocatorSchema,
   git: z.strictObject({ bare: z.literal(true), originUrl: z.string().min(1), commonDirectoryPath: absolutePathSchema })
 });
+const storeOwnershipV2Schema = z.strictObject({
+  version: z.literal(2), projectId: uuidV7Schema, repositoryPath: absolutePathSchema,
+  identity: fileIdentitySchema, source: sourceLocatorSchema,
+  git: z.strictObject({ bare: z.literal(true), originUrl: remoteRepositoryUrlSchema, pendingOriginUrl: remoteRepositoryUrlSchema.nullable(), commonDirectoryPath: absolutePathSchema })
+});
+const storeOwnershipSchema = z.union([storeOwnershipV1Schema, storeOwnershipV2Schema]);
 type StoreOwnership = z.infer<typeof storeOwnershipSchema>;
 const workspaceOwnershipSchema = z.strictObject({
   version: z.literal(1), projectId: uuidV7Schema, workspaceId: uuidV7Schema,
@@ -82,6 +93,7 @@ type WorkspaceOwnership = z.infer<typeof workspaceOwnershipSchema>;
 const storeCreationSchema = z.strictObject({
   version: z.literal(1), resourceType: z.literal("store"), operationId: uuidV7Schema, projectId: uuidV7Schema,
   source: sourceLocatorSchema, stagingPath: absolutePathSchema, finalRepositoryPath: absolutePathSchema,
+  originUrl: remoteRepositoryUrlSchema.nullable().default(null),
   stagingIdentity: fileIdentitySchema,
   repositoryIdentity: fileIdentitySchema.nullable(), phase: z.enum(["staging-created", "repository-created", "published"])
 }).superRefine((record, context) => {
@@ -119,7 +131,8 @@ export class ConfigurationValidationError extends Error {
 }
 
 function executionFailure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionFailure {
-  const retryable = ["SOURCE_UNAVAILABLE", "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR", "GATEWAY_UPDATE_FAILED"].includes(code);
+  const retryable = ["SOURCE_UNAVAILABLE", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_TOKEN_LEASE_ACTIVE",
+    "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR", "GATEWAY_UPDATE_FAILED"].includes(code);
   return { code, message, retryable, details } as AgentExecutionFailure;
 }
 function storeConflict(projectId: string): AgentExecutionError {
@@ -139,14 +152,31 @@ function logOwnershipDeviceRebind(resourceType: "project" | "workspace", resourc
 }
 
 export type GitRunner = (args: readonly string[]) => Promise<{ stdout: string; stderr: string }>;
-function protectedGitInvocation(args: readonly string[]): { args: string[]; env: NodeJS.ProcessEnv } {
+interface AuthenticatedGitContext {
+  readonly connectionId: string;
+  readonly repositoryId: string;
+  readonly token: string;
+  readonly originUrl: string;
+}
+export function protectedGitInvocation(args: readonly string[], auth?: { readonly capability: AskpassCapability }): { args: string[]; env: NodeJS.ProcessEnv } {
   const caFile = process.env.DEVSPACE_GIT_CA_FILE;
   const caArguments = caFile === undefined ? [] : ["-c", `http.sslCAInfo=${path.resolve(caFile)}`];
+  const environment: NodeJS.ProcessEnv = {
+    PATH: "/usr/bin:/bin", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", XDG_CACHE_HOME: "/nonexistent", LANG: "C", LC_ALL: "C",
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_COUNT: "0",
+    GIT_TERMINAL_PROMPT: "0", SSH_ASKPASS: "/bin/false", GIT_SSH: "/bin/false", GIT_SSH_COMMAND: "/bin/false",
+    GIT_PROXY_COMMAND: "/bin/false", GIT_TRACE: "0", GIT_TRACE_PACKET: "0", GIT_TRACE_PERFORMANCE: "0",
+    GIT_TRACE_SETUP: "0", GIT_TRACE_CURL: "0", GIT_CURL_VERBOSE: "0"
+  };
+  if (auth !== undefined) {
+    environment.GIT_ASKPASS = auth.capability.helperPath;
+    Object.assign(environment, auth.capability.environment);
+  } else environment.GIT_ASKPASS = "/bin/false";
   return {
-    args: ["-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false",
-      "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", ...caArguments, ...args],
-    env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false" }
+    args: ["-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "credential.helper=",
+      "-c", "credential.useHttpPath=true", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+      "-c", "http.followRedirects=false", "-c", "core.sshCommand=/bin/false", ...caArguments, ...args],
+    env: environment
   };
 }
 export async function runGit(args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
@@ -183,6 +213,9 @@ export class ManagedWorkspaces {
   private workspaceRoot = "";
   private stateRoot = "";
   private executionFence: ExternalExecutionFence | null = null;
+  private githubAuthority: GithubAppAuthority | null;
+  private readonly askpassBroker: GithubAskpassBroker;
+  private initialized = false;
   private readonly runtime: WorkspaceRuntimeManager;
   private readonly preview: PreviewRuntimeManager;
 
@@ -194,8 +227,11 @@ export class ManagedWorkspaces {
     previewRuntime?: PreviewRuntimeManager,
     previewBaseRegistry: ApprovedPreviewBaseRegistry = readPreviewBaseRegistry(),
     previewProbe?: PreviewGatewayProbe,
-    previewGateway?: PreviewGatewayAdapterContract
+    previewGateway?: PreviewGatewayAdapterContract,
+    askpassBroker: GithubAskpassBroker = createGithubAskpassBroker()
   ) {
+    this.githubAuthority = null;
+    this.askpassBroker = askpassBroker;
     const engine = new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
     this.runtime = runtime ?? new WorkspaceRuntimeManager(roots.state, engine, readRuntimePolicy(), writer);
     this.preview = previewRuntime ?? new PreviewRuntimeManager(roots.state, engine, this.runtime, previewBaseRegistry, writer, previewProbe,
@@ -275,6 +311,21 @@ export class ManagedWorkspaces {
     catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "ownership", "runtimes"), error instanceof Error ? error.message : "runtime ownership state validation failed"); }
     try { await this.preview.initialize(); }
     catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "previews"), error instanceof Error ? error.message : "preview state validation failed"); }
+    if (this.githubAuthority !== null && this.corruption === null) {
+      try { await this.askpassBroker.start(); }
+      catch (error) { this.corruption ??= new PrivateStateCorruptionError(this.stateRoot, error instanceof Error ? error.message : "askpass broker startup failed"); }
+    }
+    this.initialized = true;
+  }
+
+  setGithubAuthority(authority: GithubAppAuthority | null): void {
+    if (this.initialized) throw new Error("github-authority-must-be-set-before-agent-start");
+    this.githubAuthority = authority;
+  }
+
+  async shutdown(): Promise<void> {
+    await this.askpassBroker.stop().catch(() => undefined);
+    this.initialized = false;
   }
 
   private async validateStateTree(root: string, kind: "revision" | "project" | "workspace" | "creation"): Promise<void> {
@@ -325,14 +376,105 @@ export class ManagedWorkspaces {
     await this.executionFence.awaitProject(uuidV7Schema.parse(projectId));
   }
   private async operationGit(operationId: string, projectId: string, role: ExternalExecutionRole,
-    args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
-    if (this.git !== runGit) return await this.git(args);
+    args: readonly string[], auth?: AuthenticatedGitContext): Promise<{ stdout: string; stderr: string }> {
+    let capability: AskpassCapability | undefined;
+    let executionId: string | undefined;
+    if (auth !== undefined) {
+      executionId = uuidv7();
+      capability = this.askpassBroker.register({ ...auth, operationId, executionId, deadlineAt: new Date(Date.now() + GIT_TIMEOUT_MS) });
+    }
+    try {
+      if (this.git !== runGit) return await this.git(args);
     if (this.executionFence === null) throw new PrivateStateCorruptionError(this.stateRoot, "execution fence is not initialized");
-    const invocation = protectedGitInvocation(args);
+    const invocation = protectedGitInvocation(args, capability === undefined ? undefined : { capability });
     const result = await this.executionFence.runGit({ operationId, projectId, role, args: invocation.args,
-      timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env });
-    if (result.code !== 0 || result.signal !== null) throw new Error("git-command-failed");
+      ...(executionId === undefined ? {} : { executionId }), timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env });
+    if (result.code !== 0 || result.signal !== null) {
+      if (auth !== undefined && /authentication failed|could not read Username|invalid username|HTTP 401|HTTP 403|access denied/iu.test(result.stderr)) {
+        throw new Error("github-git-authentication-failed");
+      }
+      throw new Error("git-command-failed");
+    }
     return { stdout: result.stdout, stderr: result.stderr };
+    } finally {
+      if (capability !== undefined) this.askpassBroker.settle(capability.capability);
+    }
+  }
+
+  private githubAuthorityRequired(): GithubAppAuthority {
+    if (this.githubAuthority === null) throw new AgentExecutionError(executionFailure("GITHUB_INSTALLATION_UNAVAILABLE", "The GitHub installation is unavailable.", {}));
+    return this.githubAuthority;
+  }
+
+  private githubExecutionError(error: unknown): AgentExecutionError | null {
+    if (error instanceof AgentExecutionError) return error;
+    const message = error instanceof Error ? error.message : "";
+    const mapped = message === "github-contents-permission-required"
+      ? ["GITHUB_CONTENTS_PERMISSION_REQUIRED", "GitHub Contents read permission is required."] as const
+      : message === "github-installation-unavailable" || message === "github-connection-not-found" || message === "github-authority-invalid"
+        ? ["GITHUB_INSTALLATION_UNAVAILABLE", "The GitHub installation is unavailable."] as const
+        : message === "github-repository-not-authorized"
+          ? ["GITHUB_REPOSITORY_NOT_AUTHORIZED", "The selected GitHub repository is not authorized."] as const
+          : message === "github-git-authentication-failed"
+            ? ["GITHUB_GIT_AUTHENTICATION_FAILED", "GitHub rejected the fresh repository credential."] as const
+          : message === "github-token-lease-active"
+              ? ["GITHUB_TOKEN_LEASE_ACTIVE", "A previous GitHub token transaction is still being settled."] as const
+              : message === "github-upstream-invalid" || message === "github-token-mint-failed" || message === "github-operation-failed"
+                ? ["SOURCE_UNAVAILABLE", "The GitHub repository source is currently unavailable."] as const
+              : null;
+    return mapped === null ? null : new AgentExecutionError(executionFailure(mapped[0], mapped[1], {}));
+  }
+
+  private async resolveGithubRepository(source: Extract<SourceLocator, { kind: "github-app" }>) {
+    try {
+      return await this.githubAuthorityRequired().resolveRepository(source);
+    } catch (error) {
+      const mapped = this.githubExecutionError(error);
+      if (mapped !== null) throw mapped;
+      throw error;
+    }
+  }
+
+  private async withGithubToken<T>(source: Extract<SourceLocator, { kind: "github-app" }>, operationId: string,
+    operation: (token: string, repository: import("@devspace/contracts").GithubRepository) => Promise<T>): Promise<T> {
+    const authority = this.githubAuthorityRequired();
+    try {
+      const result = await authority.withExactRepositoryToken(source, operation, operationId);
+      return result.value;
+    } catch (error) {
+      const mapped = this.githubExecutionError(error);
+      if (mapped !== null) throw mapped;
+      throw error;
+    }
+  }
+
+  async inspectSource(source: SourceLocator): Promise<import("@devspace/contracts").SourceInspectionData> {
+    const data = sourceLocatorSchema.parse(source);
+    if (data.kind !== "github-app") throw new Error("source-inspection-public-path-required");
+    const operationId = uuidv7();
+    const authority = this.githubAuthorityRequired();
+    const result = await authority.withExactRepositoryToken(data, async (token, repository) => {
+      const executionId = uuidv7();
+      const capability = this.askpassBroker.register({ ...data, operationId, executionId, originUrl: repository.cleanHttpsUrl,
+        token, deadlineAt: new Date(Date.now() + 15_000) });
+      try {
+        const invocation = protectedGitInvocation(["ls-remote", "--symref", "--", repository.cleanHttpsUrl, "HEAD"], { capability });
+        const processResult = await runBoundedProcess("/usr/bin/git", invocation.args, {
+          timeoutMs: 15_000, maxOutputBytes: 256 * 1024, env: invocation.env
+        });
+        if (processResult.signal !== null || processResult.code !== 0) {
+          if (/authentication failed|could not read Username|invalid username|HTTP 401|HTTP 403|access denied/iu.test(processResult.stderr)) {
+            throw new Error("github-git-authentication-failed");
+          }
+          throw new Error("source-unavailable");
+        }
+        const inspected = parseLsRemoteOutput(processResult.stdout);
+        return githubSourceInspectionDataSchema.parse({ ...inspected, sourceKind: "github-app", repository, cleanupDegraded: false });
+      } finally {
+        this.askpassBroker.settle(capability.capability);
+      }
+    });
+    return githubSourceInspectionDataSchema.parse({ ...result.value, cleanupDegraded: result.cleanupDegraded });
   }
   private async assertManagedDirectories(): Promise<void> {
     this.assertHealthy();
@@ -541,10 +683,27 @@ export class ManagedWorkspaces {
     if (identityComparison === "mismatch") throw storeConflict(projectId);
     const resolved = await realpath(record.repositoryPath);
     if (resolved !== record.repositoryPath || record.git.commonDirectoryPath !== record.repositoryPath) throw storeConflict(projectId);
+    let actualOrigin: string;
     try {
       if ((await this.git(["--git-dir", record.repositoryPath, "rev-parse", "--is-bare-repository"])).stdout.trim() !== "true") throw new Error("not-bare");
-      if ((await this.git(["--git-dir", record.repositoryPath, "config", "--get", "remote.origin.url"])).stdout.trim() !== record.git.originUrl) throw new Error("origin-mismatch");
+      actualOrigin = (await this.git(["--git-dir", record.repositoryPath, "config", "--get", "remote.origin.url"])).stdout.trim();
     } catch { throw storeConflict(projectId); }
+    const expectedOrigin = record.version === 2 && record.git.pendingOriginUrl !== null ? record.git.pendingOriginUrl : record.git.originUrl;
+    if (actualOrigin !== record.git.originUrl && actualOrigin !== expectedOrigin) throw storeConflict(projectId);
+    if (record.version === 2 && record.git.pendingOriginUrl !== null) {
+      if (actualOrigin === record.git.originUrl) {
+        try {
+          await this.git(["--git-dir", record.repositoryPath, "config", "remote.origin.url", record.git.pendingOriginUrl]);
+          actualOrigin = (await this.git(["--git-dir", record.repositoryPath, "config", "--get", "remote.origin.url"])).stdout.trim();
+        } catch {
+          throw storeConflict(projectId);
+        }
+      }
+      if (actualOrigin !== record.git.pendingOriginUrl) throw storeConflict(projectId);
+      const completed = storeOwnershipV2Schema.parse({ ...record, git: { ...record.git, originUrl: record.git.pendingOriginUrl, pendingOriginUrl: null } });
+      await this.writer.write(this.storeOwnershipPath(projectId), completed);
+      record = completed;
+    }
     if (identityComparison === "device-only-rebind") {
       await this.assertManagedDirectories();
       const rebound = storeOwnershipSchema.parse({ ...record, identity: current.identity });
@@ -553,6 +712,27 @@ export class ManagedWorkspaces {
       return rebound;
     }
     return record;
+  }
+
+  private async transitionStoreOrigin(record: StoreOwnership, projectId: string, newOrigin: string): Promise<StoreOwnership> {
+    const cleanOrigin = remoteRepositoryUrlSchema.parse(newOrigin);
+    if (!cleanOrigin.startsWith("https://") || cleanOrigin.includes("@") || cleanOrigin.includes("?") || cleanOrigin.includes("#")) throw storeConflict(projectId);
+    if (record.git.originUrl === cleanOrigin && (record.version === 1 || record.git.pendingOriginUrl === null)) return record;
+    const currentOrigin = (await this.git(["--git-dir", record.repositoryPath, "config", "--get", "remote.origin.url"])).stdout.trim();
+    if (record.version === 2 && record.git.pendingOriginUrl !== null && currentOrigin !== record.git.originUrl && currentOrigin !== record.git.pendingOriginUrl) throw storeConflict(projectId);
+    const pending = storeOwnershipV2Schema.parse({
+      version: 2, projectId: record.projectId, repositoryPath: record.repositoryPath, identity: record.identity, source: record.source,
+      git: { bare: true, originUrl: record.git.originUrl, pendingOriginUrl: cleanOrigin, commonDirectoryPath: record.git.commonDirectoryPath }
+    });
+    await this.writer.write(this.storeOwnershipPath(projectId), pending);
+    if (currentOrigin !== cleanOrigin) {
+      await this.git(["--git-dir", record.repositoryPath, "config", "remote.origin.url", cleanOrigin]);
+    }
+    const verifiedOrigin = (await this.git(["--git-dir", record.repositoryPath, "config", "--get", "remote.origin.url"])).stdout.trim();
+    if (verifiedOrigin !== cleanOrigin) throw storeConflict(projectId);
+    const completed = storeOwnershipV2Schema.parse({ ...pending, git: { ...pending.git, originUrl: cleanOrigin, pendingOriginUrl: null } });
+    await this.writer.write(this.storeOwnershipPath(projectId), completed);
+    return completed;
   }
 
   private async loadCreation(operationId: string): Promise<CreationRecord | null> {
@@ -583,9 +763,19 @@ export class ManagedWorkspaces {
   async createManagedStore(input: CreateManagedStoreData, operationId: string): Promise<void> {
     await this.assertManagedDirectories();
     const data = createManagedStoreDataSchema.parse(input);
-    if (data.source.kind !== "remote") throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "The source is not approved.", { policy: "source-not-approved" }));
-    const url = new URL(data.source.url);
-    if (url.protocol !== "https:" || url.search !== "" || url.username !== "" || url.password !== "") {
+    const githubSource = data.source.kind === "github-app" ? data.source : null;
+    let sourceOrigin: string;
+    if (data.source.kind === "remote") {
+      const url = new URL(data.source.url);
+      if (url.protocol !== "https:" || url.search !== "" || url.username !== "" || url.password !== "") {
+        throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "The source is not approved.", { policy: "source-not-approved" }));
+      }
+      sourceOrigin = data.source.url;
+    } else if (data.source.kind === "github-app") {
+      const resolved = await this.resolveGithubRepository(data.source);
+      if (resolved.repository.archived || resolved.repository.disabled) throw new AgentExecutionError(executionFailure("GITHUB_REPOSITORY_NOT_AUTHORIZED", "The selected GitHub repository is not available for onboarding.", {}));
+      sourceOrigin = resolved.repository.cleanHttpsUrl;
+    } else {
       throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "The source is not approved.", { policy: "source-not-approved" }));
     }
     const finalDirectory = this.projectDirectory(data.projectId);
@@ -593,7 +783,11 @@ export class ManagedWorkspaces {
     const ownershipEntry = await lstatIdentity(this.storeOwnershipPath(data.projectId));
     if (ownershipEntry !== null) {
       const owned = await this.loadStoreOwnership(data.projectId);
-      if (owned.source.kind !== "remote" || owned.source.url !== data.source.url) throw storeConflict(data.projectId);
+      const sameSource = owned.source.kind === data.source.kind
+        && (data.source.kind === "remote" && owned.source.kind === "remote" ? owned.source.url === data.source.url
+          : data.source.kind === "github-app" && owned.source.kind === "github-app"
+            ? owned.source.connectionId === data.source.connectionId && owned.source.repositoryId === data.source.repositoryId : false);
+      if (!sameSource) throw storeConflict(data.projectId);
       return;
     }
     let creation = await this.loadCreation(operationId);
@@ -608,6 +802,7 @@ export class ManagedWorkspaces {
       if (staged === null || !staged.stats.isDirectory()) throw storeConflict(data.projectId);
       creation = storeCreationSchema.parse({ version: 1, resourceType: "store", operationId, projectId: data.projectId,
         source: data.source, stagingPath, finalRepositoryPath: finalRepository,
+        originUrl: sourceOrigin,
         stagingIdentity: staged.identity, repositoryIdentity: null, phase: "staging-created" });
       await this.saveCreation(creation);
     }
@@ -625,22 +820,38 @@ export class ManagedWorkspaces {
     if (creation.phase === "staging-created") {
       const recoveredRepository = await lstatIdentity(stagedRepository);
       if (recoveredRepository === null) {
-        try { await this.operationGit(operationId, data.projectId, "store-clone",
-          ["clone", "--bare", "--no-recurse-submodules", "--", data.source.url, stagedRepository]); }
-        catch {
+        try {
+          if (data.source.kind === "remote") {
+            await this.operationGit(operationId, data.projectId, "store-clone",
+              ["clone", "--bare", "--no-recurse-submodules", "--", sourceOrigin, stagedRepository]);
+          } else if (githubSource !== null) {
+            await this.withGithubToken(githubSource, operationId, async (token, repository) => {
+              sourceOrigin = repository.cleanHttpsUrl;
+              await this.operationGit(operationId, data.projectId, "store-clone",
+                ["clone", "--bare", "--no-recurse-submodules", "--", repository.cleanHttpsUrl, stagedRepository],
+                { connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId, token, originUrl: repository.cleanHttpsUrl });
+            });
+          }
+        }
+        catch (error) {
           await this.cleanupStoreCreation(creation);
+          if (error instanceof AgentExecutionError) throw error;
+          if (data.source.kind === "github-app" && error instanceof Error && error.message === "github-git-authentication-failed") {
+            throw new AgentExecutionError(executionFailure("GITHUB_GIT_AUTHENTICATION_FAILED", "GitHub rejected the fresh repository credential.", {}));
+          }
           throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {}));
         }
       } else {
         try {
           if (!recoveredRepository.stats.isDirectory()
             || (await this.git(["--git-dir", stagedRepository, "rev-parse", "--is-bare-repository"])).stdout.trim() !== "true"
-            || (await this.git(["--git-dir", stagedRepository, "config", "--get", "remote.origin.url"])).stdout.trim() !== data.source.url) throw new Error("invalid-staged-repository");
+            || (await this.git(["--git-dir", stagedRepository, "config", "--get", "remote.origin.url"])).stdout.trim() !== (creation.originUrl ?? sourceOrigin)) throw new Error("invalid-staged-repository");
         } catch { throw storeConflict(data.projectId); }
       }
       const repositoryIdentity = await lstatIdentity(stagedRepository);
       if (repositoryIdentity === null || !repositoryIdentity.stats.isDirectory()) throw storeConflict(data.projectId);
-      creation = storeCreationSchema.parse({ ...creation, repositoryIdentity: repositoryIdentity.identity, phase: "repository-created" });
+      const clonedOrigin = (await this.git(["--git-dir", stagedRepository, "config", "--get", "remote.origin.url"])).stdout.trim();
+      creation = storeCreationSchema.parse({ ...creation, originUrl: clonedOrigin, repositoryIdentity: repositoryIdentity.identity, phase: "repository-created" });
       await this.saveCreation(creation);
     }
     if (creation.phase === "repository-created") {
@@ -653,8 +864,11 @@ export class ManagedWorkspaces {
     }
     const repositoryNow = await lstatIdentity(finalRepository);
     if (repositoryNow === null || !repositoryNow.stats.isDirectory() || creation.repositoryIdentity === null || !identitiesEqual(repositoryNow.identity, creation.repositoryIdentity)) throw storeConflict(data.projectId);
-    const ownership = storeOwnershipSchema.parse({ version: 1, projectId: data.projectId, repositoryPath: finalRepository,
-      identity: repositoryNow.identity, source: data.source, git: { bare: true, originUrl: data.source.url, commonDirectoryPath: finalRepository } });
+    const ownership = data.source.kind === "github-app"
+      ? storeOwnershipV2Schema.parse({ version: 2, projectId: data.projectId, repositoryPath: finalRepository,
+        identity: repositoryNow.identity, source: data.source, git: { bare: true, originUrl: sourceOrigin, pendingOriginUrl: null, commonDirectoryPath: finalRepository } })
+      : storeOwnershipV1Schema.parse({ version: 1, projectId: data.projectId, repositoryPath: finalRepository,
+        identity: repositoryNow.identity, source: data.source, git: { bare: true, originUrl: sourceOrigin, commonDirectoryPath: finalRepository } });
     await this.validateCreationSemantics(creation);
     await this.assertManagedDirectories();
     await this.writer.write(this.storeOwnershipPath(data.projectId), ownership);
@@ -687,14 +901,36 @@ export class ManagedWorkspaces {
     await rm(quarantine, { recursive: true });
   }
 
-  async fetch(projectId: string, operationId?: string): Promise<void> {
-    const store = await this.loadStoreOwnership(projectId);
+  async fetch(projectId: string, operationId?: string, expectedSource?: SourceLocator): Promise<void> {
+    let store = await this.loadStoreOwnership(projectId);
+    if (expectedSource !== undefined) {
+      const sameSource = expectedSource.kind === store.source.kind
+        && (expectedSource.kind === "remote" && store.source.kind === "remote" ? expectedSource.url === store.source.url
+          : expectedSource.kind === "github-app" && store.source.kind === "github-app"
+            ? expectedSource.connectionId === store.source.connectionId && expectedSource.repositoryId === store.source.repositoryId : false);
+      if (!sameSource) throw storeConflict(projectId);
+    }
     try {
       const args = ["--git-dir", store.repositoryPath, "fetch", "--no-recurse-submodules", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"];
-      if (operationId === undefined) await this.git(args);
+      if (store.source.kind === "github-app") {
+        const githubSource = store.source;
+        const fetchOperationId = operationId ?? uuidv7();
+        await this.withGithubToken(githubSource, fetchOperationId, async (token, repository) => {
+          store = await this.transitionStoreOrigin(store, projectId, repository.cleanHttpsUrl);
+          await this.operationGit(fetchOperationId, projectId, "project-fetch", ["--git-dir", store.repositoryPath, "fetch", "--no-recurse-submodules", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
+            connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId, token, originUrl: repository.cleanHttpsUrl
+          });
+        });
+      } else if (operationId === undefined) await this.git(args);
       else await this.operationGit(operationId, projectId, "project-fetch", args);
     }
-    catch { throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {})); }
+    catch (error) {
+      if (error instanceof AgentExecutionError) throw error;
+      if (error instanceof Error && error.message === "github-git-authentication-failed") {
+        throw new AgentExecutionError(executionFailure("GITHUB_GIT_AUTHENTICATION_FAILED", "GitHub rejected the fresh repository credential.", {}));
+      }
+      throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {}));
+    }
     await this.loadStoreOwnership(projectId);
   }
 

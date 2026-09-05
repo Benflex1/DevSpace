@@ -4,7 +4,7 @@ test("registers and reloads a persisted project through the real Web and Agent s
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "DevSpace" })).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible();
-  await page.getByLabel("Repository URL").fill("https://127.0.0.1:3443/repository.git");
+  await page.getByRole("textbox", { name: /Repository URL/u }).fill("https://127.0.0.1:3443/repository.git");
   await page.getByLabel("Project name").fill("Rocket");
   await page.getByLabel("Project slug").fill("rocket");
   await page.getByRole("button", { name: "Inspect and register" }).click();
@@ -18,11 +18,11 @@ test("registers and reloads a persisted project through the real Web and Agent s
   await expect(project.getByText("Registered — workspace setup pending")).toBeVisible();
 });
 
-test("shows bounded unconfigured GitHub App UI without credential or onboarding actions", async ({ page }) => {
+test("keeps unconfigured GitHub App selection inside the unified Add Project surface", async ({ page }) => {
   await page.goto("/");
-  const card = page.getByRole("region", { name: "Private GitHub repositories" });
-  await expect(card.getByRole("status")).toHaveText("unconfigured");
-  await expect(card.getByText("has not been configured by the administrator")).toBeVisible();
-  await expect(card.locator("input")).toHaveCount(0);
-  await expect(card.getByRole("button", { name: /clone|create project|disconnect/i })).toHaveCount(0);
+  const form = page.locator("section.form-card", { has: page.getByRole("heading", { name: "Add Project" }) });
+  await form.getByRole("radio", { name: "Connected GitHub repository" }).check();
+  await expect(form.getByText("GitHub App access has not been configured by the administrator")).toBeVisible();
+  await expect(form.getByRole("textbox", { name: /Repository URL/u })).toHaveCount(0);
+  await expect(form.getByRole("button", { name: /clone|create project|disconnect/i })).toHaveCount(0);
 });

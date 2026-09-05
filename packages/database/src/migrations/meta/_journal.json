@@ -50,6 +50,13 @@
       "when": 1785846033373,
       "tag": "0006_github_app_checkpoint_one",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788573738566,
+      "tag": "0007_github_private_sources",
+      "breakpoints": true
     }
   ]
 }

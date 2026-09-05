@@ -1,14 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
-describe("GitHub App card", () => {
-  it("offers only the bounded connection flow and no credential or project onboarding controls", async () => {
-    const source = await readFile(new URL("./github-app-card.tsx", import.meta.url), "utf8");
-    expect(source).toContain("Private GitHub repositories");
-    expect(source).toContain("Retry GitHub connection");
-    expect(source).not.toContain("<input");
-    expect(source).not.toContain("Clone");
-    expect(source).not.toContain("Create project");
+describe("unified project source form", () => {
+  it("keeps GitHub selection inside Add Project without browser credential or URL authority", async () => {
+    const source = await readFile(new URL("./project-form.tsx", import.meta.url), "utf8");
+    expect(source).toContain("Connected GitHub repository");
+    expect(source).toContain("Refresh GitHub access");
+    expect(source).toContain("repositoryId: selectedRepositoryId");
+    expect(source).not.toContain('type="password"');
+    expect(source).not.toContain("repositoryUrl: selected");
+    expect(source).not.toContain("token");
     expect(source).not.toContain("Disconnect");
   });
 });

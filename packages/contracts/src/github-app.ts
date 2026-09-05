@@ -86,6 +86,7 @@ export const githubRepositorySchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["cleanHttpsUrl"], message: "Clean URL must match owner and repository name." });
   }
 });
+export type GithubRepository = z.infer<typeof githubRepositorySchema>;
 export const githubRepositoryResolutionSchema = z.strictObject({
   repository: githubRepositorySchema,
   cleanupDegraded: z.boolean()

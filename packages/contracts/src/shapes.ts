@@ -62,6 +62,7 @@ export const createManagedStoreDataSchema = z.strictObject({
   source: sourceLocatorSchema
 });
 export const projectIdentityDataSchema = z.strictObject({ projectId: uuidV7Schema });
+export const projectFetchDataSchema = z.strictObject({ projectId: uuidV7Schema, source: sourceLocatorSchema.optional() });
 export const inspectGitDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema.nullable()

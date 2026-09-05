@@ -739,6 +739,49 @@ export const githubConnections = sqliteTable("github_connections", {
   check("github_connections_row_version_check", sql`${table.rowVersion} >= 1`)
 ]);
 
+export const projectGithubSources = sqliteTable("project_github_sources", {
+  projectId: text("project_id").primaryKey().references(() => projects.id, {
+    onDelete: "cascade",
+    onUpdate: "no action"
+  }),
+  connectionId: text("connection_id").notNull().references(() => githubConnections.connectionId, {
+    onDelete: "restrict",
+    onUpdate: "no action"
+  }),
+  repositoryId: text("repository_id").notNull(),
+  ownerLogin: text("owner_login").notNull(),
+  name: text("name").notNull(),
+  fullName: text("full_name").notNull(),
+  cleanHttpsUrl: text("clean_https_url").notNull(),
+  defaultBranch: text("default_branch").notNull(),
+  isPrivate: integer("is_private", { mode: "boolean" }).notNull(),
+  isArchived: integer("is_archived", { mode: "boolean" }).notNull(),
+  isDisabled: integer("is_disabled", { mode: "boolean" }).notNull(),
+  verifiedAt: text("verified_at").notNull(),
+  metadataUpdatedAt: text("metadata_updated_at").notNull(),
+  rowVersion: integer("row_version").notNull().default(1)
+}, (table) => [
+  index("project_github_sources_connection_id_idx").on(table.connectionId),
+  check("project_github_sources_repository_id_check", decimalIdExpression(table.repositoryId)),
+  check("project_github_sources_owner_login_check", sql`
+    length(${table.ownerLogin}) between 1 and 39
+    and ${table.ownerLogin} not glob '*[^A-Za-z0-9-]*'
+    and ${table.ownerLogin} not glob '-*'
+    and ${table.ownerLogin} not glob '*-'
+  `),
+  check("project_github_sources_name_check", sql`
+    length(${table.name}) between 1 and 100
+    and ${table.name} not glob '*[^A-Za-z0-9_.-]*'
+  `),
+  check("project_github_sources_full_name_check", sql`${table.fullName} = ${table.ownerLogin} || '/' || ${table.name}`),
+  check("project_github_sources_clean_https_url_check", sql`
+    ${table.cleanHttpsUrl} = 'https://github.com/' || ${table.fullName} || '.git'
+  `),
+  timestampCheck("project_github_sources_verified_at_timestamp_check", table.verifiedAt),
+  timestampCheck("project_github_sources_metadata_updated_at_timestamp_check", table.metadataUpdatedAt),
+  check("project_github_sources_row_version_check", sql`${table.rowVersion} >= 1`)
+]);
+
 export const schema = {
   projects,
   projectConfigRevisions,
@@ -758,7 +801,8 @@ export const schema = {
   operations,
   auditEvents,
   githubConnectionAttempts,
-  githubConnections
+  githubConnections,
+  projectGithubSources
 } as const;
 
 export const applicationTableNames = [
@@ -780,7 +824,8 @@ export const applicationTableNames = [
   "operations",
   "audit_events",
   "github_connection_attempts",
-  "github_connections"
+  "github_connections",
+  "project_github_sources"
 ] as const;
 
 export type Project = typeof projects.$inferSelect;
@@ -817,3 +862,5 @@ export type AuditEvent = typeof auditEvents.$inferSelect;
 export type NewAuditEvent = typeof auditEvents.$inferInsert;
 export type GithubConnectionAttempt = typeof githubConnectionAttempts.$inferSelect;
 export type GithubConnection = typeof githubConnections.$inferSelect;
+export type ProjectGithubSource = typeof projectGithubSources.$inferSelect;
+export type NewProjectGithubSource = typeof projectGithubSources.$inferInsert;

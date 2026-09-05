@@ -21,7 +21,11 @@ import {
   aiChangedFilesSummarySchema,
   canonicalAiEventSchema,
   classifyAiEventAppend,
+  githubRepositorySchema,
+  utcTimestampMsSchema,
   aiTurnContentSchema,
+  type GithubRepository,
+  type SourceLocator,
   type AgentSnapshotData,
   type CanonicalAiEvent,
   type WorkspaceInspectionData
@@ -32,8 +36,8 @@ import pathModule from "node:path";
 import {
   auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
   previews, workspaceServices, workspaces, aiSessions, aiTurns, aiEvents,
-  githubConnectionAttempts, githubConnections,
-  type Operation, type Preview, type Project, type ProjectConfigRevision
+  githubConnectionAttempts, githubConnections, projectGithubSources,
+  type Operation, type Preview, type Project, type ProjectConfigRevision, type ProjectGithubSource
 } from "@devspace/database";
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -99,6 +103,29 @@ export interface CreateProjectInput {
   readonly repositoryUrl: string;
   readonly defaultBranch: string;
   readonly actor: string;
+  readonly githubSource?: {
+    readonly connectionId: string;
+    readonly repository: GithubRepository;
+    readonly verifiedAt: string;
+    readonly metadataUpdatedAt: string;
+  };
+}
+
+export interface ProjectGithubSourceView {
+  readonly projectId: string;
+  readonly connectionId: string;
+  readonly repositoryId: string;
+  readonly ownerLogin: string;
+  readonly name: string;
+  readonly fullName: string;
+  readonly cleanHttpsUrl: string;
+  readonly defaultBranch: string;
+  readonly private: boolean;
+  readonly archived: boolean;
+  readonly disabled: boolean;
+  readonly verifiedAt: string;
+  readonly metadataUpdatedAt: string;
+  readonly rowVersion: number;
 }
 
 export class DuplicateProjectSlugError extends Error {
@@ -159,6 +186,25 @@ function toView(project: Project): ProjectView {
   return {
     id: project.id, name: project.name, slug: project.slug, repositoryUrl: project.repositoryUrl,
     defaultBranch: project.defaultBranch, state: project.state, createdAt: project.createdAt
+  };
+}
+
+function toGithubSourceView(source: ProjectGithubSource): ProjectGithubSourceView {
+  return {
+    projectId: source.projectId,
+    connectionId: source.connectionId,
+    repositoryId: source.repositoryId,
+    ownerLogin: source.ownerLogin,
+    name: source.name,
+    fullName: source.fullName,
+    cleanHttpsUrl: source.cleanHttpsUrl,
+    defaultBranch: source.defaultBranch,
+    private: source.isPrivate,
+    archived: source.isArchived,
+    disabled: source.isDisabled,
+    verifiedAt: source.verifiedAt,
+    metadataUpdatedAt: source.metadataUpdatedAt,
+    rowVersion: source.rowVersion
   };
 }
 
@@ -727,6 +773,16 @@ export function openProjectDatabase(path: string, options: {
       }
     }
   };
+  const getOwnedGithubConnection = (actor: string, connectionId: string) => db.select({
+    connection: githubConnections,
+    attempt: githubConnectionAttempts
+  }).from(githubConnections).innerJoin(githubConnectionAttempts,
+    eq(githubConnectionAttempts.connectionId, githubConnections.connectionId)
+  ).where(and(
+    eq(githubConnections.connectionId, connectionId),
+    eq(githubConnectionAttempts.createdBy, actor),
+    eq(githubConnectionAttempts.status, "connected")
+  )).get();
   return {
     close: () => client.close(),
     listProjects: (): ProjectView[] => db.select().from(projects).orderBy(desc(projects.createdAt)).all().map(toView),
@@ -747,6 +803,64 @@ export function openProjectDatabase(path: string, options: {
     getManagedProject(projectId: string): ManagedProjectView | undefined {
       const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
       return project === undefined ? undefined : readManagedProject(project);
+    },
+    getProjectGithubSource(projectId: string): ProjectGithubSourceView | null {
+      const source = db.select().from(projectGithubSources).where(eq(projectGithubSources.projectId, projectId)).get();
+      return source === undefined ? null : toGithubSourceView(source);
+    },
+    getProjectSourceLocator(projectId: string, actor?: string): SourceLocator | null {
+      const project = db.select({ id: projects.id, repositoryUrl: projects.repositoryUrl }).from(projects)
+        .where(eq(projects.id, projectId)).get();
+      if (project === undefined) return null;
+      const source = db.select().from(projectGithubSources).where(eq(projectGithubSources.projectId, projectId)).get();
+      return source === undefined
+        ? { kind: "remote", url: project.repositoryUrl }
+        : (() => {
+            if (actor !== undefined) {
+              const owned = getOwnedGithubConnection(actor, source.connectionId);
+              if (owned === undefined || owned.connection.status === "failed") {
+                throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+              }
+            }
+            return { kind: "github-app", connectionId: source.connectionId, repositoryId: source.repositoryId } as const;
+          })();
+    },
+    refreshProjectGithubSource(input: {
+      projectId: string; actor: string; connectionId: string; repository: GithubRepository;
+      verifiedAt: string; metadataUpdatedAt: string;
+    }): ProjectGithubSourceView {
+      return client.transaction(() => {
+        const project = db.select().from(projects).where(eq(projects.id, input.projectId)).get();
+        const source = db.select().from(projectGithubSources).where(eq(projectGithubSources.projectId, input.projectId)).get();
+        if (project === undefined || source === undefined || source.connectionId !== input.connectionId
+          || source.repositoryId !== input.repository.repositoryId) {
+          throw new ProjectSetupConflictError("The retained GitHub source identity no longer matches the project.");
+        }
+        const owned = getOwnedGithubConnection(input.actor, source.connectionId);
+        if (owned === undefined || owned.connection.status === "failed") {
+          throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+        }
+        const repository = githubRepositorySchema.parse(input.repository);
+        const verifiedAt = utcTimestampMsSchema.parse(input.verifiedAt);
+        const metadataUpdatedAt = utcTimestampMsSchema.parse(input.metadataUpdatedAt);
+        const updatedAt = now().toISOString();
+        db.update(projects).set({ repositoryUrl: repository.cleanHttpsUrl, updatedAt, rowVersion: project.rowVersion + 1 })
+          .where(eq(projects.id, input.projectId)).run();
+        const updated = db.update(projectGithubSources).set({
+          ownerLogin: repository.ownerLogin, name: repository.name, fullName: repository.fullName,
+          cleanHttpsUrl: repository.cleanHttpsUrl, defaultBranch: repository.defaultBranch,
+          isPrivate: repository.private, isArchived: repository.archived, isDisabled: repository.disabled,
+          verifiedAt, metadataUpdatedAt, rowVersion: source.rowVersion + 1
+        }).where(and(eq(projectGithubSources.projectId, input.projectId), eq(projectGithubSources.rowVersion, source.rowVersion))).run();
+        if (updated.changes !== 1) throw new ProjectSetupConflictError("The retained GitHub source metadata changed concurrently.");
+        const refreshed = db.select().from(projectGithubSources).where(eq(projectGithubSources.projectId, input.projectId)).get();
+        if (refreshed === undefined) throw new ProjectSetupConflictError("The refreshed GitHub source metadata could not be retained.");
+        return toGithubSourceView(refreshed);
+      }).immediate();
+    },
+    assertGithubConnectionOwned(actor: string, connectionId: string): void {
+      const owned = getOwnedGithubConnection(actor, connectionId);
+      if (owned === undefined || owned.connection.status === "failed") throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
     },
     listPreviews(projectId: string, workspaceId: string): PreviewView[] {
       const workspace = db.select({ id: workspaces.id }).from(workspaces).where(and(
@@ -922,7 +1036,38 @@ export function openProjectDatabase(path: string, options: {
       };
       try {
         client.transaction(() => {
+          if (input.githubSource !== undefined) {
+            const owned = getOwnedGithubConnection(input.actor, input.githubSource.connectionId);
+            if (owned === undefined || owned.connection.status === "failed") {
+              throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+            }
+            const repository = input.githubSource.repository;
+            if (input.repositoryUrl !== repository.cleanHttpsUrl
+              || repository.fullName !== `${repository.ownerLogin}/${repository.name}`
+              || repository.cleanHttpsUrl !== `https://github.com/${repository.fullName}.git`) {
+              throw new ProjectSetupConflictError("The retained GitHub repository metadata is not canonical.");
+            }
+          }
           db.insert(projects).values(row).run();
+          if (input.githubSource !== undefined) {
+            const repository = input.githubSource.repository;
+            db.insert(projectGithubSources).values({
+              projectId,
+              connectionId: input.githubSource.connectionId,
+              repositoryId: repository.repositoryId,
+              ownerLogin: repository.ownerLogin,
+              name: repository.name,
+              fullName: repository.fullName,
+              cleanHttpsUrl: repository.cleanHttpsUrl,
+              defaultBranch: repository.defaultBranch,
+              isPrivate: repository.private,
+              isArchived: repository.archived,
+              isDisabled: repository.disabled,
+              verifiedAt: input.githubSource.verifiedAt,
+              metadataUpdatedAt: input.githubSource.metadataUpdatedAt,
+              rowVersion: 1
+            }).run();
+          }
           const last = db.select({ sequence: auditEvents.sequence }).from(auditEvents)
             .orderBy(desc(auditEvents.sequence)).limit(1).get();
           options.beforeAuditInsert?.();
@@ -934,7 +1079,9 @@ export function openProjectDatabase(path: string, options: {
             resourceType: "project",
             resourceId: projectId,
             operationId: null,
-            metadataJson: JSON.stringify({ sourceKind: "remote" }),
+            metadataJson: JSON.stringify(input.githubSource === undefined
+              ? { sourceKind: "remote" }
+              : { sourceKind: "github-app", connectionId: input.githubSource.connectionId, repositoryId: input.githubSource.repository.repositoryId }),
             createdAt: timestamp
           }).run();
         }).immediate();
@@ -1013,6 +1160,27 @@ export function openProjectDatabase(path: string, options: {
           operationName: input.operationName, resourceType: input.resourceType, resourceId: input.resourceId,
           state: "accepted", progressJson: null, errorCode: null, errorMessage: null,
           createdAt: timestamp, startedAt: null, finishedAt: null
+        };
+        db.insert(operations).values(operation).run();
+        return operation;
+      }).immediate();
+    },
+    getOrCreateProjectFetchOperation(input: { projectId: string; actor: string }): Operation {
+      return client.transaction(() => {
+        const project = db.select({ id: projects.id, state: projects.state }).from(projects)
+          .where(eq(projects.id, input.projectId)).get();
+        if (project === undefined) throw new ProjectSetupConflictError("The project was not found.");
+        if (project.state !== "ready") throw new ProjectSetupConflictError("A ready project is required to fetch the repository.");
+        const existing = db.select().from(operations).where(and(
+          eq(operations.projectId, input.projectId), eq(operations.operationName, "project.fetch")
+        )).orderBy(desc(operations.createdAt), desc(operations.operationId)).get();
+        if (existing !== undefined && (existing.state === "accepted" || existing.state === "running")) return existing;
+        const createdAt = now().toISOString();
+        const operation: Operation = {
+          operationId: createId(), projectId: input.projectId, workspaceId: null, actor: input.actor,
+          operationName: "project.fetch", resourceType: "project", resourceId: input.projectId,
+          state: "accepted", progressJson: null, errorCode: null, errorMessage: null,
+          createdAt, startedAt: null, finishedAt: null
         };
         db.insert(operations).values(operation).run();
         return operation;
@@ -1722,7 +1890,7 @@ export function openProjectDatabase(path: string, options: {
         const project = db.select().from(projects).where(eq(projects.id, input.projectId)).get();
         if (project === undefined) throw new ProjectSetupConflictError("The project no longer exists.");
         if (project.state === "ready") return;
-        const required = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "workspace.create"];
+        const required = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.setup.fetch", "workspace.create"];
         const completed = db.select().from(operations).where(eq(operations.projectId, project.id)).all();
         if (required.some((name) => !completed.some((operation) => operation.operationName === name && operation.state === "succeeded"))) {
           throw new ProjectSetupConflictError("Workspace setup operations have not all succeeded.");
@@ -1783,13 +1951,13 @@ export function openProjectDatabase(path: string, options: {
       }).immediate();
     },
     connectGithubInstallation(input: {
-      connectionId: string; installationId: string; accountId: string; accountType: "User" | "Organization";
+      actor: string; connectionId: string; installationId: string; accountId: string; accountType: "User" | "Organization";
       accountLogin: string; repositorySelection: "all" | "selected"; permissions: Record<string, "read" | "write">;
       status: "connected" | "degraded"; verifiedAt: string;
     }) {
       return client.transaction(() => {
         const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.connectionId, input.connectionId)).get();
-        if (attempt === undefined || attempt.claimedInstallationId !== input.installationId
+        if (attempt === undefined || attempt.createdBy !== input.actor || attempt.claimedInstallationId !== input.installationId
           || (attempt.status !== "claimed" && attempt.status !== "connected")) throw new Error("GITHUB_ATTEMPT_NOT_CLAIMED");
         const timestamp = now().toISOString();
         const existing = db.select().from(githubConnections).where(eq(githubConnections.connectionId, input.connectionId)).get();

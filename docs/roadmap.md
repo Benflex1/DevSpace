@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated August 4, 2026.
+> Updated September 5, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -63,10 +63,14 @@ Agent-managed workspace; and no host/Coolify Docker socket is exposed.
 The next product target is a coherent semi-finished beta, not another foundation-only milestone.
 
 Milestones 0 and 1, TypeScript 7 acceleration, and PR #43 / AI Session Beta Checkpoint 1 are
-complete and merged. The current objective is the finished owner-controlled MVP. Private GitHub
-repository access is the active slice; this branch implements its Checkpoint 1 connection and
-repository-listing foundation, but that checkpoint is not merged or generally complete until the
-branch is reviewed and merged. The remaining path prioritizes:
+complete and merged. PR #44 merged Private GitHub Checkpoint 1 at
+`a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`; its validated head was
+`ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`, and the accepted snapshots were proven
+tree-equivalent. Real CP1 local/dev GitHub App acceptance is complete. The current objective is the
+finished owner-controlled MVP, and CP2 is the active implementation slice on
+`feat/private-github-access-cp2`. Automated verification passes on this branch; the draft PR remains
+intentionally in draft, and the real-provider gate and production deployment remain explicitly
+pending. The remaining path prioritizes:
 
 1. private GitHub repository access Checkpoints 1–3;
 2. the remaining browser-usable Codex approvals and structured-question flow;
@@ -405,12 +409,14 @@ Stop rule:
    - ✅ owner device-code onboarding and bounded real-provider browser validation passed; Checkpoint 1
      is complete
 
-2. 🟡 **Private GitHub repository access**
-   - Checkpoint 1 is implemented on `feat/private-github-access`, pending review and merge: App-only
-     connection, configured numeric account authority, Agent-private state and token lifecycle,
-     repository listing, and minimal browser UI;
-   - Checkpoint 2 remains private inspect/clone/fetch/workspace creation and credential brokering;
-   - Checkpoint 3 remains explicit push and disconnect/revocation behavior;
+2. 🟡 **Private GitHub repository access — Checkpoint 2 implementation**
+   - ✅ Checkpoint 1 merged by PR #44 at `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`; validated
+     head `ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`; accepted snapshots are tree-equivalent;
+   - ✅ CP2 browser slice implements live refresh, immutable repository selection, private
+     inspect/clone/fetch, managed store/worktree setup, normal runtime start, later Fetch repository,
+     exact token brokering, and restart-safe origin transitions;
+   - 🟡 real-provider CP2 acceptance remains a later manual gate; no production deployment is claimed;
+   - ⏳ Checkpoint 3 remains explicit push and disconnect/revocation behavior;
    - no OAuth, PAT, or fine-grained-token fallback is planned for this authority model.
 
 3. ⏳ **Create a project from scratch**
@@ -440,19 +446,22 @@ Stop rule:
 
 ### Private GitHub repository access
 
-**Status: 🟡 Checkpoint 1 implemented on this branch; not yet merged**
+**Status: 🟡 Checkpoint 2 implemented on `feat/private-github-access-cp2`; real-provider gate pending**
 
-- 🟡 Authenticate the administrator-configured owner account/installation through a GitHub App
-- 🟡 List authorized repositories outside project onboarding
-- ❌ Clone and fetch private repositories without embedding credentials in remote URLs
+- ✅ Authenticate the administrator-configured owner account/installation through a GitHub App
+- ✅ List authorized repositories outside project onboarding and refresh live installation authority
+- ✅ Clone and fetch private repositories without embedding credentials in remote URLs
+- ✅ Inspect, register, set up, start, and later fetch a private repository through the normal path
+- ✅ Keep immutable `{connectionId, repositoryId}` ownership through Web, Agent, journal, and store state
+- ✅ Broker one-operation credentials through an owner-private askpass socket and native helper
 - ❌ Push through an explicit user action
-- 🟡 Keep credentials and short-lived tokens Agent-private
-- 🟡 Redact credentials from logs, errors, process arguments, and persisted public state
+- ✅ Keep credentials and short-lived tokens Agent-private
+- ✅ Redact credentials from logs, errors, process arguments, and persisted public state
 - ❌ Revoke/disconnect access cleanly
 
 Sequencing decision:
 
-- Checkpoint 1 is the active branch; Checkpoints 2 and 3 remain pending.
+- CP1 is merged and locally/dev accepted; CP2 is the active branch and is not production accepted.
 - It is required before inviting external beta users because most real development repositories are
   private.
 - Do not delay the first AI vertical slice for a generic multi-provider source-control abstraction.
@@ -618,7 +627,8 @@ Deferred until later:
 
 ## Additional vertical slices
 
-- 🟡 Private GitHub repository access Checkpoint 1 implemented on this branch; Checkpoints 2/3 pending
+- 🟡 Private GitHub repository access Checkpoint 2 implemented on its feature branch; real-provider
+  acceptance remains pending and Checkpoint 3 is deferred
 - ❌ Create project from scratch
 - ❌ Persistent terminals
 

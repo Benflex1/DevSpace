@@ -81,7 +81,7 @@ async function configurePreviewWorkspace(databaseInput: ReturnType<typeof openPr
     projectId: projectIdInput, source: { kind: "remote", url: repositoryUrl }
   }));
   const fetchOperation = databaseInput.getOrCreateOperation({ projectId: projectIdInput, actor: "e2e@example.invalid",
-    operationName: "project.fetch", resourceType: "project", resourceId: projectIdInput });
+    operationName: "project.setup.fetch", resourceType: "project", resourceId: projectIdInput });
   await waitForOperation(databaseInput, agent, fetchOperation, async () => await agent.fetchProject(fetchOperation.operationId, projectIdInput));
   const workspaceOperation = databaseInput.getOrCreateOperation({ projectId: projectIdInput, actor: "e2e@example.invalid",
     operationName: "workspace.create", resourceType: "workspace", resourceId: setup.workspaceId });

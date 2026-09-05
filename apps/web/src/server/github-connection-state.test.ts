@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { openProjectDatabase } from "./database.js";
+import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
 
 describe("GitHub connection state", () => {
   it("persists only a state hash and atomically resumes an exact duplicate claim", () => {
@@ -38,6 +38,29 @@ describe("GitHub connection state", () => {
     expect(claims[0]?.status).toBe("claimed");
     expect(claims[1]?.status).toBe("claimed");
     expect(claims[0]?.rowVersion).toBe(claims[1]?.rowVersion);
+    database.close();
+  });
+
+  it("proves the retained connection belongs to the actor at persisted private-source lookup", () => {
+    const database = openProjectDatabase(":memory:", { now: () => new Date("2026-08-04T12:00:00.000Z") });
+    const attempt = database.createGithubConnectionAttempt({ actor: "owner", stateHash: "c".repeat(64), expiresAt: "2026-08-04T12:10:00.000Z" });
+    database.claimGithubConnectionAttempt({ actor: "owner", stateHash: "c".repeat(64), installationId: "77" });
+    database.connectGithubInstallation({ actor: "owner", connectionId: attempt.connectionId, installationId: "77", accountId: "99",
+      accountType: "Organization", accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" },
+      status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z" });
+    const project = database.createProject({ name: "Private", slug: "private", repositoryUrl: "https://github.com/org/private.git", defaultBranch: "feature", actor: "owner",
+      githubSource: { connectionId: attempt.connectionId, repository: { repositoryId: "9007199254740993", ownerLogin: "org", name: "private", fullName: "org/private",
+        cleanHttpsUrl: "https://github.com/org/private.git", defaultBranch: "main", private: true, archived: false, disabled: false },
+        verifiedAt: "2026-08-04T12:00:00.000Z", metadataUpdatedAt: "2026-08-04T12:00:00.000Z" } });
+    expect(database.getProjectSourceLocator(project.id, "owner")).toEqual({ kind: "github-app", connectionId: attempt.connectionId, repositoryId: "9007199254740993" });
+    const refreshed = database.refreshProjectGithubSource({ projectId: project.id, actor: "owner", connectionId: attempt.connectionId,
+      repository: { repositoryId: "9007199254740993", ownerLogin: "org", name: "renamed", fullName: "org/renamed",
+        cleanHttpsUrl: "https://github.com/org/renamed.git", defaultBranch: "trunk", private: true, archived: false, disabled: false },
+      verifiedAt: "2026-08-04T12:01:00.000Z", metadataUpdatedAt: "2026-08-04T12:01:00.000Z" });
+    expect(refreshed).toMatchObject({ repositoryId: "9007199254740993", name: "renamed", defaultBranch: "trunk", rowVersion: 2 });
+    expect(database.listProjects()[0]).toMatchObject({ repositoryUrl: "https://github.com/org/renamed.git", defaultBranch: "feature" });
+    expect(() => database.getProjectSourceLocator(project.id, "foreign")).toThrow(ProjectSetupConflictError);
+    expect(() => database.assertGithubConnectionOwned("foreign", attempt.connectionId)).toThrow(ProjectSetupConflictError);
     database.close();
   });
 });

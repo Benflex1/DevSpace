@@ -22,11 +22,13 @@ import {
   type PreviewInspectionData,
   type RuntimeStatusData,
   type SourceInspectionData,
+  type SourceLocator,
   type ProcessInspectionData,
   type WorkspaceInspectionData,
   type GithubAppInspection,
   type GithubInstallationInspection,
-  type GithubRepositoryPage
+  type GithubRepositoryPage,
+  type GithubRepositoryResolution
 } from "@devspace/contracts";
 import {
   classifyFailureCode, createLogger, type FailureCategory, type LogContext, type StructuredLogger
@@ -168,7 +170,8 @@ export function createAgentClient(socketPath: string, options: {
   const aiStreamAdmission = options.aiStreamAdmission ?? processAiStreamAdmission;
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
-    | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.repositories.list"
+    | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.installation.refresh"
+    | "github.repositories.list" | "github.repositories.resolve"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
     | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
@@ -325,8 +328,12 @@ export function createAgentClient(socketPath: string, options: {
       await call("github.installation.verify", { connectionId, installationId }) as GithubInstallationInspection,
     inspectGithubInstallation: async (connectionId: string): Promise<GithubInstallationInspection> =>
       await call("github.installation.inspect", { connectionId }) as GithubInstallationInspection,
+    refreshGithubInstallation: async (connectionId: string): Promise<GithubInstallationInspection> =>
+      await call("github.installation.refresh", { connectionId }) as GithubInstallationInspection,
     listGithubRepositories: async (connectionId: string, pageSize: number, continuation?: string): Promise<GithubRepositoryPage> =>
       await call("github.repositories.list", { connectionId, pageSize, ...(continuation === undefined ? {} : { continuation }) }) as GithubRepositoryPage,
+    resolveGithubRepository: async (connectionId: string, repositoryId: string): Promise<GithubRepositoryResolution> =>
+      await call("github.repositories.resolve", { connectionId, repositoryId }) as GithubRepositoryResolution,
     inspectSource: async (url: string): Promise<SourceInspectionData> => await call(
       "project.source.inspect", { source: { kind: "remote", url } }
     ) as SourceInspectionData,
@@ -339,8 +346,8 @@ export function createAgentClient(socketPath: string, options: {
     createManagedStore: async (operationId: string, data: CreateManagedStoreData): Promise<void> => {
       await call("project.managed-store.create", data, operationId);
     },
-    fetchProject: async (operationId: string, projectId: string): Promise<void> => {
-      await call("project.fetch", { projectId }, operationId);
+    fetchProject: async (operationId: string, projectId: string, source?: SourceLocator): Promise<void> => {
+      await call("project.fetch", { projectId, ...(source === undefined ? {} : { source }) }, operationId);
     },
     createWorkspace: async (operationId: string, data: CreateWorkspaceData): Promise<void> => {
       await call("workspace.create", data, operationId);
@@ -468,4 +475,5 @@ export type FullAgentClient = ReturnType<typeof createAgentClient>;
 export type WorkspaceAgentClient = Pick<FullAgentClient,
   "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" |
   "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
-export type AgentClient = Pick<WorkspaceAgentClient, "health" | "inspectSource">;
+export type AgentClient = Pick<FullAgentClient, "health" | "inspectSource">
+  & Partial<Pick<FullAgentClient, "resolveGithubRepository">>;

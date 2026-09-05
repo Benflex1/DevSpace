@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { AgentResponseError, AgentUnavailableError, createAgentClient } from "../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../server/config.js";
-import { DuplicateProjectSlugError, getProjectDatabase } from "../../../server/database.js";
+import { DuplicateProjectSlugError, ProjectSetupConflictError, getProjectDatabase } from "../../../server/database.js";
 import { OnboardingValidationError, onboardProject, parseOnboardingInput } from "../../../server/onboarding.js";
 import { PROJECT_REGISTRATION_BODY_LIMIT_BYTES, RequestBodyMalformedError, RequestBodyTooLargeError, readBoundedJsonBody } from "../../../server/request-body.js";
 import { normalizeUserFacingFailure } from "../../../server/user-facing-failure.js";
@@ -26,6 +26,7 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     if (error instanceof DuplicateProjectSlugError) return json({ message: error.message }, 409);
+    if (error instanceof ProjectSetupConflictError) return json({ message: "The selected GitHub connection is not available to this actor." }, 403);
     if (error instanceof OnboardingValidationError) return json({ message: error.message }, 422);
     if (error instanceof AgentUnavailableError || error instanceof AgentResponseError) return json(normalizeUserFacingFailure(error, {
       fallbackMessage: "Project registration failed safely.", event: "web.project_registration.failed",

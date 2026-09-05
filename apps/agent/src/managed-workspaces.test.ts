@@ -142,6 +142,35 @@ test("rebinds finalized store ownership after a device-only change and persists 
   await expect(readJson(recordPath)).resolves.toMatchObject({ identity: current });
 });
 
+test("completes an interrupted exact origin transition after restart", async () => {
+  const h = await harness(); await h.createStore();
+  const recordPath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const record = await readJson<StoreOwnershipTestRecord & { git: { bare: true; originUrl: string; commonDirectoryPath: string } }>(recordPath);
+  const renamedOrigin = "https://example.com/renamed-repository.git";
+  await writeJson(recordPath, { ...record, version: 2, git: { ...record.git, pendingOriginUrl: renamedOrigin } });
+
+  const restarted = new ManagedWorkspaces(h.roots, h.git); await restarted.initialize();
+  await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ projectId, workspaceId: null });
+  await expect(readJson(recordPath)).resolves.toMatchObject({
+    version: 2, git: { originUrl: renamedOrigin, pendingOriginUrl: null }
+  });
+  await expect(h.git(["--git-dir", h.managed.repositoryPath(projectId), "config", "--get", "remote.origin.url"]))
+    .resolves.toMatchObject({ stdout: `${renamedOrigin}\n` });
+});
+
+test("rejects a third origin during an interrupted exact origin transition", async () => {
+  const h = await harness(); await h.createStore();
+  const recordPath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const record = await readJson<StoreOwnershipTestRecord & { git: { bare: true; originUrl: string; commonDirectoryPath: string } }>(recordPath);
+  const pendingOrigin = "https://example.com/renamed-repository.git";
+  const foreignOrigin = "https://example.com/foreign-repository.git";
+  await writeJson(recordPath, { ...record, version: 2, git: { ...record.git, pendingOriginUrl: pendingOrigin } });
+  await h.git(["--git-dir", h.managed.repositoryPath(projectId), "config", "remote.origin.url", foreignOrigin]);
+
+  const restarted = new ManagedWorkspaces(h.roots, h.git); await restarted.initialize();
+  await expect(restarted.inspectGit(projectId, null)).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+});
+
 test("rebinds finalized workspace ownership and workspace inspection after a coherent device-only change", async () => {
   const h = await harness(); await h.register(); await h.createStore(); await h.managed.fetch(projectId);
   await h.managed.createWorkspace(h.workspace, workspaceOperation);

@@ -354,7 +354,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const)
       .map((operation) => f11AiAgentApiV1EndpointByOperation[operation]!)
       .find((endpoint) => url.pathname === endpoint.path);
-    const githubEndpoint = (["github.app.inspect", "github.installation.verify", "github.installation.inspect", "github.repositories.list"] as const)
+    const githubEndpoint = (["github.app.inspect", "github.installation.verify", "github.installation.inspect", "github.installation.refresh", "github.repositories.list", "github.repositories.resolve"] as const)
       .map((operation) => githubAgentApiV1EndpointByOperation[operation])
       .find((endpoint) => request.method === endpoint.method && url.pathname === endpoint.path);
     const selectedEndpoint = request.method === "GET" && url.pathname === healthEndpoint.path ? healthEndpoint
@@ -437,12 +437,23 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         const result = githubEndpoint.operation === "github.app.inspect" ? await githubAuthority.inspectApp()
           : githubEndpoint.operation === "github.installation.verify" ? await githubAuthority.verifyInstallation(data as never)
           : githubEndpoint.operation === "github.installation.inspect" ? await githubAuthority.inspectInstallation((data as { connectionId: string }).connectionId)
+          : githubEndpoint.operation === "github.installation.refresh" ? await githubAuthority.refreshInstallation(data as never)
+          : githubEndpoint.operation === "github.repositories.resolve" ? await githubAuthority.resolveRepository(data as never)
           : await githubAuthority.listRepositories(data as never);
         return sendJson(response, 200, githubEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data: result }));
       } catch (error) {
+        if (error instanceof AgentExecutionError && ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code)) {
+          const status = error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
+            : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
+          return sendJson(response, status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
+        }
         const message = error instanceof Error ? error.message : "";
         const selected = message === "github-connection-not-found" ? { status: 404, code: "GITHUB_CONNECTION_NOT_FOUND", retryable: false, details: {} }
           : message === "github-token-lease-active" ? { status: 503, code: "GITHUB_TOKEN_LEASE_ACTIVE", retryable: true, details: {} }
+          : message === "github-contents-permission-required" ? { status: 403, code: "GITHUB_CONTENTS_PERMISSION_REQUIRED", retryable: false, details: {} }
+          : message === "github-installation-unavailable" ? { status: 503, code: "GITHUB_INSTALLATION_UNAVAILABLE", retryable: true, details: {} }
+          : message === "github-repository-not-authorized" ? { status: 403, code: "GITHUB_REPOSITORY_NOT_AUTHORIZED", retryable: false, details: {} }
+          : message === "github-git-authentication-failed" ? { status: 502, code: "GITHUB_GIT_AUTHENTICATION_FAILED", retryable: false, details: {} }
           : { status: message === "github-authority-invalid" || message === "github-installation-conflict" ? 422 : 503,
               code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: message === "github-app-unconfigured" ? "unconfigured" : message === "github-authority-invalid" || message === "github-installation-conflict" ? "mismatch" : "upstream-unavailable" } };
         return sendJson(response, selected.status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
@@ -838,6 +849,34 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       } catch {
         return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
       }
+      if (body.data.source.kind === "github-app") {
+        try {
+          const data = await managed.inspectSource(body.data.source);
+          return sendJson(response, 200, inspectEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+        } catch (error) {
+          if (error instanceof AgentExecutionError && ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code)) {
+            const status = error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
+              : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
+            return sendJson(response, status, inspectEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
+          }
+          const message = error instanceof Error ? error.message : "";
+          const selected = message === "github-contents-permission-required"
+            ? { status: 403, code: "GITHUB_CONTENTS_PERMISSION_REQUIRED" as const, retryable: false }
+            : message === "github-repository-not-authorized"
+              ? { status: 403, code: "GITHUB_REPOSITORY_NOT_AUTHORIZED" as const, retryable: false }
+              : message === "github-installation-unavailable"
+                ? { status: 503, code: "GITHUB_INSTALLATION_UNAVAILABLE" as const, retryable: true }
+                : message === "github-git-authentication-failed"
+                  ? { status: 502, code: "GITHUB_GIT_AUTHENTICATION_FAILED" as const, retryable: false }
+                  : message === "github-token-lease-active"
+                    ? { status: 503, code: "GITHUB_TOKEN_LEASE_ACTIVE" as const, retryable: true }
+                  : { status: 503, code: "SOURCE_UNAVAILABLE" as const, retryable: true };
+          return sendJson(response, selected.status, inspectEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+            code: selected.code, message: selected.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" ? "GitHub Contents read permission is required." : "The GitHub repository source is currently unavailable.",
+            retryable: selected.retryable, details: {}
+          } }));
+        }
+      }
       if (body.data.source.kind !== "remote") {
         return sendJson(response, 422, inspectEndpoint.errorSchema.parse({
           meta: meta(requestId, now),
@@ -927,6 +966,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (started) return;
       startupPreviewReconciliationHealthy = true;
       githubAuthority ??= await createGithubAppAuthority({ stateRoot: managedRoots.state, now, createId });
+      managed.setGithubAuthority(githubAuthority);
       await managed.initialize();
       await journal.initialize();
       if (managed.isHealthy) await execution.initialize();
@@ -998,6 +1038,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       execution.shutdownTransports();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await executor.drain();
+      await managed.shutdown();
       if (resolverStarted && previewLeaseResolver !== null) {
         await previewLeaseResolver.stop();
         resolverStarted = false;

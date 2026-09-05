@@ -16,10 +16,12 @@ export async function GET(request: Request) {
       || (continuation !== undefined && !githubContinuationSchema.safeParse(continuation).success)) {
       return NextResponse.json({ message: "Repository pagination is invalid." }, { status: 400 });
     }
-    const state = getProjectDatabase(config.databasePath).getGithubConnectionState(actor.identity);
+    const database = getProjectDatabase(config.databasePath);
+    const state = database.getGithubConnectionState(actor.identity);
     if (state?.connection === undefined || state.connection === null || state.connection.status === "failed") {
       return NextResponse.json({ message: "A verified GitHub connection is required." }, { status: 409 });
     }
+    database.assertGithubConnectionOwned(actor.identity, state.connection.connectionId);
     const page = await createAgentClient(config.agentSocketPath).listGithubRepositories(state.connection.connectionId, pageSize, continuation);
     return NextResponse.json(page, { headers: { "cache-control": "no-store" } });
   } catch (error) {

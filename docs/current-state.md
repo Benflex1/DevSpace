@@ -6,9 +6,11 @@ Milestones 0 and 1 are complete. PR #43 / AI Session Beta Checkpoint 1 is merged
 objective is the finished owner-controlled MVP, and private GitHub repository access is the active
 slice.
 
-Private GitHub Repository Access Checkpoint 1 is implemented on
-`feat/private-github-access`. It is not merged, deployed, or accepted against a real production
-GitHub App. Checkpoints 2 and 3 remain pending.
+Private GitHub Repository Access Checkpoint 1 was merged by PR #44 at
+`a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`. The validated CP1 head was
+`ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`; the accepted CP1 snapshots were proven tree-identical.
+Real CP1 local/dev GitHub App acceptance is complete. This document does not claim production
+deployment or production-provider acceptance.
 
 ## Canonical AI-session merge proof
 
@@ -64,26 +66,27 @@ The current dashboard and Workbench expose project onboarding, workspace runtime
 tasks, and previews. File editing, richer Git controls, persistent terminals, project creation from
 scratch, and later Workbench polish remain post-M1 product work.
 
-## Private GitHub Checkpoint 1 state
+## Private GitHub Repository Access status
 
-This branch implements Checkpoint 1 and remains a draft, unmerged, undeployed branch. It has not
-received real production GitHub App acceptance. The authority model is App-only: no user OAuth,
-OAuth client secret, user access token, PAT, Git password, or browser account discovery exists.
-Administrator configuration supplies one expected account numeric ID and account type; login names
-are display metadata only.
+Checkpoint 2 is implemented on `feat/private-github-access-cp2` as a browser-usable vertical slice.
+Automated verification passes on this branch; the draft PR remains intentionally in draft and the
+later manual real-provider gate remains pending. No production deployment or production acceptance
+is claimed.
 
-The callback state is a one-time 32-byte value whose SHA-256 hash is the only persisted state value.
-The authenticated Web actor, ten-minute expiry, and pending/claimed/connected/failed attempt lifecycle are
-bound in SQLite. Claims use an immediate compare-and-swap transaction. Exact duplicate callbacks
-with the same installation ID are resumable, a conflicting ID is rejected, and a Web persistence
-failure after Agent binding can be retried against the same private binding. The browser-facing
-projection maps internal `claimed` to `pending`; internal persistence states are never returned as
-public connection states.
+The authority model remains App-only: no user OAuth, OAuth client secret, user access token, PAT,
+Git password, or browser account discovery exists. Administrator configuration supplies one expected
+account numeric ID and account type; login names are display metadata only. The callback state is a
+one-time 32-byte value whose SHA-256 hash is the only persisted state value. The authenticated Web
+actor, ten-minute expiry, and pending/claimed/connected/failed attempt lifecycle are bound in
+SQLite. Claims use an immediate compare-and-swap transaction, and every Web use of a connection ID
+joins the retained connection to its originating actor-owned connection attempt.
 
-The Agent verifies `/app` and the exact installation with an App JWT, proves the App ID, expected
-account ID/type, active installation, repository selection, and the minimum `metadata` permission,
-then stores only safe installation metadata in the private binding. The Agent-private layout extends
-the existing configured state root:
+The Agent verifies `/app` and the exact installation with an App JWT, proves the App ID, exact
+installation ID, configured account ID/type, active status, repository-selection mode, and minimum
+metadata permission, then stores only safe installation metadata in the private binding. Each
+authenticated private Git operation repeats the live proof, requires current Contents read, resolves
+the exact numeric repository ID, mints one fresh exact-repository read token, and revokes/settles it
+independently. The Agent-private layout extends the existing configured state root:
 
 ```text
 <agent-state-root>/github-app/
@@ -104,51 +107,33 @@ runtime. The private key and all tokens stay
 inside Agent memory/private storage; SQLite, browser responses, logs, errors, URLs, arguments, and
 ordinary environment values contain no reusable credential.
 
-Repository listing is serialized per connection and requests only `metadata: read`. The installation
-token is minted immediately before the bounded installation-repository request, never persisted,
-revoked immediately, and dropped from memory. Production HTTP reads inspect and conservatively
-validate `Content-Length`, prefer `Accept-Encoding: identity`, consume Web Streams incrementally by
-decoded byte count, cancel at the bound, and apply fatal UTF-8 decoding before JSON parsing. Exact
-length equality is required for identity responses; encoded responses retain the decoded cap while
-not comparing decoded bytes with encoded `Content-Length`. A mint response is definitive only when
-a complete bounded GitHub rejection proves no token; a transport failure, malformed/oversized
-response, or incomplete `201` response is uncertain. Uncertain minting retains a conservative
-nonsecret guard through the maximum token lifetime and blocks overlapping minting. The internal
-lifecycle records primary listing outcome, revocation outcome, lease settlement, and binding-health
-persistence separately. A successful page remains successful when cleanup is degraded; the response
-carries only bounded `cleanupDegraded` state, while a stale guard remains until proven cleanup or
-expiry.
+Repository listing remains serialized per connection and requests only `metadata: read`. Exact Git
+requests use the deliberately bounded lossless-ID request serializer, require the exact repository
+authority in GitHub's scoped response, and derive `https://<owner>/<name>.git` locally. The token
+never enters a URL, argv, persistent environment, Git config, journal, SQLite, browser response,
+workspace, or log. A short owner-private runtime directory under `$XDG_RUNTIME_DIR` (then
+`/run/user/<uid>`, then an unpredictable `/tmp` directory) holds the broker socket. The broker
+binds a random 256-bit operation capability to the connection, repository, Agent operation,
+execution ID, process-group evidence, deadline, and exact prompt sequence. The native helper emits
+only the requested username or password.
 
-Inspection derives effective health from the durable binding and lease state. A lease recovered at
-startup, a persisted cleanup-degraded lease, an unproven local settlement, or a binding-health write
-failure reports `degraded` even when the durable binding still says `connected`; a safely owned
-in-process lease does not by itself change ordinary status inspection. After a guard expires (or
-cleanup is otherwise proven), only a later successful listing with proven revocation, local
-settlement, and binding restoration may persist `degraded` back to `connected`; expiry alone does not.
-The browser can connect, retry, view the verified identity, list safe repository metadata, and
-paginate with bounded opaque continuations. Private inspection,
-clone, fetch, workspace creation, onboarding selection, credential brokering, push, disconnect, and
-webhooks are not part of this checkpoint.
+Clone and fetch use the normal managed bare store and primary worktree path. Private ownership
+records retain `{connectionId, repositoryId}` and v2 origin-transition state; a rename retaining the
+same numeric ID may transition only through the exact recorded old/new clean HTTPS pair. Browser
+Fetch repository starts a distinct operation and retries accepted/running operations by the same
+operation ID. Public HTTPS onboarding, clone, fetch, inspection, and local worktree operations remain
+on their existing unauthenticated path.
 
-The focused suite covers App/account authority, minimum permissions, ambiguous mint results and
-restart blocking, bounded production response reads, exact record/path identity, cleanup persistence
-failures, degraded recovery across restart, validated-byte parsing, callback claim concurrency, Web
-persistence retry, public status projection, strict contracts, malformed upstream repository
-identities, and the browser-safe connection/listing surface. It uses ephemeral keys, temporary
-private state, injected transport/response seams, and deterministic failure seams only; no real
-GitHub credentials or network are required.
+The focused suite covers live refresh, actor ownership, immutable IDs larger than
+`Number.MAX_SAFE_INTEGER`, exact mint scope and permission validation, stale/missing permissions,
+installation/repository removal, token-lease uncertainty and degraded cleanup, long-path broker
+startup, stale sockets, helper protocol failures, hostile Git environment/configuration, canary
+non-disclosure, authenticated Git fixtures, managed-store transitions, browser routes, and atomic
+Web persistence. It uses ephemeral keys, temporary private state, local authenticated Git fixtures,
+injected transport/response seams, and deterministic failure seams only; it does not use real
+GitHub private keys or installation tokens.
 
-## Limitations and deferred work
-
-- No private repository inspection, clone, fetch, workspace creation, onboarding selection, Git
-  credential broker, askpass helper, or push exists yet.
-- No disconnect, installation deletion, webhook handling, GitHub Enterprise, multiple owner
-  identities, or browser account configuration exists.
-- External uninstall, suspension, permission reduction, and repository-selection changes remain
-  GitHub-authoritative: connection setup proves the configured installation, and later listing must
-  succeed through that installation's current token/API authority. No webhook dependency exists.
-- Checkpoint 2 will cover private inspect/clone/fetch/workspace creation and bounded credential
-  brokering. Checkpoint 3 will cover explicit push and disconnect/revocation behavior.
-- This branch has automated fake-transport, filesystem, persistence, contract, route/UI, and browser
-  coverage only. It does not claim deployment or real production GitHub App acceptance. The AI smoke
-  was not rerun for this correction.
+Explicitly deferred from CP2 are push, disconnect/revocation UX, installation deletion, repository
+creation, PAT/OAuth fallback, generic provider abstraction, webhooks, GitHub Enterprise, multiple
+identities, manual authenticated Git inside workspace containers, hostile same-UID/multi-tenant
+hardening, and production deployment. Real-provider acceptance remains a later user-operated gate.
