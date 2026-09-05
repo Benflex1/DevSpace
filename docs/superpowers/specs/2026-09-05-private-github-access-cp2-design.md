@@ -151,4 +151,3 @@ inspection/rename/restart behavior, Web routes, browser onboarding/setup/fetch,
 and unchanged public flows. The complete repository contract and focused
 Playwright/browser and authenticated-Git suites run before the branch is
 declared complete.
-

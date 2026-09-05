@@ -225,4 +225,3 @@
 - [ ] **Step 3: Review all changed files and run the verification-before-completion checklist; fix failures without weakening tests or invariants.
 - [ ] **Step 4: Commit the final coherent implementation, push `feat/private-github-access-cp2`, and create one draft PR targeting `main`.
 - [ ] **Step 5: Verify the PR remains draft, no merge or deployment occurred, and capture the exact requested Git outputs for the final report.
-
