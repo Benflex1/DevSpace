@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import https from "node:https";
@@ -83,12 +83,72 @@ describe("GitHub askpass broker", () => {
     expect(broker.runtimeDirectory).toBeNull();
   });
 
-  test("uses a short /tmp fallback for long runtime/state paths", async () => {
+  test("uses a short approved fallback for long runtime/state paths", async () => {
     const longBase = await privateRoot(`devspace-${"x".repeat(90)}-`);
-    const broker = createGithubAskpassBroker({ runtimeBases: [longBase, "/tmp"], helperPath: "/trusted/helper" });
+    const fallback = await privateRoot("devspace-short-");
+    const broker = createGithubAskpassBroker({ runtimeBases: [longBase, fallback], helperPath: "/trusted/helper" });
     await broker.start();
-    expect(broker.runtimeDirectory?.startsWith("/tmp/devspace-askpass-")).toBe(true);
+    expect(broker.runtimeDirectory?.startsWith(`${fallback}${path.sep}devspace-askpass-`)).toBe(true);
     expect(Buffer.byteLength(broker.socketPath ?? "")).toBeLessThanOrEqual(100);
+    await broker.stop();
+  });
+
+  test.each(["EROFS", "EACCES"])("falls through a candidate-local %s runtime error", async (code) => {
+    const first = await privateRoot("devspace-runtime-first-");
+    const second = await privateRoot("devspace-runtime-second-");
+    const realMkdir = mkdir;
+    const broker = createGithubAskpassBroker({
+      runtimeBases: [first, second],
+      mkdir: async (directory, options) => {
+        if (directory.startsWith(first)) throw Object.assign(new Error(code), { code });
+        return await realMkdir(directory, options);
+      },
+      helperPath: "/trusted/helper"
+    });
+    await broker.start();
+    expect(broker.runtimeDirectory?.startsWith(`${second}${path.sep}devspace-askpass-`)).toBe(true);
+    await broker.stop();
+  });
+
+  test("reports deterministic unavailability after all candidate-local availability errors", async () => {
+    const first = await privateRoot("devspace-runtime-first-");
+    const second = await privateRoot("devspace-runtime-second-");
+    const broker = createGithubAskpassBroker({
+      runtimeBases: [first, second],
+      mkdir: () => Promise.reject(Object.assign(new Error("read-only"), { code: "EROFS" })),
+      helperPath: "/trusted/helper"
+    });
+    await expect(broker.start()).rejects.toThrow("askpass-runtime-unavailable");
+    expect(broker.socketPath).toBeNull();
+  });
+
+  test("fails closed on an unsafe runtime-base symlink instead of skipping it", async () => {
+    const target = await privateRoot("devspace-runtime-target-");
+    const symlinkBase = `${target}-link`;
+    const fallback = await privateRoot("devspace-runtime-fallback-");
+    await symlink(target, symlinkBase);
+    roots.push(symlinkBase);
+    const broker = createGithubAskpassBroker({ runtimeBases: [symlinkBase, fallback], helperPath: "/trusted/helper" });
+    await expect(broker.start()).rejects.toThrow("askpass-runtime-base-unsafe");
+  });
+
+  test("serializes concurrent startup and permits a later retry after startup failure", async () => {
+    const base = await privateRoot("devspace-runtime-retry-");
+    let unavailable = true;
+    const realMkdir = mkdir;
+    const broker = createGithubAskpassBroker({
+      runtimeBases: [base],
+      mkdir: async (directory, options) => {
+        if (unavailable) throw Object.assign(new Error("read-only"), { code: "EROFS" });
+        return await realMkdir(directory, options);
+      },
+      helperPath: "/trusted/helper"
+    });
+    const failures = await Promise.allSettled([broker.ensureStarted(), broker.ensureStarted(), broker.ensureStarted()]);
+    expect(failures.every((result) => result.status === "rejected")).toBe(true);
+    unavailable = false;
+    await Promise.all([broker.ensureStarted(), broker.ensureStarted()]);
+    expect(broker.socketPath).not.toBeNull();
     await broker.stop();
   });
 
@@ -110,6 +170,26 @@ describe("GitHub askpass broker", () => {
     await broker.stop();
   });
 
+  test("does not unlink an active unexpected socket during startup failure cleanup", async () => {
+    const base = await privateRoot("devspace-active-socket-");
+    const suffix = "cd".repeat(16);
+    const runtime = path.join(base, `devspace-askpass-${suffix}`);
+    await mkdir(runtime, { mode: 0o700 });
+    const socketPath = path.join(runtime, "broker.sock");
+    const listener = await new Promise<ReturnType<typeof createServer>>((resolve, reject) => {
+      const value = createServer();
+      value.once("error", reject);
+      value.listen(socketPath, () => resolve(value));
+    });
+    const broker = createGithubAskpassBroker({ runtimeBases: [base], randomBytes: () => Buffer.from(suffix, "hex"), helperPath: "/trusted/helper" });
+    try {
+      await expect(broker.start()).rejects.toThrow("askpass-socket-active");
+      await expect(stat(socketPath)).resolves.toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => listener.close(() => resolve()));
+    }
+  });
+
   test("serves one username and one password only through the native helper", async () => {
     const base = await privateRoot("devspace-broker-");
     const broker = createGithubAskpassBroker({ runtimeBases: [base] });
@@ -121,6 +201,23 @@ describe("GitHub askpass broker", () => {
     expect(result.stdout).toBe("x-access-tokenprivate-canary");
     expect(result.stderr).toBe("");
     broker.settle(capability.capability);
+    await broker.stop();
+  });
+
+  test.each([
+    ["password before username", [`Password for '${originUrl}': `]],
+    ["duplicate username", [`Username for '${originUrl}': `, `Username for '${originUrl}': `]],
+    ["duplicate password", [`Username for '${originUrl}': `, `Password for '${originUrl}': `, `Password for '${originUrl}': `]]
+  ])("rejects %s according to the exact prompt state machine", async (_label, prompts) => {
+    const base = await privateRoot("devspace-prompt-state-");
+    const broker = createGithubAskpassBroker({ runtimeBases: [base] });
+    const capability = await registration(broker);
+    const result = await runHelpers(capability.helperPath, capability.capability, prompts, {
+      ...capability.environment, DEVSPACE_EXECUTION_ID: executionId
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe(_label === "duplicate username" ? "x-access-token" : _label === "duplicate password" ? "x-access-tokenprivate-canary" : "");
+    expect(result.stderr).toBe("");
     await broker.stop();
   });
 
@@ -208,7 +305,8 @@ describe("GitHub askpass broker", () => {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve()); });
     const address = server.address(); if (address === null || typeof address === "string") throw new Error("fixture address missing");
     const repositoryUrl = `https://127.0.0.1:${address.port}/repository.git`;
-    const broker = createGithubAskpassBroker();
+    const brokerRoot = await privateRoot("devspace-git-broker-");
+    const broker = createGithubAskpassBroker({ runtimeBases: [brokerRoot] });
     await broker.start();
     const capability = broker.register({ connectionId, repositoryId, operationId, executionId, originUrl: repositoryUrl, token: canary,
       deadlineAt: new Date(Date.now() + 30_000) });

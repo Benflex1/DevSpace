@@ -42,6 +42,7 @@ export interface GithubAskpassBroker {
   readonly socketPath: string | null;
   readonly runtimeDirectory: string | null;
   readonly helperPath: string;
+  ensureStarted(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   register(input: AskpassBrokerRegistrationInput): AskpassCapability;
@@ -51,6 +52,8 @@ export interface GithubAskpassBroker {
 export interface GithubAskpassBrokerOptions {
   /** Test seam; production selection is XDG_RUNTIME_DIR, /run/user/<uid>, then /tmp. */
   readonly runtimeBases?: readonly string[];
+  /** Test seam for candidate-local filesystem availability faults. */
+  readonly mkdir?: (directory: string, options: { readonly mode: number }) => Promise<unknown>;
   readonly helperPath?: string;
   readonly randomBytes?: (size: number) => Buffer;
   readonly now?: () => number;
@@ -58,9 +61,16 @@ export interface GithubAskpassBrokerOptions {
 
 interface Registration extends AskpassBrokerRegistrationInput {
   readonly capability: string;
-  usernameUsed: boolean;
-  passwordUsed: boolean;
+  promptState: "awaiting-username" | "awaiting-password" | "complete";
   processGroup: ProcessGroupIdentity | null;
+}
+
+const RUNTIME_AVAILABILITY_ERRNOS = new Set(["EACCES", "ENODEV", "ENETDOWN", "ENOENT", "ENOTDIR", "EPERM", "EROFS"]);
+
+function isRuntimeAvailabilityError(error: unknown): boolean {
+  return error !== null && typeof error === "object" && "code" in error
+    && typeof (error as { readonly code?: unknown }).code === "string"
+    && RUNTIME_AVAILABILITY_ERRNOS.has((error as { readonly code: string }).code);
 }
 
 function protocolError(reason = "askpass-protocol-invalid"): Error { return new Error(reason); }
@@ -180,15 +190,22 @@ function expectedPrompts(originUrl: string): { readonly username: string; readon
   };
 }
 
-async function safeRuntimeBase(directory: string, uid: number): Promise<boolean> {
+async function safeRuntimeBase(directory: string, uid: number): Promise<"available" | "unavailable"> {
   const parsed = runtimeDirectorySchema.safeParse(directory);
-  if (!parsed.success) return false;
-  const stats = await lstat(directory).catch(() => null);
-  return stats !== null && isPrivateDirectory(stats, uid);
+  if (!parsed.success) throw new Error("askpass-runtime-base-invalid");
+  let stats: Awaited<ReturnType<typeof lstat>>;
+  try { stats = await lstat(directory); }
+  catch (error) {
+    if (isRuntimeAvailabilityError(error)) return "unavailable";
+    throw error;
+  }
+  if (!isPrivateDirectory(stats, uid)) throw new Error("askpass-runtime-base-unsafe");
+  return "available";
 }
 
 async function createRuntimeDirectory(options: GithubAskpassBrokerOptions, uid: number): Promise<{ path: string; identity: SocketIdentity }> {
   const random = options.randomBytes ?? randomBytes;
+  const createDirectory = options.mkdir ?? (async (directory: string, mkdirOptions: { readonly mode: number }) => await mkdir(directory, mkdirOptions));
   const environmentBase = process.env.XDG_RUNTIME_DIR;
   const defaultBases = [
     ...(environmentBase === undefined ? [] : [environmentBase]),
@@ -198,29 +215,43 @@ async function createRuntimeDirectory(options: GithubAskpassBrokerOptions, uid: 
   const bases = options.runtimeBases ?? defaultBases;
   const suffix = random(16).toString("hex");
   let shortPathSeen = false;
+  let availabilityErrorSeen = false;
   for (const base of bases) {
-    if (!(await safeRuntimeBase(base, uid)) && base !== "/tmp") continue;
+    if (base !== "/tmp") {
+      const baseState = await safeRuntimeBase(base, uid);
+      if (baseState === "unavailable") { availabilityErrorSeen = true; continue; }
+    }
     const directory = path.join(base, `devspace-askpass-${suffix}`);
     const socket = path.join(directory, "broker.sock");
     if (Buffer.byteLength(socket) > SOCKET_PATH_MAX_BYTES) { shortPathSeen = true; continue; }
     try {
-      await mkdir(directory, { mode: 0o700 });
+      await createDirectory(directory, { mode: 0o700 });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         const existing = await lstat(directory).catch(() => null);
         if (existing === null || !isPrivateDirectory(existing, uid)) throw new Error("askpass-runtime-directory-ownership-invalid", { cause: error });
         return { path: directory, identity: identity(existing) };
       }
+      if (isRuntimeAvailabilityError(error)) { availabilityErrorSeen = true; continue; }
       throw error;
     }
-    const stats = await lstat(directory).catch(() => null);
-    if (stats === null || !isPrivateDirectory(stats, uid)) {
+    let stats: Awaited<ReturnType<typeof lstat>>;
+    try { stats = await lstat(directory); }
+    catch (error) {
+      if (isRuntimeAvailabilityError(error)) {
+        availabilityErrorSeen = true;
+        await rmdir(directory).catch(() => undefined);
+        continue;
+      }
+      throw error;
+    }
+    if (!isPrivateDirectory(stats, uid)) {
       await rmdir(directory).catch(() => undefined);
       throw new Error("askpass-runtime-directory-ownership-invalid");
     }
     return { path: directory, identity: identity(stats) };
   }
-  throw new Error(shortPathSeen ? "askpass-runtime-socket-path-too-long" : "askpass-runtime-unavailable");
+  throw new Error(availabilityErrorSeen ? "askpass-runtime-unavailable" : shortPathSeen ? "askpass-runtime-socket-path-too-long" : "askpass-runtime-unavailable");
 }
 
 async function probeExistingSocket(socketPath: string): Promise<"active" | "stale" | "absent"> {
@@ -275,6 +306,7 @@ export function createGithubAskpassBroker(options: GithubAskpassBrokerOptions = 
   let runtime: { path: string; identity: SocketIdentity } | null = null;
   let socketPath: string | null = null;
   let socketIdentity: SocketIdentity | null = null;
+  let startPromise: Promise<void> | null = null;
 
   const handleConnection = (socket: Socket): void => {
     let bytes = Buffer.alloc(0);
@@ -308,10 +340,10 @@ export function createGithubAskpassBroker(options: GithubAskpassBrokerOptions = 
         const isUsername = request.prompt === prompts.username;
         const isPassword = prompts.passwords.includes(request.prompt);
         if (!isUsername && !isPassword) throw new Error("prompt");
-        if (isUsername && registration.usernameUsed) throw new Error("username-duplicate");
-        if (isPassword && registration.passwordUsed) throw new Error("password-duplicate");
-        if (isUsername) registration.usernameUsed = true;
-        if (isPassword) registration.passwordUsed = true;
+        if (registration.promptState === "awaiting-username" && !isUsername) throw new Error("password-before-username");
+        if (registration.promptState === "awaiting-password" && !isPassword) throw new Error("username-duplicate");
+        if (registration.promptState === "complete") throw new Error("credential-prompt-complete");
+        registration.promptState = isUsername ? "awaiting-password" : "complete";
         socket.end(encodeResponse(isUsername ? "x-access-token" : registration.token));
       } catch {
         socket.destroy();
@@ -331,52 +363,69 @@ export function createGithubAskpassBroker(options: GithubAskpassBrokerOptions = 
     socket.on("end", () => { if (!frameHandled) reject(); });
   };
 
+  const startBroker = async (): Promise<void> => {
+    if (server !== null) return;
+    const uid = currentUid();
+    runtime = await createRuntimeDirectory(options, uid);
+    socketPath = path.join(runtime.path, "broker.sock");
+    let created: Server | null = null;
+    let socketPublished = false;
+    try {
+      await removeStaleSocket(socketPath, uid);
+      created = net.createServer({ allowHalfOpen: true }, handleConnection);
+      await new Promise<void>((resolve, reject) => {
+        created?.once("error", reject);
+        created?.listen(socketPath!, () => { created?.off("error", reject); socketPublished = true; resolve(); });
+      });
+      await chmod(socketPath, 0o700);
+      const stats = await lstat(socketPath);
+      if (!isOwnedSocket(stats, uid)) throw new Error("askpass-socket-ownership-invalid");
+      socketIdentity = identity(stats);
+      server = created;
+    } catch (error) {
+      created?.close();
+      if (socketPath !== null) {
+        const current = await lstat(socketPath).catch((socketError: NodeJS.ErrnoException) => {
+          if (socketError.code === "ENOENT") return null;
+          return null;
+        });
+        if (socketPublished && current !== null && isOwnedSocket(current, uid)
+          && (socketIdentity === null || sameIdentity(socketIdentity, identity(current)))) {
+          await unlink(socketPath).catch(() => undefined);
+        }
+      }
+      if (runtime !== null) {
+        const current = await lstat(runtime.path).catch(() => null);
+        if (current !== null && isPrivateDirectory(current, uid) && sameIdentity(runtime.identity, identity(current))) {
+          await rmdir(runtime.path).catch(() => undefined);
+        }
+      }
+      runtime = null;
+      socketPath = null;
+      socketIdentity = null;
+      throw error;
+    }
+  };
+  const ensureStarted = async (): Promise<void> => {
+    if (server !== null) return;
+    if (startPromise === null) {
+      startPromise = startBroker().catch((error: unknown) => {
+        startPromise = null;
+        throw error;
+      });
+    }
+    await startPromise;
+  };
+
   return {
     get socketPath() { return socketPath; },
     get runtimeDirectory() { return runtime?.path ?? null; },
     helperPath,
-    async start() {
-      if (server !== null) return;
-      const uid = currentUid();
-      runtime = await createRuntimeDirectory(options, uid);
-      socketPath = path.join(runtime.path, "broker.sock");
-      await removeStaleSocket(socketPath, uid);
-      const created = net.createServer({ allowHalfOpen: true }, handleConnection);
-      try {
-        await new Promise<void>((resolve, reject) => {
-          created.once("error", reject);
-          created.listen(socketPath!, () => { created.off("error", reject); resolve(); });
-        });
-        await chmod(socketPath, 0o700);
-        const stats = await lstat(socketPath);
-        if (!isOwnedSocket(stats, uid)) throw new Error("askpass-socket-ownership-invalid");
-        socketIdentity = identity(stats);
-        server = created;
-      } catch (error) {
-        created.close();
-        if (socketPath !== null) {
-          const current = await lstat(socketPath).catch((socketError: NodeJS.ErrnoException) => {
-            if (socketError.code === "ENOENT") return null;
-            return null;
-          });
-          if (current !== null && isOwnedSocket(current, uid)
-            && (socketIdentity === null || sameIdentity(socketIdentity, identity(current)))) {
-            await unlink(socketPath).catch(() => undefined);
-          }
-        }
-        if (runtime !== null) {
-          const current = await lstat(runtime.path).catch(() => null);
-          if (current !== null && isPrivateDirectory(current, uid) && sameIdentity(runtime.identity, identity(current))) {
-            await rmdir(runtime.path).catch(() => undefined);
-          }
-        }
-        runtime = null;
-        socketPath = null;
-        socketIdentity = null;
-        throw error;
-      }
-    },
+    ensureStarted,
+    async start() { await ensureStarted(); },
     async stop() {
+      const pendingStart = startPromise;
+      if (pendingStart !== null) await pendingStart.catch(() => undefined);
       for (const capability of registrations.keys()) registrations.delete(capability);
       const activeServer = server;
       server = null;
@@ -399,6 +448,7 @@ export function createGithubAskpassBroker(options: GithubAskpassBrokerOptions = 
       socketIdentity = null;
       socketPath = null;
       runtime = null;
+      startPromise = null;
     },
     register(input) {
       if (server === null || socketPath === null) throw new Error("askpass-broker-not-started");
@@ -409,7 +459,7 @@ export function createGithubAskpassBroker(options: GithubAskpassBrokerOptions = 
       if (!boundedString(input.token, TOKEN_MAX_BYTES) || !Number.isFinite(input.deadlineAt.valueOf()) || input.deadlineAt.valueOf() <= now()) throw new Error("askpass-capability-invalid");
       expectedPrompts(input.originUrl);
       const capability = randomBytes(32).toString("hex");
-      registrations.set(capability, { ...input, connectionId, repositoryId, operationId, executionId, capability, usernameUsed: false, passwordUsed: false, processGroup: null });
+      registrations.set(capability, { ...input, connectionId, repositoryId, operationId, executionId, capability, promptState: "awaiting-username", processGroup: null });
       return {
         capability, socketPath, helperPath, executionId,
         environment: {

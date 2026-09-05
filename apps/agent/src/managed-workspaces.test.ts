@@ -10,6 +10,8 @@ import {
   parseProjectOptionsV1
 } from "@devspace/project-options";
 import { AgentExecutionError, ManagedWorkspaces, runGit, type GitRunner } from "./managed-workspaces.js";
+import { createGithubAskpassBroker } from "./github-askpass.js";
+import type { GithubAppAuthority } from "./github-app.js";
 import { DockerEngineClient } from "./docker-runtime.js";
 import { PreviewRuntimeManager } from "./preview-runtime.js";
 import { WorkspaceRuntimeError, WorkspaceRuntimeManager } from "./workspace-runtime.js";
@@ -93,6 +95,20 @@ async function harness(writer: AtomicJsonWriter = durableJsonWriter, wrap?: (bas
   const createStore = async (operationId = storeOperation) => await managed.createManagedStore({ projectId, source: { kind: "remote", url: sourceUrl } }, operationId);
   return { root, source, roots, managed, git, workspace, firstCommit, register, createStore };
 }
+
+test("keeps configured GitHub authority outside general Agent health until private Git needs askpass", async () => {
+  const h = await harness();
+  const broker = createGithubAskpassBroker({ runtimeBases: [path.join(h.root, "unavailable-runtime")] });
+  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, undefined, undefined, undefined, undefined, undefined, broker);
+  managed.setGithubAuthority({} as GithubAppAuthority);
+  await managed.initialize();
+  expect(managed.isHealthy).toBe(true);
+  expect(broker.socketPath).toBeNull();
+  await expect(managed.inspectSource({ kind: "github-app", connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", repositoryId: "9007199254740993" }))
+    .rejects.toMatchObject({ failure: { code: "SOURCE_UNAVAILABLE" } });
+  expect(managed.isHealthy).toBe(true);
+  await managed.shutdown();
+});
 
 function differentDevice(device: string): string { return device === "44" ? "45" : "44"; }
 

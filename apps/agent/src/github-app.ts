@@ -31,6 +31,12 @@ const MAX_CONFIG_BYTES = 16 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const GITHUB_API_VERSION = "2022-11-28";
+// Keep this aligned with the maximum authenticated Git execution deadline in
+// managed-workspaces.ts.  The additional margin covers the bounded GitHub
+// token revocation request and a small scheduling allowance.
+const MAX_AUTHENTICATED_GIT_EXECUTION_MS = 120_000;
+const GITHUB_TOKEN_CLEANUP_MARGIN_MS = 30_000;
+const MIN_REQUIRED_TOKEN_LIFETIME_MS = MAX_AUTHENTICATED_GIT_EXECUTION_MS + GITHUB_TOKEN_CLEANUP_MARGIN_MS;
 const MAX_INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 const CONSERVATIVE_UNKNOWN_MINT_LEASE_MS = 70 * 60 * 1000;
 const githubTokenExpirySchema = z.string().datetime({ offset: true });
@@ -536,12 +542,25 @@ export async function createGithubAppAuthority(options: {
       const candidateToken = typeof mintedBody?.token === "string" && mintedBody.token.length > 0 && mintedBody.token.length <= 16 * 1024 ? mintedBody.token : null;
       if (minted.status === 201) {
         const mintedExpiry = typeof mintedBody?.expires_at === "string" && githubTokenExpirySchema.safeParse(mintedBody.expires_at).success ? Date.parse(mintedBody.expires_at) : Number.NaN;
-        if (candidateToken === null || !Number.isFinite(mintedExpiry) || mintedExpiry <= currentTime
-          || mintedExpiry > currentTime + MAX_INSTALLATION_TOKEN_LIFETIME_MS + 5 * 60 * 1000) primaryError = failure("token-mint-failed");
+        if (candidateToken === null) primaryError = failure("token-mint-failed");
         else {
-          token = candidateToken; mintState = "token"; guardExpiryMs = mintedExpiry;
-          try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "active", createdAt }); leaseBlocks.set(input.connectionId, mintedExpiry); }
-          catch { primaryError = failure("token-mint-failed"); token = candidateToken; mintState = "uncertain"; guardExpiryMs = conservativeExpiryMs; leaseBlocks.set(input.connectionId, conservativeExpiryMs); }
+          // A 201 response gives us a token authority even when its expiry
+          // metadata is malformed.  Retain it only in memory and attempt
+          // revocation; if expiry cannot be trusted, keep the conservative
+          // uncertain-mint guard.
+          token = candidateToken;
+          if (!Number.isFinite(mintedExpiry) || mintedExpiry <= currentTime
+            || mintedExpiry > currentTime + MAX_INSTALLATION_TOKEN_LIFETIME_MS + 5 * 60 * 1000) {
+            primaryError = failure("token-mint-failed"); mintState = "uncertain"; guardExpiryMs = conservativeExpiryMs;
+            leaseBlocks.set(input.connectionId, conservativeExpiryMs);
+          } else {
+            mintState = "token"; guardExpiryMs = mintedExpiry; leaseBlocks.set(input.connectionId, mintedExpiry);
+            if (mintedExpiry - currentTime < MIN_REQUIRED_TOKEN_LIFETIME_MS) primaryError = failure("token-mint-failed");
+            else {
+              try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "active", createdAt }); }
+              catch { primaryError = failure("token-mint-failed"); token = candidateToken; mintState = "uncertain"; guardExpiryMs = conservativeExpiryMs; leaseBlocks.set(input.connectionId, conservativeExpiryMs); }
+            }
+          }
         }
       } else if ([400, 401, 403, 404, 422].includes(minted.status) && record(minted.body) !== null
         && typeof record(minted.body)?.message === "string" && (record(minted.body)?.message as string).length <= 512) {

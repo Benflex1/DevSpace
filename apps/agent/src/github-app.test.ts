@@ -182,6 +182,37 @@ describe("GitHub App authority", () => {
   });
 
   it.each([
+    ["just below", "2026-08-04T12:02:29.999Z", false],
+    ["exactly at", "2026-08-04T12:02:30.000Z", true],
+    ["comfortably above", "2026-08-04T12:05:00.000Z", true]
+  ])("enforces the bounded Git plus cleanup minimum token lifetime (%s)", async (_label, expiresAt, shouldRun) => {
+    const { stateRoot } = await fixture();
+    let operationRan = false;
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      if (request.path === "/app/installations/77") return { status: 200, body: { id: 77, app_id: 123, repository_selection: "selected", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+      if (request.path.endsWith("/access_tokens")) return { status: 201, body: { token: "lifetime-canary", expires_at: expiresAt,
+        permissions: { contents: "read" }, repository_selection: "selected", repositories: [{ id: 9007199254740993n, owner: { login: "org" },
+          name: "private-repo", full_name: "org/private-repo", default_branch: "main", private: true, archived: false, disabled: false,
+          permissions: { pull: true } }] } };
+      if (request.path === "/installation/token") return { status: 204, body: {} };
+      throw new Error(`unexpected path ${request.path}`);
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await bind(authority);
+    const outcome = await authority.withExactRepositoryToken({ connectionId, repositoryId: "9007199254740993" }, async () => {
+      await Promise.resolve();
+      operationRan = true;
+      return "used";
+    }).catch((error: unknown) => error);
+    if (shouldRun) expect(outcome).toMatchObject({ value: "used" });
+    else expect(outcome).toMatchObject({ message: "github-token-mint-failed" });
+    expect(operationRan).toBe(shouldRun);
+  });
+
+  it.each([
     ["missing repository authority", '{"token":"private-canary","expires_at":"2026-08-04T13:00:00.000Z","permissions":{"contents":"read"},"repository_selection":"selected","repositories":[]}'],
     ["foreign repository authority", '{"token":"private-canary","expires_at":"2026-08-04T13:00:00.000Z","permissions":{"contents":"read"},"repository_selection":"selected","repositories":[{"id":4,"owner":{"login":"org"},"name":"foreign","full_name":"org/foreign","default_branch":"main","private":true,"archived":false,"disabled":false,"permissions":{"admin":false,"push":false,"pull":true}}]}'],
     ["ambiguous repository authority", '{"token":"private-canary","expires_at":"2026-08-04T13:00:00.000Z","permissions":{"contents":"read"},"repository_selection":"selected","repositories":[{"id":9007199254740993,"owner":{"login":"org"},"name":"private-repo","full_name":"org/private-repo","default_branch":"main","private":true,"archived":false,"disabled":false,"permissions":{"admin":false,"push":false,"pull":true}},{"id":9007199254740993,"owner":{"login":"org"},"name":"private-repo","full_name":"org/private-repo","default_branch":"main","private":true,"archived":false,"disabled":false,"permissions":{"admin":false,"push":false,"pull":true}}]}']

@@ -311,10 +311,6 @@ export class ManagedWorkspaces {
     catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "ownership", "runtimes"), error instanceof Error ? error.message : "runtime ownership state validation failed"); }
     try { await this.preview.initialize(); }
     catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "previews"), error instanceof Error ? error.message : "preview state validation failed"); }
-    if (this.githubAuthority !== null && this.corruption === null) {
-      try { await this.askpassBroker.start(); }
-      catch (error) { this.corruption ??= new PrivateStateCorruptionError(this.stateRoot, error instanceof Error ? error.message : "askpass broker startup failed"); }
-    }
     this.initialized = true;
   }
 
@@ -380,6 +376,7 @@ export class ManagedWorkspaces {
     let capability: AskpassCapability | undefined;
     let executionId: string | undefined;
     if (auth !== undefined) {
+      await this.ensurePrivateCredentialTransport();
       executionId = uuidv7();
       capability = this.askpassBroker.register({ ...auth, operationId, executionId, deadlineAt: new Date(Date.now() + GIT_TIMEOUT_MS) });
     }
@@ -404,6 +401,13 @@ export class ManagedWorkspaces {
   private githubAuthorityRequired(): GithubAppAuthority {
     if (this.githubAuthority === null) throw new AgentExecutionError(executionFailure("GITHUB_INSTALLATION_UNAVAILABLE", "The GitHub installation is unavailable.", {}));
     return this.githubAuthority;
+  }
+
+  private async ensurePrivateCredentialTransport(): Promise<void> {
+    try { await this.askpassBroker.ensureStarted(); }
+    catch {
+      throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The private repository credential transport is unavailable.", {}));
+    }
   }
 
   private githubExecutionError(error: unknown): AgentExecutionError | null {
@@ -439,6 +443,7 @@ export class ManagedWorkspaces {
     operation: (token: string, repository: import("@devspace/contracts").GithubRepository) => Promise<T>): Promise<T> {
     const authority = this.githubAuthorityRequired();
     try {
+      await this.ensurePrivateCredentialTransport();
       const result = await authority.withExactRepositoryToken(source, operation, operationId);
       return result.value;
     } catch (error) {
@@ -453,6 +458,7 @@ export class ManagedWorkspaces {
     if (data.kind !== "github-app") throw new Error("source-inspection-public-path-required");
     const operationId = uuidv7();
     const authority = this.githubAuthorityRequired();
+    await this.ensurePrivateCredentialTransport();
     const result = await authority.withExactRepositoryToken(data, async (token, repository) => {
       const executionId = uuidv7();
       const capability = this.askpassBroker.register({ ...data, operationId, executionId, originUrl: repository.cleanHttpsUrl,
@@ -764,6 +770,7 @@ export class ManagedWorkspaces {
     await this.assertManagedDirectories();
     const data = createManagedStoreDataSchema.parse(input);
     const githubSource = data.source.kind === "github-app" ? data.source : null;
+    if (githubSource !== null) await this.ensurePrivateCredentialTransport();
     let sourceOrigin: string;
     if (data.source.kind === "remote") {
       const url = new URL(data.source.url);

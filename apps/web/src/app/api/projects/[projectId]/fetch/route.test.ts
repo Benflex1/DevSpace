@@ -1,15 +1,18 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ fetchProject: vi.fn(), database: {}, agent: {} }));
-vi.mock("../../../../../server/project-fetch.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../server/project-fetch.js")>()), fetchProject: mocks.fetchProject
-}));
-vi.mock("../../../../../server/database.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../server/database.js")>()), getProjectDatabase: () => mocks.database
-}));
-vi.mock("../../../../../server/agent-client.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../server/agent-client.js")>()), createAgentClient: () => mocks.agent
-}));
+vi.mock("../../../../../server/project-fetch.js", async (importOriginal) => {
+  const original = Object.assign({}, await importOriginal());
+  return { ...original, fetchProject: mocks.fetchProject };
+});
+vi.mock("../../../../../server/database.js", async (importOriginal) => {
+  const original = Object.assign({}, await importOriginal());
+  return { ...original, getProjectDatabase: () => mocks.database };
+});
+vi.mock("../../../../../server/agent-client.js", async (importOriginal) => {
+  const original = Object.assign({}, await importOriginal());
+  return { ...original, createAgentClient: () => mocks.agent };
+});
 
 import { POST } from "./route.js";
 
