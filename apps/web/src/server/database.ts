@@ -2037,6 +2037,8 @@ export function openProjectDatabase(path: string, options: {
         const timestamp = now().toISOString();
         const existing = db.select().from(githubConnections).where(eq(githubConnections.connectionId, input.connectionId)).get();
         const lifecycleGeneration = input.lifecycleGeneration ?? setup?.targetGeneration ?? existing?.lifecycleGeneration ?? 1;
+        if (existing !== undefined && setup === undefined
+          && (existing.lifecycleGeneration !== 1 || existing.lifecycleState !== "enabled")) throw new Error("GITHUB_GENERATION_STALE");
         if (existing !== undefined && (existing.lifecycleGeneration !== lifecycleGeneration
           || (setup !== undefined && existing.lifecycleState !== "reconnect-pending"))) throw new Error("GITHUB_GENERATION_STALE");
         const value = { connectionId: input.connectionId, installationId: input.installationId, accountId: input.accountId,

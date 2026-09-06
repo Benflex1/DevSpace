@@ -126,4 +126,22 @@ describe("GitHub connection state", () => {
     expect(() => database.beginGithubDisconnect({ actor: "foreign", connectionId: initial.connectionId })).toThrow(ProjectSetupConflictError);
     database.close();
   });
+
+  it("rejects the original callback after a newer reconnect generation is pending", () => {
+    const database = openProjectDatabase(":memory:", { now: () => new Date("2026-08-04T12:00:00.000Z"),
+      createId: () => "018f0d84-7b39-7cc3-9d4a-0675d9162a11" });
+    const initial = database.createGithubConnectionAttempt({ actor: "owner", stateHash: "e".repeat(64), expiresAt: "2026-08-04T12:10:00.000Z" });
+    database.claimGithubConnectionAttempt({ actor: "owner", stateHash: "e".repeat(64), installationId: "77" });
+    database.connectGithubInstallation({ actor: "owner", connectionId: initial.connectionId, installationId: "77", accountId: "99",
+      accountType: "Organization", accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" },
+      status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z" });
+    const reconnect = database.createGithubConnectionAttempt({ actor: "owner", connectionId: initial.connectionId,
+      stateHash: "f".repeat(64), expiresAt: "2026-08-04T12:10:00.000Z" });
+    expect(() => database.connectGithubInstallation({ actor: "owner", connectionId: initial.connectionId, installationId: "77", accountId: "99",
+      accountType: "Organization", accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" },
+      status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z" })).toThrow("GITHUB_GENERATION_STALE");
+    expect(database.getGithubAuthorityContext("owner", initial.connectionId)).toMatchObject({ lifecycleGeneration: reconnect.lifecycleGeneration,
+      lifecycleState: "reconnect-pending", admitted: false });
+    database.close();
+  });
 });
