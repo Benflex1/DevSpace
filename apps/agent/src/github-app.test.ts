@@ -181,6 +181,52 @@ describe("GitHub App authority", () => {
     expect(observed.repositoryId).toBe("9007199254740993");
   });
 
+  it("mints one exact write token without changing the read-token request", async () => {
+    const { stateRoot } = await fixture();
+    let requestBody = "";
+    await withFetch(async (input, init) => {
+      await Promise.resolve();
+      const pathname = fetchInputUrl(input).pathname;
+      if (pathname === "/app") return new Response('{"id":123}', { status: 200 });
+      if (pathname === "/app/installations/77") return new Response('{"id":77,"app_id":123,"repository_selection":"selected","suspended_at":null,"account":{"id":9007199254740993,"login":"org","type":"Organization"},"permissions":{"metadata":"read","contents":"write"}}', { status: 200 });
+      if (pathname === "/app/installations/77/access_tokens") {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return new Response('{"token":"private-write-canary","expires_at":"2026-08-04T13:00:00.000Z","permissions":{"contents":"write"},"repository_selection":"selected","repositories":[{"id":9007199254740993,"owner":{"login":"org"},"name":"private-repo","full_name":"org/private-repo","default_branch":"main","private":true,"archived":false,"disabled":false}]}', { status: 201 });
+      }
+      if (pathname === "/installation/token") return new Response(null, { status: 204 });
+      throw new Error(`unexpected path ${pathname}`);
+    }, async () => {
+      const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+      await authority.persistBindingForTest({ connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization",
+        accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "write" }, status: "connected",
+        verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+      await authority.withExactRepositoryWriteToken({ connectionId, repositoryId: "9007199254740993" }, async (_token, repository) => {
+        expect(repository.repositoryId).toBe("9007199254740993");
+      });
+    });
+    expect(requestBody).toBe('{"repository_ids":[9007199254740993],"permissions":{"contents":"write"}}');
+  });
+
+  it("refuses the write-token path when the live installation lacks Contents write", async () => {
+    const { stateRoot } = await fixture();
+    let accessTokenRequested = false;
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      if (request.path === "/app/installations/77") return { status: 200, body: { id: 77, app_id: 123, repository_selection: "selected", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+      if (request.path.endsWith("/access_tokens")) { accessTokenRequested = true; return { status: 201, body: {} }; }
+      return { status: 500, body: {} };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport });
+    await authority.persistBindingForTest({ connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization",
+      accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "write" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+    await expect(authority.withExactRepositoryWriteToken({ connectionId, repositoryId: "9007199254740993" }, () => Promise.resolve(undefined)))
+      .rejects.toThrow("github-contents-write-permission-required");
+    expect(accessTokenRequested).toBe(false);
+  });
+
   it("treats a successful runTokenTransaction<void> callback as completed and revokes its token", async () => {
     const { stateRoot } = await fixture();
     const calls: GithubHttpRequest[] = [];
