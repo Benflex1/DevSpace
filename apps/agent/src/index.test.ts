@@ -320,7 +320,7 @@ test.each(["github-upstream-invalid", "github-token-mint-failed", "github-operat
 );
 
 test("returns direct GitHub local failures as Agent internal without exposing the failure message", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-github-route-internal-")); temporaryDirectories.push(directory);
+  const directory = await mkdtemp(path.join(tmpdir(), "ds-gh-int-")); temporaryDirectories.push(directory);
   const socketPath = path.join(directory, "agent.sock");
   await provisionDefaultRoots(socketPath);
   const secret = "private-state-writer-secret";

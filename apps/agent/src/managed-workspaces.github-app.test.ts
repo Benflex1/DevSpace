@@ -25,8 +25,9 @@ const processMocks = vi.hoisted(() => ({
   runBoundedProcess: vi.fn(),
   realRunBoundedProcess: undefined as typeof import("./git-inspector.js")["runBoundedProcess"] | undefined
 }));
+type GitInspectorModule = typeof import("./git-inspector.js");
 vi.mock("./git-inspector.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./git-inspector.js")>();
+  const original = Object.assign({}, await importOriginal()) as GitInspectorModule;
   processMocks.realRunBoundedProcess = original.runBoundedProcess;
   return { ...original, runBoundedProcess: processMocks.runBoundedProcess };
 });
