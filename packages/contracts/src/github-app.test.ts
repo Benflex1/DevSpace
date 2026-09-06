@@ -35,6 +35,7 @@ describe("GitHub App contracts", () => {
     expect(sourceLocatorSchema.safeParse({ kind: "github-app", connectionId, repositoryId, ownerLogin: "attacker" }).success).toBe(false);
     expect(githubInstallationRefreshDataSchema.parse({ connectionId })).toEqual({ connectionId });
     expect(githubRepositoryResolveDataSchema.parse({ connectionId, repositoryId })).toEqual({ connectionId, repositoryId });
+    expect(githubRepositoryResolveDataSchema.safeParse({ kind: "github-app", connectionId, repositoryId }).success).toBe(false);
   });
 
   it("bounds pagination and exposes only clean repository metadata", () => {

@@ -92,6 +92,7 @@ export interface ExternalExecutionResult {
   readonly stderr: string;
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
+  readonly timedOut: boolean;
 }
 
 export class ExternalExecutionFence {
@@ -298,7 +299,9 @@ export class ExternalExecutionFence {
       } });
       await this.persist(marker);
     }
+    let timedOut = false;
     const deadlineTimer = marker.phase === "running" ? setTimeout(() => {
+      timedOut = true;
       void this.terminateExact(marker).catch((error) => { this.corruption ??= error instanceof PrivateStateCorruptionError
         ? error : new PrivateStateCorruptionError(this.markerPath(marker.operationId), "execution timeout termination failed"); });
     }, Math.max(0, new Date(marker.deadlineAt).getTime() - this.now().getTime())) : undefined;
@@ -318,6 +321,6 @@ export class ExternalExecutionFence {
       readFile(stdoutPath, "utf8").catch(() => ""), readFile(stderrPath, "utf8").catch(() => "")
     ]);
     await this.removeOutputs(executionId);
-    return { ...completed, stdout: stdout.slice(0, input.maxOutputBytes), stderr: stderr.slice(0, input.maxOutputBytes) };
+    return { ...completed, stdout: stdout.slice(0, input.maxOutputBytes), stderr: stderr.slice(0, input.maxOutputBytes), timedOut };
   }
 }

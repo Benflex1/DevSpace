@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { updateSuggestedField } from "./project-form-fields.js";
 
 describe("unified project source form", () => {
   it("keeps GitHub selection inside Add Project without browser credential or URL authority", async () => {
@@ -11,5 +12,14 @@ describe("unified project source form", () => {
     expect(source).not.toContain("repositoryUrl: selected");
     expect(source).not.toContain("token");
     expect(source).not.toContain("Disconnect");
+    expect(source).toContain("updateSuggestedField");
+    expect(source).toContain('source: "user"');
+  });
+
+  it("updates suggestions only for fields that remain auto-generated", () => {
+    expect(updateSuggestedField({ value: "Old name", source: "auto" }, "New name"))
+      .toEqual({ value: "New name", source: "auto" });
+    expect(updateSuggestedField({ value: "Custom name", source: "user" }, "New name"))
+      .toEqual({ value: "Custom name", source: "user" });
   });
 });

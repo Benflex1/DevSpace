@@ -17,6 +17,7 @@ import {
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { WebSocketServer } from "ws";
+import * as z from "zod";
 import { GitInspectionPolicyError, GitInspectionUnavailableError, createProductionGitInspector, type GitInspector } from "./git-inspector.js";
 import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
@@ -442,22 +443,32 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           : await githubAuthority.listRepositories(data as never);
         return sendJson(response, 200, githubEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data: result }));
       } catch (error) {
-        if (error instanceof AgentExecutionError && ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code)) {
+        if (error instanceof AgentExecutionError && (error.failure.code === "AGENT_INTERNAL_ERROR"
+          || ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code))) {
           const status = error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
-            : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
+            : error.failure.code === "AGENT_INTERNAL_ERROR" ? 500 : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
           return sendJson(response, status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
         }
         const message = error instanceof Error ? error.message : "";
+        if (error instanceof z.ZodError || message === "github-authority-contract-violation" || message === "github-authority-programming-error") {
+          return sendJson(response, 500, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+            code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true, details: { incidentId: createId() }
+          } }));
+        }
         const selected = message === "github-connection-not-found" ? { status: 404, code: "GITHUB_CONNECTION_NOT_FOUND", retryable: false, details: {} }
           : message === "github-token-lease-active" ? { status: 503, code: "GITHUB_TOKEN_LEASE_ACTIVE", retryable: true, details: {} }
           : message === "github-contents-permission-required" ? { status: 403, code: "GITHUB_CONTENTS_PERMISSION_REQUIRED", retryable: false, details: {} }
           : message === "github-installation-unavailable" ? { status: 503, code: "GITHUB_INSTALLATION_UNAVAILABLE", retryable: true, details: {} }
           : message === "github-repository-not-authorized" ? { status: 403, code: "GITHUB_REPOSITORY_NOT_AUTHORIZED", retryable: false, details: {} }
           : message === "github-git-authentication-failed" ? { status: 502, code: "GITHUB_GIT_AUTHENTICATION_FAILED", retryable: false, details: {} }
-          : { status: message === "github-authority-invalid" || message === "github-installation-conflict" ? 422 : 503,
-              code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: message === "github-app-unconfigured" ? "unconfigured" : message === "github-authority-invalid" || message === "github-installation-conflict" ? "mismatch" : "upstream-unavailable" } };
+          : message === "github-app-unconfigured" ? { status: 422, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "unconfigured" } }
+          : message === "github-authority-invalid" || message === "github-installation-conflict" ? { status: 422, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "mismatch" } }
+          : message === "github-upstream-invalid" || message === "github-token-mint-failed" || message === "github-operation-failed"
+            ? { status: 503, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "upstream-unavailable" } }
+          : { status: 500, code: "AGENT_INTERNAL_ERROR", retryable: true, details: { incidentId: createId() } };
         return sendJson(response, selected.status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
-          code: selected.code, message: "GitHub App authority could not be established safely.", retryable: selected.retryable, details: selected.details
+          code: selected.code, message: selected.code === "AGENT_INTERNAL_ERROR" ? "The Agent encountered an unexpected error." : "GitHub App authority could not be established safely.",
+          retryable: selected.retryable, details: selected.details
         } }));
       }
     }
@@ -854,12 +865,25 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           const data = await managed.inspectSource(body.data.source);
           return sendJson(response, 200, inspectEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
         } catch (error) {
-          if (error instanceof AgentExecutionError && ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code)) {
-            const status = error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
+          if (error instanceof AgentExecutionError && error.internalReason !== undefined) {
+            logger.error("agent.source.inspection.failed", "Private source inspection failed at an internal GitHub boundary", {
+              requestId, errorCategory: "github-authority-boundary", errorCode: error.failure.code,
+              internalReason: error.internalReason
+            });
+          }
+          if (error instanceof AgentExecutionError && (error.failure.code === "AGENT_INTERNAL_ERROR"
+            || ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code))) {
+            const status = error.failure.code === "AGENT_INTERNAL_ERROR" ? 500
+              : error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
               : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
             return sendJson(response, status, inspectEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
           }
           const message = error instanceof Error ? error.message : "";
+          if (error instanceof z.ZodError || message === "github-authority-contract-violation" || message === "github-authority-programming-error") {
+            return sendJson(response, 500, inspectEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+              code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true, details: { incidentId: createId() }
+            } }));
+          }
           const selected = message === "github-contents-permission-required"
             ? { status: 403, code: "GITHUB_CONTENTS_PERMISSION_REQUIRED" as const, retryable: false }
             : message === "github-repository-not-authorized"
@@ -904,9 +928,15 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           }));
         }
         if (error instanceof GitInspectionUnavailableError) {
-          return sendJson(response, 503, inspectEndpoint.errorSchema.parse({
+          if (error.reason === "remote-source" || error.reason === "timeout") {
+            return sendJson(response, 503, inspectEndpoint.errorSchema.parse({
+              meta: meta(requestId, now),
+              error: { code: "SOURCE_UNAVAILABLE", message: "The repository source is currently unavailable.", retryable: true, details: {} }
+            }));
+          }
+          return sendJson(response, 500, inspectEndpoint.errorSchema.parse({
             meta: meta(requestId, now),
-            error: { code: "SOURCE_UNAVAILABLE", message: error.message, retryable: true, details: {} }
+            error: { code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true, details: { incidentId: createId() } }
           }));
         }
         return sendJson(response, 500, inspectEndpoint.errorSchema.parse({

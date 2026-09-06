@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
+import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, githubAgentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
+import type { GithubAppAuthority } from "./github-app.js";
 import type { PreviewInspectionResult } from "./preview-runtime.js";
 import { createAgentServer } from "./server.js";
 import { parseLsRemoteOutput } from "./git-inspector.js";
@@ -294,6 +295,48 @@ test("rejects missing protocol headers and malformed source envelopes", async ()
     const malformed = await request(socketPath, { method: "POST", path: "/v1/projects/inspect-source", headers, body: "{}" });
     expect(malformed.status).toBe(400);
     expect((malformed.body as { error: { code: string } }).error.code).toBe("REQUEST_INVALID");
+  } finally { await server.stop(); }
+});
+
+test.each(["github-upstream-invalid", "github-token-mint-failed", "github-operation-failed"] as const)(
+  "retains %s as the direct GitHub upstream-unavailable route category", async (message) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-github-route-")); temporaryDirectories.push(directory);
+    const socketPath = path.join(directory, "agent.sock");
+    await provisionDefaultRoots(socketPath);
+    const githubAuthority = { listRepositories: () => Promise.reject(new Error(message)) } as unknown as GithubAppAuthority;
+    const server = createAgentServer({ socketPath, githubAuthority, now: () => now, createId: () => id });
+    await server.start();
+    try {
+      const body = JSON.stringify({ data: { connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", pageSize: 20 } });
+      const response = await request(socketPath, { method: "POST", path: githubAgentApiV1EndpointByOperation["github.repositories.list"].path, headers: {
+        ...headers, "content-length": String(Buffer.byteLength(body))
+      }, body });
+      expect(response.status).toBe(503);
+      expect(githubAgentApiV1EndpointByOperation["github.repositories.list"].errorSchema.parse(response.body)).toMatchObject({ error: {
+        code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "upstream-unavailable" }
+      } });
+    } finally { await server.stop(); }
+  }
+);
+
+test("returns direct GitHub local failures as Agent internal without exposing the failure message", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-github-route-internal-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const secret = "private-state-writer-secret";
+  const githubAuthority = { listRepositories: () => Promise.reject(new Error(secret)) } as unknown as GithubAppAuthority;
+  const server = createAgentServer({ socketPath, githubAuthority, now: () => now, createId: () => id });
+  await server.start();
+  try {
+    const body = JSON.stringify({ data: { connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", pageSize: 20 } });
+    const response = await request(socketPath, { method: "POST", path: githubAgentApiV1EndpointByOperation["github.repositories.list"].path, headers: {
+      ...headers, "content-length": String(Buffer.byteLength(body))
+    }, body });
+    expect(response.status).toBe(500);
+    expect(githubAgentApiV1EndpointByOperation["github.repositories.list"].errorSchema.parse(response.body)).toMatchObject({ error: {
+      code: "AGENT_INTERNAL_ERROR", retryable: true, details: { incidentId: id }
+    } });
+    expect(JSON.stringify(response.body)).not.toContain(secret);
   } finally { await server.stop(); }
 });
 

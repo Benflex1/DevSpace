@@ -181,6 +181,68 @@ describe("GitHub App authority", () => {
     expect(observed.repositoryId).toBe("9007199254740993");
   });
 
+  it("treats a successful runTokenTransaction<void> callback as completed and revokes its token", async () => {
+    const { stateRoot } = await fixture();
+    const calls: GithubHttpRequest[] = [];
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      calls.push(request);
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      if (request.path === "/app/installations/77") return { status: 200, body: { id: 77, app_id: 123, repository_selection: "selected", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+      if (request.path.endsWith("/access_tokens")) return { status: 201, body: { token: "void-callback-token", expires_at: "2026-08-04T13:00:00.000Z",
+        permissions: { contents: "read" }, repository_selection: "selected", repositories: [{ id: 9007199254740993n, owner: { login: "org" },
+          name: "private-repo", full_name: "org/private-repo", default_branch: "main", private: true, archived: false, disabled: false }] } };
+      if (request.path === "/installation/token") return { status: 204, body: {} };
+      throw new Error(`unexpected path ${request.path}`);
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await authority.persistBindingForTest({ connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization",
+      accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+
+    let callbackRan = false;
+    const result = await authority.withExactRepositoryToken<void>({ connectionId, repositoryId: "9007199254740993" }, async () => {
+      await Promise.resolve();
+      callbackRan = true;
+    });
+
+    expect(callbackRan).toBe(true);
+    expect(result).toEqual({ value: undefined, cleanupDegraded: false });
+    expect(calls.filter((request) => request.method === "DELETE")).toHaveLength(1);
+    expect(calls.find((request) => request.method === "DELETE")?.authorization).toBe("Bearer void-callback-token");
+  });
+
+  it("keeps a local callback failure secret-safe instead of flattening it to upstream invalid", async () => {
+    const { stateRoot } = await fixture();
+    const calls: GithubHttpRequest[] = [];
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      calls.push(request);
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      if (request.path === "/app/installations/77") return { status: 200, body: { id: 77, app_id: 123, repository_selection: "selected", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+      if (request.path.endsWith("/access_tokens")) return { status: 201, body: { token: "local-failure-token", expires_at: "2026-08-04T13:00:00.000Z",
+        permissions: { contents: "read" }, repository_selection: "selected", repositories: [{ id: 9007199254740993n, owner: { login: "org" },
+          name: "private-repo", full_name: "org/private-repo", default_branch: "main", private: true, archived: false, disabled: false }] } };
+      if (request.path === "/installation/token") return { status: 204, body: {} };
+      throw new Error(`unexpected path ${request.path}`);
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await authority.persistBindingForTest({ connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization",
+      accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+
+    const error = await authority.withExactRepositoryToken({ connectionId, repositoryId: "9007199254740993" }, async () => {
+      await Promise.resolve();
+      throw new Error("private-writer-state-secret");
+    }).catch((value: unknown) => value);
+
+    expect(error).toMatchObject({ message: "github-authority-programming-error" });
+    expect((error as Error).message).not.toContain("private-writer-state-secret");
+    expect(calls.filter((request) => request.method === "DELETE")).toHaveLength(1);
+  });
+
   it.each([
     ["just below", "2026-08-04T12:02:29.999Z", false],
     ["exactly at", "2026-08-04T12:02:30.000Z", true],

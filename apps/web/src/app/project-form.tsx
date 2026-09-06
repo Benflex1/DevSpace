@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { updateSuggestedField, type SuggestedFieldState } from "./project-form-fields.js";
 
 interface ProjectResult { id: string; name: string; slug: string; repositoryUrl: string; defaultBranch: string; state: string }
 interface Connection {
@@ -28,9 +29,9 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [continuation, setContinuation] = useState<string | null>(null);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
-  const [name, setName] = useState("");
-  const [slug, setSlug] = useState("");
-  const [branch, setBranch] = useState("");
+  const [name, setName] = useState<SuggestedFieldState>({ value: "", source: "auto" });
+  const [slug, setSlug] = useState<SuggestedFieldState>({ value: "", source: "auto" });
+  const [branch, setBranch] = useState<SuggestedFieldState>({ value: "", source: "auto" });
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [loadingGithub, setLoadingGithub] = useState(false);
@@ -80,21 +81,21 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
   };
   const chooseRepository = (repository: Repository) => {
     setSelectedRepositoryId(repository.repositoryId);
-    if (name === "") setName(suggestedName(repository.name));
-    if (slug === "") setSlug(suggestedSlug(repository.name));
-    if (branch === "") setBranch(repository.defaultBranch);
+    setName((current) => updateSuggestedField(current, suggestedName(repository.name)));
+    setSlug((current) => updateSuggestedField(current, suggestedSlug(repository.name)));
+    setBranch((current) => updateSuggestedField(current, repository.defaultBranch));
   };
   const onRepositoryChange = (value: string) => {
     setRepositoryUrl(value);
-    if (name === "") setName(suggestedName(value));
-    if (slug === "") setSlug(suggestedSlug(value));
+    setName((current) => updateSuggestedField(current, suggestedName(value)));
+    setSlug((current) => updateSuggestedField(current, suggestedSlug(value)));
   };
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setSubmitting(true); setMessage(sourceKind === "remote" ? "Inspecting repository…" : "Registering GitHub repository…");
     try {
       const body = sourceKind === "remote"
-        ? { sourceKind, repositoryUrl, name, slug, defaultBranch: branch }
-        : { sourceKind, connectionId: connection.connectionId, repositoryId: selectedRepositoryId, name, slug, defaultBranch: branch };
+        ? { sourceKind, repositoryUrl, name: name.value, slug: slug.value, defaultBranch: branch.value }
+        : { sourceKind, connectionId: connection.connectionId, repositoryId: selectedRepositoryId, name: name.value, slug: slug.value, defaultBranch: branch.value };
       const response = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify(body) });
       const result = await response.json() as { project?: ProjectResult; message?: string };
       if (!response.ok || result.project === undefined) throw new Error(result.message ?? "Project registration failed.");
@@ -106,7 +107,7 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
 
   return <form onSubmit={(event) => { submit(event).catch(() => { setMessage("Project registration failed."); setSubmitting(false); }); }}>
     <fieldset className="source-choice"><legend>Repository source</legend>
-      <label><input type="radio" name="sourceKind" checked={sourceKind === "remote"} onChange={() => setSourceKind("remote")} /> HTTPS repository URL</label>
+      <label><input type="radio" name="sourceKind" checked={sourceKind === "remote"} onChange={() => { setSourceKind("remote"); setBranch((current) => updateSuggestedField(current, "")); }} /> HTTPS repository URL</label>
       <label><input type="radio" name="sourceKind" checked={sourceKind === "github-app"} onChange={() => { setSourceKind("github-app"); loadConnection().catch(() => undefined); }} /> Connected GitHub repository</label>
     </fieldset>
     {sourceKind === "remote" ? <label>Repository URL <small>HTTPS only; no credentials or query parameters</small><input name="repositoryUrl" type="url" required placeholder="https://github.com/owner/repository.git" value={repositoryUrl} onChange={(event) => onRepositoryChange(event.target.value)} /></label>
@@ -120,8 +121,8 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
         {continuation !== null && <button type="button" disabled={loadingGithub} onClick={() => void listRepositories(continuation)}>Load more repositories</button>}
         {selected !== undefined && <p>Selected <strong>{selected.fullName}</strong>; authority is retained by its immutable GitHub repository ID.</p>}
       </section>}
-    <div className="form-row"><label>Project name<input name="name" required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} /></label><label>Project slug<input name="slug" required maxLength={64} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={slug} onChange={(event) => setSlug(event.target.value)} /></label></div>
-    <label>Default branch <small>optional override</small><input name="defaultBranch" placeholder="Detected from repository" value={branch} onChange={(event) => setBranch(event.target.value)} /></label>
+    <div className="form-row"><label>Project name<input name="name" required maxLength={100} value={name.value} onChange={(event) => setName({ value: event.target.value, source: "user" })} /></label><label>Project slug<input name="slug" required maxLength={64} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={slug.value} onChange={(event) => setSlug({ value: event.target.value, source: "user" })} /></label></div>
+    <label>Default branch <small>optional override</small><input name="defaultBranch" placeholder="Detected from repository" value={branch.value} onChange={(event) => setBranch({ value: event.target.value, source: "user" })} /></label>
     <button type="submit" disabled={submitting || !agentReachable || (sourceKind === "github-app" && (!connected || selectedRepositoryId === ""))}>{submitting ? "Registering…" : sourceKind === "remote" ? "Inspect and register" : "Register project"}</button>
     {!agentReachable && <p className="message error">Start the DevSpace Agent before adding a project.</p>}
     {message !== "" && <p className={`message ${message.includes("pending") ? "success" : ""}`} role="status">{message}</p>}

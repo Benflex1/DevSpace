@@ -8,6 +8,8 @@ import {
   createWorkspaceDataSchema,
   gitInspectionDataSchema,
   githubSourceInspectionDataSchema,
+  githubRepositoryResolutionSchema,
+  githubRepositoryResolveDataSchema,
   projectOptionsRevisionHashSchema,
   remoteRepositoryUrlSchema,
   sourceLocatorSchema,
@@ -20,6 +22,7 @@ import {
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
+  type GithubRepositoryResolveData,
   type WorkspaceInspectionData,
   type SourceLocator
 } from "@devspace/contracts";
@@ -30,7 +33,8 @@ import {
 } from "@devspace/project-options";
 import * as z from "zod";
 import { v7 as uuidv7 } from "uuid";
-import { parseLsRemoteOutput, runBoundedProcess } from "./git-inspector.js";
+import { classifyAuthenticatedGitFailure } from "./authenticated-git-failure.js";
+import { GitInspectionUnavailableError, parseLsRemoteOutput, runBoundedProcess } from "./git-inspector.js";
 import { ExternalExecutionFence, type ExternalExecutionRole } from "./external-execution.js";
 import { createGithubAskpassBroker, type AskpassCapability, type GithubAskpassBroker } from "./github-askpass.js";
 import type { GithubAppAuthority } from "./github-app.js";
@@ -119,9 +123,12 @@ const workspaceCreationSchema = z.strictObject({
 });
 const creationSchema = z.union([storeCreationSchema, workspaceCreationSchema]);
 type CreationRecord = z.infer<typeof creationSchema>;
+export type AgentInternalFailureReason = "github-authority-contract-violation" | "github-authority-programming-error";
 
 export class AgentExecutionError extends Error {
-  constructor(readonly failure: AgentExecutionFailure) { super(failure.message); this.name = "AgentExecutionError"; }
+  constructor(readonly failure: AgentExecutionFailure, readonly internalReason?: AgentInternalFailureReason) {
+    super(failure.message); this.name = "AgentExecutionError";
+  }
 }
 export class ConfigurationValidationError extends Error {
   constructor(readonly reason: "configuration-format" | "configuration-hash" | "cross-reference") {
@@ -158,6 +165,13 @@ interface AuthenticatedGitContext {
   readonly token: string;
   readonly originUrl: string;
 }
+export function githubRepositoryResolveDataFromSourceLocator(
+  source: Extract<SourceLocator, { kind: "github-app" }>
+): GithubRepositoryResolveData {
+  return githubRepositoryResolveDataSchema.parse({ connectionId: source.connectionId, repositoryId: source.repositoryId });
+}
+
+const githubTokenOperationResultSchema = z.strictObject({ value: z.unknown(), cleanupDegraded: z.boolean() });
 export function protectedGitInvocation(args: readonly string[], auth?: { readonly capability: AskpassCapability }): { args: string[]; env: NodeJS.ProcessEnv } {
   const caFile = process.env.DEVSPACE_GIT_CA_FILE;
   const caArguments = caFile === undefined ? [] : ["-c", `http.sslCAInfo=${path.resolve(caFile)}`];
@@ -165,8 +179,7 @@ export function protectedGitInvocation(args: readonly string[], auth?: { readonl
     PATH: "/usr/bin:/bin", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", XDG_CACHE_HOME: "/nonexistent", LANG: "C", LC_ALL: "C",
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_COUNT: "0",
     GIT_TERMINAL_PROMPT: "0", SSH_ASKPASS: "/bin/false", GIT_SSH: "/bin/false", GIT_SSH_COMMAND: "/bin/false",
-    GIT_PROXY_COMMAND: "/bin/false", GIT_TRACE: "0", GIT_TRACE_PACKET: "0", GIT_TRACE_PERFORMANCE: "0",
-    GIT_TRACE_SETUP: "0", GIT_TRACE_CURL: "0", GIT_CURL_VERBOSE: "0"
+    GIT_PROXY_COMMAND: "/bin/false"
   };
   if (auth !== undefined) {
     environment.GIT_ASKPASS = auth.capability.helperPath;
@@ -387,8 +400,11 @@ export class ManagedWorkspaces {
     const result = await this.executionFence.runGit({ operationId, projectId, role, args: invocation.args,
       ...(executionId === undefined ? {} : { executionId }), timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env });
     if (result.code !== 0 || result.signal !== null) {
-      if (auth !== undefined && /authentication failed|could not read Username|invalid username|HTTP 401|HTTP 403|access denied/iu.test(result.stderr)) {
-        throw new Error("github-git-authentication-failed");
+      if (auth !== undefined) {
+        const failureKind = classifyAuthenticatedGitFailure(result);
+        if (failureKind === "authentication") throw new Error("github-git-authentication-failed");
+        if (failureKind === "remote-source") throw new Error("github-operation-failed");
+        throw new Error("git-command-failed");
       }
       throw new Error("git-command-failed");
     }
@@ -410,7 +426,13 @@ export class ManagedWorkspaces {
     }
   }
 
-  private githubExecutionError(error: unknown): AgentExecutionError | null {
+  private githubInternalError(reason: AgentInternalFailureReason): AgentExecutionError {
+    return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The Agent encountered an unexpected error.", {
+      incidentId: uuidv7()
+    }), reason);
+  }
+
+  private githubExecutionError(error: unknown): AgentExecutionError {
     if (error instanceof AgentExecutionError) return error;
     const message = error instanceof Error ? error.message : "";
     const mapped = message === "github-contents-permission-required"
@@ -426,30 +448,35 @@ export class ManagedWorkspaces {
               : message === "github-upstream-invalid" || message === "github-token-mint-failed" || message === "github-operation-failed"
                 ? ["SOURCE_UNAVAILABLE", "The GitHub repository source is currently unavailable."] as const
               : null;
-    return mapped === null ? null : new AgentExecutionError(executionFailure(mapped[0], mapped[1], {}));
+    if (mapped !== null) return new AgentExecutionError(executionFailure(mapped[0], mapped[1], {}));
+    if (message === "github-authority-contract-violation" || error instanceof z.ZodError) {
+      return this.githubInternalError("github-authority-contract-violation");
+    }
+    if (message === "github-authority-programming-error") return this.githubInternalError("github-authority-programming-error");
+    return this.githubInternalError("github-authority-programming-error");
   }
 
   private async resolveGithubRepository(source: Extract<SourceLocator, { kind: "github-app" }>) {
     try {
-      return await this.githubAuthorityRequired().resolveRepository(source);
+      const resolveData = githubRepositoryResolveDataFromSourceLocator(source);
+      const resolution = await this.githubAuthorityRequired().resolveRepository(resolveData);
+      return githubRepositoryResolutionSchema.parse(resolution);
     } catch (error) {
-      const mapped = this.githubExecutionError(error);
-      if (mapped !== null) throw mapped;
-      throw error;
+      throw this.githubExecutionError(error);
     }
   }
 
   private async withGithubToken<T>(source: Extract<SourceLocator, { kind: "github-app" }>, operationId: string,
-    operation: (token: string, repository: import("@devspace/contracts").GithubRepository) => Promise<T>): Promise<T> {
+    operation: (token: string, repository: import("@devspace/contracts").GithubRepository) => Promise<T>): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }> {
     const authority = this.githubAuthorityRequired();
     try {
       await this.ensurePrivateCredentialTransport();
-      const result = await authority.withExactRepositoryToken(source, operation, operationId);
-      return result.value;
+      const resolveData = githubRepositoryResolveDataFromSourceLocator(source);
+      const result = await authority.withExactRepositoryToken(resolveData, operation, operationId);
+      const envelope = githubTokenOperationResultSchema.parse(result);
+      return { value: envelope.value as T, cleanupDegraded: envelope.cleanupDegraded };
     } catch (error) {
-      const mapped = this.githubExecutionError(error);
-      if (mapped !== null) throw mapped;
-      throw error;
+      throw this.githubExecutionError(error);
     }
   }
 
@@ -457,9 +484,7 @@ export class ManagedWorkspaces {
     const data = sourceLocatorSchema.parse(source);
     if (data.kind !== "github-app") throw new Error("source-inspection-public-path-required");
     const operationId = uuidv7();
-    const authority = this.githubAuthorityRequired();
-    await this.ensurePrivateCredentialTransport();
-    const result = await authority.withExactRepositoryToken(data, async (token, repository) => {
+    const result = await this.withGithubToken(data, operationId, async (token, repository) => {
       const executionId = uuidv7();
       const capability = this.askpassBroker.register({ ...data, operationId, executionId, originUrl: repository.cleanHttpsUrl,
         token, deadlineAt: new Date(Date.now() + 15_000) });
@@ -469,13 +494,19 @@ export class ManagedWorkspaces {
           timeoutMs: 15_000, maxOutputBytes: 256 * 1024, env: invocation.env
         });
         if (processResult.signal !== null || processResult.code !== 0) {
-          if (/authentication failed|could not read Username|invalid username|HTTP 401|HTTP 403|access denied/iu.test(processResult.stderr)) {
-            throw new Error("github-git-authentication-failed");
-          }
-          throw new Error("source-unavailable");
+          const failureKind = classifyAuthenticatedGitFailure(processResult);
+          if (failureKind === "authentication") throw new Error("github-git-authentication-failed");
+          if (failureKind === "remote-source") throw new Error("github-operation-failed");
+          throw new Error("git-command-failed");
         }
         const inspected = parseLsRemoteOutput(processResult.stdout);
         return githubSourceInspectionDataSchema.parse({ ...inspected, sourceKind: "github-app", repository, cleanupDegraded: false });
+      } catch (error) {
+        if (error instanceof GitInspectionUnavailableError) {
+          if (error.reason === "remote-source" || error.reason === "timeout") throw new Error("github-operation-failed", { cause: error });
+          throw new Error("git-command-failed", { cause: error });
+        }
+        throw error;
       } finally {
         this.askpassBroker.settle(capability.capability);
       }

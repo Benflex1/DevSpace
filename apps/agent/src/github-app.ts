@@ -64,9 +64,28 @@ export interface GithubHttpResponse { readonly status: number; readonly body: un
 export type GithubHttpTransport = (request: GithubHttpRequest) => Promise<GithubHttpResponse>;
 
 function failure(code: string): Error { return new Error(`github-${code}`); }
+type OperationOutcome<T> =
+  | { readonly completed: false }
+  | { readonly completed: true; readonly value: T };
+
+function agentFailureCode(error: unknown): string | null {
+  if (!(error instanceof Error) || error.name !== "AgentExecutionError") return null;
+  const candidate = record((error as { readonly failure?: unknown }).failure);
+  return typeof candidate?.code === "string" ? candidate.code : null;
+}
+
 function safePrimaryFailure(error: unknown): Error {
-  if (error instanceof Error && /^(?:github-(?:continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|contents-permission-required|installation-unavailable|repository-not-authorized|git-authentication-failed))$/u.test(error.message)) return error;
-  return failure("upstream-invalid");
+  if (error instanceof z.ZodError) return failure("authority-contract-violation");
+  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|contents-permission-required|installation-unavailable|repository-not-authorized|git-authentication-failed))$/u.test(error.message)) return error;
+  const typedCode = agentFailureCode(error);
+  if (typedCode === "SOURCE_UNAVAILABLE") return failure("operation-failed");
+  if (typedCode === "GITHUB_GIT_AUTHENTICATION_FAILED") return failure("git-authentication-failed");
+  if (typedCode === "GITHUB_INSTALLATION_UNAVAILABLE") return failure("installation-unavailable");
+  if (typedCode === "GITHUB_REPOSITORY_NOT_AUTHORIZED") return failure("repository-not-authorized");
+  if (typedCode === "GITHUB_CONTENTS_PERMISSION_REQUIRED") return failure("contents-permission-required");
+  if (typedCode === "GITHUB_TOKEN_LEASE_ACTIVE") return failure("token-lease-active");
+  if (typedCode === "AGENT_INTERNAL_ERROR") return failure("authority-programming-error");
+  return failure("authority-programming-error");
 }
 interface GithubJsonNumber { readonly kind: "github-json-number"; readonly value: string }
 function githubJsonNumber(value: string): GithubJsonNumber { return { kind: "github-json-number", value }; }
@@ -338,6 +357,10 @@ export async function createGithubAppAuthority(options: {
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? randomUUID;
   const transport = options.transport ?? defaultTransport;
+  const requestGithub = async (request: GithubHttpRequest): Promise<GithubHttpResponse> => {
+    try { return await transport(request); }
+    catch { throw failure("upstream-invalid"); }
+  };
   const writer = options.writer ?? durableJsonWriter;
   const removeLease = options.removeLease ?? unlink;
   const bindingsRoot = path.join(appRoot, "installations");
@@ -463,10 +486,10 @@ export async function createGithubAppAuthority(options: {
       throw error instanceof Error ? error : failure("private-state-invalid");
     });
     const appToken = jwt(current.privateKey, current.config.appId, now());
-    const appResponse = await transport({ method: "GET", path: "/app", authorization: `Bearer ${appToken}` });
+    const appResponse = await requestGithub({ method: "GET", path: "/app", authorization: `Bearer ${appToken}` });
     const app = record(appResponse.body);
     if (appResponse.status !== 200 || decimal(app?.id) !== current.config.appId) throw failure("authority-invalid");
-    const response = await transport({ method: "GET", path: `/app/installations/${installationId}`, authorization: `Bearer ${appToken}` });
+    const response = await requestGithub({ method: "GET", path: `/app/installations/${installationId}`, authorization: `Bearer ${appToken}` });
     const installation = record(response.body); const account = record(installation?.account);
     if (response.status !== 200) throw failure("installation-unavailable");
     if (decimal(installation?.id) !== installationId || decimal(installation?.app_id) !== current.config.appId
@@ -532,11 +555,11 @@ export async function createGithubAppAuthority(options: {
     leaseBlocks.set(input.connectionId, conservativeExpiryMs);
 
     let token: string | null = null; let mintState: "token" | "definitive-rejection" | "uncertain" = "uncertain";
-    let value: T | undefined; let primaryError: Error | null = null;
+    let outcome: OperationOutcome<T> = { completed: false }; let primaryError: Error | null = null;
     try {
       const appToken = jwt(current.privateKey, current.config.appId, now());
       let minted: GithubHttpResponse;
-      try { minted = await transport({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: input.body }); }
+      try { minted = await requestGithub({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: input.body }); }
       catch { primaryError = failure("token-mint-failed"); throw primaryError; }
       const mintedBody = record(minted.body);
       const candidateToken = typeof mintedBody?.token === "string" && mintedBody.token.length > 0 && mintedBody.token.length <= 16 * 1024 ? mintedBody.token : null;
@@ -571,14 +594,14 @@ export async function createGithubAppAuthority(options: {
         primaryError = failure("token-mint-failed"); mintState = "uncertain";
       }
       if (mintState === "token" && token !== null && primaryError === null) {
-        try { input.validateMint?.(mintedBody); value = await input.operation(token); }
+        try { input.validateMint?.(mintedBody); outcome = { completed: true, value: await input.operation(token) }; }
         catch (error) { primaryError = safePrimaryFailure(error); }
       }
     } catch (error) { if (primaryError === null) primaryError = safePrimaryFailure(error); }
 
     let revocation: "succeeded" | "failed" | "not-needed" | "uncertain" = "uncertain";
     if (token !== null) {
-      try { revocation = (await transport({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204 ? "succeeded" : "failed"; }
+      try { revocation = (await requestGithub({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204 ? "succeeded" : "failed"; }
       catch { revocation = "uncertain"; }
     } else if (mintState === "definitive-rejection") revocation = "not-needed";
     token = null; // eslint-disable-line no-useless-assignment -- explicitly drop credential authority before returning
@@ -595,7 +618,7 @@ export async function createGithubAppAuthority(options: {
       recoveredUncertainConnections.add(input.connectionId);
       try { await persist({ ...binding, status: "degraded", cleanupDegraded: true }); } catch { degradedBindings.add(input.connectionId); }
       cleanupDegraded = true;
-    } else if (value === undefined && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
+    } else if (!outcome.completed && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
       try { await persist({ ...binding, status: "degraded", cleanupDegraded: true }); }
       catch {
         degradedBindings.add(input.connectionId);
@@ -605,7 +628,7 @@ export async function createGithubAppAuthority(options: {
         try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt }); } catch { /* in-memory barrier remains fail-closed */ }
       }
       cleanupDegraded = true;
-    } else if (value !== undefined && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
+    } else if (outcome.completed && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
       try { await persist({ ...binding, status: "connected", cleanupDegraded: false }); degradedBindings.delete(input.connectionId); recoveredUncertainConnections.delete(input.connectionId); }
       catch {
         degradedBindings.add(input.connectionId); recoveredUncertainConnections.add(input.connectionId); cleanupDegraded = true;
@@ -615,8 +638,8 @@ export async function createGithubAppAuthority(options: {
       }
     }
     if (primaryError !== null) throw primaryError;
-    if (value === undefined) throw failure("operation-failed");
-    return { value, cleanupDegraded };
+    if (!outcome.completed) throw failure("operation-failed");
+    return { value: outcome.value, cleanupDegraded };
   });
   return {
     inspectApp: async () => await Promise.resolve(githubAppInspectionSchema.parse(configured && config !== null
@@ -649,7 +672,7 @@ export async function createGithubAppAuthority(options: {
         body: { permissions: { metadata: "read" } },
         operation: async (token) => {
           for (let page = 1; page <= 1_000; page += 1) {
-            const response = await transport({ method: "GET", path: `/installation/repositories?per_page=100&page=${page}`, authorization: `Bearer ${token}` });
+            const response = await requestGithub({ method: "GET", path: `/installation/repositories?per_page=100&page=${page}`, authorization: `Bearer ${token}` });
             const responseBody = record(response.body);
             if (response.status !== 200 || !Array.isArray(responseBody?.repositories) || responseBody.repositories.length > 100) throw failure("upstream-invalid");
             const repository = responseBody.repositories.map((candidate) => safeRepository(candidate)).find((candidate) => candidate.repositoryId === input.repositoryId);
@@ -692,7 +715,7 @@ export async function createGithubAppAuthority(options: {
             try { page = Number(Buffer.from(input.continuation, "base64url").toString("ascii")); } catch { throw failure("continuation-invalid"); }
           }
           if (!Number.isInteger(page) || page < 1 || page > 1_000_000) throw failure("continuation-invalid");
-          const listed = await transport({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
+          const listed = await requestGithub({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
           const listedBody = record(listed.body);
           if (listed.status !== 200 || !Array.isArray(listedBody?.repositories) || listedBody.repositories.length > input.pageSize) throw failure("upstream-invalid");
           const repositories = listedBody.repositories.map((rawRepository) => safeRepository(rawRepository));

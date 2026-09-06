@@ -188,13 +188,14 @@ export class OperationExecutor {
         code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
         details: { incidentId: this.createId() }
       };
+      const internalReason = error instanceof AgentExecutionError ? error.internalReason : undefined;
       await this.journal.fail(operationId, failure);
       this.events.failed(operationId, resource, failure);
       const incidentId = "incidentId" in failure.details ? failure.details.incidentId : undefined;
       this.logger.error("agent.operation.failed", "Agent operation failed", {
         operationId, operationName: record.operationName, operationState: "failed", errorCategory: "operation",
         failureCategory: classifyFailureCode(failure.code), errorCode: failure.code, retryable: failure.retryable,
-        ...(incidentId === undefined ? {} : { incidentId }), ...resourceFields
+        ...(incidentId === undefined ? {} : { incidentId }), ...(internalReason === undefined ? {} : { internalReason }), ...resourceFields
       });
     }
   }

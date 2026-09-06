@@ -88,5 +88,6 @@ test("a timed-out real Git process group is terminated and its marker is retired
     args: ["-c", "core.hooksPath=/dev/null", "credential-cache--daemon", socket], timeoutMs: 150,
     maxOutputBytes: 64 * 1024, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C" } });
   expect(result.code === 0 && result.signal === null).toBe(false);
+  expect(result.timedOut).toBe(true);
   expect(await readdir(root)).toEqual([]);
 });
