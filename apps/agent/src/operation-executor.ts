@@ -9,7 +9,7 @@ import { classifyFailureCode, createLogger, type StructuredLogger } from "@devsp
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
   if (typeof request.projectId !== "string") return null;
-  if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close",
+  if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close", "project.push",
     "preview.activate", "preview.deactivate"].includes(record.operationName)
     && typeof request.workspaceId === "string") {
     if (["preview.activate", "preview.deactivate"].includes(record.operationName) && typeof request.previewId === "string") {
@@ -113,6 +113,9 @@ export class OperationExecutor {
           await this.managed.fetch((record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).projectId,
             operationId, (record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).source,
             (record.request as { githubAuthorityGeneration?: number }).githubAuthorityGeneration);
+          break;
+        case "project.push":
+          await this.managed.push(record.request as Parameters<ManagedWorkspaces["push"]>[0], operationId);
           break;
         case "workspace.create": {
           const request = record.request as Parameters<ManagedWorkspaces["createWorkspace"]>[0];

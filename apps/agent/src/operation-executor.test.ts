@@ -60,6 +60,34 @@ test("accepted incomplete work resumes after restart and duplicate scheduling ex
   expect(calls).toBe(1);
 });
 
+test("dispatches project.push through ManagedWorkspaces exactly once", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-push-executor-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const operationId = "018f0f00-0000-7000-8000-000000000007";
+  const request = {
+    projectId: project, workspaceId: boot,
+    source: { kind: "github-app" as const, connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", repositoryId: "9007199254740993" },
+    branchName: "feature/push", commitOid: "a".repeat(40), githubAuthorityGeneration: 1
+  };
+  const accepted = await journal.accept(operationId, "project.push", request);
+  let calls = 0;
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    push: async (input: typeof request, replayedOperationId?: string) => {
+      calls += 1;
+      expect(input).toEqual(request);
+      expect(replayedOperationId).toBe(operationId);
+    },
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+  executor.schedule(accepted);
+  await executor.drain();
+  expect(calls).toBe(1);
+  expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+});
+
 test("an exact task.start replay after Agent restart reuses the accepted execution", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-task-operation-replay-")); roots.push(root);
   const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);

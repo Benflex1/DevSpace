@@ -12,7 +12,7 @@ import {
   type AtomicJsonWriter
 } from "./private-state.js";
 
-const executionRoleSchema = z.enum(["store-clone", "project-fetch", "workspace-branch-update", "workspace-add"]);
+const executionRoleSchema = z.enum(["store-clone", "project-fetch", "project-push", "workspace-branch-update", "workspace-add"]);
 export type ExternalExecutionRole = z.infer<typeof executionRoleSchema>;
 const processIdentitySchema = z.strictObject({
   pid: z.number().int().min(2), processGroupId: z.number().int().min(2), startTimeTicks: z.string().regex(/^[0-9]+$/u)
@@ -229,6 +229,7 @@ export class ExternalExecutionFence {
 
   validateJournalBindings(findOperation: (operationId: string) => {
     readonly operationName: string; readonly request: unknown; readonly state: string;
+    readonly failure?: { readonly code?: string } | null;
   } | undefined): void {
     this.assertHealthy();
     for (const marker of this.markers.values()) {
@@ -236,9 +237,12 @@ export class ExternalExecutionFence {
       const requestProjectId = operation?.request !== null && typeof operation?.request === "object"
         && "projectId" in operation.request ? (operation.request as { projectId?: unknown }).projectId : undefined;
       const expectedOperation = marker.role === "store-clone" ? "project.managed-store.create"
-        : marker.role === "project-fetch" ? "project.fetch" : "workspace.create";
+        : marker.role === "project-fetch" ? "project.fetch"
+        : marker.role === "project-push" ? "project.push" : "workspace.create";
+      const interruptedPush = marker.role === "project-push" && operation?.operationName === "project.push"
+        && operation.state === "failed" && operation.failure?.code === "GITHUB_PUSH_OUTCOME_UNCERTAIN";
       if (operation === undefined || operation.operationName !== expectedOperation || requestProjectId !== marker.projectId
-        || (operation.state !== "accepted" && operation.state !== "running")) {
+        || (!interruptedPush && operation.state !== "accepted" && operation.state !== "running")) {
         this.fail(marker, "execution marker is not bound to its nonterminal durable journal operation");
       }
     }

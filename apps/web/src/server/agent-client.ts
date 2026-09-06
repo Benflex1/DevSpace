@@ -20,6 +20,7 @@ import {
   type HealthData,
   type MutationReceipt,
   type PreviewInspectionData,
+  type ProjectPushData,
   type RuntimeStatusData,
   type SourceInspectionData,
   type SourceLocator,
@@ -174,7 +175,7 @@ export function createAgentClient(socketPath: string, options: {
     | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.installation.refresh"
     | "github.installation.disconnect" | "github.installation.reconnect.prepare"
     | "github.repositories.list" | "github.repositories.resolve"
-    | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
+    | "project.managed-store.create" | "project.fetch" | "project.push" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
     | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
     | "ai-provider.inspect" | "ai-session.start" | "ai-session.resume" | "ai-session.turn.send" | "ai-session.turn.interrupt"
@@ -356,6 +357,9 @@ export function createAgentClient(socketPath: string, options: {
       await call("project.fetch", { projectId, ...(source === undefined ? {} : { source }),
         ...(githubAuthorityGeneration === undefined ? {} : { githubAuthorityGeneration }) }, operationId);
     },
+    pushProject: async (operationId: string, data: ProjectPushData): Promise<void> => {
+      await call("project.push", data, operationId);
+    },
     createWorkspace: async (operationId: string, data: CreateWorkspaceData): Promise<void> => {
       await call("workspace.create", data, operationId);
     },
@@ -481,6 +485,6 @@ export function createAgentClient(socketPath: string, options: {
 export type FullAgentClient = ReturnType<typeof createAgentClient>;
 export type WorkspaceAgentClient = Pick<FullAgentClient,
   "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" |
-  "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
+  "fetchProject" | "pushProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
 export type AgentClient = Pick<FullAgentClient, "health" | "inspectSource">
   & Partial<Pick<FullAgentClient, "resolveGithubRepository">>;

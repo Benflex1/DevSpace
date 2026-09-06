@@ -8,10 +8,12 @@ import { afterEach, expect, test, vi } from "vitest";
 import * as z from "zod";
 import {
   githubRepositoryResolveDataSchema,
+  createWorkspaceDataSchema,
   type GithubRepository,
   type GithubRepositoryResolveData,
   type SourceLocator
 } from "@devspace/contracts";
+import { canonicalizeProjectOptionsV1, hashProjectOptionsV1, parseProjectOptionsV1 } from "@devspace/project-options";
 import { AgentExecutionError, ManagedWorkspaces, protectedGitInvocation, type GitRunner } from "./managed-workspaces.js";
 import type { AskpassCapability, GithubAskpassBroker } from "./github-askpass.js";
 import { createGithubAppAuthority, type GithubAppAuthority, type GithubHttpRequest } from "./github-app.js";
@@ -36,6 +38,8 @@ const exec = promisify(execFile);
 const projectId = "018f0f00-0000-7000-8000-000000000101";
 const connectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a11";
 const repositoryId = "9007199254740993";
+const workspaceId = "018f0f00-0000-7000-8000-000000000103";
+const revisionId = "018f0f00-0000-7000-8000-000000000104";
 const sourceUrl = "https://github.com/org/private-repo.git";
 const sourceLocator = { kind: "github-app", connectionId, repositoryId } as const satisfies SourceLocator;
 const repository: GithubRepository = {
@@ -50,7 +54,7 @@ const repository: GithubRepository = {
   disabled: false
 };
 
-type AuthorityCall = { readonly method: "resolve" | "token"; readonly input: GithubRepositoryResolveData };
+type AuthorityCall = { readonly method: "resolve" | "token" | "write"; readonly input: GithubRepositoryResolveData };
 type AuthorityFaults = { readonly resolve?: Error; readonly token?: Error };
 type HarnessRoots = { readonly projects: string; readonly workspaces: string; readonly state: string };
 type GithubAuthorityFactory = (roots: HarnessRoots) => Promise<GithubAppAuthority>;
@@ -68,6 +72,12 @@ function createAuthority(calls: AuthorityCall[], faults: AuthorityFaults = {}): 
       calls.push({ method: "token", input: normalized });
       if (faults.token !== undefined) throw faults.token;
       return { value: await operation("in-memory-token", repository), cleanupDegraded: false };
+    },
+    withExactRepositoryWriteToken: async <T>(input: GithubRepositoryResolveData, operation: (token: string, repository: GithubRepository) => Promise<T>) => {
+      const normalized = githubRepositoryResolveDataSchema.parse(input);
+      calls.push({ method: "write", input: normalized });
+      if (faults.token !== undefined) throw faults.token;
+      return { value: await operation("in-memory-write-token", repository), cleanupDegraded: false };
     },
     acquireGithubLaunchFence: () => Promise.resolve(() => undefined)
   } as unknown as GithubAppAuthority;
@@ -159,6 +169,23 @@ async function createHarness(authority: GithubAppAuthority | GithubAuthorityFact
   await managed.initialize();
   managedInstances.push(managed);
   return { managed, source, roots, git, broker, authority: resolvedAuthority };
+}
+
+async function prepareWorkspace(h: Awaited<ReturnType<typeof createHarness>>, source: SourceLocator = sourceLocator) {
+  await h.managed.createManagedStore({ projectId, source }, "018f0f00-0000-7000-8000-000000000105");
+  await h.managed.fetch(projectId, "018f0f00-0000-7000-8000-000000000106", source);
+  const options = parseProjectOptionsV1({ schemaVersion: 1,
+    developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
+  const revisionHash = hashProjectOptionsV1(options);
+  await h.managed.registerRevision({ projectId, revisionId, configuration: {
+    format: "devspace.project-options/v1", hash: revisionHash, canonicalJson: canonicalizeProjectOptionsV1(options)
+  }});
+  const workspace = createWorkspaceDataSchema.parse({ projectId, workspaceId, projectSlug: "project", workspaceSlug: "workspace",
+    kind: "isolated", revision: { revisionId, revisionHash }, branchName: "feature/push", baseRef: { kind: "branch", branchName: "main" } });
+  await h.managed.createWorkspace(workspace, "018f0f00-0000-7000-8000-000000000107");
+  await exec("/usr/bin/git", ["-C", h.managed.worktreePath(workspaceId), "config", "user.name", "DevSpace Test"]);
+  await exec("/usr/bin/git", ["-C", h.managed.worktreePath(workspaceId), "config", "user.email", "devspace@example.invalid"]);
+  return workspace;
 }
 
 function externalResult(stderr: string, overrides: Partial<ExternalExecutionResult> = {}): ExternalExecutionResult {
@@ -342,6 +369,41 @@ test("composes a private fetch through the real transaction and reports success 
   expect(calls.filter((request) => request.method === "DELETE" && request.path === "/installation/token")).toHaveLength(1);
   await expect(exec("/usr/bin/git", ["--git-dir", managed.repositoryPath(projectId), "rev-parse", "refs/remotes/origin/main"]))
     .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+});
+
+test("pushes the captured local commit to the same-name remote branch with write authority", async () => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls));
+  await prepareWorkspace(h);
+  const worktree = h.managed.worktreePath(workspaceId);
+  await writeFile(path.join(worktree, "README.md"), "private push\n", "utf8");
+  await exec("/usr/bin/git", ["-C", worktree, "add", "README.md"]);
+  await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "private push"]);
+  const commitOid = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+  calls.splice(0);
+
+  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid, githubAuthorityGeneration: 1 },
+    "018f0f00-0000-7000-8000-000000000108");
+
+  expect(calls).toEqual([{ method: "write", input: { connectionId, repositoryId, lifecycleGeneration: 1 } }]);
+  await expect(exec("/usr/bin/git", ["-C", h.source, "rev-parse", "refs/heads/feature/push"]))
+    .resolves.toMatchObject({ stdout: `${commitOid}\n` });
+});
+
+test("rejects a push intent when the captured commit no longer matches the workspace", async () => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls));
+  await prepareWorkspace(h);
+  const worktree = h.managed.worktreePath(workspaceId);
+  const capturedCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+  await writeFile(path.join(worktree, "README.md"), "drifted\n", "utf8");
+  await exec("/usr/bin/git", ["-C", worktree, "add", "README.md"]);
+  await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "drifted"]);
+  calls.splice(0);
+
+  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid: capturedCommit, githubAuthorityGeneration: 1 },
+    "018f0f00-0000-7000-8000-000000000109")).rejects.toMatchObject({ failure: { code: "GITHUB_PUSH_INTENT_STALE" } });
+  expect(calls).toEqual([]);
 });
 
 test("does not put Git trace or curl-verbose controls in the positive Git environment", () => {
