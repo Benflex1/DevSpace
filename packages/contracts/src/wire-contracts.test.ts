@@ -8,6 +8,7 @@ import {
   gitBranchNameSchema,
   mutationRequestHeadersSchema,
   processInspectionDataSchema,
+  projectPushDataSchema,
   projectOptionsRevisionHashSchema,
   remoteRepositoryUrlSchema,
   resumeAiSessionDataSchema,
@@ -138,6 +139,21 @@ describe("request strictness and accepted configuration identity", () => {
     expect(resumeAiSessionDataSchema.safeParse({
       projectId: id, workspaceId: id2, sourceAiSessionId: id, aiSessionId: id
     }).success).toBe(false);
+  });
+
+  test("accepts only an exact private GitHub push intent", () => {
+    const valid = {
+      projectId: id,
+      workspaceId: id2,
+      source: { kind: "github-app", connectionId: id, repositoryId: "9007199254740993" },
+      branchName: "feature/contracts",
+      commitOid: "a".repeat(40),
+      githubAuthorityGeneration: 2
+    };
+    expect(projectPushDataSchema.safeParse(valid).success).toBe(true);
+    expect(projectPushDataSchema.safeParse({ ...valid, source: { kind: "remote", url: "https://example.com/repo.git" } }).success).toBe(false);
+    expect(projectPushDataSchema.safeParse({ ...valid, force: true }).success).toBe(false);
+    expect(projectPushDataSchema.safeParse({ ...valid, commitOid: "A".repeat(40) }).success).toBe(false);
   });
 
   test("every endpoint schema is directly executable", () => {
