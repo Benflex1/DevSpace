@@ -94,7 +94,7 @@ describe("Agent API v1 executable endpoint inventory", () => {
   });
 
   test("includes live refresh and exact repository resolution in the GitHub inventory", () => {
-    expect(githubAgentApiV1Endpoints).toHaveLength(6);
+    expect(githubAgentApiV1Endpoints).toHaveLength(8);
     expect(githubAgentApiV1EndpointByOperation["github.installation.refresh"].path).toBe("/v1/github/installations/refresh");
     expect(githubAgentApiV1EndpointByOperation["github.repositories.resolve"].path).toBe("/v1/github/repositories/resolve");
   });
@@ -152,7 +152,7 @@ describe("Agent API v1 executable endpoint inventory", () => {
     expect(generated.description).toContain("Structural JSON Schema projection");
     expect(generated.$comment).toContain("Authoritative runtime Zod validation");
     expect(generated.$comment).toContain("semantic refinements");
-    expect(generated["x-devspace-endpoint-count"]).toBe(44);
+    expect(generated["x-devspace-endpoint-count"]).toBe(46);
     const definitions = generated.$defs as Record<string, unknown>;
     expect(definitions["operation.workspace.create.requestBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.successBody"]).toBeDefined();

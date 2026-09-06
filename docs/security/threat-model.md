@@ -149,6 +149,35 @@ DevSpace is not a hostile-code sandbox. Rootless containers reduce impact but do
 - no automatic merge or deployment;
 - repository store and worktree ownership verified before every mutation.
 
+### Private GitHub authority risks
+
+- a stale browser callback, refresh result, or queued fetch could re-enable a disconnected
+  installation;
+- disconnect cleanup could revoke or unlink another connection's private state;
+- unresolved installation-token cleanup could race reconnect and mint a token under new authority;
+- GitHub installation removal, suspension, permission loss, repository deselection, and transient
+  transport failure could be confused with one another;
+- an authority loss could accidentally delete a project's local work or convert a private source to
+  URL-based authority.
+
+### Private GitHub authority controls
+
+- retained connections have a monotonic lifecycle generation and an explicit admission fence;
+- Web advances the generation in an actor-owned SQLite transaction before asking the Agent to clean
+  up, and every private request carries the expected generation where applicable;
+- the Agent checks generation immediately before token mint and immediately before authenticated
+  Git launch, while allowing only bounded in-flight settlement and token revocation after fencing;
+- disconnect cleanup validates the configured GitHub root, canonical filename, embedded connection
+  identity, no-follow regular-file identity, and containing-directory fsync before exact unlink;
+- setup callbacks preserve the original actor-owned connection attempt as the ownership anchor and
+  use generation compare-and-swap; pending reinstall attempts cannot hide a retained connection;
+- lifecycle cleanup is limited to the exact installation binding and token lease. Projects, source
+  metadata, stores, worktrees, workspace files, commits, dirty changes, runtime state, and ownership
+  records are outside the cleanup root and remain retained;
+- live proof classifies authoritative removal, suspension, missing permission, repository access
+  loss, malformed identity, and transient upstream failure separately. None of these deletes local
+  work or grants public URL authority.
+
 ## Preview-routing risks
 
 ### Risks

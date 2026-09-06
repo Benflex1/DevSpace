@@ -7,6 +7,8 @@ interface ProjectResult { id: string; name: string; slug: string; repositoryUrl:
 interface Connection {
   status: string; connectionId?: string | null; accountLogin?: string; accountId?: string; accountType?: string;
   repositorySelection?: string; permissions?: Record<string, "read" | "write">; cleanupDegraded?: boolean;
+  lifecycleState?: string; lifecycleGeneration?: number; cleanupState?: string; lastAuthorityFailureCode?: string | null;
+  pendingAttempt?: { connectionId: string; lifecycleGeneration: number; status: string; expiresAt: string } | null;
 }
 interface Repository {
   repositoryId: string; ownerLogin: string; name: string; fullName: string; defaultBranch: string;
@@ -70,6 +72,32 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
     } catch (error) { setMessage(error instanceof Error ? error.message : "GitHub access could not be refreshed."); }
     finally { setLoadingGithub(false); }
   };
+  const disconnectGithub = async () => {
+    if (connection.connectionId === null || connection.connectionId === undefined) return;
+    if (!window.confirm("Disconnect this GitHub App connection? DevSpace will keep all projects, worktrees, commits, and local changes, but private GitHub access will stop until you reconnect.")) return;
+    setLoadingGithub(true); setMessage("");
+    try {
+      const response = await fetch("/api/integrations/github/disconnect", { method: "POST",
+        headers: { "content-type": "application/json", Origin: window.location.origin, "X-DevSpace-CSRF": "1" },
+        body: JSON.stringify({ connectionId: connection.connectionId }) });
+      const body = await response.json() as Connection & { message?: string };
+      if (!response.ok) throw new Error(body.message ?? "GitHub disconnect is pending.");
+      setConnection(body); setRepositories([]); setContinuation(null); setSelectedRepositoryId("");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "GitHub disconnect is pending."); }
+    finally { setLoadingGithub(false); }
+  };
+  const reconnectGithub = async () => {
+    if (connection.connectionId === null || connection.connectionId === undefined) return;
+    setLoadingGithub(true); setMessage("");
+    try {
+      const response = await fetch("/api/integrations/github/reconnect", { method: "POST",
+        headers: { "content-type": "application/json", Origin: window.location.origin, "X-DevSpace-CSRF": "1" },
+        body: JSON.stringify({ connectionId: connection.connectionId }) });
+      const body = await response.json() as { installationUrl?: string; message?: string };
+      if (!response.ok || body.installationUrl === undefined) throw new Error(body.message ?? "GitHub reconnect could not be started.");
+      window.location.assign(body.installationUrl);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "GitHub reconnect could not be started."); setLoadingGithub(false); }
+  };
   const connectGithub = async () => {
     setLoadingGithub(true); setMessage("");
     try {
@@ -103,6 +131,8 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
     } catch (error) { setMessage(error instanceof Error ? error.message : "Project registration failed."); setSubmitting(false); }
   };
   const connected = connection.status === "connected" || connection.status === "degraded";
+  const lifecycleBlocked = ["disconnect-pending", "disconnected", "reconnect-pending", "installation-removed", "installation-suspended", "permission-required", "repository-access-unavailable", "transient-error"].includes(connection.status);
+  const reconnectable = connection.connectionId !== null && connection.connectionId !== undefined && lifecycleBlocked;
   const selected = repositories.find((repository) => repository.repositoryId === selectedRepositoryId);
 
   return <form onSubmit={(event) => { submit(event).catch(() => { setMessage("Project registration failed."); setSubmitting(false); }); }}>
@@ -113,10 +143,22 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
     {sourceKind === "remote" ? <label>Repository URL <small>HTTPS only; no credentials or query parameters</small><input name="repositoryUrl" type="url" required placeholder="https://github.com/owner/repository.git" value={repositoryUrl} onChange={(event) => onRepositoryChange(event.target.value)} /></label>
       : <section className="github-selection" aria-label="Connected GitHub repository">
         {connected && <p>Verified {connection.accountType} <strong>{connection.accountLogin}</strong>{connection.repositorySelection === "selected" ? " (selected repositories)" : " (all repositories)"}. Contents read: <strong>{connection.permissions?.contents === "read" || connection.permissions?.contents === "write" ? "effective" : "required"}</strong>.</p>}
+        {connection.status === "disconnect-pending" && <p>Disconnect is pending while active GitHub token work settles.</p>}
+        {connection.status === "disconnected" && <p>GitHub access is disconnected. DevSpace has retained your projects and local work.</p>}
+        {connection.status === "reconnect-pending" && <p>GitHub reconnect is pending. Complete the GitHub App installation flow to restore private read access.</p>}
+        {connection.status === "installation-removed" && <p>GitHub no longer has this installation. Re-authorize the DevSpace GitHub App to restore access.</p>}
+        {connection.status === "installation-suspended" && <p>The GitHub installation is suspended. Resolve that in GitHub, then reconnect.</p>}
+        {connection.status === "permission-required" && <p>The GitHub installation needs metadata and Contents read permission before private access can resume.</p>}
+        {connection.status === "repository-access-unavailable" && <p>The selected repository is no longer authorized by this GitHub installation.</p>}
+        {connection.status === "transient-error" && <p>GitHub is temporarily unavailable. Try again later.</p>}
+        {connected && connection.pendingAttempt !== null && connection.pendingAttempt !== undefined
+          && connection.pendingAttempt.connectionId !== connection.connectionId
+          && <p>A separate GitHub setup attempt is pending; this retained connection remains available.</p>}
         {connection.cleanupDegraded && <p className="error" role="alert">Token cleanup is degraded. New private Git minting is blocked until cleanup or expiry.</p>}
-        {!connected && connection.status !== "unconfigured" && <button type="button" disabled={loadingGithub || !agentReachable} onClick={() => void connectGithub()}>{connection.status === "failed" || connection.status === "pending" ? "Retry GitHub connection" : "Connect GitHub App"}</button>}
+        {!connected && !reconnectable && connection.status !== "unconfigured" && <button type="button" disabled={loadingGithub || !agentReachable} onClick={() => void connectGithub()}>{connection.status === "failed" || connection.status === "pending" ? "Retry GitHub connection" : "Connect GitHub App"}</button>}
         {connection.status === "unconfigured" && <p>GitHub App access has not been configured by the administrator.</p>}
-        {connected && <div className="github-actions"><button type="button" disabled={loadingGithub} onClick={() => void refreshGithub()}>Refresh GitHub access</button><button type="button" disabled={loadingGithub} onClick={() => void listRepositories()}>List authorized repositories</button></div>}
+        {connected && <div className="github-actions"><button type="button" disabled={loadingGithub} onClick={() => void refreshGithub()}>Refresh GitHub access</button><button type="button" disabled={loadingGithub} onClick={() => void listRepositories()}>List authorized repositories</button><button type="button" disabled={loadingGithub} onClick={() => void disconnectGithub()}>Disconnect GitHub</button></div>}
+        {reconnectable && <button type="button" disabled={loadingGithub || !agentReachable || connection.status === "disconnect-pending" || connection.status === "reconnect-pending"} onClick={() => void reconnectGithub()}>Reconnect GitHub App</button>}
         {repositories.length > 0 && <label>Authorized repository<select required value={selectedRepositoryId} onChange={(event) => { const repository = repositories.find((candidate) => candidate.repositoryId === event.target.value); if (repository !== undefined) chooseRepository(repository); }}><option value="">Select a repository</option>{repositories.map((repository) => <option key={repository.repositoryId} value={repository.repositoryId} disabled={repository.archived || repository.disabled}>{repository.fullName}{repository.archived ? " · archived" : repository.disabled ? " · disabled" : ""}</option>)}</select></label>}
         {continuation !== null && <button type="button" disabled={loadingGithub} onClick={() => void listRepositories(continuation)}>Load more repositories</button>}
         {selected !== undefined && <p>Selected <strong>{selected.fullName}</strong>; authority is retained by its immutable GitHub repository ID.</p>}

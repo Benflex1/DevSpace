@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  githubConnectionLifecycleStateSchema,
   githubConnectionIdSchema,
   githubDecimalIdSchema,
+  githubInstallationDisconnectDataSchema,
   githubInstallationRefreshDataSchema,
   githubInstallationVerifyDataSchema,
+  githubInstallationReconnectPrepareDataSchema,
   githubRepositoryResolveDataSchema,
   githubRepositoriesListDataSchema,
   githubRepositoryPageSchema
@@ -36,6 +39,19 @@ describe("GitHub App contracts", () => {
     expect(githubInstallationRefreshDataSchema.parse({ connectionId })).toEqual({ connectionId });
     expect(githubRepositoryResolveDataSchema.parse({ connectionId, repositoryId })).toEqual({ connectionId, repositoryId });
     expect(githubRepositoryResolveDataSchema.safeParse({ kind: "github-app", connectionId, repositoryId }).success).toBe(false);
+  });
+
+  it("requires a positive lifecycle generation and a connection-only lifecycle request", () => {
+    const connectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a11";
+    expect(githubConnectionLifecycleStateSchema.parse("disconnected")).toBe("disconnected");
+    expect(githubConnectionLifecycleStateSchema.safeParse("enabled").success).toBe(true);
+    expect(githubInstallationDisconnectDataSchema.parse({ connectionId, lifecycleGeneration: 2 })).toEqual({
+      connectionId, lifecycleGeneration: 2
+    });
+    expect(githubInstallationReconnectPrepareDataSchema.parse({ connectionId, lifecycleGeneration: 3 })).toEqual({
+      connectionId, lifecycleGeneration: 3
+    });
+    expect(githubInstallationDisconnectDataSchema.safeParse({ connectionId, lifecycleGeneration: 0, path: "/srv" }).success).toBe(false);
   });
 
   it("bounds pagination and exposes only clean repository metadata", () => {

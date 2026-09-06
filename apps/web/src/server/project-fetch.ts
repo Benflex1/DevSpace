@@ -22,15 +22,24 @@ export async function fetchProject(projectId: string, actor: string, dependencie
   );
   const source = dependencies.database.getProjectSourceLocator(projectId, actor);
   if (source === null) throw new ProjectFetchError("PROJECT_NOT_FOUND", "The project was not found.");
+  let githubAuthorityGeneration: number | undefined;
   try {
     if (source.kind === "github-app") {
-      const resolved = await dependencies.agent.resolveGithubRepository(source.connectionId, source.repositoryId);
+      const authority = dependencies.database.getGithubAuthorityContext(actor, source.connectionId);
+      if (!authority.admitted) {
+        const error = new ProjectFetchError("GITHUB_CONNECTION_DISABLED", "Reconnect the GitHub connection before fetching the private repository.");
+        dependencies.database.finishOperation(operation.operationId, { state: "failed", code: error.code, message: error.message });
+        throw error;
+      }
+      githubAuthorityGeneration = authority.lifecycleGeneration;
+      const resolved = await dependencies.agent.resolveGithubRepository(source.connectionId, source.repositoryId, authority.lifecycleGeneration);
       const timestamp = new Date().toISOString();
       dependencies.database.refreshProjectGithubSource({ projectId, actor, connectionId: source.connectionId,
         repository: resolved.repository, verifiedAt: timestamp, metadataUpdatedAt: timestamp });
     }
-    await dependencies.agent.fetchProject(operation.operationId, projectId, source.kind === "github-app" ? source : undefined);
+    await dependencies.agent.fetchProject(operation.operationId, projectId, source.kind === "github-app" ? source : undefined, githubAuthorityGeneration);
   } catch (error) {
+    if (error instanceof ProjectFetchError) throw error;
     if (error instanceof AgentResponseError) {
       const message = persistedFailureMessage(error.code);
       dependencies.database.finishOperation(operation.operationId, { state: "failed", code: error.code, message });

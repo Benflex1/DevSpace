@@ -56,13 +56,21 @@ export const sourceLocatorSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("remote"), url: remoteRepositoryUrlSchema }),
   z.strictObject({ kind: z.literal("github-app"), connectionId: githubConnectionIdSchema, repositoryId: githubDecimalIdSchema })
 ]);
-export const inspectSourceDataSchema = z.strictObject({ source: sourceLocatorSchema });
+export const inspectSourceDataSchema = z.strictObject({
+  source: sourceLocatorSchema,
+  githubAuthorityGeneration: z.number().int().min(1).max(2_147_483_647).optional()
+});
 export const createManagedStoreDataSchema = z.strictObject({
   projectId: uuidV7Schema,
-  source: sourceLocatorSchema
+  source: sourceLocatorSchema,
+  githubAuthorityGeneration: z.number().int().min(1).max(2_147_483_647).optional()
 });
 export const projectIdentityDataSchema = z.strictObject({ projectId: uuidV7Schema });
-export const projectFetchDataSchema = z.strictObject({ projectId: uuidV7Schema, source: sourceLocatorSchema.optional() });
+export const projectFetchDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  source: sourceLocatorSchema.optional(),
+  githubAuthorityGeneration: z.number().int().min(1).max(2_147_483_647).optional()
+});
 export const inspectGitDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema.nullable()

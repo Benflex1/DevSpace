@@ -75,9 +75,15 @@ export const executableAgentErrorRegistry = Object.freeze({
   PREVIEW_DOMAIN_NOT_APPROVED: { statuses: [422], retryable: false, detailsSchema: z.strictObject({ previewId: uuidV7Schema }) },
   GATEWAY_UPDATE_FAILED: { statuses: [503], retryable: true, detailsSchema: z.strictObject({ previewId: uuidV7Schema }) },
   GITHUB_CONNECTION_NOT_FOUND: { statuses: [404], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_CONNECTION_DISABLED: { statuses: [409], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_AUTHORITY_GENERATION_STALE: { statuses: [409], retryable: false, detailsSchema: emptyDetailsSchema },
   GITHUB_AUTHORITY_INVALID: { statuses: [409, 422, 503], retryable: false, detailsSchema: z.strictObject({
-    reason: z.enum(["unconfigured", "invalid", "mismatch", "suspended", "upstream-unavailable"])
+    reason: z.enum(["unconfigured", "invalid", "mismatch", "suspended", "upstream-unavailable", "permission-required"])
   }) },
+  GITHUB_INSTALLATION_REMOVED: { statuses: [410], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_INSTALLATION_SUSPENDED: { statuses: [403], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_REPOSITORY_ACCESS_UNAVAILABLE: { statuses: [403, 404], retryable: false, detailsSchema: emptyDetailsSchema },
+  GITHUB_UPSTREAM_TRANSIENT: { statuses: [503], retryable: true, detailsSchema: emptyDetailsSchema },
   GITHUB_TOKEN_LEASE_ACTIVE: { statuses: [503], retryable: true, detailsSchema: emptyDetailsSchema },
   GITHUB_CONTENTS_PERMISSION_REQUIRED: { statuses: [403, 422], retryable: false, detailsSchema: emptyDetailsSchema },
   GITHUB_INSTALLATION_UNAVAILABLE: { statuses: [503], retryable: true, detailsSchema: emptyDetailsSchema },

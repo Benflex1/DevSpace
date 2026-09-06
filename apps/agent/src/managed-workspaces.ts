@@ -138,7 +138,7 @@ export class ConfigurationValidationError extends Error {
 }
 
 function executionFailure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionFailure {
-  const retryable = ["SOURCE_UNAVAILABLE", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_TOKEN_LEASE_ACTIVE",
+  const retryable = ["SOURCE_UNAVAILABLE", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_TOKEN_LEASE_ACTIVE", "GITHUB_UPSTREAM_TRANSIENT",
     "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR", "GATEWAY_UPDATE_FAILED"].includes(code);
   return { code, message, retryable, details } as AgentExecutionFailure;
 }
@@ -162,13 +162,15 @@ export type GitRunner = (args: readonly string[]) => Promise<{ stdout: string; s
 interface AuthenticatedGitContext {
   readonly connectionId: string;
   readonly repositoryId: string;
+  readonly lifecycleGeneration: number;
   readonly token: string;
   readonly originUrl: string;
 }
 export function githubRepositoryResolveDataFromSourceLocator(
-  source: Extract<SourceLocator, { kind: "github-app" }>
+  source: Extract<SourceLocator, { kind: "github-app" }>, lifecycleGeneration?: number
 ): GithubRepositoryResolveData {
-  return githubRepositoryResolveDataSchema.parse({ connectionId: source.connectionId, repositoryId: source.repositoryId });
+  return githubRepositoryResolveDataSchema.parse({ connectionId: source.connectionId, repositoryId: source.repositoryId,
+    ...(lifecycleGeneration === undefined ? {} : { lifecycleGeneration }) });
 }
 
 const githubTokenOperationResultSchema = z.strictObject({ value: z.unknown(), cleanupDegraded: z.boolean() });
@@ -398,7 +400,10 @@ export class ManagedWorkspaces {
     if (this.executionFence === null) throw new PrivateStateCorruptionError(this.stateRoot, "execution fence is not initialized");
     const invocation = protectedGitInvocation(args, capability === undefined ? undefined : { capability });
     const result = await this.executionFence.runGit({ operationId, projectId, role, args: invocation.args,
-      ...(executionId === undefined ? {} : { executionId }), timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env });
+      ...(executionId === undefined ? {} : { executionId }), timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env,
+      ...(auth === undefined ? {} : {
+        beforeSpawn: async () => await this.githubAuthorityRequired().acquireGithubLaunchFence(auth.connectionId, auth.lifecycleGeneration)
+      }) });
     if (result.code !== 0 || result.signal !== null) {
       if (auth !== undefined) {
         const failureKind = classifyAuthenticatedGitFailure(result);
@@ -435,9 +440,31 @@ export class ManagedWorkspaces {
   private githubExecutionError(error: unknown): AgentExecutionError {
     if (error instanceof AgentExecutionError) return error;
     const message = error instanceof Error ? error.message : "";
-    const mapped = message === "github-contents-permission-required"
+    if (message === "github-permission-required") {
+      return new AgentExecutionError(executionFailure("GITHUB_AUTHORITY_INVALID", "The GitHub installation does not have the required read permission.", {
+        reason: "permission-required"
+      }));
+    }
+    if (message === "github-authority-invalid") {
+      return new AgentExecutionError(executionFailure("GITHUB_AUTHORITY_INVALID", "The GitHub App authority did not match the configured identity.", {
+        reason: "mismatch"
+      }));
+    }
+    const mapped = message === "github-connection-disabled"
+      ? ["GITHUB_CONNECTION_DISABLED", "The GitHub connection is disconnected."] as const
+      : message === "github-authority-generation-stale"
+        ? ["GITHUB_AUTHORITY_GENERATION_STALE", "The GitHub connection changed while this operation was starting."] as const
+      : message === "github-installation-removed"
+        ? ["GITHUB_INSTALLATION_REMOVED", "The GitHub installation is no longer available."] as const
+      : message === "github-installation-suspended"
+        ? ["GITHUB_INSTALLATION_SUSPENDED", "The GitHub installation is suspended."] as const
+      : message === "github-repository-access-unavailable"
+        ? ["GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", "The selected GitHub repository is no longer available to this connection."] as const
+      : message === "github-upstream-transient"
+        ? ["GITHUB_UPSTREAM_TRANSIENT", "GitHub is temporarily unavailable. Try again."] as const
+      : message === "github-contents-permission-required"
       ? ["GITHUB_CONTENTS_PERMISSION_REQUIRED", "GitHub Contents read permission is required."] as const
-      : message === "github-installation-unavailable" || message === "github-connection-not-found" || message === "github-authority-invalid"
+      : message === "github-installation-unavailable" || message === "github-connection-not-found"
         ? ["GITHUB_INSTALLATION_UNAVAILABLE", "The GitHub installation is unavailable."] as const
         : message === "github-repository-not-authorized"
           ? ["GITHUB_REPOSITORY_NOT_AUTHORIZED", "The selected GitHub repository is not authorized."] as const
@@ -456,9 +483,9 @@ export class ManagedWorkspaces {
     return this.githubInternalError("github-authority-programming-error");
   }
 
-  private async resolveGithubRepository(source: Extract<SourceLocator, { kind: "github-app" }>) {
+  private async resolveGithubRepository(source: Extract<SourceLocator, { kind: "github-app" }>, lifecycleGeneration?: number) {
     try {
-      const resolveData = githubRepositoryResolveDataFromSourceLocator(source);
+      const resolveData = githubRepositoryResolveDataFromSourceLocator(source, lifecycleGeneration);
       const resolution = await this.githubAuthorityRequired().resolveRepository(resolveData);
       return githubRepositoryResolutionSchema.parse(resolution);
     } catch (error) {
@@ -467,11 +494,12 @@ export class ManagedWorkspaces {
   }
 
   private async withGithubToken<T>(source: Extract<SourceLocator, { kind: "github-app" }>, operationId: string,
-    operation: (token: string, repository: import("@devspace/contracts").GithubRepository) => Promise<T>): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }> {
+    lifecycleGeneration: number | undefined,
+    operation: (token: string, repository: import("@devspace/contracts").GithubRepository, lifecycleGeneration: number) => Promise<T>): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }> {
     const authority = this.githubAuthorityRequired();
     try {
       await this.ensurePrivateCredentialTransport();
-      const resolveData = githubRepositoryResolveDataFromSourceLocator(source);
+      const resolveData = githubRepositoryResolveDataFromSourceLocator(source, lifecycleGeneration);
       const result = await authority.withExactRepositoryToken(resolveData, operation, operationId);
       const envelope = githubTokenOperationResultSchema.parse(result);
       return { value: envelope.value as T, cleanupDegraded: envelope.cleanupDegraded };
@@ -480,19 +508,24 @@ export class ManagedWorkspaces {
     }
   }
 
-  async inspectSource(source: SourceLocator): Promise<import("@devspace/contracts").SourceInspectionData> {
+  async inspectSource(source: SourceLocator, lifecycleGeneration?: number): Promise<import("@devspace/contracts").SourceInspectionData> {
     const data = sourceLocatorSchema.parse(source);
     if (data.kind !== "github-app") throw new Error("source-inspection-public-path-required");
     const operationId = uuidv7();
-    const result = await this.withGithubToken(data, operationId, async (token, repository) => {
+    const result = await this.withGithubToken(data, operationId, lifecycleGeneration, async (token, repository, effectiveGeneration) => {
       const executionId = uuidv7();
       const capability = this.askpassBroker.register({ ...data, operationId, executionId, originUrl: repository.cleanHttpsUrl,
         token, deadlineAt: new Date(Date.now() + 15_000) });
       try {
         const invocation = protectedGitInvocation(["ls-remote", "--symref", "--", repository.cleanHttpsUrl, "HEAD"], { capability });
-        const processResult = await runBoundedProcess("/usr/bin/git", invocation.args, {
-          timeoutMs: 15_000, maxOutputBytes: 256 * 1024, env: invocation.env
-        });
+        const releaseLaunchFence = await this.githubAuthorityRequired().acquireGithubLaunchFence(data.connectionId, effectiveGeneration);
+        let processPromise: ReturnType<typeof runBoundedProcess>;
+        try {
+          processPromise = runBoundedProcess("/usr/bin/git", invocation.args, {
+            timeoutMs: 15_000, maxOutputBytes: 256 * 1024, env: invocation.env
+          });
+        } finally { releaseLaunchFence(); }
+        const processResult = await processPromise;
         if (processResult.signal !== null || processResult.code !== 0) {
           const failureKind = classifyAuthenticatedGitFailure(processResult);
           if (failureKind === "authentication") throw new Error("github-git-authentication-failed");
@@ -810,7 +843,7 @@ export class ManagedWorkspaces {
       }
       sourceOrigin = data.source.url;
     } else if (data.source.kind === "github-app") {
-      const resolved = await this.resolveGithubRepository(data.source);
+      const resolved = await this.resolveGithubRepository(data.source, data.githubAuthorityGeneration);
       if (resolved.repository.archived || resolved.repository.disabled) throw new AgentExecutionError(executionFailure("GITHUB_REPOSITORY_NOT_AUTHORIZED", "The selected GitHub repository is not available for onboarding.", {}));
       sourceOrigin = resolved.repository.cleanHttpsUrl;
     } else {
@@ -863,11 +896,12 @@ export class ManagedWorkspaces {
             await this.operationGit(operationId, data.projectId, "store-clone",
               ["clone", "--bare", "--no-recurse-submodules", "--", sourceOrigin, stagedRepository]);
           } else if (githubSource !== null) {
-            await this.withGithubToken(githubSource, operationId, async (token, repository) => {
+            await this.withGithubToken(githubSource, operationId, data.githubAuthorityGeneration, async (token, repository, effectiveGeneration) => {
               sourceOrigin = repository.cleanHttpsUrl;
               await this.operationGit(operationId, data.projectId, "store-clone",
                 ["clone", "--bare", "--no-recurse-submodules", "--", repository.cleanHttpsUrl, stagedRepository],
-                { connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId, token, originUrl: repository.cleanHttpsUrl });
+                { connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId,
+                  lifecycleGeneration: effectiveGeneration, token, originUrl: repository.cleanHttpsUrl });
             });
           }
         }
@@ -939,7 +973,7 @@ export class ManagedWorkspaces {
     await rm(quarantine, { recursive: true });
   }
 
-  async fetch(projectId: string, operationId?: string, expectedSource?: SourceLocator): Promise<void> {
+  async fetch(projectId: string, operationId?: string, expectedSource?: SourceLocator, lifecycleGeneration?: number): Promise<void> {
     let store = await this.loadStoreOwnership(projectId);
     if (expectedSource !== undefined) {
       const sameSource = expectedSource.kind === store.source.kind
@@ -953,10 +987,11 @@ export class ManagedWorkspaces {
       if (store.source.kind === "github-app") {
         const githubSource = store.source;
         const fetchOperationId = operationId ?? uuidv7();
-        await this.withGithubToken(githubSource, fetchOperationId, async (token, repository) => {
+        await this.withGithubToken(githubSource, fetchOperationId, lifecycleGeneration, async (token, repository, effectiveGeneration) => {
           store = await this.transitionStoreOrigin(store, projectId, repository.cleanHttpsUrl);
           await this.operationGit(fetchOperationId, projectId, "project-fetch", ["--git-dir", store.repositoryPath, "fetch", "--no-recurse-submodules", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
-            connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId, token, originUrl: repository.cleanHttpsUrl
+            connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId,
+            lifecycleGeneration: effectiveGeneration, token, originUrl: repository.cleanHttpsUrl
           });
         });
       } else if (operationId === undefined) await this.git(args);

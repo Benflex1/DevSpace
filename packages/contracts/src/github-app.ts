@@ -5,6 +5,12 @@ export const githubConnectionIdSchema = uuidV7Schema;
 export const githubDecimalIdSchema = z.string().min(1).max(32).regex(/^(?:0|[1-9][0-9]*)$/u);
 export const githubAccountTypeSchema = z.enum(["User", "Organization"]);
 export const githubConnectionStatusSchema = z.enum(["unconfigured", "disconnected", "pending", "connected", "degraded", "failed"]);
+export const githubLifecycleGenerationSchema = z.number().int().min(1).max(2_147_483_647);
+export const githubConnectionLifecycleStateSchema = z.enum([
+  "enabled", "disconnect-pending", "disconnected", "reconnect-pending", "installation-removed",
+  "installation-suspended", "permission-required", "repository-access-unavailable", "transient-error"
+]);
+export const githubConnectionCleanupStateSchema = z.enum(["settled", "pending", "degraded"]);
 export const githubRepositorySelectionSchema = z.enum(["all", "selected"]);
 export const githubPermissionLevelSchema = z.enum(["read", "write"]);
 export const githubPermissionsSchema = z.record(z.string().min(1).max(64).regex(/^[a-z_]+$/u), githubPermissionLevelSchema)
@@ -12,20 +18,49 @@ export const githubPermissionsSchema = z.record(z.string().min(1).max(64).regex(
 
 export const githubInstallationVerifyDataSchema = z.strictObject({
   connectionId: githubConnectionIdSchema,
-  installationId: githubDecimalIdSchema
+  installationId: githubDecimalIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema.optional()
 });
 export type GithubInstallationVerifyData = z.infer<typeof githubInstallationVerifyDataSchema>;
 
-export const githubInstallationRefreshDataSchema = z.strictObject({ connectionId: githubConnectionIdSchema });
+export const githubInstallationRefreshDataSchema = z.strictObject({
+  connectionId: githubConnectionIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema.optional()
+});
 export type GithubInstallationRefreshData = z.infer<typeof githubInstallationRefreshDataSchema>;
+
+export const githubInstallationDisconnectDataSchema = z.strictObject({
+  connectionId: githubConnectionIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema
+});
+export type GithubInstallationDisconnectData = z.infer<typeof githubInstallationDisconnectDataSchema>;
+
+export const githubInstallationReconnectPrepareDataSchema = z.strictObject({
+  connectionId: githubConnectionIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema
+});
+export type GithubInstallationReconnectPrepareData = z.infer<typeof githubInstallationReconnectPrepareDataSchema>;
+
+export const githubLifecycleInspectionSchema = z.strictObject({
+  connectionId: githubConnectionIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema,
+  lifecycleState: githubConnectionLifecycleStateSchema,
+  cleanupState: githubConnectionCleanupStateSchema,
+  installationId: githubDecimalIdSchema.nullable()
+});
+export type GithubLifecycleInspection = z.infer<typeof githubLifecycleInspectionSchema>;
 
 export const githubRepositoryResolveDataSchema = z.strictObject({
   connectionId: githubConnectionIdSchema,
-  repositoryId: githubDecimalIdSchema
+  repositoryId: githubDecimalIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema.optional()
 });
 export type GithubRepositoryResolveData = z.infer<typeof githubRepositoryResolveDataSchema>;
 
-export const githubConnectionInspectDataSchema = z.strictObject({ connectionId: githubConnectionIdSchema });
+export const githubConnectionInspectDataSchema = z.strictObject({
+  connectionId: githubConnectionIdSchema,
+  lifecycleGeneration: githubLifecycleGenerationSchema.optional()
+});
 export const githubAppInspectionSchema = z.strictObject({
   configured: z.boolean(),
   appId: githubDecimalIdSchema.nullable(),
@@ -53,7 +88,8 @@ export const githubContinuationSchema = z.string().min(1).max(256).regex(/^[A-Za
 export const githubRepositoriesListDataSchema = z.strictObject({
   connectionId: githubConnectionIdSchema,
   pageSize: z.number().int().min(1).max(100),
-  continuation: githubContinuationSchema.optional()
+  continuation: githubContinuationSchema.optional(),
+  lifecycleGeneration: githubLifecycleGenerationSchema.optional()
 });
 export type GithubRepositoriesListData = z.infer<typeof githubRepositoriesListDataSchema>;
 

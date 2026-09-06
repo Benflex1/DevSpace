@@ -111,7 +111,8 @@ export class OperationExecutor {
           break;
         case "project.fetch":
           await this.managed.fetch((record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).projectId,
-            operationId, (record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).source);
+            operationId, (record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).source,
+            (record.request as { githubAuthorityGeneration?: number }).githubAuthorityGeneration);
           break;
         case "workspace.create": {
           const request = record.request as Parameters<ManagedWorkspaces["createWorkspace"]>[0];

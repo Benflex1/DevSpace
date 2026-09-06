@@ -43,6 +43,9 @@ const previewTargetKinds = ["workspace", "service"] as const;
 const portLeaseStates = ["reserved", "active", "released", "stale"] as const;
 const githubConnectionAttemptStates = ["pending", "claimed", "connected", "failed"] as const;
 const githubConnectionStates = ["connected", "degraded", "failed"] as const;
+const githubConnectionLifecycleStates = ["enabled", "disconnect-pending", "disconnected", "reconnect-pending",
+  "installation-removed", "installation-suspended", "permission-required", "repository-access-unavailable", "transient-error"] as const;
+const githubConnectionCleanupStates = ["settled", "pending", "degraded"] as const;
 
 function quotedValues(values: readonly string[]): SQL {
   return sql.raw(values.map((value) => `'${value.replaceAll("'", "''")}'`).join(", "));
@@ -720,6 +723,11 @@ export const githubConnections = sqliteTable("github_connections", {
   repositorySelection: text("repository_selection", { enum: ["all", "selected"] }).notNull(),
   permissionsJson: text("permissions_json").notNull(),
   status: text("status", { enum: githubConnectionStates }).notNull(),
+  lifecycleGeneration: integer("lifecycle_generation").notNull().default(1),
+  lifecycleState: text("lifecycle_state", { enum: githubConnectionLifecycleStates }).notNull().default("enabled"),
+  cleanupState: text("cleanup_state", { enum: githubConnectionCleanupStates }).notNull().default("settled"),
+  lastAuthorityFailureCode: text("last_authority_failure_code"),
+  lastAuthorityCheckedAt: text("last_authority_checked_at"),
   verifiedAt: text("verified_at").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
@@ -733,10 +741,44 @@ export const githubConnections = sqliteTable("github_connections", {
   enumCheck("github_connections_repository_selection_check", table.repositorySelection, ["all", "selected"]),
   jsonCheck("github_connections_permissions_json_check", table.permissionsJson),
   enumCheck("github_connections_status_check", table.status, githubConnectionStates),
+  check("github_connections_lifecycle_generation_check", sql`${table.lifecycleGeneration} >= 1`),
+  enumCheck("github_connections_lifecycle_state_check", table.lifecycleState, githubConnectionLifecycleStates),
+  enumCheck("github_connections_cleanup_state_check", table.cleanupState, githubConnectionCleanupStates),
+  timestampCheck("github_connections_last_authority_checked_at_timestamp_check", table.lastAuthorityCheckedAt, true),
   timestampCheck("github_connections_verified_at_timestamp_check", table.verifiedAt),
   timestampCheck("github_connections_created_at_timestamp_check", table.createdAt),
   timestampCheck("github_connections_updated_at_timestamp_check", table.updatedAt),
   check("github_connections_row_version_check", sql`${table.rowVersion} >= 1`)
+]);
+
+export const githubConnectionSetupAttempts = sqliteTable("github_connection_setup_attempts", {
+  attemptId: text("attempt_id").primaryKey(),
+  connectionId: text("connection_id").notNull().references(() => githubConnections.connectionId, {
+    onDelete: "restrict",
+    onUpdate: "no action"
+  }),
+  stateHash: text("state_hash").notNull().unique("github_connection_setup_attempts_state_hash_unique"),
+  status: text("status", { enum: githubConnectionAttemptStates }).notNull(),
+  targetGeneration: integer("target_generation").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  claimedInstallationId: text("claimed_installation_id"),
+  createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  failureClassification: text("failure_classification"),
+  rowVersion: integer("row_version").notNull().default(1)
+}, (table) => [
+  uuidV7Check("github_connection_setup_attempts_attempt_id_uuid_v7_check", table.attemptId),
+  uuidV7Check("github_connection_setup_attempts_connection_id_uuid_v7_check", table.connectionId),
+  check("github_connection_setup_attempts_state_hash_check", sql`length(${table.stateHash}) = 64 and ${table.stateHash} not glob '*[^0-9a-f]*'`),
+  enumCheck("github_connection_setup_attempts_status_check", table.status, githubConnectionAttemptStates),
+  check("github_connection_setup_attempts_target_generation_check", sql`${table.targetGeneration} >= 1`),
+  timestampCheck("github_connection_setup_attempts_expires_at_timestamp_check", table.expiresAt),
+  timestampCheck("github_connection_setup_attempts_created_at_timestamp_check", table.createdAt),
+  timestampCheck("github_connection_setup_attempts_updated_at_timestamp_check", table.updatedAt),
+  check("github_connection_setup_attempts_claimed_installation_id_check", sql`${table.claimedInstallationId} is null or (${decimalIdExpression(table.claimedInstallationId)})`),
+  check("github_connection_setup_attempts_row_version_check", sql`${table.rowVersion} >= 1`),
+  index("github_connection_setup_attempts_connection_id_idx").on(table.connectionId)
 ]);
 
 export const projectGithubSources = sqliteTable("project_github_sources", {
@@ -802,6 +844,7 @@ export const schema = {
   auditEvents,
   githubConnectionAttempts,
   githubConnections,
+  githubConnectionSetupAttempts,
   projectGithubSources
 } as const;
 
@@ -825,6 +868,7 @@ export const applicationTableNames = [
   "audit_events",
   "github_connection_attempts",
   "github_connections",
+  "github_connection_setup_attempts",
   "project_github_sources"
 ] as const;
 
@@ -862,5 +906,7 @@ export type AuditEvent = typeof auditEvents.$inferSelect;
 export type NewAuditEvent = typeof auditEvents.$inferInsert;
 export type GithubConnectionAttempt = typeof githubConnectionAttempts.$inferSelect;
 export type GithubConnection = typeof githubConnections.$inferSelect;
+export type GithubConnectionSetupAttempt = typeof githubConnectionSetupAttempts.$inferSelect;
+export type NewGithubConnectionSetupAttempt = typeof githubConnectionSetupAttempts.$inferInsert;
 export type ProjectGithubSource = typeof projectGithubSources.$inferSelect;
 export type NewProjectGithubSource = typeof projectGithubSources.$inferInsert;

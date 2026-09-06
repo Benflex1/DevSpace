@@ -26,6 +26,7 @@ import {
   type ProcessInspectionData,
   type WorkspaceInspectionData,
   type GithubAppInspection,
+  type GithubLifecycleInspection,
   type GithubInstallationInspection,
   type GithubRepositoryPage,
   type GithubRepositoryResolution
@@ -171,6 +172,7 @@ export function createAgentClient(socketPath: string, options: {
 
   type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
     | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.installation.refresh"
+    | "github.installation.disconnect" | "github.installation.reconnect.prepare"
     | "github.repositories.list" | "github.repositories.resolve"
     | "project.managed-store.create" | "project.fetch" | "project.git.inspect" | "workspace.create"
     | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
@@ -324,16 +326,20 @@ export function createAgentClient(socketPath: string, options: {
     health: async (): Promise<HealthData> => await call("agent.health.get") as HealthData,
     runtimeStatus: async (): Promise<RuntimeStatusData> => await call("agent.runtime-status.get") as RuntimeStatusData,
     inspectGithubApp: async (): Promise<GithubAppInspection> => await call("github.app.inspect") as GithubAppInspection,
-    verifyGithubInstallation: async (connectionId: string, installationId: string): Promise<GithubInstallationInspection> =>
-      await call("github.installation.verify", { connectionId, installationId }) as GithubInstallationInspection,
-    inspectGithubInstallation: async (connectionId: string): Promise<GithubInstallationInspection> =>
-      await call("github.installation.inspect", { connectionId }) as GithubInstallationInspection,
-    refreshGithubInstallation: async (connectionId: string): Promise<GithubInstallationInspection> =>
-      await call("github.installation.refresh", { connectionId }) as GithubInstallationInspection,
-    listGithubRepositories: async (connectionId: string, pageSize: number, continuation?: string): Promise<GithubRepositoryPage> =>
-      await call("github.repositories.list", { connectionId, pageSize, ...(continuation === undefined ? {} : { continuation }) }) as GithubRepositoryPage,
-    resolveGithubRepository: async (connectionId: string, repositoryId: string): Promise<GithubRepositoryResolution> =>
-      await call("github.repositories.resolve", { connectionId, repositoryId }) as GithubRepositoryResolution,
+    verifyGithubInstallation: async (connectionId: string, installationId: string, lifecycleGeneration?: number): Promise<GithubInstallationInspection> =>
+      await call("github.installation.verify", { connectionId, installationId, ...(lifecycleGeneration === undefined ? {} : { lifecycleGeneration }) }) as GithubInstallationInspection,
+    inspectGithubInstallation: async (connectionId: string, lifecycleGeneration?: number): Promise<GithubInstallationInspection> =>
+      await call("github.installation.inspect", { connectionId, ...(lifecycleGeneration === undefined ? {} : { lifecycleGeneration }) }) as GithubInstallationInspection,
+    refreshGithubInstallation: async (connectionId: string, lifecycleGeneration?: number): Promise<GithubInstallationInspection> =>
+      await call("github.installation.refresh", { connectionId, ...(lifecycleGeneration === undefined ? {} : { lifecycleGeneration }) }) as GithubInstallationInspection,
+    disconnectGithubInstallation: async (connectionId: string, lifecycleGeneration: number): Promise<GithubLifecycleInspection> =>
+      await call("github.installation.disconnect", { connectionId, lifecycleGeneration }) as GithubLifecycleInspection,
+    prepareGithubReconnect: async (connectionId: string, lifecycleGeneration: number): Promise<GithubLifecycleInspection> =>
+      await call("github.installation.reconnect.prepare", { connectionId, lifecycleGeneration }) as GithubLifecycleInspection,
+    listGithubRepositories: async (connectionId: string, pageSize: number, continuation?: string, lifecycleGeneration?: number): Promise<GithubRepositoryPage> =>
+      await call("github.repositories.list", { connectionId, pageSize, ...(continuation === undefined ? {} : { continuation }), ...(lifecycleGeneration === undefined ? {} : { lifecycleGeneration }) }) as GithubRepositoryPage,
+    resolveGithubRepository: async (connectionId: string, repositoryId: string, lifecycleGeneration?: number): Promise<GithubRepositoryResolution> =>
+      await call("github.repositories.resolve", { connectionId, repositoryId, ...(lifecycleGeneration === undefined ? {} : { lifecycleGeneration }) }) as GithubRepositoryResolution,
     inspectSource: async (url: string): Promise<SourceInspectionData> => await call(
       "project.source.inspect", { source: { kind: "remote", url } }
     ) as SourceInspectionData,
@@ -346,8 +352,9 @@ export function createAgentClient(socketPath: string, options: {
     createManagedStore: async (operationId: string, data: CreateManagedStoreData): Promise<void> => {
       await call("project.managed-store.create", data, operationId);
     },
-    fetchProject: async (operationId: string, projectId: string, source?: SourceLocator): Promise<void> => {
-      await call("project.fetch", { projectId, ...(source === undefined ? {} : { source }) }, operationId);
+    fetchProject: async (operationId: string, projectId: string, source?: SourceLocator, githubAuthorityGeneration?: number): Promise<void> => {
+      await call("project.fetch", { projectId, ...(source === undefined ? {} : { source }),
+        ...(githubAuthorityGeneration === undefined ? {} : { githubAuthorityGeneration }) }, operationId);
     },
     createWorkspace: async (operationId: string, data: CreateWorkspaceData): Promise<void> => {
       await call("workspace.create", data, operationId);

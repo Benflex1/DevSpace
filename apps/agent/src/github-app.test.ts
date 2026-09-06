@@ -313,7 +313,7 @@ describe("GitHub App authority", () => {
     const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
     await bind(authority);
     await expect(authority.resolveRepository({ connectionId, repositoryId: "9007199254740993" }))
-      .rejects.toThrow("github-repository-not-authorized");
+      .rejects.toThrow("github-repository-access-unavailable");
     const mint = calls.find(({ path }) => path.endsWith("/access_tokens"));
     expect(mint?.body).toEqual({ permissions: { metadata: "read" } });
   });
@@ -344,7 +344,7 @@ describe("GitHub App authority", () => {
     expect(calls).toContain("/installation/repositories?per_page=100&page=2");
   });
 
-  it("classifies an exact-token selection rejection as repository-not-authorized", async () => {
+  it("classifies an exact-token selection rejection as repository access unavailable", async () => {
     const { stateRoot } = await fixture();
     const transport = async (request: GithubHttpRequest) => {
       await Promise.resolve();
@@ -360,7 +360,7 @@ describe("GitHub App authority", () => {
     const authority = await createGithubAppAuthority({ stateRoot, transport });
     await bind(authority);
     await expect(authority.withExactRepositoryToken({ connectionId, repositoryId: "9007199254740993" }, () => Promise.resolve(undefined)))
-      .rejects.toThrow("github-repository-not-authorized");
+      .rejects.toThrow("github-repository-access-unavailable");
   });
 
   it("fails closed for wrong app, account, type, or suspension", async () => {
@@ -378,11 +378,11 @@ describe("GitHub App authority", () => {
           : { status: 200, body: { id: 77, repository_selection: "all", permissions: {}, ...variant } };
       } });
       await expect(authority.verifyInstallation({ connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", installationId: "77" }))
-        .rejects.toThrow(variant.suspended_at === null ? "github-authority-invalid" : "github-installation-unavailable");
+        .rejects.toThrow(variant.suspended_at === null ? "github-authority-invalid" : "github-installation-suspended");
     }
   });
 
-  it("reports a removed installation as unavailable during live refresh", async () => {
+  it("reports a removed installation authoritatively during live refresh", async () => {
     const { stateRoot } = await fixture();
     const authority = await createGithubAppAuthority({ stateRoot, transport: async ({ path }) => {
       await Promise.resolve();
@@ -391,7 +391,19 @@ describe("GitHub App authority", () => {
         : { status: 404, body: { message: "Not Found" } };
     } });
     await bind(authority);
-    await expect(authority.refreshInstallation({ connectionId })).rejects.toThrow("github-installation-unavailable");
+    await expect(authority.refreshInstallation({ connectionId })).rejects.toThrow("github-installation-removed");
+  });
+
+  it("treats missing suspension metadata as malformed authority", async () => {
+    const { stateRoot } = await fixture();
+    const authority = await createGithubAppAuthority({ stateRoot, transport: async ({ path }) => {
+      await Promise.resolve();
+      return path === "/app"
+        ? { status: 200, body: { id: 123 } }
+        : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all",
+            account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read" } } };
+    } });
+    await expect(authority.verifyInstallation({ connectionId, installationId: "77" })).rejects.toThrow("github-authority-invalid");
   });
 
   it("rejects an installation without the minimum metadata permission", async () => {
@@ -402,7 +414,53 @@ describe("GitHub App authority", () => {
         ? { status: 200, body: { id: 123 } }
         : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null, account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { issues: "read" } } };
     } });
-    await expect(authority.verifyInstallation({ connectionId, installationId: "77" })).rejects.toThrow("github-authority-invalid");
+    await expect(authority.verifyInstallation({ connectionId, installationId: "77" })).rejects.toThrow("github-permission-required");
+  });
+
+  it("keeps transient upstream failures separate from malformed authority", async () => {
+    const transientFixture = await fixture();
+    const transientAuthority = await createGithubAppAuthority({ stateRoot: transientFixture.stateRoot,
+      transport: async () => { await Promise.resolve(); throw new Error("network-timeout"); } });
+    await bind(transientAuthority);
+    await expect(transientAuthority.refreshInstallation({ connectionId })).rejects.toThrow("github-upstream-transient");
+
+    const rateFixture = await fixture();
+    let rateLimited = false;
+    const rateAuthority = await createGithubAppAuthority({ stateRoot: rateFixture.stateRoot, transport: async ({ path }) => {
+      await Promise.resolve();
+      if (path === "/app" && rateLimited) return { status: 403, body: { message: "API rate limit exceeded" } };
+      return path === "/app"
+        ? { status: 200, body: { id: 123 } }
+        : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null,
+            account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read" } } };
+    } });
+    await bind(rateAuthority);
+    rateLimited = true;
+    await expect(rateAuthority.refreshInstallation({ connectionId })).rejects.toThrow("github-upstream-transient");
+
+    const malformedFixture = await fixture();
+    const malformedAuthority = await createGithubAppAuthority({ stateRoot: malformedFixture.stateRoot, transport: async ({ path }) => {
+      await Promise.resolve();
+      return path === "/app" ? { status: 403, body: {} } : { status: 200, body: {} };
+    } });
+    await bind(malformedAuthority);
+    await expect(malformedAuthority.refreshInstallation({ connectionId })).rejects.toThrow("github-authority-invalid");
+  });
+
+  it("keeps token-mint transport loss transient", async () => {
+    const { stateRoot } = await fixture();
+    let mintUnavailable = false;
+    const authority = await createGithubAppAuthority({ stateRoot, transport: async (request) => {
+      await Promise.resolve();
+      if (request.path.endsWith("/access_tokens") && mintUnavailable) throw new Error("network-timeout");
+      return request.path === "/app"
+        ? { status: 200, body: { id: 123 } }
+        : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null,
+            account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read" } } };
+    } });
+    await bind(authority);
+    mintUnavailable = true;
+    await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-upstream-transient");
   });
 
   it("rejects malformed upstream repository identities", async () => {
@@ -556,7 +614,7 @@ describe("GitHub App authority", () => {
     const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
     await authority.persistBindingForTest({ connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", installationId: "77", accountId: "9007199254740993", accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" }, status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
     const error = await authority.listRepositories({ connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", pageSize: 20 }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(Error); expect((error as Error).message).toBe("github-upstream-invalid");
+    expect(error).toBeInstanceOf(Error); expect((error as Error).message).toBe("github-upstream-transient");
     expect((error as Error).message).not.toContain(secret);
     expect(await readFile(path.join(appRoot, "token-leases", "018f0d84-7b39-7cc3-9d4a-0675d9162a11.json"), "utf8")).not.toContain(secret);
     const restarted = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:30:00.000Z") });
@@ -581,7 +639,7 @@ describe("GitHub App authority", () => {
     };
     const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
     await authority.persistBindingForTest({ connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" }, status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
-    await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-mint-failed");
+    await expect(authority.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-upstream-transient");
     expect(await readFile(path.join(appRoot, "token-leases", `${connectionId}.json`), "utf8")).not.toContain("recovered-secret");
     const restarted = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:30:00.000Z") });
     await expect(restarted.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-token-lease-active");
@@ -1016,7 +1074,7 @@ describe("GitHub App authority", () => {
     await authority.listRepositories({ connectionId, pageSize: 20 });
     recovery = true;
     const recovered = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T13:01:00.000Z") });
-    await expect(recovered.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-upstream-invalid");
+    await expect(recovered.listRepositories({ connectionId, pageSize: 20 })).rejects.toThrow("github-upstream-transient");
     expect((await recovered.inspectInstallation(connectionId)).status).toBe("degraded");
     const restarted = await createGithubAppAuthority({ stateRoot, transport, writer, now: () => new Date("2026-08-04T13:30:00.000Z") });
     expect((await restarted.inspectInstallation(connectionId)).status).toBe("degraded");
@@ -1035,5 +1093,176 @@ describe("GitHub App authority", () => {
     await expect(createGithubAppAuthority({ stateRoot, privateReadAfterRead: async (filePath) => {
       if (filePath.endsWith(`${connectionId}.json`)) await chmod(filePath, 0o644);
     } })).rejects.toThrow("github-private-state-invalid");
+  });
+  it("fences a connection at disconnect, removes only its binding, and rejects the old generation", async () => {
+    const { stateRoot } = await fixture();
+    const localWorktree = path.join(stateRoot, "project-worktree");
+    await mkdir(localWorktree, { mode: 0o700 });
+    await writeFile(path.join(localWorktree, "dirty.txt"), "uncommitted local work\n");
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      return request.path === "/app"
+        ? { status: 200, body: { id: 123 } }
+        : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null,
+            account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 });
+    const disconnected = await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
+    expect(disconnected).toMatchObject({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled" });
+    await expect(authority.assertGithubAdmission(connectionId, 1)).rejects.toThrow("github-authority-generation-stale");
+    await expect(authority.assertGithubAdmission(connectionId, 2)).rejects.toThrow("github-connection-disabled");
+    await expect(authority.listRepositories({ connectionId, pageSize: 20, lifecycleGeneration: 2 })).rejects.toThrow("github-connection-disabled");
+    await expect(readFile(path.join(stateRoot, "github-app", "installations", `${connectionId}.json`))).rejects.toThrow();
+    expect(await readFile(path.join(localWorktree, "dirty.txt"), "utf8")).toBe("uncommitted local work\n");
+    const tombstone = JSON.parse(await readFile(path.join(stateRoot, "github-app", "lifecycle", `${connectionId}.json`), "utf8")) as Record<string, unknown>;
+    expect(tombstone).toMatchObject({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected" });
+  });
+
+  it("recovers an interrupted disconnect on restart and isolates another connection", async () => {
+    const { stateRoot } = await fixture();
+    const otherConnectionId = "018f0d84-7b39-7cc3-9d4a-0675d9162a12";
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      return request.path === "/app"
+        ? { status: 200, body: { id: 123 } }
+        : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null,
+            account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport });
+    await authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 });
+    await authority.persistBindingForTest({ connectionId: otherConnectionId, installationId: "88", accountId: "9007199254740993",
+      accountType: "Organization", accountLogin: "org", repositorySelection: "all", permissions: { metadata: "read" },
+      status: "connected", verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+    await writeFile(path.join(stateRoot, "github-app", "lifecycle", `${connectionId}.json`), JSON.stringify({ version: 1,
+      connectionId, lifecycleGeneration: 2, lifecycleState: "disconnect-pending", cleanupState: "pending", installationId: "77",
+      updatedAt: "2026-08-04T12:00:00.000Z" }), { mode: 0o600 });
+    const restarted = await createGithubAppAuthority({ stateRoot, transport });
+    await expect(readFile(path.join(stateRoot, "github-app", "installations", `${connectionId}.json`))).rejects.toThrow();
+    expect((await restarted.inspectInstallation(otherConnectionId)).installationId).toBe("88");
+    expect(JSON.parse(await readFile(path.join(stateRoot, "github-app", "lifecycle", `${connectionId}.json`), "utf8")))
+      .toMatchObject({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled" });
+  });
+
+  it("rejects stale refresh and callbacks after a newer disconnect generation", async () => {
+    const { stateRoot } = await fixture();
+    let releaseRefresh!: () => void;
+    let markRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => { markRefreshStarted = resolve; });
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let blockRefresh = false;
+    const transport = async (request: GithubHttpRequest) => {
+      if (request.path === "/app" && blockRefresh) {
+        markRefreshStarted();
+        await refreshGate;
+      }
+      return request.path === "/app"
+        ? { status: 200, body: { id: 123 } }
+        : { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null,
+            account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read" } } };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 });
+    blockRefresh = true;
+    const refresh = authority.refreshInstallation({ connectionId, lifecycleGeneration: 1 });
+    await refreshStarted;
+    expect((await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 })).lifecycleState).toBe("disconnected");
+    releaseRefresh();
+    await expect(refresh).rejects.toThrow("github-authority-generation-stale");
+    await expect(authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 }))
+      .rejects.toThrow("github-authority-generation-stale");
+    expect(JSON.parse(await readFile(path.join(stateRoot, "github-app", "lifecycle", `${connectionId}.json`), "utf8")))
+      .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnected" });
+  });
+
+  it("reconnects with the same DevSpace connection and a replacement installation", async () => {
+    const { stateRoot } = await fixture();
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      const installationId = request.path.match(/\/installations\/(\d+)$/u)?.[1] ?? "77";
+      return { status: 200, body: { id: installationId, app_id: 123, repository_selection: "selected", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport });
+    await authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 });
+    await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
+    await authority.prepareGithubReconnect({ connectionId, lifecycleGeneration: 3 });
+    await expect(authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 }))
+      .rejects.toThrow("github-authority-generation-stale");
+    const reconnected = await authority.verifyInstallation({ connectionId, installationId: "88", lifecycleGeneration: 3 });
+    expect(reconnected).toMatchObject({ connectionId, installationId: "88", status: "connected" });
+    expect((await authority.inspectInstallation(connectionId)).installationId).toBe("88");
+    await authority.assertGithubAdmission(connectionId, 3);
+  });
+
+  it("lets an already-launched operation settle, then removes its connection binding", async () => {
+    const { stateRoot } = await fixture();
+    let releaseOperation!: () => void;
+    let markOperationStarted!: () => void;
+    const operationStarted = new Promise<void>((resolve) => { markOperationStarted = resolve; });
+    const operationGate = new Promise<void>((resolve) => { releaseOperation = resolve; });
+    const requests: GithubHttpRequest[] = [];
+    const transport = async (request: GithubHttpRequest) => {
+      await Promise.resolve();
+      requests.push(request);
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      if (request.path === "/app/installations/77") return { status: 200, body: { id: 77, app_id: 123, repository_selection: "selected", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+      if (request.path.endsWith("/access_tokens")) return { status: 201, body: { token: "settling-token", expires_at: "2026-08-04T13:00:00.000Z",
+        permissions: { contents: "read" }, repository_selection: "selected", repositories: [{ id: 9007199254740993n,
+          owner: { login: "org" }, name: "private-repo", full_name: "org/private-repo", default_branch: "main", private: true,
+          archived: false, disabled: false }] } };
+      if (request.path === "/installation/token") return { status: 204, body: {} };
+      throw new Error(`unexpected path ${request.path}`);
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await authority.persistBindingForTest({ connectionId, installationId: "77", accountId: "9007199254740993", accountType: "Organization",
+      accountLogin: "org", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+    const operation = authority.withExactRepositoryToken({ connectionId, repositoryId: "9007199254740993", lifecycleGeneration: 1 }, async () => {
+      markOperationStarted();
+      await operationGate;
+      return "settled";
+    });
+    await operationStarted;
+    expect((await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 })).lifecycleState).toBe("disconnect-pending");
+    releaseOperation();
+    await expect(operation).resolves.toMatchObject({ value: "settled" });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try { await readFile(path.join(stateRoot, "github-app", "installations", `${connectionId}.json`)); }
+      catch { break; }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await expect(readFile(path.join(stateRoot, "github-app", "installations", `${connectionId}.json`))).rejects.toThrow();
+    expect(requests.filter((request) => request.path.endsWith("/access_tokens"))).toHaveLength(1);
+  });
+
+  it("refuses reconnect while an unresolved token lease remains", async () => {
+    const { stateRoot } = await fixture();
+    let release!: () => void;
+    let markMintStarted!: () => void;
+    const mintStarted = new Promise<void>((resolve) => { markMintStarted = resolve; });
+    const mintRelease = new Promise<void>((resolve) => { release = resolve; });
+    const transport = async (request: GithubHttpRequest) => {
+      if (request.path === "/app") return { status: 200, body: { id: 123 } };
+      if (request.path.endsWith("/access_tokens")) {
+        markMintStarted();
+        await mintRelease;
+        return { status: 201, body: { token: "lease-token", expires_at: "2026-08-04T13:00:00.000Z" } };
+      }
+      if (request.path === "/installation/token") return { status: 503, body: {} };
+      return { status: 200, body: { id: 77, app_id: 123, repository_selection: "all", suspended_at: null,
+        account: { id: 9007199254740993n, login: "org", type: "Organization" }, permissions: { metadata: "read", contents: "read" } } };
+    };
+    const authority = await createGithubAppAuthority({ stateRoot, transport, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    await authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 });
+    const tokenWork = authority.listRepositories({ connectionId, pageSize: 20, lifecycleGeneration: 1 });
+    await mintStarted;
+    const disconnected = await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
+    expect(disconnected.lifecycleState).toBe("disconnect-pending");
+    await expect(authority.prepareGithubReconnect({ connectionId, lifecycleGeneration: 3 })).rejects.toThrow("github-token-lease-active");
+    release();
+    await tokenWork.catch(() => undefined);
   });
 });
