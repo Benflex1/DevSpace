@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated September 5, 2026.
+> Updated September 6, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -67,10 +67,9 @@ complete and merged. PR #44 merged Private GitHub Checkpoint 1 at
 `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`; its validated head was
 `ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`, and the accepted snapshots were proven
 tree-equivalent. Real CP1 local/dev GitHub App acceptance is complete. The current objective is the
-finished owner-controlled MVP, and CP2 is the active implementation slice on
-`feat/private-github-access-cp2`. Automated verification passes on this branch; the draft PR remains
-intentionally in draft, and the real-provider gate and production deployment remain explicitly
-pending. The remaining path prioritizes:
+finished owner-controlled MVP, and CP3A is the active implementation slice on
+`feat/private-github-access-cp3a-lifecycle`. CP2 real-provider acceptance completed successfully
+with PR #45; production deployment remains explicitly pending. The remaining path prioritizes:
 
 1. private GitHub repository access Checkpoints 1–3;
 2. the remaining browser-usable Codex approvals and structured-question flow;
@@ -409,14 +408,20 @@ Stop rule:
    - ✅ owner device-code onboarding and bounded real-provider browser validation passed; Checkpoint 1
      is complete
 
-2. 🟡 **Private GitHub repository access — Checkpoint 2 implementation**
+2. 🟡 **Private GitHub repository access — Checkpoint 3A connection lifecycle**
    - ✅ Checkpoint 1 merged by PR #44 at `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`; validated
      head `ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`; accepted snapshots are tree-equivalent;
    - ✅ CP2 browser slice implements live refresh, immutable repository selection, private
      inspect/clone/fetch, managed store/worktree setup, normal runtime start, later Fetch repository,
      exact token brokering, and restart-safe origin transitions;
-   - 🟡 real-provider CP2 acceptance remains a later manual gate; no production deployment is claimed;
-   - ⏳ Checkpoint 3 remains explicit push and disconnect/revocation behavior;
+   - ✅ CP2 real-provider acceptance completed successfully in PR #45; accepted PR head
+     `a9dabaece59ea9927ebb5a62767849cda96245ff`, squash merge
+     `3ffd07fad4995ac73bb2dccc1514bf5cb5fe5193`, shared root tree
+     `9647bd27929a7300aaa627416f8111f447b68899`;
+   - 🟡 CP3A adds lifecycle generations, explicit disconnect, bounded cleanup, same-ID reconnect,
+     reinstall recovery, and safe authority-loss classification;
+   - ⏳ CP3B remains the deferred push boundary: write permission, push intents, confirmation,
+     effects, and reconciliation are not part of CP3A;
    - no OAuth, PAT, or fine-grained-token fallback is planned for this authority model.
 
 3. ⏳ **Create a project from scratch**
@@ -446,7 +451,7 @@ Stop rule:
 
 ### Private GitHub repository access
 
-**Status: 🟡 Checkpoint 2 implemented on `feat/private-github-access-cp2`; real-provider gate pending**
+**Status: 🟡 Checkpoint 3A connection lifecycle on `feat/private-github-access-cp3a-lifecycle`**
 
 - ✅ Authenticate the administrator-configured owner account/installation through a GitHub App
 - ✅ List authorized repositories outside project onboarding and refresh live installation authority
@@ -454,14 +459,18 @@ Stop rule:
 - ✅ Inspect, register, set up, start, and later fetch a private repository through the normal path
 - ✅ Keep immutable `{connectionId, repositoryId}` ownership through Web, Agent, journal, and store state
 - ✅ Broker one-operation credentials through an owner-private askpass socket and native helper
-- ❌ Push through an explicit user action
 - ✅ Keep credentials and short-lived tokens Agent-private
 - ✅ Redact credentials from logs, errors, process arguments, and persisted public state
-- ❌ Revoke/disconnect access cleanly
+- ✅ Fence new private operations with a durable lifecycle generation
+- ✅ Disconnect one retained connection with exact Agent-private cleanup and no local-work deletion
+- ✅ Reconnect or replace the GitHub installation while retaining the same DevSpace connection ID
+- ✅ Classify installation removal, suspension, permission loss, repository access loss, and transient upstream failures
+- ❌ Push through an explicit user action
 
 Sequencing decision:
 
-- CP1 is merged and locally/dev accepted; CP2 is the active branch and is not production accepted.
+- CP1 is merged and locally/dev accepted; CP2 real-provider acceptance is complete and CP3A is the
+  active branch. Production deployment is not claimed.
 - It is required before inviting external beta users because most real development repositories are
   private.
 - Do not delay the first AI vertical slice for a generic multi-provider source-control abstraction.
@@ -627,8 +636,8 @@ Deferred until later:
 
 ## Additional vertical slices
 
-- 🟡 Private GitHub repository access Checkpoint 2 implemented on its feature branch; real-provider
-  acceptance remains pending and Checkpoint 3 is deferred
+- 🟡 Private GitHub repository access Checkpoint 3A lifecycle implementation on its feature branch;
+  CP2 real-provider acceptance is complete and CP3B push is deferred
 - ❌ Create project from scratch
 - ❌ Persistent terminals
 

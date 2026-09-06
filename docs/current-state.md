@@ -68,10 +68,25 @@ scratch, and later Workbench polish remain post-M1 product work.
 
 ## Private GitHub Repository Access status
 
-Checkpoint 2 is implemented on `feat/private-github-access-cp2` as a browser-usable vertical slice.
-Automated verification passes on this branch; the draft PR remains intentionally in draft and the
-later manual real-provider gate remains pending. No production deployment or production acceptance
-is claimed.
+Checkpoint 2 is merged and its real-provider acceptance completed successfully. The accepted merge
+proof is:
+
+```text
+PR #45
+accepted PR head:
+a9dabaece59ea9927ebb5a62767849cda96245ff
+
+squash merge:
+3ffd07fad4995ac73bb2dccc1514bf5cb5fe5193
+
+shared root tree:
+9647bd27929a7300aaa627416f8111f447b68899
+```
+
+Checkpoint 3A is the active implementation slice on
+`feat/private-github-access-cp3a-lifecycle`. It adds durable connection lifecycle generations,
+explicit disconnect, bounded cleanup settlement, same-ID reconnect/re-authorization, and
+authoritative upstream-loss classifications. It does not claim production deployment.
 
 The authority model remains App-only: no user OAuth, OAuth client secret, user access token, PAT,
 Git password, or browser account discovery exists. Administrator configuration supplies one expected
@@ -84,17 +99,25 @@ joins the retained connection to its originating actor-owned connection attempt.
 The Agent verifies `/app` and the exact installation with an App JWT, proves the App ID, exact
 installation ID, configured account ID/type, active status, repository-selection mode, and minimum
 metadata permission, then stores only safe installation metadata in the private binding. Each
-authenticated private Git operation repeats the live proof, requires current Contents read, resolves
-the exact numeric repository ID, mints one fresh exact-repository read token, and revokes/settles it
-independently. The Agent-private layout extends the existing configured state root:
+authenticated private Git operation is fenced by the retained connection's lifecycle generation,
+repeats the live proof, requires current Contents read, resolves the exact numeric repository ID,
+mints one fresh exact-repository read token, and revokes/settles it independently. The
+Agent-private layout extends the existing configured state root:
 
 ```text
 <agent-state-root>/github-app/
 ├── config.json
 ├── private-key.pem
 ├── installations/<connection-id>.json
-└── token-leases/<connection-id>.json
+├── token-leases/<connection-id>.json
+└── lifecycle/<connection-id>.json
 ```
+
+SQLite retains the stable `connection_id`, a monotonic `lifecycle_generation`, admission state,
+cleanup state, and the last safe authority classification. A reconnect or replacement GitHub
+installation updates that retained row and keeps the same DevSpace connection ID. A separate
+setup-attempt table preserves the original actor-owned connection attempt as the ownership anchor
+while keeping a pending reconnect visible beside the retained connection.
 
 The existing Agent-private conventions are reused: Agent-owned `0700` directories; no-follow
 descriptor reads; regular, single-link, owner-owned `0600` files; bounded nonzero sizes; stable
@@ -133,7 +156,15 @@ Web persistence. It uses ephemeral keys, temporary private state, local authenti
 injected transport/response seams, and deterministic failure seams only; it does not use real
 GitHub private keys or installation tokens.
 
-Explicitly deferred from CP2 are push, disconnect/revocation UX, installation deletion, repository
-creation, PAT/OAuth fallback, generic provider abstraction, webhooks, GitHub Enterprise, multiple
-identities, manual authenticated Git inside workspace containers, hostile same-UID/multi-tenant
-hardening, and production deployment. Real-provider acceptance remains a later user-operated gate.
+Disconnect removes only the exact Agent-private installation binding after active token work and
+lease settlement; it never removes projects, source metadata, managed stores, worktrees, workspace
+files, commits, dirty changes, or runtime state. Pending cleanup remains visible when the Agent is
+unavailable, and stale refreshes or callbacks cannot re-enable an older generation. The browser
+offers minimal disconnect confirmation and reconnect/re-authorize guidance.
+
+CP3B push remains deferred: Contents write permission, write-scoped tokens, push intents,
+confirmation, effect records, reconciliation, force push, tags, and branch-management UI are not
+part of CP3A. Installation deletion, repository creation, PAT/OAuth fallback, generic provider
+abstraction, webhooks, GitHub Enterprise, multiple identities, manual authenticated Git inside
+workspace containers, hostile same-UID/multi-tenant hardening, and production deployment remain
+outside this slice.

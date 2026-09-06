@@ -431,4 +431,49 @@ describe("forward SQLite migration runner", () => {
       }
     });
   });
+
+  test("migrates an existing CP2 GitHub connection into the generation-one enabled lifecycle", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const legacyMigrationsFolder = join(directory, "cp2-migrations");
+      await cp(migrationsFolder, legacyMigrationsFolder, { recursive: true });
+      await rm(join(legacyMigrationsFolder, "0008_github_connection_lifecycle.sql"));
+      await rm(join(legacyMigrationsFolder, "meta", "0008_snapshot.json"));
+      const legacyJournalPath = join(legacyMigrationsFolder, "meta", "_journal.json");
+      const legacyJournal = JSON.parse(await readFile(legacyJournalPath, "utf8")) as { entries: unknown[] };
+      legacyJournal.entries = legacyJournal.entries.slice(0, 8);
+      await writeFile(legacyJournalPath, `${JSON.stringify(legacyJournal, null, 2)}\n`);
+
+      const database = new Database(`${directory}/cp2.sqlite`);
+      try {
+        migrateDatabase(database, { migrationsFolder: legacyMigrationsFolder });
+        const connectionId = id(220);
+        database.prepare(`
+          insert into github_connections (
+            connection_id, installation_id, account_id, account_type, account_login,
+            repository_selection, permissions_json, status, verified_at, created_at, updated_at, row_version
+          ) values (?, '77', '99', 'Organization', 'org', 'selected', ?, 'connected', ?, ?, ?, 1)
+        `).run(connectionId, JSON.stringify({ metadata: "read", contents: "read" }), timestamp, timestamp, timestamp);
+
+        migrateDatabase(database, { migrationsFolder });
+
+        expect(database.prepare(`
+          select connection_id, installation_id, account_id, account_type, account_login,
+            repository_selection, permissions_json, status, lifecycle_generation, lifecycle_state,
+            cleanup_state, last_authority_failure_code, last_authority_checked_at, verified_at,
+            created_at, updated_at, row_version
+          from github_connections where connection_id = ?
+        `).get(connectionId)).toEqual({
+          connection_id: connectionId, installation_id: "77", account_id: "99", account_type: "Organization",
+          account_login: "org", repository_selection: "selected", permissions_json: JSON.stringify({ metadata: "read", contents: "read" }),
+          status: "connected", lifecycle_generation: 1, lifecycle_state: "enabled", cleanup_state: "settled",
+          last_authority_failure_code: null, last_authority_checked_at: null, verified_at: timestamp,
+          created_at: timestamp, updated_at: timestamp, row_version: 1
+        });
+        expect(database.prepare("select name from sqlite_schema where type = 'table' and name = 'github_connection_setup_attempts'")
+          .get()).toEqual({ name: "github_connection_setup_attempts" });
+      } finally {
+        database.close();
+      }
+    });
+  });
 });

@@ -225,6 +225,31 @@ running -> passed | failed | cancelled | timed_out | lost
 
 `passed`, `failed`, `cancelled`, `timed_out`, and `lost` are terminal.
 
+## Retained GitHub connection
+
+The retained GitHub App connection has a durable Web lifecycle and an Agent-private tombstone. The
+monotonic generation is part of every private authority request; it does not replace the immutable
+`{ connectionId, repositoryId }` source identity.
+
+```text
+enabled -> disconnect-pending -> disconnected
+enabled -> installation-removed | installation-suspended | permission-required |
+           repository-access-unavailable | transient-error
+installation-removed | installation-suspended | permission-required |
+repository-access-unavailable | transient-error -> reconnect-pending -> enabled
+```
+
+Disconnect advances the generation and fences admission before Agent cleanup. Existing inspect,
+clone, or fetch work may settle within its existing bounded execution and token cleanup remains
+allowed. New token minting and authenticated Git launch are refused. `cleanup_state` is independent:
+`settled`, `pending`, or `degraded`. Reconnect cannot enable authority while a token lease remains
+unresolved, and a stale refresh or callback cannot write `enabled` over a newer generation.
+
+The lifecycle transition never deletes projects, GitHub source metadata, managed stores, worktrees,
+workspace files, commits, dirty changes, runtime state, or ownership records. Installation removal,
+suspension, missing permission, repository deselection, and transient upstream failure are surfaced
+as distinct safe states; none is represented as local source deletion or public URL authority.
+
 ## Lost-state and recovery rule
 
 `lost` means the agent can no longer make a trustworthy observation about a previously known resource. It is not equivalent to stopped, absent, failed, or removed. Entering `lost` requires an observation gap such as agent restart, runtime loss, or identity mismatch. Leaving `lost` is allowed only where a graph explicitly lists a recovery edge and requires a fresh resource snapshot or reconciliation result. Domain functions model these transitions and guards only; Milestone 0 adds no supervisor, timer, or reconciliation implementation.

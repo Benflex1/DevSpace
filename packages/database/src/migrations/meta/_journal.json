@@ -57,6 +57,13 @@
       "when": 1788573738566,
       "tag": "0007_github_private_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788717248024,
+      "tag": "0008_github_connection_lifecycle",
+      "breakpoints": true
     }
   ]
 }

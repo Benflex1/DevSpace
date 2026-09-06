@@ -5,11 +5,16 @@ import path from "node:path";
 import * as z from "zod";
 import {
   githubAppInspectionSchema,
+  githubConnectionCleanupStateSchema,
+  githubConnectionLifecycleStateSchema,
   githubConnectionIdSchema,
   githubDecimalIdSchema,
+  githubInstallationDisconnectDataSchema,
   githubInstallationInspectionSchema,
+  githubInstallationReconnectPrepareDataSchema,
   githubInstallationRefreshDataSchema,
   githubInstallationVerifyDataSchema,
+  githubLifecycleInspectionSchema,
   githubRepositoryResolveDataSchema,
   githubRepositoryResolutionSchema,
   githubRepositorySchema,
@@ -17,13 +22,16 @@ import {
   githubRepositoryPageSchema,
   type GithubAppInspection,
   type GithubInstallationInspection,
+  type GithubInstallationDisconnectData,
+  type GithubInstallationReconnectPrepareData,
   type GithubInstallationRefreshData,
   type GithubInstallationVerifyData,
   type GithubRepository,
   type GithubRepositoryResolution,
   type GithubRepositoryResolveData,
   type GithubRepositoriesListData,
-  type GithubRepositoryPage
+  type GithubRepositoryPage,
+  type GithubLifecycleInspection
 } from "@devspace/contracts";
 import { durableJsonWriter, parseStrictJsonBytes, type AtomicJsonWriter } from "./private-state.js";
 
@@ -40,7 +48,15 @@ const MIN_REQUIRED_TOKEN_LIFETIME_MS = MAX_AUTHENTICATED_GIT_EXECUTION_MS + GITH
 const MAX_INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 const CONSERVATIVE_UNKNOWN_MINT_LEASE_MS = 70 * 60 * 1000;
 const githubTokenExpirySchema = z.string().datetime({ offset: true });
+const recoverableAuthorityStates = new Set([
+  "installation-removed", "installation-suspended", "permission-required", "repository-access-unavailable", "transient-error"
+]);
 const bindingSchema = githubInstallationInspectionSchema.omit({ cleanupDegraded: true }).extend({ version: z.literal(1), cleanupDegraded: z.boolean() });
+const lifecycleSchema = z.strictObject({
+  version: z.literal(1), connectionId: githubConnectionIdSchema, lifecycleGeneration: z.number().int().min(1).max(2_147_483_647),
+  lifecycleState: githubConnectionLifecycleStateSchema, cleanupState: githubConnectionCleanupStateSchema,
+  installationId: githubDecimalIdSchema.nullable(), updatedAt: z.string().datetime({ offset: true })
+});
 const configSchema = z.strictObject({
   version: z.literal(1), appId: githubDecimalIdSchema, expectedAccountId: githubDecimalIdSchema,
   expectedAccountType: z.enum(["User", "Organization"]),
@@ -62,6 +78,7 @@ export interface GithubHttpRequest {
 }
 export interface GithubHttpResponse { readonly status: number; readonly body: unknown }
 export type GithubHttpTransport = (request: GithubHttpRequest) => Promise<GithubHttpResponse>;
+export type GithubLaunchFence = () => Promise<() => void>;
 
 function failure(code: string): Error { return new Error(`github-${code}`); }
 type OperationOutcome<T> =
@@ -76,14 +93,21 @@ function agentFailureCode(error: unknown): string | null {
 
 function safePrimaryFailure(error: unknown): Error {
   if (error instanceof z.ZodError) return failure("authority-contract-violation");
-  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|contents-permission-required|installation-unavailable|repository-not-authorized|git-authentication-failed))$/u.test(error.message)) return error;
+  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|upstream-transient|authority-invalid|permission-required|contents-permission-required|installation-unavailable|installation-removed|installation-suspended|repository-not-authorized|repository-access-unavailable|git-authentication-failed|connection-disabled|authority-generation-stale|token-lease-active))$/u.test(error.message)) return error;
   const typedCode = agentFailureCode(error);
   if (typedCode === "SOURCE_UNAVAILABLE") return failure("operation-failed");
   if (typedCode === "GITHUB_GIT_AUTHENTICATION_FAILED") return failure("git-authentication-failed");
   if (typedCode === "GITHUB_INSTALLATION_UNAVAILABLE") return failure("installation-unavailable");
   if (typedCode === "GITHUB_REPOSITORY_NOT_AUTHORIZED") return failure("repository-not-authorized");
   if (typedCode === "GITHUB_CONTENTS_PERMISSION_REQUIRED") return failure("contents-permission-required");
+  if (typedCode === "GITHUB_AUTHORITY_INVALID") return failure("authority-invalid");
   if (typedCode === "GITHUB_TOKEN_LEASE_ACTIVE") return failure("token-lease-active");
+  if (typedCode === "GITHUB_CONNECTION_DISABLED") return failure("connection-disabled");
+  if (typedCode === "GITHUB_AUTHORITY_GENERATION_STALE") return failure("authority-generation-stale");
+  if (typedCode === "GITHUB_INSTALLATION_REMOVED") return failure("installation-removed");
+  if (typedCode === "GITHUB_INSTALLATION_SUSPENDED") return failure("installation-suspended");
+  if (typedCode === "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE") return failure("repository-access-unavailable");
+  if (typedCode === "GITHUB_UPSTREAM_TRANSIENT") return failure("upstream-transient");
   if (typedCode === "AGENT_INTERNAL_ERROR") return failure("authority-programming-error");
   return failure("authority-programming-error");
 }
@@ -101,6 +125,11 @@ function decimal(value: unknown): string | null {
 }
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+function isTransientGithubResponse(status: number, body: unknown): boolean {
+  if (status === 408 || status === 429 || status >= 500) return true;
+  const message = record(body)?.message;
+  return typeof message === "string" && /rate limit|abuse detection|temporarily unavailable/u.test(message.toLowerCase());
 }
 function filenameConnectionId(name: string): string {
   if (!name.endsWith(".json")) throw failure("private-state-invalid");
@@ -339,10 +368,16 @@ export interface GithubAppAuthority {
   inspectApp(): Promise<GithubAppInspection>;
   verifyInstallation(input: GithubInstallationVerifyData): Promise<GithubInstallationInspection>;
   refreshInstallation(input: GithubInstallationRefreshData): Promise<GithubInstallationInspection>;
-  inspectInstallation(connectionId: string): Promise<GithubInstallationInspection>;
+  inspectInstallation(connectionId: string, lifecycleGeneration?: number): Promise<GithubInstallationInspection>;
+  disconnectInstallation(input: GithubInstallationDisconnectData): Promise<GithubLifecycleInspection>;
+  prepareGithubReconnect(input: GithubInstallationReconnectPrepareData): Promise<GithubLifecycleInspection>;
+  assertGithubAdmission(connectionId: string, lifecycleGeneration?: number): Promise<void>;
+  acquireGithubLaunchFence(connectionId: string, lifecycleGeneration?: number): Promise<() => void>;
   listRepositories(input: GithubRepositoriesListData): Promise<GithubRepositoryPage>;
   resolveRepository(input: GithubRepositoryResolveData): Promise<GithubRepositoryResolution>;
-  withExactRepositoryToken<T>(input: GithubRepositoryResolveData, operation: (token: string, repository: GithubRepository) => Promise<T>, operationId?: string): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }>;
+  withExactRepositoryToken<T>(input: GithubRepositoryResolveData,
+    operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>,
+    operationId?: string): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }>;
   /** Agent-private test seam; never part of the server contract. */
   persistBindingForTest(binding: GithubInstallationInspection): Promise<void>;
 }
@@ -359,13 +394,19 @@ export async function createGithubAppAuthority(options: {
   const transport = options.transport ?? defaultTransport;
   const requestGithub = async (request: GithubHttpRequest): Promise<GithubHttpResponse> => {
     try { return await transport(request); }
-    catch { throw failure("upstream-invalid"); }
+    catch (error) {
+      if (error instanceof Error && error.message === "github-upstream-invalid") throw error;
+      throw failure("upstream-transient");
+    }
   };
   const writer = options.writer ?? durableJsonWriter;
   const removeLease = options.removeLease ?? unlink;
   const bindingsRoot = path.join(appRoot, "installations");
   const leasesRoot = path.join(appRoot, "token-leases");
+  const lifecycleRoot = path.join(appRoot, "lifecycle");
   const locks = new Map<string, Promise<void>>();
+  const lifecycleLocks = new Map<string, Promise<void>>();
+  const activeTransactions = new Map<string, number>();
   const leaseBlocks = new Map<string, number>();
   const degradedBindings = new Set<string>();
   const recoveredUncertainConnections = new Set<string>();
@@ -387,7 +428,7 @@ export async function createGithubAppAuthority(options: {
     if (parsedKey.type !== "private" || (parsedKey.asymmetricKeyType !== "rsa" && parsedKey.asymmetricKeyType !== "rsa-pss")) {
       throw failure("private-state-invalid");
     }
-    for (const directory of [bindingsRoot, leasesRoot]) {
+    for (const directory of [bindingsRoot, leasesRoot, lifecycleRoot]) {
       await mkdir(directory, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
       await assertPrivateDirectory(directory);
     }
@@ -415,6 +456,16 @@ export async function createGithubAppAuthority(options: {
       if (!Number.isFinite(expiresAt)) throw failure("private-state-invalid");
       if (expiresAt > now().valueOf()) leaseBlocks.set(filenameId, expiresAt);
     }
+    const lifecycleIds = new Set<string>();
+    for (const name of await readdir(lifecycleRoot)) {
+      const filenameId = filenameConnectionId(name);
+      if (lifecycleIds.has(filenameId)) throw failure("private-state-invalid");
+      lifecycleIds.add(filenameId);
+      const file = path.join(lifecycleRoot, name);
+      const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+      const lifecycle = parseStrictJsonBytes(bytes, file, lifecycleSchema);
+      if (lifecycle.connectionId !== filenameId) throw failure("private-state-invalid");
+    }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("github-")) throw error;
     else throw failure("private-state-invalid");
@@ -425,6 +476,7 @@ export async function createGithubAppAuthority(options: {
   };
   const bindingFile = (connectionId: string) => path.join(bindingsRoot, `${githubConnectionIdSchema.parse(connectionId)}.json`);
   const leaseFile = (connectionId: string) => path.join(leasesRoot, `${githubConnectionIdSchema.parse(connectionId)}.json`);
+  const lifecycleFile = (connectionId: string) => path.join(lifecycleRoot, `${githubConnectionIdSchema.parse(connectionId)}.json`);
   const persist = async (binding: GithubInstallationInspection) => writer.write(bindingFile(binding.connectionId), { version: 1, ...binding });
   const readBinding = async (expectedConnectionId: string) => {
     requireConfig();
@@ -459,6 +511,139 @@ export async function createGithubAppAuthority(options: {
     });
     return entry === null ? null : await readLease(expectedConnectionId);
   };
+  const readLifecycleIfPresent = async (expectedConnectionId: string) => {
+    const connection = githubConnectionIdSchema.safeParse(expectedConnectionId);
+    if (!connection.success) throw failure("private-state-invalid");
+    const file = lifecycleFile(connection.data);
+    const entry = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw failure("private-state-invalid");
+    });
+    if (entry === null) return null;
+    const bytes = await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+    const value = parseStrictJsonBytes(bytes, file, lifecycleSchema);
+    if (value.connectionId !== connection.data) throw failure("private-state-invalid");
+    return value;
+  };
+  const writeLifecycle = async (value: GithubLifecycleInspection): Promise<void> => {
+    await writer.write(lifecycleFile(value.connectionId), { version: 1, ...value, updatedAt: now().toISOString() });
+  };
+  const acquireLifecycleLock = async (connectionId: string): Promise<() => void> => {
+    const previous = lifecycleLocks.get(connectionId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    lifecycleLocks.set(connectionId, current);
+    await previous;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      release();
+      if (lifecycleLocks.get(connectionId) === current) lifecycleLocks.delete(connectionId);
+    };
+  };
+  const withLifecycleLock = async <T>(connectionId: string, action: () => Promise<T>): Promise<T> => {
+    const release = await acquireLifecycleLock(connectionId);
+    try { return await action(); }
+    finally { release(); }
+  };
+  const defaultLifecycle = async (connectionId: string, installationId: string | null): Promise<GithubLifecycleInspection> => {
+    const existing = await readLifecycleIfPresent(connectionId);
+    if (existing !== null) return existing;
+    return githubLifecycleInspectionSchema.parse({ connectionId, lifecycleGeneration: 1, lifecycleState: "enabled",
+      cleanupState: "settled", installationId });
+  };
+  const lifecycleFor = async (connectionId: string): Promise<GithubLifecycleInspection> => {
+    const lifecycle = await readLifecycleIfPresent(connectionId);
+    if (lifecycle !== null) return lifecycle;
+    const binding = await readBinding(connectionId);
+    return await defaultLifecycle(connectionId, binding.installationId);
+  };
+  const assertGithubAdmission = async (connectionId: string, expectedGeneration = 1): Promise<void> => {
+    const lifecycle = await lifecycleFor(connectionId);
+    if (lifecycle.lifecycleGeneration !== expectedGeneration) throw failure("authority-generation-stale");
+    if (lifecycle.lifecycleState !== "enabled") throw failure("connection-disabled");
+  };
+  const assertProofAdmission = async (connectionId: string, expectedGeneration: number, allowReconnect: boolean,
+    allowRecovery: boolean): Promise<GithubLifecycleInspection> => {
+    const lifecycle = await readLifecycleIfPresent(connectionId);
+    if (lifecycle === null) {
+      if (expectedGeneration !== 1) throw failure("authority-generation-stale");
+      return await defaultLifecycle(connectionId, null);
+    }
+    if (lifecycle.lifecycleGeneration !== expectedGeneration) throw failure("authority-generation-stale");
+    if (lifecycle.lifecycleState !== "enabled"
+      && !(allowReconnect && lifecycle.lifecycleState === "reconnect-pending")
+      && !(allowRecovery && recoverableAuthorityStates.has(lifecycle.lifecycleState))) {
+      throw failure("connection-disabled");
+    }
+    return lifecycle;
+  };
+  const unlinkExactBinding = async (connectionId: string): Promise<void> => {
+    await assertPrivateDirectory(appRoot);
+    await assertPrivateDirectory(bindingsRoot);
+    const file = bindingFile(connectionId);
+    const before = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw failure("private-state-invalid");
+    });
+    if (before === null) return;
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw failure("private-state-invalid");
+    await readPrivateFile(file, MAX_CONFIG_BYTES, () => options.privateReadAfterRead?.(file));
+    const after = await lstat(file);
+    if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1
+      || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mode !== after.mode || before.uid !== after.uid) throw failure("private-state-invalid");
+    await unlink(file);
+    let directory;
+    try {
+      directory = await open(bindingsRoot, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0));
+      await directory.sync();
+    } finally { await directory?.close().catch(() => undefined); }
+  };
+  const activeFor = (connectionId: string): number => activeTransactions.get(connectionId) ?? 0;
+  const assertReconnectSettlement = async (connectionId: string): Promise<void> => {
+    if (activeFor(connectionId) > 0) throw failure("token-lease-active");
+    const lease = await readLeaseIfPresent(connectionId);
+    if (lease === null) return;
+    const expiresAt = new Date(lease.expiresAt).valueOf();
+    if (!Number.isFinite(expiresAt) || expiresAt > now().valueOf()) throw failure("token-lease-active");
+    try { await removeLease(leaseFile(connectionId)); }
+    catch { throw failure("token-lease-active"); }
+    leaseBlocks.delete(connectionId);
+    recoveredUncertainConnections.delete(connectionId);
+  };
+  const maybeFinalizeDisconnect = async (connectionId: string): Promise<GithubLifecycleInspection> => await withLifecycleLock(connectionId, async () => {
+    const lifecycle = await readLifecycleIfPresent(connectionId);
+    if (lifecycle === null || (lifecycle.lifecycleState !== "disconnect-pending" && lifecycle.lifecycleState !== "disconnected")) {
+      throw failure("connection-not-found");
+    }
+    if (activeFor(connectionId) > 0) return lifecycle;
+    const lease = await readLeaseIfPresent(connectionId);
+    if (lease !== null) {
+      const expiry = new Date(lease.expiresAt).valueOf();
+      if (!Number.isFinite(expiry) || expiry > now().valueOf()) {
+        const pending = lifecycle.cleanupState === "pending" ? lifecycle : { ...lifecycle, cleanupState: "pending" as const };
+        if (pending !== lifecycle) await writeLifecycle(pending);
+        return pending;
+      }
+      try { await removeLease(leaseFile(connectionId)); leaseBlocks.delete(connectionId); recoveredUncertainConnections.delete(connectionId); }
+      catch {
+        const degraded = { ...lifecycle, lifecycleState: "disconnected" as const, cleanupState: "degraded" as const };
+        await writeLifecycle(degraded).catch(() => undefined);
+        return degraded;
+      }
+    }
+    try { await unlinkExactBinding(connectionId); }
+    catch {
+      const degraded = { ...lifecycle, lifecycleState: "disconnected" as const, cleanupState: "degraded" as const };
+      await writeLifecycle(degraded);
+      return degraded;
+    }
+    const settled = { ...lifecycle, lifecycleState: "disconnected" as const, cleanupState: "settled" as const, installationId: lifecycle.installationId };
+    await writeLifecycle(settled);
+    return settled;
+  });
   const inspectEffective = async (connectionId: string) => {
     const binding = await readBinding(connectionId);
     const lease = await readLeaseIfPresent(connectionId);
@@ -479,50 +664,89 @@ export async function createGithubAppAuthority(options: {
       if (locks.get(connectionId) === current) locks.delete(connectionId);
     }
   };
-  const liveBinding = async (connectionId: string, installationId: string, preserveExisting: boolean): Promise<GithubInstallationInspection> => {
+  const liveBinding = async (connectionId: string, installationId: string, preserveExisting: boolean,
+    expectedGeneration = 1, allowReconnect = false, allowRecovery = false): Promise<GithubInstallationInspection> => {
     const current = requireConfig();
+    const lifecycle = await assertProofAdmission(connectionId, expectedGeneration, allowReconnect, allowRecovery);
     const existing = await readBinding(connectionId).catch((error: unknown) => {
       if (error instanceof Error && error.message === "github-connection-not-found") return null;
       throw error instanceof Error ? error : failure("private-state-invalid");
     });
-    const appToken = jwt(current.privateKey, current.config.appId, now());
-    const appResponse = await requestGithub({ method: "GET", path: "/app", authorization: `Bearer ${appToken}` });
-    const app = record(appResponse.body);
-    if (appResponse.status !== 200 || decimal(app?.id) !== current.config.appId) throw failure("authority-invalid");
-    const response = await requestGithub({ method: "GET", path: `/app/installations/${installationId}`, authorization: `Bearer ${appToken}` });
-    const installation = record(response.body); const account = record(installation?.account);
-    if (response.status !== 200) throw failure("installation-unavailable");
-    if (decimal(installation?.id) !== installationId || decimal(installation?.app_id) !== current.config.appId
-      || decimal(account?.id) !== current.config.expectedAccountId || account?.type !== current.config.expectedAccountType
-      || typeof account?.login !== "string" || account.login.length < 1 || account.login.length > 255
-      || (installation?.repository_selection !== "all" && installation?.repository_selection !== "selected")) throw failure("authority-invalid");
-    if (installation?.suspended_at !== null) throw failure("installation-unavailable");
-    const permissionsRaw = record(installation.permissions); const permissions: Record<string, "read" | "write"> = {};
-    if (permissionsRaw === null || Object.entries(permissionsRaw).length > 64) throw failure("authority-invalid");
-    for (const [name, level] of Object.entries(permissionsRaw)) {
-      if (!/^[a-z_]{1,64}$/u.test(name) || (level !== "read" && level !== "write")) throw failure("authority-invalid");
-      permissions[name] = level;
+    try {
+      const appToken = jwt(current.privateKey, current.config.appId, now());
+      const appResponse = await requestGithub({ method: "GET", path: "/app", authorization: `Bearer ${appToken}` });
+      const app = record(appResponse.body);
+      if (appResponse.status !== 200) throw isTransientGithubResponse(appResponse.status, appResponse.body)
+        ? failure("upstream-transient") : failure("authority-invalid");
+      if (decimal(app?.id) !== current.config.appId) throw failure("authority-invalid");
+      const response = await requestGithub({ method: "GET", path: `/app/installations/${installationId}`, authorization: `Bearer ${appToken}` });
+      const installation = record(response.body); const account = record(installation?.account);
+      if (response.status === 404) throw failure("installation-removed");
+      if (response.status !== 200) throw isTransientGithubResponse(response.status, response.body)
+        ? failure("upstream-transient") : failure("authority-invalid");
+      if (decimal(installation?.id) !== installationId || decimal(installation?.app_id) !== current.config.appId
+        || decimal(account?.id) !== current.config.expectedAccountId || account?.type !== current.config.expectedAccountType
+        || typeof account?.login !== "string" || account.login.length < 1 || account.login.length > 255
+        || (installation?.repository_selection !== "all" && installation?.repository_selection !== "selected")) throw failure("authority-invalid");
+      if (installation === null || !Object.hasOwn(installation, "suspended_at")) throw failure("authority-invalid");
+      if (installation.suspended_at !== null) throw failure("installation-suspended");
+      const permissionsRaw = record(installation.permissions); const permissions: Record<string, "read" | "write"> = {};
+      if (permissionsRaw === null || Object.entries(permissionsRaw).length > 64) throw failure("authority-invalid");
+      for (const [name, level] of Object.entries(permissionsRaw)) {
+        if (!/^[a-z_]{1,64}$/u.test(name) || (level !== "read" && level !== "write")) throw failure("authority-invalid");
+        permissions[name] = level;
+      }
+      if (permissions.metadata !== "read" && permissions.metadata !== "write") throw failure("permission-required");
+      if (existing !== null && existing.installationId !== installationId && preserveExisting) throw failure("installation-conflict");
+      const cleanupDegraded = existing?.cleanupDegraded === true || degradedBindings.has(connectionId) || recoveredUncertainConnections.has(connectionId);
+      const binding = githubInstallationInspectionSchema.parse({ connectionId, installationId,
+        accountId: current.config.expectedAccountId, accountType: current.config.expectedAccountType, accountLogin: account.login,
+        repositorySelection: installation.repository_selection, permissions, status: cleanupDegraded ? "degraded" : "connected",
+        verifiedAt: now().toISOString(), cleanupDegraded });
+      await withLifecycleLock(connectionId, async () => {
+        const currentLifecycle = await readLifecycleIfPresent(connectionId);
+        if (currentLifecycle !== null && currentLifecycle.lifecycleGeneration !== expectedGeneration) throw failure("authority-generation-stale");
+        if (currentLifecycle !== null && currentLifecycle.lifecycleState !== "enabled"
+          && !(allowReconnect && currentLifecycle.lifecycleState === "reconnect-pending")
+          && !(allowRecovery && recoverableAuthorityStates.has(currentLifecycle.lifecycleState))) throw failure("connection-disabled");
+        if (allowReconnect) await assertReconnectSettlement(connectionId);
+        await persist(binding);
+        await writeLifecycle({ connectionId, lifecycleGeneration: expectedGeneration,
+          lifecycleState: "enabled", cleanupState: cleanupDegraded ? "degraded" : "settled", installationId });
+      });
+      return await inspectEffective(connectionId);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      const state = code === "installation-removed" ? "installation-removed"
+        : code === "installation-suspended" ? "installation-suspended"
+        : code === "permission-required" ? "permission-required"
+        : code === "upstream-transient" ? "transient-error" : null;
+      if (state !== null) await withLifecycleLock(connectionId, async () => {
+        const currentLifecycle = await readLifecycleIfPresent(connectionId);
+        if (currentLifecycle === null || currentLifecycle.lifecycleGeneration === lifecycle.lifecycleGeneration) {
+          await writeLifecycle({ connectionId, lifecycleGeneration: lifecycle.lifecycleGeneration, lifecycleState: state,
+            cleanupState: currentLifecycle?.cleanupState ?? "settled", installationId: currentLifecycle?.installationId ?? installationId });
+        }
+      }).catch(() => undefined);
+      throw error;
     }
-    if (permissions.metadata !== "read" && permissions.metadata !== "write") throw failure("authority-invalid");
-    if (existing !== null && existing.installationId !== installationId && preserveExisting) throw failure("installation-conflict");
-    const cleanupDegraded = existing?.cleanupDegraded === true || degradedBindings.has(connectionId) || recoveredUncertainConnections.has(connectionId);
-    const binding = githubInstallationInspectionSchema.parse({ connectionId, installationId,
-      accountId: current.config.expectedAccountId, accountType: current.config.expectedAccountType, accountLogin: account.login,
-      repositorySelection: installation.repository_selection, permissions, status: cleanupDegraded ? "degraded" : "connected",
-      verifiedAt: now().toISOString(), cleanupDegraded });
-    await persist(binding);
-    return await inspectEffective(connectionId);
   };
   const runTokenTransaction = async <T>(input: {
     readonly connectionId: string;
+    readonly lifecycleGeneration?: number;
     readonly operationId?: string;
     readonly body: unknown;
     readonly validateMint?: (body: unknown) => void;
     readonly classifyMintFailure?: (status: number, body: unknown) => Error | null;
     readonly operation: (token: string) => Promise<T>;
   }): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }> => await locked(input.connectionId, async () => {
-    const binding = await readBinding(input.connectionId);
     const current = requireConfig();
+    await withLifecycleLock(input.connectionId, async () => {
+      await assertGithubAdmission(input.connectionId, input.lifecycleGeneration ?? 1);
+      activeTransactions.set(input.connectionId, activeFor(input.connectionId) + 1);
+    });
+    const binding = await readBinding(input.connectionId);
+    try {
     const leasePath = leaseFile(input.connectionId);
     const currentTime = now().valueOf();
     const inProcessExpiry = leaseBlocks.get(input.connectionId);
@@ -560,7 +784,11 @@ export async function createGithubAppAuthority(options: {
       const appToken = jwt(current.privateKey, current.config.appId, now());
       let minted: GithubHttpResponse;
       try { minted = await requestGithub({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: input.body }); }
-      catch { primaryError = failure("token-mint-failed"); throw primaryError; }
+      catch (error) {
+        primaryError = error instanceof Error && error.message === "github-upstream-transient"
+          ? error : failure("token-mint-failed");
+        throw primaryError;
+      }
       const mintedBody = record(minted.body);
       const candidateToken = typeof mintedBody?.token === "string" && mintedBody.token.length > 0 && mintedBody.token.length <= 16 * 1024 ? mintedBody.token : null;
       if (minted.status === 201) {
@@ -585,16 +813,27 @@ export async function createGithubAppAuthority(options: {
             }
           }
         }
-      } else if ([400, 401, 403, 404, 422].includes(minted.status) && record(minted.body) !== null
-        && typeof record(minted.body)?.message === "string" && (record(minted.body)?.message as string).length <= 512) {
-        mintState = "definitive-rejection";
-        primaryError = input.classifyMintFailure?.(minted.status, minted.body) ?? failure("token-mint-failed");
       } else {
-        if (candidateToken !== null) token = candidateToken;
-        primaryError = failure("token-mint-failed"); mintState = "uncertain";
+        const classified = input.classifyMintFailure?.(minted.status, minted.body) ?? null;
+        const definitiveStatus = [400, 401, 403, 404, 422, 429].includes(minted.status);
+        if (classified !== null || (definitiveStatus && (record(minted.body) !== null
+          && typeof record(minted.body)?.message === "string" && (record(minted.body)?.message as string).length <= 512))) {
+          if (candidateToken !== null && !definitiveStatus) token = candidateToken;
+          mintState = definitiveStatus ? "definitive-rejection" : "uncertain";
+          primaryError = classified ?? failure("token-mint-failed");
+        } else {
+          if (candidateToken !== null) token = candidateToken;
+          primaryError = failure("token-mint-failed"); mintState = "uncertain";
+        }
       }
       if (mintState === "token" && token !== null && primaryError === null) {
-        try { input.validateMint?.(mintedBody); outcome = { completed: true, value: await input.operation(token) }; }
+        try {
+          await withLifecycleLock(input.connectionId, async () => {
+            await assertGithubAdmission(input.connectionId, input.lifecycleGeneration ?? 1);
+          });
+          input.validateMint?.(mintedBody);
+          outcome = { completed: true, value: await input.operation(token) };
+        }
         catch (error) { primaryError = safePrimaryFailure(error); }
       }
     } catch (error) { if (primaryError === null) primaryError = safePrimaryFailure(error); }
@@ -604,7 +843,7 @@ export async function createGithubAppAuthority(options: {
       try { revocation = (await requestGithub({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204 ? "succeeded" : "failed"; }
       catch { revocation = "uncertain"; }
     } else if (mintState === "definitive-rejection") revocation = "not-needed";
-    token = null; // eslint-disable-line no-useless-assignment -- explicitly drop credential authority before returning
+    token = null;
     let leaseSettled = false;
     if (revocation === "succeeded" || revocation === "not-needed") {
       try { await removeLease(leasePath); leaseSettled = true; leaseBlocks.delete(input.connectionId); }
@@ -640,75 +879,184 @@ export async function createGithubAppAuthority(options: {
     if (primaryError !== null) throw primaryError;
     if (!outcome.completed) throw failure("operation-failed");
     return { value: outcome.value, cleanupDegraded };
+    } finally {
+      const remaining = activeFor(input.connectionId) - 1;
+      if (remaining <= 0) activeTransactions.delete(input.connectionId);
+      else activeTransactions.set(input.connectionId, remaining);
+      void maybeFinalizeDisconnect(input.connectionId).catch(() => undefined);
+    }
   });
+  if (configured) {
+    for (const name of await readdir(lifecycleRoot)) {
+      const connectionId = filenameConnectionId(name);
+      const lifecycle = await readLifecycleIfPresent(connectionId);
+      if (lifecycle !== null && (lifecycle.lifecycleState === "disconnect-pending" || lifecycle.lifecycleState === "disconnected")) {
+        await maybeFinalizeDisconnect(connectionId);
+      }
+    }
+  }
   return {
     inspectApp: async () => await Promise.resolve(githubAppInspectionSchema.parse(configured && config !== null
       ? { configured: true, appId: config.appId, expectedAccountId: config.expectedAccountId, expectedAccountType: config.expectedAccountType, installationUrl: config.installationUrl }
       : { configured: false, appId: null, expectedAccountId: null, expectedAccountType: null, installationUrl: null })),
     verifyInstallation: async (raw) => {
       const input = githubInstallationVerifyDataSchema.parse(raw);
+      const expectedGeneration = input.lifecycleGeneration ?? 1;
+      const lifecycle = await readLifecycleIfPresent(input.connectionId);
+      const allowReconnect = lifecycle?.lifecycleState === "reconnect-pending";
       const existing = await readBinding(input.connectionId).catch((error: unknown) => {
         if (error instanceof Error && error.message === "github-connection-not-found") return null;
         throw error instanceof Error ? error : failure("private-state-invalid");
       });
       if (existing !== null) {
-        if (existing.installationId !== input.installationId) throw failure("installation-conflict");
-        return await liveBinding(input.connectionId, input.installationId, true);
+        if (existing.installationId !== input.installationId && !allowReconnect) throw failure("installation-conflict");
+        return await liveBinding(input.connectionId, input.installationId, !allowReconnect, expectedGeneration, allowReconnect);
       }
-      return await liveBinding(input.connectionId, input.installationId, false);
+      return await liveBinding(input.connectionId, input.installationId, false, expectedGeneration, allowReconnect);
     },
     refreshInstallation: async (raw) => {
       const input = githubInstallationRefreshDataSchema.parse(raw);
       const existing = await readBinding(input.connectionId);
-      return await liveBinding(input.connectionId, existing.installationId, true);
+      const lifecycle = await lifecycleFor(input.connectionId);
+      return await liveBinding(input.connectionId, existing.installationId, true, input.lifecycleGeneration ?? lifecycle.lifecycleGeneration,
+        false, true);
     },
-    inspectInstallation: inspectEffective,
+    inspectInstallation: async (connectionId: string, lifecycleGeneration?: number) => {
+      if (lifecycleGeneration !== undefined) await assertGithubAdmission(connectionId, lifecycleGeneration);
+      return await inspectEffective(connectionId);
+    },
+    disconnectInstallation: async (raw) => {
+      const input = githubInstallationDisconnectDataSchema.parse(raw);
+      const existing = await readLifecycleIfPresent(input.connectionId);
+      const current = existing ?? await defaultLifecycle(input.connectionId, (await readBinding(input.connectionId)).installationId);
+      if (input.lifecycleGeneration < current.lifecycleGeneration
+        || input.lifecycleGeneration > current.lifecycleGeneration + 1) throw failure("authority-generation-stale");
+      if (input.lifecycleGeneration === current.lifecycleGeneration
+        && current.lifecycleState !== "enabled" && current.lifecycleState !== "disconnect-pending" && current.lifecycleState !== "disconnected") {
+        throw failure("connection-disabled");
+      }
+      await withLifecycleLock(input.connectionId, async () => {
+        const latest = await readLifecycleIfPresent(input.connectionId);
+        if (latest !== null && latest.lifecycleGeneration !== current.lifecycleGeneration
+          && latest.lifecycleGeneration !== input.lifecycleGeneration) throw failure("authority-generation-stale");
+        const installationId = latest?.installationId ?? current.installationId;
+        await writeLifecycle({ connectionId: input.connectionId, lifecycleGeneration: input.lifecycleGeneration,
+          lifecycleState: "disconnect-pending", cleanupState: "pending", installationId });
+      });
+      return await maybeFinalizeDisconnect(input.connectionId);
+    },
+    prepareGithubReconnect: async (raw) => {
+      const input = githubInstallationReconnectPrepareDataSchema.parse(raw);
+      const current = await lifecycleFor(input.connectionId);
+      if (input.lifecycleGeneration < current.lifecycleGeneration || input.lifecycleGeneration > current.lifecycleGeneration + 1) {
+        throw failure("authority-generation-stale");
+      }
+      return await withLifecycleLock(input.connectionId, async () => {
+        const latest = await lifecycleFor(input.connectionId);
+        if (input.lifecycleGeneration < latest.lifecycleGeneration || input.lifecycleGeneration > latest.lifecycleGeneration + 1) {
+          throw failure("authority-generation-stale");
+        }
+        const samePendingRetry = latest.lifecycleState === "reconnect-pending"
+          && input.lifecycleGeneration === latest.lifecycleGeneration;
+        if (!samePendingRetry && input.lifecycleGeneration !== latest.lifecycleGeneration + 1) throw failure("authority-generation-stale");
+        await assertReconnectSettlement(input.connectionId);
+        const prepared = { connectionId: input.connectionId, lifecycleGeneration: input.lifecycleGeneration,
+          lifecycleState: "reconnect-pending" as const, cleanupState: "settled" as const, installationId: latest.installationId };
+        await writeLifecycle(prepared);
+        return prepared;
+      });
+    },
+    assertGithubAdmission,
+    acquireGithubLaunchFence: async (connectionId, expectedGeneration = 1) => {
+      const release = await acquireLifecycleLock(connectionId);
+      try {
+        await assertGithubAdmission(connectionId, expectedGeneration);
+        return release;
+      } catch (error) {
+        release();
+        throw error;
+      }
+    },
     persistBindingForTest: persist,
     resolveRepository: async (raw) => {
       const input = githubRepositoryResolveDataSchema.parse(raw);
-      await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true);
+      const lifecycle = await lifecycleFor(input.connectionId);
+      const generation = input.lifecycleGeneration ?? lifecycle.lifecycleGeneration;
+      await assertGithubAdmission(input.connectionId, generation);
+      await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true, generation);
       const result = await runTokenTransaction({
         connectionId: input.connectionId,
+        lifecycleGeneration: generation,
         body: { permissions: { metadata: "read" } },
+        classifyMintFailure: (status, body) => {
+          const message = typeof record(body)?.message === "string" ? (record(body)?.message as string).toLowerCase() : "";
+          if (isTransientGithubResponse(status, body)) return failure("upstream-transient");
+          if (status === 404) return failure("installation-removed");
+          if (status === 401) return failure("authority-invalid");
+          if (status === 403 && message.includes("suspend")) return failure("installation-suspended");
+          if (status === 403 || status === 422) return failure("permission-required");
+          return null;
+        },
         operation: async (token) => {
           for (let page = 1; page <= 1_000; page += 1) {
             const response = await requestGithub({ method: "GET", path: `/installation/repositories?per_page=100&page=${page}`, authorization: `Bearer ${token}` });
             const responseBody = record(response.body);
+            if (isTransientGithubResponse(response.status, response.body)) throw failure("upstream-transient");
+            if (response.status === 404) throw failure("installation-removed");
+            if (response.status === 403) throw failure("permission-required");
             if (response.status !== 200 || !Array.isArray(responseBody?.repositories) || responseBody.repositories.length > 100) throw failure("upstream-invalid");
             const repository = responseBody.repositories.map((candidate) => safeRepository(candidate)).find((candidate) => candidate.repositoryId === input.repositoryId);
             if (repository !== undefined) return repository;
             if (responseBody.repositories.length < 100) break;
           }
-          throw failure("repository-not-authorized");
+          throw failure("repository-access-unavailable");
         }
       });
       return githubRepositoryResolutionSchema.parse({ repository: result.value, cleanupDegraded: result.cleanupDegraded });
     },
     withExactRepositoryToken: async <T>(raw: GithubRepositoryResolveData,
-      operation: (token: string, repository: GithubRepository) => Promise<T>, operationId?: string) => {
+      operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>, operationId?: string) => {
       const input = githubRepositoryResolveDataSchema.parse(raw);
-      const binding = await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true);
+      const lifecycle = await lifecycleFor(input.connectionId);
+      const generation = input.lifecycleGeneration ?? lifecycle.lifecycleGeneration;
+      await assertGithubAdmission(input.connectionId, generation);
+      const binding = await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true, generation);
       if (binding.permissions.contents !== "read" && binding.permissions.contents !== "write") throw failure("contents-permission-required");
       let scopedRepository: GithubRepository | undefined;
       const result = await runTokenTransaction<T>({
         connectionId: input.connectionId,
+        lifecycleGeneration: generation,
         ...(operationId === undefined ? {} : { operationId }),
         body: { kind: "exact-repository-token", repositoryId: input.repositoryId },
-        classifyMintFailure: (status) => status === 404 ? failure("installation-unavailable")
-          : status === 403 || status === 422 ? failure("repository-not-authorized") : null,
+        classifyMintFailure: (status, body) => status === 404 ? failure("repository-access-unavailable")
+          : isTransientGithubResponse(status, body) ? failure("upstream-transient")
+          : status === 403 || status === 422 ? failure("repository-access-unavailable") : null,
         validateMint: (body) => { scopedRepository = exactScopedRepository(body, input.repositoryId); },
-        operation: async (token) => scopedRepository === undefined ? Promise.reject(failure("repository-not-authorized")) : await operation(token, scopedRepository)
+        operation: async (token) => scopedRepository === undefined ? Promise.reject(failure("repository-not-authorized"))
+          : await operation(token, scopedRepository, generation)
       });
       return result;
     },
     listRepositories: async (raw) => {
       const input = githubRepositoriesListDataSchema.parse(raw);
+      const lifecycle = await lifecycleFor(input.connectionId);
+      const generation = input.lifecycleGeneration ?? lifecycle.lifecycleGeneration;
+      await assertGithubAdmission(input.connectionId, generation);
       // Listing is the retained, safe metadata snapshot.  The browser's explicit
       // Refresh GitHub access action and every authenticated Git operation perform
       // the live App/installation proof; a stale snapshot must never authorize Git.
       const result = await runTokenTransaction({
         connectionId: input.connectionId,
+        lifecycleGeneration: generation,
         body: { permissions: { metadata: "read" } },
+        classifyMintFailure: (status, body) => {
+          if (isTransientGithubResponse(status, body)) return failure("upstream-transient");
+          if (status === 404) return failure("installation-removed");
+          if (status === 401) return failure("authority-invalid");
+          const message = typeof record(body)?.message === "string" ? (record(body)?.message as string).toLowerCase() : "";
+          if ((status === 403 || status === 422) && /permission|contents|metadata/u.test(message)) return failure("permission-required");
+          return null;
+        },
         operation: async (token) => {
           let page = 1;
           if (input.continuation !== undefined) {
@@ -717,6 +1065,9 @@ export async function createGithubAppAuthority(options: {
           if (!Number.isInteger(page) || page < 1 || page > 1_000_000) throw failure("continuation-invalid");
           const listed = await requestGithub({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
           const listedBody = record(listed.body);
+          if (isTransientGithubResponse(listed.status, listed.body)) throw failure("upstream-transient");
+          if (listed.status === 404) throw failure("installation-removed");
+          if (listed.status === 403) throw failure("permission-required");
           if (listed.status !== 200 || !Array.isArray(listedBody?.repositories) || listedBody.repositories.length > input.pageSize) throw failure("upstream-invalid");
           const repositories = listedBody.repositories.map((rawRepository) => safeRepository(rawRepository));
           return githubRepositoryPageSchema.parse({ repositories,

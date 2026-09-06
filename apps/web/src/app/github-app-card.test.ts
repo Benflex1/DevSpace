@@ -10,8 +10,9 @@ describe("unified project source form", () => {
     expect(source).toContain("repositoryId: selectedRepositoryId");
     expect(source).not.toContain('type="password"');
     expect(source).not.toContain("repositoryUrl: selected");
-    expect(source).not.toContain("token");
-    expect(source).not.toContain("Disconnect");
+    expect(source).not.toContain("accessToken");
+    expect(source).not.toContain("privateKey");
+    expect(source).toContain("Disconnect GitHub");
     expect(source).toContain("updateSuggestedField");
     expect(source).toContain('source: "user"');
   });

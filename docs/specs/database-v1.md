@@ -73,6 +73,40 @@ authenticated actor and its status to be `connected`. A connection ID alone is n
 browser authority. The project source row retains the exact `{ connection_id, repository_id }`
 authority; owner/name/URL values are validated metadata only.
 
+## github_connections
+
+`github_connections` is the durable Web projection of one retained GitHub App installation. Its
+identity is stable across disconnect and re-authorization; lifecycle generation is an authorization
+context and never replaces `{ connection_id, repository_id }` source identity.
+
+- `connection_id` primary key and ownership anchor through `github_connection_attempts`
+- retained installation/account metadata and redacted permission JSON
+- `lifecycle_generation`, a positive monotonic integer initialized to `1`
+- `lifecycle_state`: `enabled | disconnect-pending | disconnected | reconnect-pending |
+  installation-removed | installation-suspended | permission-required |
+  repository-access-unavailable | transient-error`
+- `cleanup_state`: `settled | pending | degraded`
+- `last_authority_failure_code`, safe diagnostic code nullable
+- `last_authority_checked_at`, nullable canonical timestamp
+- existing connection status, verification timestamps, and row version
+
+Only `enabled` connections admit new private operations. Disconnect advances the generation and
+sets `disconnect-pending` before Agent cleanup. Cleanup degradation is retained separately from the
+disconnected lifecycle state. Reconnect advances the generation again and remains blocked until the
+Agent has safely settled any unresolved token lease.
+
+## github_connection_setup_attempts
+
+`github_connection_setup_attempts` stores reconnect/re-authorization callback state separately from
+the original `github_connection_attempts` row. It retains `connection_id`, `target_generation`,
+one-time state hash, actor, expiry, claimed installation, status, failure classification, and row
+version. Its foreign key is `ON DELETE RESTRICT`. The original actor-owned attempt remains the
+ownership anchor; a pending setup attempt cannot hide the retained connection from Web views.
+
+Setup callbacks may replace the retained installation ID only after App identity, configured numeric
+account/type, active installation, and generation compare-and-swap proof. Expired, stale, or
+foreign callbacks cannot enable a prior generation.
+
 ## project_config_revisions
 
 - `id` primary key
@@ -380,7 +414,10 @@ Later configuration activation is one web-owned transaction that supersedes the 
 - migration utilities do not expose general runtime repositories or write APIs.
 
 Migration `0007_github_private_sources.sql` creates `project_github_sources` and registers schema
-version `8`. It is forward-only, has no secret columns, is tested from an empty database and the
-previous schema, and preserves the existing public-project model. Existing public projects remain
-without a `project_github_sources` row; GitHub projects receive one during the atomic registration
+version `8`. Migration `0008_github_connection_lifecycle.sql` adds the lifecycle generation/state
+columns and `github_connection_setup_attempts`, registering schema version `9`. It migrates every
+existing CP2 connection to generation `1`, `enabled`, and settled cleanup, with no secret columns.
+Both migrations are forward-only, tested from an empty database and the previous schema, and
+preserve the existing public-project model. Existing public projects remain without a
+`project_github_sources` row; GitHub projects receive one during the atomic registration
 transaction.

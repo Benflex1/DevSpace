@@ -4,19 +4,38 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  inspectApp: vi.fn(), verify: vi.fn(), inspect: vi.fn(), refresh: vi.fn(), list: vi.fn()
+const mocks = vi.hoisted(() => {
+  class MockAgentResponseError extends Error {
+    readonly code = "AGENT_ERROR";
+    constructor() { super("agent-error"); this.name = "AgentResponseError"; }
+  }
+  class MockAgentUnavailableError extends Error {
+    readonly code = "AGENT_UNAVAILABLE";
+    constructor() { super("agent-unavailable"); this.name = "AgentUnavailableError"; }
+  }
+  return {
+    inspectApp: vi.fn(), verify: vi.fn(), inspect: vi.fn(), refresh: vi.fn(), list: vi.fn(),
+    disconnect: vi.fn(), prepareReconnect: vi.fn(), MockAgentResponseError, MockAgentUnavailableError
+  };
+});
+vi.mock("../../../../server/agent-client.js", () => ({
+  AgentResponseError: mocks.MockAgentResponseError,
+  AgentUnavailableError: mocks.MockAgentUnavailableError,
+  createAgentClient: () => ({
+    inspectGithubApp: mocks.inspectApp, verifyGithubInstallation: mocks.verify,
+    inspectGithubInstallation: mocks.inspect, refreshGithubInstallation: mocks.refresh, listGithubRepositories: mocks.list,
+    disconnectGithubInstallation: mocks.disconnect, prepareGithubReconnect: mocks.prepareReconnect
+  })
 }));
-vi.mock("../../../../server/agent-client.js", () => ({ createAgentClient: () => ({
-  inspectGithubApp: mocks.inspectApp, verifyGithubInstallation: mocks.verify,
-  inspectGithubInstallation: mocks.inspect, refreshGithubInstallation: mocks.refresh, listGithubRepositories: mocks.list
-}) }));
 
 import { POST as begin } from "./connection-attempts/route.js";
 import { GET as setup } from "./setup/route.js";
 import { GET as connection } from "./connection/route.js";
 import { GET as repositories } from "./repositories/route.js";
 import { POST as refresh } from "./refresh/route.js";
+import { POST as disconnect } from "./disconnect/route.js";
+import { POST as reconnect } from "./reconnect/route.js";
+import { AgentUnavailableError } from "../../../../server/agent-client.js";
 import { getProjectDatabase } from "../../../../server/database.js";
 
 const directories: string[] = [];
@@ -50,10 +69,10 @@ describe("GitHub Web routes", () => {
     const refreshed = await refresh(new Request("http://localhost:3000/api/integrations/github/refresh", {
       method: "POST", headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1" }
     }));
-    expect(refreshed.status).toBe(200); expect(mocks.refresh).toHaveBeenCalledWith(startBody.connectionId);
+    expect(refreshed.status).toBe(200); expect(mocks.refresh).toHaveBeenCalledWith(startBody.connectionId, 1);
     expect((await connection(new Request("http://localhost:3000/api/integrations/github/connection"))).status).toBe(200);
     const listed = await repositories(new Request("http://localhost:3000/api/integrations/github/repositories?pageSize=25"));
-    expect(listed.status).toBe(200); expect(mocks.list).toHaveBeenCalledWith(startBody.connectionId, 25, undefined);
+    expect(listed.status).toBe(200); expect(mocks.list).toHaveBeenCalledWith(startBody.connectionId, 25, undefined, 1);
     expect(JSON.stringify(await listed.json())).not.toContain("token");
   });
 
@@ -127,5 +146,88 @@ describe("GitHub Web routes", () => {
     expect(response.status).toBe(200);
     const degradedBody = await response.json() as { status?: unknown };
     expect(degradedBody.status).toBe("degraded");
+  });
+
+  it("requires CSRF for disconnect and reconnect", async () => {
+    const headers = { "content-type": "application/json", origin: "http://attacker.invalid" };
+    const disconnected = await disconnect(new Request("http://localhost:3000/api/integrations/github/disconnect", {
+      method: "POST", headers, body: JSON.stringify({ connectionId: "018f0f00-0000-7000-8000-000000000099" })
+    }));
+    const reconnected = await reconnect(new Request("http://localhost:3000/api/integrations/github/reconnect", {
+      method: "POST", headers, body: JSON.stringify({ connectionId: "018f0f00-0000-7000-8000-000000000099" })
+    }));
+    expect(disconnected.status).toBe(403); expect(reconnected.status).toBe(403);
+    expect(mocks.disconnect).not.toHaveBeenCalled(); expect(mocks.prepareReconnect).not.toHaveBeenCalled();
+  });
+
+  it("fences disconnect before Agent cleanup and retains the connection identity", async () => {
+    const started = await begin(new Request("http://localhost:3000/api/integrations/github/connection-attempts", { method: "POST",
+      headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1" } }));
+    const body = await started.json() as { connectionId: string; installationUrl: string };
+    const state = new URL(body.installationUrl).searchParams.get("state");
+    if (state === null) throw new Error("test state missing");
+    const verified = { connectionId: body.connectionId, installationId: "77", accountId: "99", accountType: "Organization",
+      accountLogin: "owner-org", repositorySelection: "selected", permissions: { metadata: "read" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false } as const;
+    mocks.verify.mockResolvedValue(verified);
+    await setup(new Request(`http://localhost:3000/api/integrations/github/setup?state=${state}&installation_id=77&setup_action=install`));
+    mocks.disconnect.mockResolvedValue({ connectionId: body.connectionId, lifecycleGeneration: 2,
+      lifecycleState: "disconnected", cleanupState: "settled", installationId: null });
+    const response = await disconnect(new Request("http://localhost:3000/api/integrations/github/disconnect", {
+      method: "POST", headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1", "content-type": "application/json" },
+      body: JSON.stringify({ connectionId: body.connectionId })
+    }));
+    expect(response.status).toBe(200);
+    expect(mocks.disconnect).toHaveBeenCalledWith(body.connectionId, 2);
+    expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
+      .toMatchObject({ connectionId: body.connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled" });
+    const visible = await connection(new Request("http://localhost:3000/api/integrations/github/connection"));
+    expect(visible.status).toBe(200);
+    expect(await visible.json()).toMatchObject({ connectionId: body.connectionId, status: "disconnected" });
+  });
+
+  it("reconnects through a pending setup attempt while retaining the same connection ID", async () => {
+    const started = await begin(new Request("http://localhost:3000/api/integrations/github/connection-attempts", { method: "POST",
+      headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1" } }));
+    const body = await started.json() as { connectionId: string; installationUrl: string };
+    const state = new URL(body.installationUrl).searchParams.get("state");
+    if (state === null) throw new Error("test state missing");
+    const verified = { connectionId: body.connectionId, installationId: "77", accountId: "99", accountType: "Organization",
+      accountLogin: "owner-org", repositorySelection: "selected", permissions: { metadata: "read" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false } as const;
+    mocks.verify.mockResolvedValue(verified);
+    await setup(new Request(`http://localhost:3000/api/integrations/github/setup?state=${state}&installation_id=77&setup_action=install`));
+    mocks.prepareReconnect.mockResolvedValue({ connectionId: body.connectionId, lifecycleGeneration: 2,
+      lifecycleState: "reconnect-pending", cleanupState: "settled", installationId: "77" });
+    const response = await reconnect(new Request("http://localhost:3000/api/integrations/github/reconnect", {
+      method: "POST", headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1", "content-type": "application/json" },
+      body: JSON.stringify({ connectionId: body.connectionId })
+    }));
+    expect(response.status).toBe(201);
+    expect(mocks.prepareReconnect).toHaveBeenCalledWith(body.connectionId, 2);
+    expect(await response.json()).toMatchObject({ connectionId: body.connectionId, lifecycleGeneration: 2, status: "reconnect-pending" });
+    const visible = await connection(new Request("http://localhost:3000/api/integrations/github/connection"));
+    expect(await visible.json()).toMatchObject({ connectionId: body.connectionId, status: "reconnect-pending" });
+  });
+
+  it("reports Agent-unavailable cleanup as pending after the durable Web fence", async () => {
+    const started = await begin(new Request("http://localhost:3000/api/integrations/github/connection-attempts", { method: "POST",
+      headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1" } }));
+    const body = await started.json() as { connectionId: string; installationUrl: string };
+    const state = new URL(body.installationUrl).searchParams.get("state");
+    if (state === null) throw new Error("test state missing");
+    mocks.verify.mockResolvedValue({ connectionId: body.connectionId, installationId: "77", accountId: "99", accountType: "Organization",
+      accountLogin: "owner-org", repositorySelection: "selected", permissions: { metadata: "read" }, status: "connected",
+      verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+    await setup(new Request(`http://localhost:3000/api/integrations/github/setup?state=${state}&installation_id=77&setup_action=install`));
+    mocks.disconnect.mockRejectedValue(new AgentUnavailableError());
+    const response = await disconnect(new Request("http://localhost:3000/api/integrations/github/disconnect", {
+      method: "POST", headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1", "content-type": "application/json" },
+      body: JSON.stringify({ connectionId: body.connectionId })
+    }));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ connectionId: body.connectionId, status: "disconnect-pending", cleanupState: "pending" });
+    expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
+      .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnect-pending", cleanupState: "pending" });
   });
 });

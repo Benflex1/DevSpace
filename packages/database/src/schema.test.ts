@@ -19,7 +19,7 @@ function rows<T>(database: Database.Database, sql: string): T[] {
 
 describe("database schema metadata", () => {
   test("exports exactly the accepted application tables", () => {
-    expect(Object.keys(schema)).toHaveLength(20);
+    expect(Object.keys(schema)).toHaveLength(21);
     expect(Object.values(schema).map(getTableName)).toEqual(applicationTableNames);
   });
 
@@ -63,12 +63,12 @@ describe("database schema metadata", () => {
             childTable: tableName
           }))
         );
-        expect(foreignKeys).toHaveLength(35);
+        expect(foreignKeys).toHaveLength(36);
         expect(new Set(foreignKeys.map(({ on_update }) => on_update))).toEqual(new Set(["NO ACTION"]));
         expect(Object.fromEntries(["CASCADE", "RESTRICT", "SET NULL"].map((action) => [
           action,
           foreignKeys.filter(({ on_delete }) => on_delete === action).length
-        ]))).toEqual({ CASCADE: 16, RESTRICT: 10, "SET NULL": 9 });
+        ]))).toEqual({ CASCADE: 16, RESTRICT: 11, "SET NULL": 9 });
         for (const foreignKey of foreignKeys.filter(({ on_delete }) => on_delete === "SET NULL")) {
           const column = rows<{ name: string; notnull: number }>(
             database,
@@ -137,6 +137,16 @@ describe("database schema metadata", () => {
         expect(taskRunsSql).toContain(
           "'queued', 'starting', 'running', 'passed', 'failed', 'cancelled', 'timed_out', 'lost'"
         );
+        const githubColumns = rows<{ name: string; notnull: number; dflt_value: string | null }>(
+          database,
+          "pragma table_info('github_connections')"
+        );
+        expect(githubColumns.find(({ name }) => name === "lifecycle_generation"))
+          .toMatchObject({ notnull: 1, dflt_value: "1" });
+        expect(githubColumns.find(({ name }) => name === "lifecycle_state"))
+          .toMatchObject({ notnull: 1, dflt_value: "'enabled'" });
+        expect(githubColumns.find(({ name }) => name === "cleanup_state"))
+          .toMatchObject({ notnull: 1, dflt_value: "'settled'" });
         const previewColumns = rows<{ name: string; notnull: number; dflt_value: string | null }>(
           database,
           "pragma table_info('previews')"

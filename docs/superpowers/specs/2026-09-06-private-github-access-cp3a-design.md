@@ -1,7 +1,7 @@
 # DevSpace Private GitHub Access — CP3A connection lifecycle
 
-**Date:** 2026-09-06  
-**Status:** accepted for implementation on `feat/private-github-access-cp3a-lifecycle`  
+**Date:** 2026-09-06
+**Status:** accepted for implementation on `feat/private-github-access-cp3a-lifecycle`
 **Scope:** connection lifecycle, authority generations, disconnect cleanup, reconnect and authority-loss reporting
 
 ## Goal

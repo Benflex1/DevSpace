@@ -224,8 +224,10 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
     await completeMutation(dependencies.database, dependencies.agent, createStore, async () => {
       const source = dependencies.database.getProjectSourceLocator(projectId, actor);
       if (source === null) throw new WorkspaceSetupValidationError("The project source is no longer available.");
+      const authority = source.kind === "github-app" ? dependencies.database.getGithubAuthorityContext(actor, source.connectionId) : undefined;
+      if (authority !== undefined && !authority.admitted) throw new WorkspaceSetupValidationError("Reconnect the GitHub connection before setting up this private repository.");
       await dependencies.agent.createManagedStore(createStore.operationId, {
-        projectId, source
+        projectId, source, ...(authority === undefined ? {} : { githubAuthorityGeneration: authority.lifecycleGeneration })
       });
     }, polling);
 
@@ -235,7 +237,10 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
     await completeMutation(dependencies.database, dependencies.agent, fetch, async () => {
       const source = dependencies.database.getProjectSourceLocator(projectId, actor);
       if (source === null) throw new WorkspaceSetupValidationError("The project source is no longer available.");
-      await dependencies.agent.fetchProject(fetch.operationId, projectId, source.kind === "github-app" ? source : undefined);
+      const authority = source.kind === "github-app" ? dependencies.database.getGithubAuthorityContext(actor, source.connectionId) : undefined;
+      if (authority !== undefined && !authority.admitted) throw new WorkspaceSetupValidationError("Reconnect the GitHub connection before setting up this private repository.");
+      await dependencies.agent.fetchProject(fetch.operationId, projectId, source.kind === "github-app" ? source : undefined,
+        authority?.lifecycleGeneration);
     }, polling);
 
     const branchName = gitBranchNameSchema.parse(setup.project.defaultBranch);

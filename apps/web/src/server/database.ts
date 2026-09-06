@@ -36,7 +36,7 @@ import pathModule from "node:path";
 import {
   auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
   previews, workspaceServices, workspaces, aiSessions, aiTurns, aiEvents,
-  githubConnectionAttempts, githubConnections, projectGithubSources,
+  githubConnectionAttempts, githubConnections, githubConnectionSetupAttempts, projectGithubSources,
   type Operation, type Preview, type Project, type ProjectConfigRevision, type ProjectGithubSource
 } from "@devspace/database";
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
@@ -783,6 +783,10 @@ export function openProjectDatabase(path: string, options: {
     eq(githubConnectionAttempts.createdBy, actor),
     eq(githubConnectionAttempts.status, "connected")
   )).get();
+  const githubConnectionView = (connection: typeof githubConnections.$inferSelect) => ({
+    ...connection,
+    permissions: JSON.parse(connection.permissionsJson) as Record<string, "read" | "write">
+  });
   return {
     close: () => client.close(),
     listProjects: (): ProjectView[] => db.select().from(projects).orderBy(desc(projects.createdAt)).all().map(toView),
@@ -1922,16 +1926,79 @@ export function openProjectDatabase(path: string, options: {
       if (result === undefined) throw new ProjectSetupConflictError("The finalized project could not be read.");
       return result;
     },
-    createGithubConnectionAttempt(input: { actor: string; stateHash: string; expiresAt: string }) {
-      const timestamp = now().toISOString();
-      const attempt = { connectionId: createId(), stateHash: input.stateHash, status: "pending" as const,
-        expiresAt: input.expiresAt, claimedInstallationId: null, createdBy: input.actor,
-        createdAt: timestamp, updatedAt: timestamp, failureClassification: null, rowVersion: 1 };
-      db.insert(githubConnectionAttempts).values(attempt).run();
-      return attempt;
+    createGithubConnectionAttempt(input: { actor: string; stateHash: string; expiresAt: string; connectionId?: string }) {
+      return client.transaction(() => {
+        const timestamp = now().toISOString();
+        if (input.connectionId !== undefined) {
+          const owned = getOwnedGithubConnection(input.actor, input.connectionId);
+          if (owned === undefined) throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+          const pending = db.select().from(githubConnectionSetupAttempts).where(and(
+            eq(githubConnectionSetupAttempts.connectionId, input.connectionId),
+            eq(githubConnectionSetupAttempts.createdBy, input.actor),
+            eq(githubConnectionSetupAttempts.status, "pending")
+          )).orderBy(desc(githubConnectionSetupAttempts.createdAt)).get();
+          if (pending !== undefined && owned.connection.lifecycleGeneration === pending.targetGeneration
+            && owned.connection.lifecycleState === "reconnect-pending") {
+            const updated = db.update(githubConnectionSetupAttempts).set({ stateHash: input.stateHash,
+              expiresAt: input.expiresAt, updatedAt: timestamp, rowVersion: pending.rowVersion + 1
+            }).where(and(eq(githubConnectionSetupAttempts.attemptId, pending.attemptId),
+              eq(githubConnectionSetupAttempts.rowVersion, pending.rowVersion))).run();
+            if (updated.changes !== 1) throw new ProjectSetupConflictError("The GitHub reconnect attempt changed concurrently.");
+            return { ...pending, stateHash: input.stateHash, expiresAt: input.expiresAt, updatedAt: timestamp,
+              rowVersion: pending.rowVersion + 1, lifecycleGeneration: pending.targetGeneration, reauthorization: true as const };
+          }
+          if (pending !== undefined) {
+            db.update(githubConnectionSetupAttempts).set({ status: "failed", failureClassification: "stale-generation",
+              updatedAt: timestamp, rowVersion: pending.rowVersion + 1 }).where(and(
+              eq(githubConnectionSetupAttempts.attemptId, pending.attemptId),
+              eq(githubConnectionSetupAttempts.status, "pending"), eq(githubConnectionSetupAttempts.rowVersion, pending.rowVersion)
+            )).run();
+          }
+          const generation = owned.connection.lifecycleGeneration + 1;
+          const updated = db.update(githubConnections).set({
+            lifecycleGeneration: generation, lifecycleState: "reconnect-pending", cleanupState: "pending",
+            lastAuthorityFailureCode: null, lastAuthorityCheckedAt: null,
+            updatedAt: timestamp, rowVersion: owned.connection.rowVersion + 1
+          }).where(and(eq(githubConnections.connectionId, input.connectionId),
+            eq(githubConnections.lifecycleGeneration, owned.connection.lifecycleGeneration),
+            eq(githubConnections.rowVersion, owned.connection.rowVersion))).run();
+          if (updated.changes !== 1) throw new ProjectSetupConflictError("The GitHub connection changed concurrently.");
+          const attempt = {
+            attemptId: createId(), connectionId: input.connectionId, stateHash: input.stateHash, status: "pending" as const,
+            targetGeneration: generation, expiresAt: input.expiresAt, claimedInstallationId: null,
+            createdBy: input.actor, createdAt: timestamp, updatedAt: timestamp, failureClassification: null, rowVersion: 1
+          };
+          db.insert(githubConnectionSetupAttempts).values(attempt).run();
+          return { ...attempt, lifecycleGeneration: generation, reauthorization: true as const };
+        }
+        const attempt = { connectionId: createId(), stateHash: input.stateHash, status: "pending" as const,
+          expiresAt: input.expiresAt, claimedInstallationId: null, createdBy: input.actor,
+          createdAt: timestamp, updatedAt: timestamp, failureClassification: null, rowVersion: 1 };
+        db.insert(githubConnectionAttempts).values(attempt).run();
+        return { ...attempt, lifecycleGeneration: 1, reauthorization: false as const };
+      }).immediate();
     },
     claimGithubConnectionAttempt(input: { actor: string; stateHash: string; installationId: string }) {
       return client.transaction(() => {
+        const setup = db.select().from(githubConnectionSetupAttempts).where(eq(githubConnectionSetupAttempts.stateHash, input.stateHash)).get();
+        if (setup !== undefined) {
+          const anchor = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.connectionId, setup.connectionId)).get();
+          if (anchor === undefined || anchor.createdBy !== input.actor) throw new Error("GITHUB_STATE_INVALID");
+          if (!timingSafeEqual(Buffer.from(setup.stateHash, "hex"), Buffer.from(input.stateHash, "hex"))) throw new Error("GITHUB_STATE_INVALID");
+          if (Date.parse(setup.expiresAt) <= now().valueOf()) throw new Error("GITHUB_STATE_EXPIRED");
+          if (setup.status === "failed") throw new Error("GITHUB_STATE_CONSUMED");
+          if (setup.status === "claimed" || setup.status === "connected") {
+            if (setup.claimedInstallationId !== input.installationId) throw new Error("GITHUB_INSTALLATION_CONFLICT");
+            return setup;
+          }
+          const updatedAt = now().toISOString();
+          const result = db.update(githubConnectionSetupAttempts).set({ status: "claimed", claimedInstallationId: input.installationId,
+            updatedAt, rowVersion: setup.rowVersion + 1 }).where(and(
+            eq(githubConnectionSetupAttempts.attemptId, setup.attemptId), eq(githubConnectionSetupAttempts.status, "pending"),
+            eq(githubConnectionSetupAttempts.rowVersion, setup.rowVersion))).run();
+          if (result.changes !== 1) throw new Error("GITHUB_STATE_CONCURRENT");
+          return { ...setup, status: "claimed" as const, claimedInstallationId: input.installationId, updatedAt, rowVersion: setup.rowVersion + 1 };
+        }
         const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.stateHash, input.stateHash)).get();
         if (attempt === undefined || attempt.createdBy !== input.actor) throw new Error("GITHUB_STATE_INVALID");
         if (!timingSafeEqual(Buffer.from(attempt.stateHash, "hex"), Buffer.from(input.stateHash, "hex"))) throw new Error("GITHUB_STATE_INVALID");
@@ -1953,35 +2020,125 @@ export function openProjectDatabase(path: string, options: {
     connectGithubInstallation(input: {
       actor: string; connectionId: string; installationId: string; accountId: string; accountType: "User" | "Organization";
       accountLogin: string; repositorySelection: "all" | "selected"; permissions: Record<string, "read" | "write">;
-      status: "connected" | "degraded"; verifiedAt: string;
+      status: "connected" | "degraded"; verifiedAt: string; lifecycleGeneration?: number; attemptId?: string;
     }) {
       return client.transaction(() => {
+        const setup = input.attemptId === undefined ? undefined
+          : db.select().from(githubConnectionSetupAttempts).where(and(
+            eq(githubConnectionSetupAttempts.attemptId, input.attemptId),
+            eq(githubConnectionSetupAttempts.connectionId, input.connectionId)
+          )).get();
         const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.connectionId, input.connectionId)).get();
-        if (attempt === undefined || attempt.createdBy !== input.actor || attempt.claimedInstallationId !== input.installationId
-          || (attempt.status !== "claimed" && attempt.status !== "connected")) throw new Error("GITHUB_ATTEMPT_NOT_CLAIMED");
+        if (attempt === undefined || attempt.createdBy !== input.actor
+          || (setup === undefined && (attempt.claimedInstallationId !== input.installationId
+            || (attempt.status !== "claimed" && attempt.status !== "connected")))) throw new Error("GITHUB_ATTEMPT_NOT_CLAIMED");
+        if (setup !== undefined && (setup.createdBy !== input.actor || setup.claimedInstallationId !== input.installationId
+          || (setup.status !== "claimed" && setup.status !== "connected"))) throw new Error("GITHUB_ATTEMPT_NOT_CLAIMED");
         const timestamp = now().toISOString();
         const existing = db.select().from(githubConnections).where(eq(githubConnections.connectionId, input.connectionId)).get();
+        const lifecycleGeneration = input.lifecycleGeneration ?? setup?.targetGeneration ?? existing?.lifecycleGeneration ?? 1;
+        if (existing !== undefined && (existing.lifecycleGeneration !== lifecycleGeneration
+          || (setup !== undefined && existing.lifecycleState !== "reconnect-pending"))) throw new Error("GITHUB_GENERATION_STALE");
         const value = { connectionId: input.connectionId, installationId: input.installationId, accountId: input.accountId,
           accountType: input.accountType, accountLogin: input.accountLogin, repositorySelection: input.repositorySelection,
-          permissionsJson: JSON.stringify(input.permissions), status: input.status, verifiedAt: input.verifiedAt,
+          permissionsJson: JSON.stringify(input.permissions), status: input.status, lifecycleGeneration,
+          lifecycleState: "enabled" as const, cleanupState: "settled" as const, lastAuthorityFailureCode: null,
+          lastAuthorityCheckedAt: input.verifiedAt, verifiedAt: input.verifiedAt,
           createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp, rowVersion: (existing?.rowVersion ?? 0) + 1 };
         db.insert(githubConnections).values(value).onConflictDoUpdate({ target: githubConnections.connectionId,
           set: { installationId: value.installationId, accountId: value.accountId, accountType: value.accountType,
             accountLogin: value.accountLogin, repositorySelection: value.repositorySelection, permissionsJson: value.permissionsJson,
-            status: value.status, verifiedAt: value.verifiedAt, updatedAt: value.updatedAt, rowVersion: value.rowVersion } }).run();
-        if (attempt.status !== "connected") db.update(githubConnectionAttempts).set({ status: "connected", updatedAt: timestamp,
+            status: value.status, lifecycleGeneration: value.lifecycleGeneration, lifecycleState: value.lifecycleState,
+            cleanupState: value.cleanupState, lastAuthorityFailureCode: value.lastAuthorityFailureCode,
+            lastAuthorityCheckedAt: value.lastAuthorityCheckedAt, verifiedAt: value.verifiedAt, updatedAt: value.updatedAt,
+            rowVersion: value.rowVersion } }).run();
+        if (setup !== undefined && setup.status !== "connected") db.update(githubConnectionSetupAttempts).set({ status: "connected", updatedAt: timestamp,
+          rowVersion: setup.rowVersion + 1 }).where(and(eq(githubConnectionSetupAttempts.attemptId, setup.attemptId),
+            eq(githubConnectionSetupAttempts.rowVersion, setup.rowVersion))).run();
+        if (setup === undefined && attempt.status !== "connected") db.update(githubConnectionAttempts).set({ status: "connected", updatedAt: timestamp,
           rowVersion: attempt.rowVersion + 1 }).where(and(eq(githubConnectionAttempts.connectionId, attempt.connectionId),
             eq(githubConnectionAttempts.rowVersion, attempt.rowVersion))).run();
         return { ...value, permissions: input.permissions };
       }).immediate();
     },
     getGithubConnectionState(actor: string) {
-      const attempt = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.createdBy, actor))
-        .orderBy(desc(githubConnectionAttempts.createdAt)).get();
-      if (attempt === undefined) return null;
-      const connection = db.select().from(githubConnections).where(eq(githubConnections.connectionId, attempt.connectionId)).get();
-      return { attempt, connection: connection === undefined ? null : { ...connection,
-        permissions: JSON.parse(connection.permissionsJson) as Record<string, "read" | "write"> } };
+      const attempts = db.select().from(githubConnectionAttempts).where(eq(githubConnectionAttempts.createdBy, actor))
+        .orderBy(desc(githubConnectionAttempts.createdAt)).all();
+      const retained = attempts.map((attempt) => ({ attempt, connection: db.select().from(githubConnections)
+        .where(eq(githubConnections.connectionId, attempt.connectionId)).get() })).find((candidate) => candidate.connection !== undefined);
+      const pendingReconnect = db.select().from(githubConnectionSetupAttempts)
+        .where(and(eq(githubConnectionSetupAttempts.createdBy, actor), eq(githubConnectionSetupAttempts.status, "pending")))
+        .orderBy(desc(githubConnectionSetupAttempts.createdAt)).get();
+      const pendingInitial = attempts.find((candidate) => candidate.status === "pending"
+        && db.select({ connectionId: githubConnections.connectionId }).from(githubConnections)
+          .where(eq(githubConnections.connectionId, candidate.connectionId)).get() === undefined);
+      const pendingAttempt = pendingReconnect === undefined ? pendingInitial
+        : pendingInitial === undefined || pendingReconnect.createdAt >= pendingInitial.createdAt ? pendingReconnect : pendingInitial;
+      const attempt = retained?.attempt ?? pendingAttempt ?? attempts[0];
+      const connection = retained?.connection ?? (attempt === undefined ? undefined : db.select().from(githubConnections)
+        .where(eq(githubConnections.connectionId, attempt.connectionId)).get());
+      if (attempt === undefined && pendingAttempt === undefined) return null;
+      return {
+        attempt: attempt ?? pendingAttempt,
+        connection: connection === undefined ? null : githubConnectionView(connection),
+        pendingAttempt: pendingAttempt ?? null
+      };
+    },
+    getGithubAuthorityContext(actor: string, connectionId: string) {
+      const owned = getOwnedGithubConnection(actor, connectionId);
+      if (owned === undefined) throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+      return {
+        connectionId, lifecycleGeneration: owned.connection.lifecycleGeneration,
+        lifecycleState: owned.connection.lifecycleState, cleanupState: owned.connection.cleanupState,
+        admitted: owned.connection.lifecycleState === "enabled",
+        refreshable: ["installation-removed", "installation-suspended", "permission-required", "repository-access-unavailable", "transient-error"].includes(owned.connection.lifecycleState)
+      };
+    },
+    beginGithubDisconnect(input: { actor: string; connectionId: string }) {
+      return client.transaction(() => {
+        const owned = getOwnedGithubConnection(input.actor, input.connectionId);
+        if (owned === undefined) throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+        if (owned.connection.lifecycleState === "disconnected" || owned.connection.lifecycleState === "disconnect-pending") return owned.connection;
+        const updatedAt = now().toISOString();
+        const nextGeneration = owned.connection.lifecycleGeneration + 1;
+        const result = db.update(githubConnections).set({ lifecycleGeneration: nextGeneration,
+          lifecycleState: "disconnect-pending", cleanupState: "pending", lastAuthorityFailureCode: null,
+          lastAuthorityCheckedAt: null, updatedAt, rowVersion: owned.connection.rowVersion + 1
+        }).where(and(eq(githubConnections.connectionId, input.connectionId),
+          eq(githubConnections.lifecycleGeneration, owned.connection.lifecycleGeneration),
+          eq(githubConnections.rowVersion, owned.connection.rowVersion))).run();
+        if (result.changes !== 1) throw new ProjectSetupConflictError("The GitHub connection changed concurrently.");
+        const updated = db.select().from(githubConnections).where(eq(githubConnections.connectionId, input.connectionId)).get();
+        if (updated === undefined) throw new ProjectSetupConflictError("The GitHub connection could not be fenced.");
+        return updated;
+      }).immediate();
+    },
+    completeGithubDisconnect(input: { actor: string; connectionId: string; lifecycleGeneration: number; cleanupState: "settled" | "pending" | "degraded" }) {
+      return client.transaction(() => {
+        const owned = getOwnedGithubConnection(input.actor, input.connectionId);
+        if (owned === undefined) throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+        const result = db.update(githubConnections).set({ lifecycleState: input.cleanupState === "pending" ? "disconnect-pending" : "disconnected", cleanupState: input.cleanupState,
+          status: input.cleanupState === "degraded" ? "degraded" : owned.connection.status,
+          updatedAt: now().toISOString(), rowVersion: owned.connection.rowVersion + 1
+        }).where(and(eq(githubConnections.connectionId, input.connectionId),
+          eq(githubConnections.lifecycleGeneration, input.lifecycleGeneration), eq(githubConnections.lifecycleState, "disconnect-pending"),
+          eq(githubConnections.rowVersion, owned.connection.rowVersion))).run();
+        if (result.changes !== 1) throw new ProjectSetupConflictError("The GitHub disconnect changed concurrently.");
+        return db.select().from(githubConnections).where(eq(githubConnections.connectionId, input.connectionId)).get()!;
+      }).immediate();
+    },
+    recordGithubAuthorityFailure(input: { actor: string; connectionId: string; lifecycleGeneration: number; failureCode: string; lifecycleState: "installation-removed" | "installation-suspended" | "permission-required" | "repository-access-unavailable" | "transient-error" }) {
+      const owned = getOwnedGithubConnection(input.actor, input.connectionId);
+      if (owned === undefined) throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
+      const result = db.update(githubConnections).set({ lifecycleState: input.lifecycleState,
+        lastAuthorityFailureCode: input.failureCode, lastAuthorityCheckedAt: now().toISOString(),
+        updatedAt: now().toISOString(), rowVersion: owned.connection.rowVersion + 1
+      }).where(and(eq(githubConnections.connectionId, input.connectionId),
+        eq(githubConnections.lifecycleGeneration, input.lifecycleGeneration), eq(githubConnections.rowVersion, owned.connection.rowVersion))).run();
+      if (result.changes !== 1) throw new ProjectSetupConflictError("The GitHub authority changed concurrently.");
+    },
+    completeGithubAuthorityReconnect(input: { actor: string; connectionId: string; lifecycleGeneration: number; installationId: string; accountId: string; accountType: "User" | "Organization"; accountLogin: string; repositorySelection: "all" | "selected"; permissions: Record<string, "read" | "write">; status: "connected" | "degraded"; verifiedAt: string; attemptId?: string }) {
+      return this.connectGithubInstallation({ ...input, lifecycleGeneration: input.lifecycleGeneration });
     },
     listOperations: () => db.select().from(operations).orderBy(operations.createdAt, operations.operationId).all(),
     listRuntimeOperations: (projectId: string, workspaceId: string) => db.select().from(operations).where(and(

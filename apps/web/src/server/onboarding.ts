@@ -72,8 +72,10 @@ export async function onboardProject(input: OnboardingInput, actor: string, depe
 }): Promise<ProjectView> {
   if (input.sourceKind === "github-app") {
     dependencies.database.assertGithubConnectionOwned(actor, input.connectionId);
+    const authority = dependencies.database.getGithubAuthorityContext(actor, input.connectionId);
+    if (!authority.admitted) throw new OnboardingValidationError("Reconnect the GitHub connection before selecting a private repository.");
     if (dependencies.agent.resolveGithubRepository === undefined) throw new OnboardingValidationError("GitHub repository resolution is unavailable.");
-    const resolved = await dependencies.agent.resolveGithubRepository(input.connectionId, input.repositoryId);
+    const resolved = await dependencies.agent.resolveGithubRepository(input.connectionId, input.repositoryId, authority.lifecycleGeneration);
     if (resolved.repository.archived || resolved.repository.disabled) {
       throw new OnboardingValidationError("Archived or disabled GitHub repositories cannot be added as new projects.");
     }

@@ -44,8 +44,8 @@ const failure = (code: string, retryable: boolean, details: object) => ({
 const independentApplicability = {
   "configuration-revision.register": ["AGENT_INTERNAL_ERROR"],
   "configuration-runtime-plan.register": ["CONFIGURATION_NOT_REGISTERED", "RUNTIME_POLICY_VIOLATION", "AGENT_INTERNAL_ERROR"],
-  "project.managed-store.create": ["RESOURCE_STATE_CONFLICT", "SOURCE_NOT_FOUND", "SOURCE_INVALID", "SOURCE_UNAVAILABLE", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE", "RUNTIME_POLICY_VIOLATION", "AGENT_INTERNAL_ERROR"],
-  "project.fetch": ["PROJECT_NOT_FOUND", "SOURCE_UNAVAILABLE", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE", "AGENT_INTERNAL_ERROR"],
+  "project.managed-store.create": ["RESOURCE_STATE_CONFLICT", "SOURCE_NOT_FOUND", "SOURCE_INVALID", "SOURCE_UNAVAILABLE", "GITHUB_AUTHORITY_INVALID", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_CONNECTION_DISABLED", "GITHUB_AUTHORITY_GENERATION_STALE", "GITHUB_INSTALLATION_REMOVED", "GITHUB_INSTALLATION_SUSPENDED", "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", "GITHUB_UPSTREAM_TRANSIENT", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE", "RUNTIME_POLICY_VIOLATION", "AGENT_INTERNAL_ERROR"],
+  "project.fetch": ["PROJECT_NOT_FOUND", "SOURCE_UNAVAILABLE", "GITHUB_AUTHORITY_INVALID", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_CONNECTION_DISABLED", "GITHUB_AUTHORITY_GENERATION_STALE", "GITHUB_INSTALLATION_REMOVED", "GITHUB_INSTALLATION_SUSPENDED", "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", "GITHUB_UPSTREAM_TRANSIENT", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE", "AGENT_INTERNAL_ERROR"],
   "workspace.create": ["PROJECT_NOT_FOUND", "CONFIGURATION_NOT_REGISTERED", "WORKSPACE_STATE_CONFLICT", "RUNTIME_POLICY_VIOLATION", "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR"],
   "workspace.start": ["PROJECT_NOT_FOUND", "RESOURCE_NOT_FOUND", "CONFIGURATION_NOT_REGISTERED", "WORKSPACE_STATE_CONFLICT", "RUNTIME_POLICY_VIOLATION", "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR"],
   "workspace.stop": ["PROJECT_NOT_FOUND", "RESOURCE_NOT_FOUND", "WORKSPACE_STATE_CONFLICT", "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR"],
@@ -73,6 +73,13 @@ const validFailures = [
   failure("SOURCE_INVALID", false, { reason: "not-a-git-repository" }),
   failure("SOURCE_UNAVAILABLE", true, {}),
   failure("GITHUB_CONTENTS_PERMISSION_REQUIRED", false, {}),
+  failure("GITHUB_AUTHORITY_INVALID", false, { reason: "permission-required" }),
+  failure("GITHUB_CONNECTION_DISABLED", false, {}),
+  failure("GITHUB_AUTHORITY_GENERATION_STALE", false, {}),
+  failure("GITHUB_INSTALLATION_REMOVED", false, {}),
+  failure("GITHUB_INSTALLATION_SUSPENDED", false, {}),
+  failure("GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", false, {}),
+  failure("GITHUB_UPSTREAM_TRANSIENT", true, {}),
   failure("GITHUB_INSTALLATION_UNAVAILABLE", true, {}),
   failure("GITHUB_REPOSITORY_NOT_AUTHORIZED", false, {}),
   failure("GITHUB_GIT_AUTHENTICATION_FAILED", false, {}),
@@ -109,9 +116,9 @@ describe("F10 AgentExecutionFailure", () => {
     expectTypeOf<PreviewActivateFailure>().toMatchTypeOf<AgentExecutionFailure>();
   });
 
-  test("contains exactly the accepted 23 variants", () => {
-    expect(agentExecutionFailureCodes).toHaveLength(23);
-    expect(new Set(agentExecutionFailureCodes).size).toBe(23);
+  test("contains exactly the accepted 30 variants", () => {
+    expect(agentExecutionFailureCodes).toHaveLength(30);
+    expect(new Set(agentExecutionFailureCodes).size).toBe(30);
     for (const value of validFailures) {
       expect(agentExecutionFailureSchema.safeParse(value).success, value.code).toBe(true);
     }
@@ -170,7 +177,7 @@ describe("F10 AgentExecutionFailure", () => {
     })).success).toBe(false);
   });
 
-  test("does not widen a narrow row to the full 23-code union", () => {
+  test("does not widen a narrow row to the full 30-code union", () => {
     const register = agentExecutionFailureApplicability["configuration-revision.register"].schema;
     expect(register.safeParse(failure("AGENT_INTERNAL_ERROR", true, { incidentId: id })).success).toBe(true);
     expect(register.safeParse(failure("SOURCE_UNAVAILABLE", true, {})).success).toBe(false);

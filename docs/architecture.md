@@ -60,6 +60,27 @@ Every project has a primary workspace. Additional workspaces are optional and us
 
 The managed repository store is not used as an editable checkout. Every editable checkout is a worktree. This removes the special case where the primary branch would otherwise be edited directly.
 
+## Retained GitHub connection lifecycle
+
+Private GitHub access is retained as one actor-owned DevSpace connection identified by a stable
+`connectionId`. SQLite stores a monotonic lifecycle generation, admission state, cleanup state, and
+safe last authority classification. The generation is an authorization context; project source
+identity remains `{ connectionId, repositoryId }`, so repository renames continue through the
+immutable GitHub repository ID.
+
+Web advances the generation and records `disconnect-pending` before requesting Agent cleanup. The
+Agent fences token mint and authenticated Git launch, lets already-launched bounded work settle,
+continues token revocation, and unlinks only the exact connection binding after safe lease
+settlement. A lifecycle tombstone makes restart recovery idempotent. No disconnect path traverses
+project, repository-store, worktree, workspace, container, or ownership roots.
+
+Re-authorization uses a separate setup-attempt row tied to the original actor-owned connection
+attempt. App identity, configured numeric account/type, active installation, and generation
+compare-and-swap proof are required before a replacement installation ID is retained. A pending
+attempt remains visible beside the retained connection. Installation removal, suspension,
+permission loss, repository access loss, malformed authority, and transient upstream failure are
+distinct safe states. CP3B write authority remains outside this lifecycle slice.
+
 ## Runtime-plan flow
 
 1. The user edits Project Options through the web UI.

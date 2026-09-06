@@ -254,6 +254,8 @@ export class ExternalExecutionFence {
     readonly timeoutMs: number;
     readonly maxOutputBytes: number;
     readonly env: NodeJS.ProcessEnv;
+    /** Runs while the launch fence is held, immediately before the child is spawned. */
+    readonly beforeSpawn?: () => Promise<() => void>;
   }): Promise<ExternalExecutionResult> {
     await this.awaitProject(input.projectId);
     const executionId = input.executionId ?? this.createId();
@@ -272,16 +274,20 @@ export class ExternalExecutionFence {
     marker = launchCommittedMarkerSchema.parse({ ...marker, phase: "launch-committed" });
     await this.persist(marker);
     let child: ChildProcess;
+    let releaseLaunchFence: (() => void) | undefined;
     try {
+      releaseLaunchFence = await input.beforeSpawn?.();
       child = spawn("/usr/bin/git", [...input.args], {
         shell: false, detached: true, stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
         env: { ...input.env, DEVSPACE_EXECUTION_ID: executionId, DEVSPACE_OPERATION_ID: input.operationId }
       });
     } catch (error) {
+      releaseLaunchFence?.();
       await Promise.all([stdoutFile.close(), stderrFile.close()]);
       await this.retire(marker);
       throw error;
     }
+    releaseLaunchFence?.();
     await Promise.all([stdoutFile.close(), stderrFile.close()]);
     const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.once("error", reject);

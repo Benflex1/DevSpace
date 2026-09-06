@@ -68,7 +68,8 @@ function createAuthority(calls: AuthorityCall[], faults: AuthorityFaults = {}): 
       calls.push({ method: "token", input: normalized });
       if (faults.token !== undefined) throw faults.token;
       return { value: await operation("in-memory-token", repository), cleanupDegraded: false };
-    }
+    },
+    acquireGithubLaunchFence: () => Promise.resolve(() => undefined)
   } as unknown as GithubAppAuthority;
 }
 

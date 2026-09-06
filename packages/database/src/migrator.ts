@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { readMigrationFiles, type MigrationMeta } from "drizzle-orm/migrator";
 
-export const latestSchemaVersion = 8;
+export const latestSchemaVersion = 9;
 export const drizzleMigrationTableName = "__drizzle_migrations";
 
 export interface MigrationOptions {

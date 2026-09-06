@@ -69,16 +69,19 @@ test("registers a GitHub repository by connection and immutable repository ID wi
     id: "018f0f00-0000-7000-8000-000000000001", name: value.name, slug: value.slug, repositoryUrl: value.repositoryUrl,
     defaultBranch: value.defaultBranch, state: "registering" as const, createdAt: "2026-07-17T00:00:00.000Z"
   }));
-  const githubDatabase = { assertGithubConnectionOwned: owned, createProject } as unknown as ProjectDatabase;
+  const githubDatabase = { assertGithubConnectionOwned: owned,
+    getGithubAuthorityContext: () => ({ connectionId, lifecycleGeneration: 1, lifecycleState: "enabled" as const,
+      cleanupState: "settled" as const, admitted: true }), createProject } as unknown as ProjectDatabase;
   const agent: AgentClient = {
     health: () => Promise.resolve({ status: "ok" as const }),
     inspectSource: () => Promise.reject(new Error("must not inspect a GitHub source")),
-    resolveGithubRepository: () => Promise.resolve({ repository, cleanupDegraded: false })
+    resolveGithubRepository: vi.fn(() => Promise.resolve({ repository, cleanupDegraded: false }))
   };
   const result = await onboardProject({ sourceKind: "github-app", connectionId, repositoryId: repository.repositoryId,
     name: "Private", slug: "private" }, "actor", { agent, database: githubDatabase });
   expect(result.repositoryUrl).toBe(repository.cleanHttpsUrl);
   expect(owned).toHaveBeenCalledWith("actor", connectionId);
+  expect(agent.resolveGithubRepository).toHaveBeenCalledWith(connectionId, repository.repositoryId, 1);
   const createdInput = createProject.mock.calls[0]?.[0];
   expect(createdInput?.repositoryUrl).toBe(repository.cleanHttpsUrl);
   expect(createdInput?.githubSource?.connectionId).toBe(connectionId);

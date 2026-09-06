@@ -22,8 +22,16 @@ export async function GET(request: Request) {
     const database = getProjectDatabase(config.databasePath);
     const attempt = database.claimGithubConnectionAttempt({ actor: actor.identity,
       stateHash: createHash("sha256").update(state, "utf8").digest("hex"), installationId });
-    const verified = await createAgentClient(config.agentSocketPath).verifyGithubInstallation(attempt.connectionId, installationId);
-    database.connectGithubInstallation({ actor: actor.identity, ...verified });
+    const targetGeneration = "targetGeneration" in attempt && typeof attempt.targetGeneration === "number" ? attempt.targetGeneration : undefined;
+    const attemptId = "attemptId" in attempt && typeof attempt.attemptId === "string" ? attempt.attemptId : undefined;
+    const agent = createAgentClient(config.agentSocketPath);
+    const verified = targetGeneration === undefined
+      ? await agent.verifyGithubInstallation(attempt.connectionId, installationId)
+      : await agent.verifyGithubInstallation(attempt.connectionId, installationId, targetGeneration);
+    database.connectGithubInstallation({ actor: actor.identity, ...verified,
+      ...(targetGeneration === undefined ? {} : { lifecycleGeneration: targetGeneration }),
+      ...(attemptId === undefined ? {} : { attemptId })
+    });
     return redirect(config.appOrigin, verified.cleanupDegraded ? "degraded" : "connected");
   } catch (error) {
     if (error instanceof AuthenticationError) return NextResponse.json({ message: "Authentication is required." }, { status: 403 });

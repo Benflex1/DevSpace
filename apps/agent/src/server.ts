@@ -355,7 +355,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const)
       .map((operation) => f11AiAgentApiV1EndpointByOperation[operation]!)
       .find((endpoint) => url.pathname === endpoint.path);
-    const githubEndpoint = (["github.app.inspect", "github.installation.verify", "github.installation.inspect", "github.installation.refresh", "github.repositories.list", "github.repositories.resolve"] as const)
+    const githubEndpoint = (["github.app.inspect", "github.installation.verify", "github.installation.inspect", "github.installation.refresh", "github.installation.disconnect", "github.installation.reconnect.prepare", "github.repositories.list", "github.repositories.resolve"] as const)
       .map((operation) => githubAgentApiV1EndpointByOperation[operation])
       .find((endpoint) => request.method === endpoint.method && url.pathname === endpoint.path);
     const selectedEndpoint = request.method === "GET" && url.pathname === healthEndpoint.path ? healthEndpoint
@@ -437,16 +437,22 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         if (githubAuthority === null) throw new Error("github-app-unconfigured");
         const result = githubEndpoint.operation === "github.app.inspect" ? await githubAuthority.inspectApp()
           : githubEndpoint.operation === "github.installation.verify" ? await githubAuthority.verifyInstallation(data as never)
-          : githubEndpoint.operation === "github.installation.inspect" ? await githubAuthority.inspectInstallation((data as { connectionId: string }).connectionId)
+          : githubEndpoint.operation === "github.installation.inspect" ? await githubAuthority.inspectInstallation((data as { connectionId: string; lifecycleGeneration?: number }).connectionId,
+            (data as { connectionId: string; lifecycleGeneration?: number }).lifecycleGeneration)
           : githubEndpoint.operation === "github.installation.refresh" ? await githubAuthority.refreshInstallation(data as never)
+          : githubEndpoint.operation === "github.installation.disconnect" ? await githubAuthority.disconnectInstallation(data as never)
+          : githubEndpoint.operation === "github.installation.reconnect.prepare" ? await githubAuthority.prepareGithubReconnect(data as never)
           : githubEndpoint.operation === "github.repositories.resolve" ? await githubAuthority.resolveRepository(data as never)
           : await githubAuthority.listRepositories(data as never);
         return sendJson(response, 200, githubEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data: result }));
       } catch (error) {
         if (error instanceof AgentExecutionError && (error.failure.code === "AGENT_INTERNAL_ERROR"
-          || ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code))) {
-          const status = error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
-            : error.failure.code === "AGENT_INTERNAL_ERROR" ? 500 : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
+          || ["GITHUB_AUTHORITY_INVALID", "GITHUB_CONNECTION_DISABLED", "GITHUB_AUTHORITY_GENERATION_STALE", "GITHUB_INSTALLATION_REMOVED", "GITHUB_INSTALLATION_SUSPENDED", "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", "GITHUB_UPSTREAM_TRANSIENT", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code))) {
+          const status = error.failure.code === "GITHUB_INSTALLATION_REMOVED" ? 410
+            : error.failure.code === "GITHUB_INSTALLATION_SUSPENDED" || error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED"
+              || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" || error.failure.code === "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE" ? 403
+            : error.failure.code === "AGENT_INTERNAL_ERROR" ? 500 : error.failure.code === "GITHUB_AUTHORITY_INVALID" ? 422
+            : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
           return sendJson(response, status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
         }
         const message = error instanceof Error ? error.message : "";
@@ -456,18 +462,29 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           } }));
         }
         const selected = message === "github-connection-not-found" ? { status: 404, code: "GITHUB_CONNECTION_NOT_FOUND", retryable: false, details: {} }
+          : message === "github-connection-disabled" ? { status: 409, code: "GITHUB_CONNECTION_DISABLED", retryable: false, details: {} }
+          : message === "github-authority-generation-stale" ? { status: 409, code: "GITHUB_AUTHORITY_GENERATION_STALE", retryable: false, details: {} }
           : message === "github-token-lease-active" ? { status: 503, code: "GITHUB_TOKEN_LEASE_ACTIVE", retryable: true, details: {} }
           : message === "github-contents-permission-required" ? { status: 403, code: "GITHUB_CONTENTS_PERMISSION_REQUIRED", retryable: false, details: {} }
+          : message === "github-permission-required" ? { status: 422, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "permission-required" } }
           : message === "github-installation-unavailable" ? { status: 503, code: "GITHUB_INSTALLATION_UNAVAILABLE", retryable: true, details: {} }
+          : message === "github-installation-removed" ? { status: 410, code: "GITHUB_INSTALLATION_REMOVED", retryable: false, details: {} }
+          : message === "github-installation-suspended" ? { status: 403, code: "GITHUB_INSTALLATION_SUSPENDED", retryable: false, details: {} }
           : message === "github-repository-not-authorized" ? { status: 403, code: "GITHUB_REPOSITORY_NOT_AUTHORIZED", retryable: false, details: {} }
+          : message === "github-repository-access-unavailable" ? { status: 403, code: "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", retryable: false, details: {} }
           : message === "github-git-authentication-failed" ? { status: 502, code: "GITHUB_GIT_AUTHENTICATION_FAILED", retryable: false, details: {} }
           : message === "github-app-unconfigured" ? { status: 422, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "unconfigured" } }
           : message === "github-authority-invalid" || message === "github-installation-conflict" ? { status: 422, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "mismatch" } }
+          : message === "github-upstream-transient" ? { status: 503, code: "GITHUB_UPSTREAM_TRANSIENT", retryable: true, details: {} }
           : message === "github-upstream-invalid" || message === "github-token-mint-failed" || message === "github-operation-failed"
             ? { status: 503, code: "GITHUB_AUTHORITY_INVALID", retryable: false, details: { reason: "upstream-unavailable" } }
           : { status: 500, code: "AGENT_INTERNAL_ERROR", retryable: true, details: { incidentId: createId() } };
         return sendJson(response, selected.status, githubEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
-          code: selected.code, message: selected.code === "AGENT_INTERNAL_ERROR" ? "The Agent encountered an unexpected error." : "GitHub App authority could not be established safely.",
+          code: selected.code, message: selected.code === "AGENT_INTERNAL_ERROR" ? "The Agent encountered an unexpected error."
+            : selected.code === "GITHUB_AUTHORITY_INVALID" && "reason" in selected.details
+              && selected.details.reason === "permission-required"
+              ? "The GitHub installation does not have the required read permission."
+              : "GitHub App authority could not be established safely.",
           retryable: selected.retryable, details: selected.details
         } }));
       }
@@ -862,7 +879,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
       if (body.data.source.kind === "github-app") {
         try {
-          const data = await managed.inspectSource(body.data.source);
+          const data = await managed.inspectSource(body.data.source, body.data.githubAuthorityGeneration);
           return sendJson(response, 200, inspectEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
         } catch (error) {
           if (error instanceof AgentExecutionError && error.internalReason !== undefined) {
@@ -872,9 +889,13 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             });
           }
           if (error instanceof AgentExecutionError && (error.failure.code === "AGENT_INTERNAL_ERROR"
-            || ["GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code))) {
+            || ["GITHUB_AUTHORITY_INVALID", "GITHUB_CONNECTION_DISABLED", "GITHUB_AUTHORITY_GENERATION_STALE", "GITHUB_INSTALLATION_REMOVED", "GITHUB_INSTALLATION_SUSPENDED", "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE", "GITHUB_UPSTREAM_TRANSIENT", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_REPOSITORY_NOT_AUTHORIZED", "GITHUB_CONTENTS_PERMISSION_REQUIRED", "GITHUB_GIT_AUTHENTICATION_FAILED", "GITHUB_TOKEN_LEASE_ACTIVE"].includes(error.failure.code))) {
             const status = error.failure.code === "AGENT_INTERNAL_ERROR" ? 500
-              : error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
+              : error.failure.code === "GITHUB_CONNECTION_DISABLED" || error.failure.code === "GITHUB_AUTHORITY_GENERATION_STALE" ? 409
+              : error.failure.code === "GITHUB_INSTALLATION_REMOVED" ? 410
+              : error.failure.code === "GITHUB_INSTALLATION_SUSPENDED" || error.failure.code === "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE"
+                || error.failure.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" || error.failure.code === "GITHUB_REPOSITORY_NOT_AUTHORIZED" ? 403
+              : error.failure.code === "GITHUB_AUTHORITY_INVALID" ? 422
               : error.failure.code === "GITHUB_GIT_AUTHENTICATION_FAILED" ? 502 : 503;
             return sendJson(response, status, inspectEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: error.failure }));
           }
@@ -884,7 +905,21 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
               code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true, details: { incidentId: createId() }
             } }));
           }
-          const selected = message === "github-contents-permission-required"
+          const selected = message === "github-connection-disabled"
+            ? { status: 409, code: "GITHUB_CONNECTION_DISABLED" as const, retryable: false }
+            : message === "github-authority-generation-stale"
+              ? { status: 409, code: "GITHUB_AUTHORITY_GENERATION_STALE" as const, retryable: false }
+            : message === "github-installation-removed"
+              ? { status: 410, code: "GITHUB_INSTALLATION_REMOVED" as const, retryable: false }
+            : message === "github-installation-suspended"
+              ? { status: 403, code: "GITHUB_INSTALLATION_SUSPENDED" as const, retryable: false }
+            : message === "github-repository-access-unavailable"
+              ? { status: 403, code: "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE" as const, retryable: false }
+            : message === "github-upstream-transient"
+              ? { status: 503, code: "GITHUB_UPSTREAM_TRANSIENT" as const, retryable: true }
+            : message === "github-permission-required"
+              ? { status: 422, code: "GITHUB_AUTHORITY_INVALID" as const, retryable: false, details: { reason: "permission-required" as const } }
+            : message === "github-contents-permission-required"
             ? { status: 403, code: "GITHUB_CONTENTS_PERMISSION_REQUIRED" as const, retryable: false }
             : message === "github-repository-not-authorized"
               ? { status: 403, code: "GITHUB_REPOSITORY_NOT_AUTHORIZED" as const, retryable: false }
@@ -896,8 +931,18 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
                     ? { status: 503, code: "GITHUB_TOKEN_LEASE_ACTIVE" as const, retryable: true }
                   : { status: 503, code: "SOURCE_UNAVAILABLE" as const, retryable: true };
           return sendJson(response, selected.status, inspectEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
-            code: selected.code, message: selected.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" ? "GitHub Contents read permission is required." : "The GitHub repository source is currently unavailable.",
-            retryable: selected.retryable, details: {}
+            code: selected.code, message: selected.code === "GITHUB_CONTENTS_PERMISSION_REQUIRED" ? "GitHub Contents read permission is required."
+              : selected.code === "GITHUB_CONNECTION_DISABLED" ? "The GitHub connection is disconnected."
+              : selected.code === "GITHUB_AUTHORITY_GENERATION_STALE" ? "The GitHub connection changed while this operation was starting."
+              : selected.code === "GITHUB_INSTALLATION_REMOVED" ? "The GitHub installation is no longer available."
+              : selected.code === "GITHUB_INSTALLATION_SUSPENDED" ? "The GitHub installation is suspended."
+              : selected.code === "GITHUB_REPOSITORY_ACCESS_UNAVAILABLE" ? "The selected GitHub repository is no longer available to this connection."
+              : selected.code === "GITHUB_UPSTREAM_TRANSIENT" ? "GitHub is temporarily unavailable. Try again."
+              : selected.code === "GITHUB_AUTHORITY_INVALID" && "details" in selected
+                && "reason" in selected.details && selected.details.reason === "permission-required"
+                ? "The GitHub installation does not have the required read permission."
+              : "The GitHub repository source is currently unavailable.",
+            retryable: selected.retryable, details: "details" in selected ? selected.details : {}
           } }));
         }
       }
