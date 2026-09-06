@@ -10,6 +10,8 @@ import {
   parseProjectOptionsV1
 } from "@devspace/project-options";
 import { AgentExecutionError, ManagedWorkspaces, runGit, type GitRunner } from "./managed-workspaces.js";
+import { createGithubAskpassBroker } from "./github-askpass.js";
+import type { GithubAppAuthority } from "./github-app.js";
 import { DockerEngineClient } from "./docker-runtime.js";
 import { PreviewRuntimeManager } from "./preview-runtime.js";
 import { WorkspaceRuntimeError, WorkspaceRuntimeManager } from "./workspace-runtime.js";
@@ -94,6 +96,20 @@ async function harness(writer: AtomicJsonWriter = durableJsonWriter, wrap?: (bas
   return { root, source, roots, managed, git, workspace, firstCommit, register, createStore };
 }
 
+test("keeps configured GitHub authority outside general Agent health until private Git needs askpass", async () => {
+  const h = await harness();
+  const broker = createGithubAskpassBroker({ runtimeBases: [path.join(h.root, "unavailable-runtime")] });
+  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, undefined, undefined, undefined, undefined, undefined, broker);
+  managed.setGithubAuthority({} as GithubAppAuthority);
+  await managed.initialize();
+  expect(managed.isHealthy).toBe(true);
+  expect(broker.socketPath).toBeNull();
+  await expect(managed.inspectSource({ kind: "github-app", connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", repositoryId: "9007199254740993" }))
+    .rejects.toMatchObject({ failure: { code: "SOURCE_UNAVAILABLE" } });
+  expect(managed.isHealthy).toBe(true);
+  await managed.shutdown();
+});
+
 function differentDevice(device: string): string { return device === "44" ? "45" : "44"; }
 
 type JsonRecord = Record<string, unknown>;
@@ -140,6 +156,35 @@ test("rebinds finalized store ownership after a device-only change and persists 
   const restarted = new ManagedWorkspaces(h.roots, h.git); await restarted.initialize();
   await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ projectId, workspaceId: null });
   await expect(readJson(recordPath)).resolves.toMatchObject({ identity: current });
+});
+
+test("completes an interrupted exact origin transition after restart", async () => {
+  const h = await harness(); await h.createStore();
+  const recordPath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const record = await readJson<StoreOwnershipTestRecord & { git: { bare: true; originUrl: string; commonDirectoryPath: string } }>(recordPath);
+  const renamedOrigin = "https://example.com/renamed-repository.git";
+  await writeJson(recordPath, { ...record, version: 2, git: { ...record.git, pendingOriginUrl: renamedOrigin } });
+
+  const restarted = new ManagedWorkspaces(h.roots, h.git); await restarted.initialize();
+  await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ projectId, workspaceId: null });
+  await expect(readJson(recordPath)).resolves.toMatchObject({
+    version: 2, git: { originUrl: renamedOrigin, pendingOriginUrl: null }
+  });
+  await expect(h.git(["--git-dir", h.managed.repositoryPath(projectId), "config", "--get", "remote.origin.url"]))
+    .resolves.toMatchObject({ stdout: `${renamedOrigin}\n` });
+});
+
+test("rejects a third origin during an interrupted exact origin transition", async () => {
+  const h = await harness(); await h.createStore();
+  const recordPath = path.join(h.roots.state, "ownership/projects", `${projectId}.json`);
+  const record = await readJson<StoreOwnershipTestRecord & { git: { bare: true; originUrl: string; commonDirectoryPath: string } }>(recordPath);
+  const pendingOrigin = "https://example.com/renamed-repository.git";
+  const foreignOrigin = "https://example.com/foreign-repository.git";
+  await writeJson(recordPath, { ...record, version: 2, git: { ...record.git, pendingOriginUrl: pendingOrigin } });
+  await h.git(["--git-dir", h.managed.repositoryPath(projectId), "config", "remote.origin.url", foreignOrigin]);
+
+  const restarted = new ManagedWorkspaces(h.roots, h.git); await restarted.initialize();
+  await expect(restarted.inspectGit(projectId, null)).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
 });
 
 test("rebinds finalized workspace ownership and workspace inspection after a coherent device-only change", async () => {

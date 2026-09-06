@@ -8,8 +8,10 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const config = readWebRuntimeConfig(); const actor = await authenticateHeaders(request.headers, config.auth);
-    const state = getProjectDatabase(config.databasePath).getGithubConnectionState(actor.identity);
+    const database = getProjectDatabase(config.databasePath);
+    const state = database.getGithubConnectionState(actor.identity);
     if (state?.connection !== undefined && state?.connection !== null) {
+      database.assertGithubConnectionOwned(actor.identity, state.connection.connectionId);
       const inspected = await createAgentClient(config.agentSocketPath).inspectGithubInstallation(state.connection.connectionId);
       return NextResponse.json(inspected, { headers: { "cache-control": "no-store" } });
     }

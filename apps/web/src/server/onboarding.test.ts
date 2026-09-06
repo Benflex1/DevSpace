@@ -1,10 +1,10 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { sourceInspectionDataSchema } from "@devspace/contracts";
 import { AgentUnavailableError, type AgentClient } from "./agent-client.js";
 import type { ProjectDatabase } from "./database.js";
 import { OnboardingValidationError, onboardProject, parseOnboardingInput } from "./onboarding.js";
 
-const input = { repositoryUrl: "https://example.com/repo.git", name: "Repo", slug: "repo" };
+const input = { sourceKind: "remote" as const, repositoryUrl: "https://example.com/repo.git", name: "Repo", slug: "repo" };
 const database = { createProject: (value: Parameters<ProjectDatabase["createProject"]>[0]) => ({
   id: "018f0f00-0000-7000-8000-000000000001", name: value.name, slug: value.slug, repositoryUrl: value.repositoryUrl,
   defaultBranch: value.defaultBranch, state: "registering" as const, createdAt: "2026-07-17T00:00:00.000Z"
@@ -52,4 +52,35 @@ test("rejects malformed sources, missing branches, and unavailable Agent health"
     inspectSource: () => Promise.reject(new Error("must not inspect"))
   };
   await expect(onboardProject(input, "actor", { database, agent: unavailableAgent })).rejects.toBeInstanceOf(AgentUnavailableError);
+});
+
+test("registers a GitHub repository by connection and immutable repository ID without accepting a URL", async () => {
+  const connectionId = "018f0f00-0000-7000-8000-000000000099";
+  const repository = {
+    repositoryId: "9007199254740993", ownerLogin: "owner-org", name: "private-repo", fullName: "owner-org/private-repo",
+    cleanHttpsUrl: "https://github.com/owner-org/private-repo.git", defaultBranch: "main", private: true, archived: false, disabled: false
+  } as const;
+  expect(parseOnboardingInput({ sourceKind: "github-app", connectionId, repositoryId: repository.repositoryId, name: "Private", slug: "private" }))
+    .toEqual({ sourceKind: "github-app", connectionId, repositoryId: repository.repositoryId, name: "Private", slug: "private" });
+  expect(() => parseOnboardingInput({ sourceKind: "github-app", connectionId, repositoryId: repository.repositoryId,
+    repositoryUrl: repository.cleanHttpsUrl, name: "Private", slug: "private" })).toThrow(OnboardingValidationError);
+  const owned = vi.fn<(actor: string, connectionId: string) => void>();
+  const createProject = vi.fn<ProjectDatabase["createProject"]>((value) => ({
+    id: "018f0f00-0000-7000-8000-000000000001", name: value.name, slug: value.slug, repositoryUrl: value.repositoryUrl,
+    defaultBranch: value.defaultBranch, state: "registering" as const, createdAt: "2026-07-17T00:00:00.000Z"
+  }));
+  const githubDatabase = { assertGithubConnectionOwned: owned, createProject } as unknown as ProjectDatabase;
+  const agent: AgentClient = {
+    health: () => Promise.resolve({ status: "ok" as const }),
+    inspectSource: () => Promise.reject(new Error("must not inspect a GitHub source")),
+    resolveGithubRepository: () => Promise.resolve({ repository, cleanupDegraded: false })
+  };
+  const result = await onboardProject({ sourceKind: "github-app", connectionId, repositoryId: repository.repositoryId,
+    name: "Private", slug: "private" }, "actor", { agent, database: githubDatabase });
+  expect(result.repositoryUrl).toBe(repository.cleanHttpsUrl);
+  expect(owned).toHaveBeenCalledWith("actor", connectionId);
+  const createdInput = createProject.mock.calls[0]?.[0];
+  expect(createdInput?.repositoryUrl).toBe(repository.cleanHttpsUrl);
+  expect(createdInput?.githubSource?.connectionId).toBe(connectionId);
+  expect(createdInput?.githubSource?.repository).toEqual(repository);
 });

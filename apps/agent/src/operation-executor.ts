@@ -110,7 +110,8 @@ export class OperationExecutor {
           await this.managed.createManagedStore(record.request as Parameters<ManagedWorkspaces["createManagedStore"]>[0], operationId);
           break;
         case "project.fetch":
-          await this.managed.fetch((record.request as { projectId: string }).projectId, operationId);
+          await this.managed.fetch((record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).projectId,
+            operationId, (record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).source);
           break;
         case "workspace.create": {
           const request = record.request as Parameters<ManagedWorkspaces["createWorkspace"]>[0];
@@ -187,13 +188,14 @@ export class OperationExecutor {
         code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
         details: { incidentId: this.createId() }
       };
+      const internalReason = error instanceof AgentExecutionError ? error.internalReason : undefined;
       await this.journal.fail(operationId, failure);
       this.events.failed(operationId, resource, failure);
       const incidentId = "incidentId" in failure.details ? failure.details.incidentId : undefined;
       this.logger.error("agent.operation.failed", "Agent operation failed", {
         operationId, operationName: record.operationName, operationState: "failed", errorCategory: "operation",
         failureCategory: classifyFailureCode(failure.code), errorCode: failure.code, retryable: failure.retryable,
-        ...(incidentId === undefined ? {} : { incidentId }), ...resourceFields
+        ...(incidentId === undefined ? {} : { incidentId }), ...(internalReason === undefined ? {} : { internalReason }), ...resourceFields
       });
     }
   }

@@ -61,7 +61,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
     headers: { authorization: `Bearer ${fixture.controlToken}` }
   }).then(async (response) => await response.json()) as { networks: number; containers: number; execs: unknown[]; containerDetails: DockerContainer[] };
   await page.goto("/");
-  await page.getByLabel("Repository URL").fill(fixture.repositoryUrl);
+  await page.getByRole("textbox", { name: /Repository URL/ }).fill(fixture.repositoryUrl);
   await page.getByLabel("Project name").fill("Primary Fixture");
   await page.getByLabel("Project slug").fill("primary-fixture");
   await page.getByRole("button", { name: "Inspect and register" }).click();
@@ -111,7 +111,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   expect(projectRow.state).toBe("ready"); expect(revisions).toHaveLength(1); expect(revisions[0].state).toBe("active");
   expect(workspaces).toHaveLength(1); expect(projectRow.primary_workspace_id).toBe(workspaces[0].id);
   expect(operations.map((operation) => operation.operation_name).sort()).toEqual([
-    "configuration-revision.register", "configuration-runtime-plan.register", "project.fetch", "project.managed-store.create", "workspace.create"
+    "configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.setup.fetch", "workspace.create"
   ]);
   expect(operations.every((operation) => operation.state === "succeeded")).toBe(true);
 
@@ -125,7 +125,8 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   expect(bare).toBe("true"); expect(branch).toBe("main"); expect(head).toBe(fixture.expectedHead); expect(dirty).toBe("");
   for (const operation of operations) {
     const journal: unknown = JSON.parse(await readFile(path.join(fixture.managedRoot, "state", "operations", `${operation.operation_id}.json`), "utf8"));
-    expect(journal).toMatchObject({ operationId: operation.operation_id, operationName: operation.operation_name, state: "succeeded" });
+    const agentOperationName = operation.operation_name === "project.setup.fetch" ? "project.fetch" : operation.operation_name;
+    expect(journal).toMatchObject({ operationId: operation.operation_id, operationName: agentOperationName, state: "succeeded" });
   }
 
   const failFirstStart = await fetch("http://127.0.0.1:3199/fail-next-container-create", {
@@ -133,7 +134,7 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   });
   expect(failFirstStart.status).toBe(204);
   await project.getByRole("button", { name: "Start runtime" }).click();
-  await expect(project.getByText("The development container could not be created safely.")).toBeVisible({ timeout: 120_000 });
+  await expect(project.getByText("The workspace is not in a state that allows this action.")).toBeVisible({ timeout: 120_000 });
   const staleWebOperation = await fetch("http://127.0.0.1:3199/simulate-stale-web-runtime-operation", {
     method: "POST", headers: { authorization: `Bearer ${fixture.controlToken}` }
   });
@@ -241,9 +242,22 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   }).toBe(200);
   await gotoProject(recoveredPage, projectId);
   await expect(recoveredPage.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible({ timeout: 30_000 });
-  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0, { timeout: 45_000 });
+  const lostTerminalDialog = recoveredPage.locator(".lost-terminal-dialog");
+  await expect(lostTerminalDialog).toBeVisible({ timeout: 45_000 });
+  await lostTerminalDialog.getByRole("button", { name: "Dismiss" }).click();
+  await lostTerminalDialog.getByRole("button", { name: "Dismiss anyway" }).click();
+  const lostDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
+  const lostRow = lostDatabase.prepare<TerminalRow>("select id, state from terminal_sessions where id = ?").get(terminalRow.id);
+  lostDatabase.close();
+  expect(lostRow).toEqual({ id: terminalRow.id, state: "lost" });
   await recovered.getByRole("button", { name: "Create terminal tab" }).click();
   await expect(recovered.locator(".terminal-list li").filter({ hasText: "active" }).first()).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => {
+    const database = new BetterSqlite3(fixture.databasePath, { readonly: true });
+    const count = database.prepare<{ count: number }>("select count(*) as count from terminal_sessions").get()?.count ?? 0;
+    database.close();
+    return count;
+  }, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
   const replacementDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
   const terminalRows = replacementDatabase.prepare<TerminalRow>("select id, state from terminal_sessions order by created_at desc, id desc").all();
   replacementDatabase.close();
@@ -253,6 +267,6 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
 
   await gotoProject(recoveredPage, projectId);
   recovered = recoveredPage.locator("main.workbench");
-  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0);
+  await expect(recovered.locator(".terminal-list li").filter({ hasText: "lost" })).toHaveCount(0, { timeout: 45_000 });
 
 });

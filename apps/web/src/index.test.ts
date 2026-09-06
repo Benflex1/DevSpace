@@ -4,7 +4,7 @@ import path from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 import { afterEach, expect, test } from "vitest";
 import { uuidV7Schema, utcTimestampMsSchema } from "@devspace/contracts";
-import { DuplicateProjectSlugError, openProjectDatabase } from "./server/database.js";
+import { DuplicateProjectSlugError, ProjectSetupConflictError, openProjectDatabase } from "./server/database.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -56,6 +56,34 @@ test("reports duplicate slugs without exposing SQLite errors", async () => {
   expect(() => database.createProject({ ...input, name: "Other" })).toThrow(DuplicateProjectSlugError);
   expect(database.listProjects()).toHaveLength(1);
   expect(database.listAuditEvents()).toHaveLength(1);
+  database.close();
+});
+
+test("atomically persists immutable GitHub source metadata and proves actor ownership", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-web-db-")); directories.push(directory);
+  let idIndex = 0;
+  const database = openProjectDatabase(path.join(directory, "devspace.sqlite"), { createId: () => ids[idIndex++]! });
+  const attempt = database.createGithubConnectionAttempt({ actor: "owner@example.com", stateHash: "a".repeat(64), expiresAt: "2099-01-01T00:00:00.000Z" });
+  database.claimGithubConnectionAttempt({ actor: "owner@example.com", stateHash: "a".repeat(64), installationId: "9007199254740993" });
+  database.connectGithubInstallation({ actor: "owner@example.com", connectionId: attempt.connectionId, installationId: "9007199254740993",
+    accountId: "99", accountType: "Organization", accountLogin: "owner-org", repositorySelection: "selected",
+    permissions: { metadata: "read", contents: "read" }, status: "connected", verifiedAt: "2026-07-17T12:34:56.789Z" });
+  const project = database.createProject({ name: "Private", slug: "private", repositoryUrl: "https://github.com/owner/private.git",
+    defaultBranch: "release", actor: "owner@example.com", githubSource: {
+      connectionId: attempt.connectionId,
+      repository: { repositoryId: "9007199254740993", ownerLogin: "owner", name: "private", fullName: "owner/private",
+        cleanHttpsUrl: "https://github.com/owner/private.git", defaultBranch: "main", private: true, archived: false, disabled: false },
+      verifiedAt: "2026-07-17T12:34:56.789Z", metadataUpdatedAt: "2026-07-17T12:34:56.789Z"
+    } });
+  expect(database.getProjectGithubSource(project.id)).toMatchObject({ connectionId: attempt.connectionId, repositoryId: "9007199254740993",
+    defaultBranch: "main", private: true });
+  expect(database.getProjectSourceLocator(project.id)).toEqual({ kind: "github-app", connectionId: attempt.connectionId, repositoryId: "9007199254740993" });
+  expect(() => database.assertGithubConnectionOwned("other@example.com", attempt.connectionId)).toThrow(ProjectSetupConflictError);
+  const raw = new BetterSqlite3(path.join(directory, "devspace.sqlite"), { readonly: true });
+  const sourceRows = raw.prepare("select * from project_github_sources").all() as unknown;
+  const typedSourceRows = sourceRows as readonly Record<string, unknown>[];
+  expect(typedSourceRows.some((row) => Object.hasOwn(row, "token"))).toBe(false);
+  raw.close();
   database.close();
 });
 

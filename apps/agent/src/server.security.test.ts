@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { sourceInspectionDataSchema } from "@devspace/contracts";
 import { createAgentServer, unlinkOwnedSocket, type AgentServerOptions } from "./server.js";
+import { GitInspectionUnavailableError } from "./git-inspector.js";
 
 const id = "018f0f00-0000-7000-8000-000000000001";
 const now = new Date("2026-07-17T12:00:00.000Z");
@@ -303,4 +304,23 @@ test("URL policy, unknown headers, and unexpected inspector errors fail safely",
   expect(failure.status).toBe(500);
   expect(failure.body.error?.code).toBe("AGENT_INTERNAL_ERROR");
   expect(failure.raw).not.toContain(secret);
+});
+
+test.each([
+  ["remote-source", 503, "SOURCE_UNAVAILABLE"],
+  ["timeout", 503, "SOURCE_UNAVAILABLE"],
+  ["spawn", 500, "AGENT_INTERNAL_ERROR"],
+  ["process-management", 500, "AGENT_INTERNAL_ERROR"],
+  ["output-limit", 500, "AGENT_INTERNAL_ERROR"]
+] as const)("projects source inspection classifies bounded Git failure %s safely", async (reason, status, code) => {
+  const socketPath = await tempSocket();
+  const { server } = agent(socketPath, vi.fn(() => Promise.reject(new GitInspectionUnavailableError(reason))));
+  await server.start();
+  const body = JSON.stringify({ data: { source: { kind: "remote", url: "https://example.com/repo.git" } } });
+  const response = await request(socketPath, {
+    method: "POST", path: "/v1/projects/inspect-source",
+    headers: { ...protocolHeaders, "content-length": String(Buffer.byteLength(body)) }, body
+  });
+  expect(response.status).toBe(status);
+  expect(response.body.error?.code).toBe(code);
 });

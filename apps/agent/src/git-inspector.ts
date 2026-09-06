@@ -2,6 +2,7 @@ import { spawn, type SpawnOptions } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { remoteRepositoryUrlSchema, sourceInspectionDataSchema, type SourceInspectionData } from "@devspace/contracts";
+import { classifyAuthenticatedGitFailure } from "./authenticated-git-failure.js";
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -12,8 +13,10 @@ export interface GitInspector {
   inspect(url: string): Promise<SourceInspectionData>;
 }
 
+export type GitInspectionUnavailableReason = "remote-source" | "timeout" | "output-limit" | "spawn" | "process-management";
+
 export class GitInspectionUnavailableError extends Error {
-  constructor() {
+  constructor(readonly reason: GitInspectionUnavailableReason = "process-management") {
     super("The repository source is currently unavailable.");
     this.name = "GitInspectionUnavailableError";
   }
@@ -50,7 +53,7 @@ function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
 }
 
 export async function runBoundedProcess(command: string, args: readonly string[], options: BoundedProcessOptions): Promise<BoundedProcessResult> {
-  if (process.platform === "win32") throw new GitInspectionUnavailableError();
+  if (process.platform === "win32") throw new GitInspectionUnavailableError("spawn");
   return await new Promise<BoundedProcessResult>((resolve, reject) => {
     const spawnOptions: SpawnOptions = {
       shell: false,
@@ -64,7 +67,7 @@ export async function runBoundedProcess(command: string, args: readonly string[]
     const childStderr = child.stderr;
     if (pid === undefined || pid <= 1 || childStdout === null || childStderr === null) {
       child.kill("SIGKILL");
-      reject(new GitInspectionUnavailableError());
+      reject(new GitInspectionUnavailableError("spawn"));
       return;
     }
     options.onSpawn?.(pid);
@@ -86,33 +89,33 @@ export async function runBoundedProcess(command: string, args: readonly string[]
       childStdout.destroy();
       childStderr.destroy();
     };
-    const fail = () => {
+    const fail = (reason: GitInspectionUnavailableReason) => {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new GitInspectionUnavailableError());
+      reject(new GitInspectionUnavailableError(reason));
     };
-    const cancel = () => {
+    const cancel = (reason: "timeout" | "output-limit") => {
       if (settled || cancelling) return;
       cancelling = true;
       clearTimeout(timeoutTimer);
-      try { signalProcessGroup(pid, "SIGTERM"); } catch { fail(); return; }
+      try { signalProcessGroup(pid, "SIGTERM"); } catch { fail("process-management"); return; }
       terminationTimer = setTimeout(() => {
-        try { signalProcessGroup(pid, "SIGKILL"); } catch { fail(); return; }
-        settlementTimer = setTimeout(fail, FORCED_SETTLEMENT_MS);
+        try { signalProcessGroup(pid, "SIGKILL"); } catch { fail("process-management"); return; }
+        settlementTimer = setTimeout(() => fail(reason), FORCED_SETTLEMENT_MS);
       }, TERMINATION_GRACE_MS);
     };
     const collect = (target: "stdout" | "stderr", chunk: Buffer) => {
       if (cancelling || settled) return;
       totalBytes += chunk.length;
-      if (totalBytes > options.maxOutputBytes) { cancel(); return; }
+      if (totalBytes > options.maxOutputBytes) { cancel("output-limit"); return; }
       if (target === "stdout") stdout += chunk.toString("utf8");
       else stderr += chunk.toString("utf8");
     };
-    const timeoutTimer = setTimeout(cancel, options.timeoutMs);
+    const timeoutTimer = setTimeout(() => cancel("timeout"), options.timeoutMs);
     childStdout.on("data", (chunk: Buffer) => collect("stdout", chunk));
     childStderr.on("data", (chunk: Buffer) => collect("stderr", chunk));
-    child.once("error", fail);
+    child.once("error", () => fail("spawn"));
     child.once("close", (code, signal) => {
       // A direct child may exit on SIGTERM while a credential helper still holds the process
       // group. Keep the escalation timer alive until the group has received SIGKILL.
@@ -145,10 +148,6 @@ function validateInspectionUrl(rawUrl: string): string {
   return parsed;
 }
 
-function looksUnavailable(stderr: string): boolean {
-  return /could not resolve|connection timed out|connection refused|network is unreachable|authentication failed|permission denied|unable to access/iu.test(stderr);
-}
-
 export function createProductionGitInspector(options: {
   timeoutMs?: number;
   runProcess?: typeof runBoundedProcess;
@@ -179,12 +178,12 @@ export function createProductionGitInspector(options: {
           GIT_ASKPASS: "/bin/false"
         }
       });
-      if (result.signal !== null) throw new GitInspectionUnavailableError();
-      if (result.code === 0) return parseLsRemoteOutput(result.stdout);
-      if (looksUnavailable(result.stderr)) throw new GitInspectionUnavailableError();
-      return sourceInspectionDataSchema.parse({
-        sourceKind: "remote", isGitRepository: false, defaultBranch: null, headCommit: null
-      });
+      if (result.signal === null && result.code === 0) return parseLsRemoteOutput(result.stdout);
+      const failureKind = classifyAuthenticatedGitFailure(result);
+      if (failureKind === "remote-source" || failureKind === "authentication") {
+        throw new GitInspectionUnavailableError("remote-source");
+      }
+      throw new Error("git-inspection-process-failed");
     }
   };
 }

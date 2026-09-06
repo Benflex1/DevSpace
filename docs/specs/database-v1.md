@@ -48,6 +48,31 @@ The project row is the single authoritative storage location for project display
 - `archived_at` nullable
 - `row_version`
 
+`projects.default_branch` is the selected onboarding/setup branch and is independent from mutable
+GitHub repository metadata. A later GitHub default-branch change updates only the GitHub source
+metadata, never the selected project branch implicitly. `projects.repository_url` remains the
+credential-free transport/display URL required by Database v1.
+
+## project_github_sources
+
+`project_github_sources` is Web-owned safe metadata for the GitHub App source variant. It has no
+secret or token column and is inserted atomically with its project row.
+
+- `project_id` primary key and foreign key to `projects`, `ON DELETE CASCADE`
+- `connection_id` foreign key to retained `github_connections`, `ON DELETE RESTRICT`
+- `repository_id`, canonical decimal GitHub repository identity retained as text
+- `owner_login`, `name`, `full_name`, and `clean_https_url`
+- `default_branch`, the current GitHub metadata value, separate from `projects.default_branch`
+- `is_private`, `is_archived`, `is_disabled`
+- `verified_at`, `metadata_updated_at`
+- `row_version`, initialized to `1` and incremented by safe metadata refreshes
+
+The owning Web query joins `github_connections.connection_id` to
+`github_connection_attempts.connection_id` and requires the attempt's `created_by` to equal the
+authenticated actor and its status to be `connected`. A connection ID alone is never treated as
+browser authority. The project source row retains the exact `{ connection_id, repository_id }`
+authority; owner/name/URL values are validated metadata only.
+
 ## project_config_revisions
 
 - `id` primary key
@@ -297,6 +322,8 @@ row. Every foreign key uses `ON UPDATE NO ACTION`.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `projects` | `active_config_revision_id` | `project_config_revisions` | `id` | nullable | `RESTRICT` | `NO ACTION` | Protected current-selection pointer. Staged project creation permits null, but a selected immutable revision cannot be deleted independently. |
 | `projects` | `primary_workspace_id` | `workspaces` | `id` | nullable | `RESTRICT` | `NO ACTION` | Protected current-primary pointer. Staged project creation permits null, but the selected primary workspace cannot be deleted independently. |
+| `project_github_sources` | `project_id` | `projects` | `id` | required | `CASCADE` | `NO ACTION` | Strict project-owned GitHub source metadata. |
+| `project_github_sources` | `connection_id` | `github_connections` | `connection_id` | required | `RESTRICT` | `NO ACTION` | Retained installation authority cannot be deleted while a project uses it. |
 | `project_config_revisions` | `project_id` | `projects` | `id` | required | `CASCADE` | `NO ACTION` | Strict project ownership; a revision has no independent meaning after project deletion. |
 | `workspaces` | `project_id` | `projects` | `id` | required | `CASCADE` | `NO ACTION` | Strict project ownership; a workspace has no independent meaning after project deletion. |
 | `workspaces` | `config_revision_id` | `project_config_revisions` | `id` | required | `RESTRICT` | `NO ACTION` | Required immutable-revision reference needed to interpret the workspace. |
@@ -351,3 +378,9 @@ Later configuration activation is one web-owned transaction that supersedes the 
 - backup before destructive migrations;
 - no agent-owned migrations;
 - migration utilities do not expose general runtime repositories or write APIs.
+
+Migration `0007_github_private_sources.sql` creates `project_github_sources` and registers schema
+version `8`. It is forward-only, has no secret columns, is tested from an empty database and the
+previous schema, and preserves the existing public-project model. Existing public projects remain
+without a `project_github_sources` row; GitHub projects receive one during the atomic registration
+transaction.

@@ -59,7 +59,9 @@ async function exerciseCancellation(mode: "timeout" | "output"): Promise<void> {
     descendantPid = await waitForFile(pidFile);
     expect(groupPid).toBeGreaterThan(1);
     expect(isAlive(descendantPid)).toBe(true);
-    await expect(operation).rejects.toBeInstanceOf(GitInspectionUnavailableError);
+    await expect(operation).rejects.toMatchObject({
+      reason: mode === "timeout" ? "timeout" : "output-limit"
+    });
     expect(Date.now() - started).toBeLessThan(1_500);
     await waitUntilDead(descendantPid);
   } finally {
@@ -126,6 +128,12 @@ test("normal subprocess completion resolves without cancellation", async () => {
   expect(result).toMatchObject({ code: 0, signal: null, stdout: "normal-completion\n", stderr: "" });
 });
 
+test("inspection-unavailable reasons preserve local process versus remote timeout causes", () => {
+  expect(new GitInspectionUnavailableError("spawn")).toMatchObject({ reason: "spawn" });
+  expect(new GitInspectionUnavailableError("process-management")).toMatchObject({ reason: "process-management" });
+  expect(new GitInspectionUnavailableError("timeout")).toMatchObject({ reason: "timeout" });
+});
+
 test("an already-gone process group is handled without signaling an unrelated process", async () => {
   let groupPid = 0;
   const operation = runBoundedProcess(process.execPath, [path.resolve("apps/agent/test/fixtures/process-normal.mjs")], {
@@ -153,4 +161,15 @@ test("production inspection accepts plain HTTPS and rejects queries or SSH befor
   await expect(inspector.inspect("https://example.com/repo.git?access_token=review-secret")).rejects.toBeInstanceOf(GitInspectionPolicyError);
   await expect(inspector.inspect("ssh://git@example.com/repo.git")).rejects.toBeInstanceOf(GitInspectionPolicyError);
   expect(runner).toHaveBeenCalledTimes(1);
+});
+
+test("production inspection treats a signaled Git process as internal even with a zero exit code", async () => {
+  const runner = vi.fn<typeof runBoundedProcess>().mockResolvedValue({
+    stdout: "ref: refs/heads/main\tHEAD\n0123456789abcdef0123456789abcdef01234567\tHEAD\n",
+    stderr: "",
+    code: 0,
+    signal: "SIGTERM"
+  });
+  const inspector = createProductionGitInspector({ runProcess: runner });
+  await expect(inspector.inspect("https://example.com/repo.git")).rejects.toMatchObject({ message: "git-inspection-process-failed" });
 });

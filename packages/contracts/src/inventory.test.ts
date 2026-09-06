@@ -3,6 +3,8 @@ import {
   MUTATION_OPERATION_ID_HEADER,
   agentApiV1EndpointByOperation,
   agentApiV1Endpoints,
+  githubAgentApiV1EndpointByOperation,
+  githubAgentApiV1Endpoints,
   generateAgentApiV1JsonSchema
 } from "./index.js";
 
@@ -27,6 +29,8 @@ const requestData: Record<string, unknown> = {
   "configuration-runtime-plan.register": { ...project, revisionId: id2, revisionHash: hash, runtimePlan: {
     format: "devspace.runtime-plan/v1", hash, canonicalJson: '{"format":"devspace.runtime-plan/v1"}'
   } },
+  "github.installation.refresh": { connectionId: id },
+  "github.repositories.resolve": { connectionId: id, repositoryId: "9007199254740993" },
   "project.source.inspect": { source: { kind: "registered-local", sourceId: id } },
   "project.managed-store.create": { ...project, source: { kind: "remote", url: "https://example.com/repository.git" } },
   "project.fetch": project,
@@ -58,6 +62,11 @@ const responseData: Record<string, unknown> = {
   "agent.capabilities.get": { protocolVersion: 1, terminalSubprotocol: "devspace.terminal.v1" },
   "agent.runtime-status.get": { rootlessRuntime: "available", operationJournal: "available", checkedAt: timestamp },
   "configuration-revision.validate": { valid: true, revisionId: id2, configurationHash: hash },
+  "github.installation.refresh": { connectionId: id, installationId: "42", accountId: "9007199254740993", accountType: "Organization",
+    accountLogin: "owner", repositorySelection: "selected", permissions: { metadata: "read", contents: "read" }, status: "connected",
+    verifiedAt: timestamp, cleanupDegraded: false },
+  "github.repositories.resolve": { repository: { repositoryId: "9007199254740993", ownerLogin: "owner", name: "repo", fullName: "owner/repo",
+    cleanHttpsUrl: "https://github.com/owner/repo.git", defaultBranch: "main", private: true, archived: false, disabled: false }, cleanupDegraded: false },
   "project.source.inspect": { sourceKind: "remote", isGitRepository: true, defaultBranch: "main", headCommit: "a".repeat(40) },
   "project.git.inspect": { ...project, workspaceId: null, branchName: "main", headCommit: "a".repeat(40), dirty: false, aheadCount: 0, behindCount: 0 },
   "workspace.inspect": { ...workspace, kind: "primary", revisionId: id, revisionHash: hash, desiredState: "running", observedState: "running", dirty: false, runtimeStack: { desiredState: "running", observedState: "running" } },
@@ -82,6 +91,12 @@ describe("Agent API v1 executable endpoint inventory", () => {
     expect(agentApiV1Endpoints.every((endpoint) => endpoint.path.startsWith("/v1"))).toBe(true);
     expect(operations.join(" ")).not.toMatch(/reconciliation|snapshot|event/u);
     expect(Object.keys(agentApiV1EndpointByOperation)).toEqual(operations);
+  });
+
+  test("includes live refresh and exact repository resolution in the GitHub inventory", () => {
+    expect(githubAgentApiV1Endpoints).toHaveLength(6);
+    expect(githubAgentApiV1EndpointByOperation["github.installation.refresh"].path).toBe("/v1/github/installations/refresh");
+    expect(githubAgentApiV1EndpointByOperation["github.repositories.resolve"].path).toBe("/v1/github/repositories/resolve");
   });
 
   test("makes every required contract and error row inspectable", () => {
@@ -137,7 +152,7 @@ describe("Agent API v1 executable endpoint inventory", () => {
     expect(generated.description).toContain("Structural JSON Schema projection");
     expect(generated.$comment).toContain("Authoritative runtime Zod validation");
     expect(generated.$comment).toContain("semantic refinements");
-    expect(generated["x-devspace-endpoint-count"]).toBe(42);
+    expect(generated["x-devspace-endpoint-count"]).toBe(44);
     const definitions = generated.$defs as Record<string, unknown>;
     expect(definitions["operation.workspace.create.requestBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.successBody"]).toBeDefined();

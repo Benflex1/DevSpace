@@ -222,16 +222,20 @@ export async function setupPrimaryWorkspace(input: WorkspaceSetupInput, projectI
       projectId, actor, operationName: "project.managed-store.create", resourceType: "project", resourceId: projectId
     });
     await completeMutation(dependencies.database, dependencies.agent, createStore, async () => {
+      const source = dependencies.database.getProjectSourceLocator(projectId, actor);
+      if (source === null) throw new WorkspaceSetupValidationError("The project source is no longer available.");
       await dependencies.agent.createManagedStore(createStore.operationId, {
-        projectId, source: { kind: "remote", url: setup.project.repositoryUrl }
+        projectId, source
       });
     }, polling);
 
     const fetch = dependencies.database.getOrCreateOperation({
-      projectId, actor, operationName: "project.fetch", resourceType: "project", resourceId: projectId
+      projectId, actor, operationName: "project.setup.fetch", resourceType: "project", resourceId: projectId
     });
     await completeMutation(dependencies.database, dependencies.agent, fetch, async () => {
-      await dependencies.agent.fetchProject(fetch.operationId, projectId);
+      const source = dependencies.database.getProjectSourceLocator(projectId, actor);
+      if (source === null) throw new WorkspaceSetupValidationError("The project source is no longer available.");
+      await dependencies.agent.fetchProject(fetch.operationId, projectId, source.kind === "github-app" ? source : undefined);
     }, polling);
 
     const branchName = gitBranchNameSchema.parse(setup.project.defaultBranch);

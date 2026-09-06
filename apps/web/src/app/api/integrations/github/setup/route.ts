@@ -23,7 +23,7 @@ export async function GET(request: Request) {
     const attempt = database.claimGithubConnectionAttempt({ actor: actor.identity,
       stateHash: createHash("sha256").update(state, "utf8").digest("hex"), installationId });
     const verified = await createAgentClient(config.agentSocketPath).verifyGithubInstallation(attempt.connectionId, installationId);
-    database.connectGithubInstallation(verified);
+    database.connectGithubInstallation({ actor: actor.identity, ...verified });
     return redirect(config.appOrigin, verified.cleanupDegraded ? "degraded" : "connected");
   } catch (error) {
     if (error instanceof AuthenticationError) return NextResponse.json({ message: "Authentication is required." }, { status: 403 });

@@ -51,6 +51,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [tasks, setTasks] = useState<readonly Task[]>(initialTasks);
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
   const [previews, setPreviews] = useState<readonly PreviewLifecycleView[]>(initialPreviews);
+  const [fetchingRepository, setFetchingRepository] = useState(false);
   const currentPreviews = useRef(initialPreviews);
   const previewLivenessPoller = useRef<PreviewLivenessPoller | null>(null);
   const { notice, show: showNotice, clear: clearNotice } = useTransientNotice(initialMessage);
@@ -284,11 +285,34 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     showNotice(response.ok ? "Preview reconciliation requested." : result.message ?? "Preview reconciliation failed.", response.ok ? "success" : "error",
       response.ok ? undefined : result.incidentId);
   };
+  const fetchRepository = async () => {
+    if (!agentReachable || fetchingRepository) return;
+    setFetchingRepository(true);
+    showNotice("Fetching repository…", "pending");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/fetch`, {
+        method: "POST", headers: { Origin: window.location.origin, "x-devspace-csrf": "1" }
+      });
+      const result = await response.json() as { message?: string; incidentId?: string };
+      if (response.status === 202) {
+        showNotice(result.message ?? "Fetch is still in progress. Retry to reconcile it.", "pending", result.incidentId);
+      } else {
+        showNotice(response.ok ? "Repository fetched." : result.message ?? "Repository fetch failed.", response.ok ? "success" : "error",
+          response.ok ? undefined : result.incidentId);
+      }
+      if (response.ok) await refresh();
+    } catch {
+      showNotice("Repository fetch failed safely.", "error");
+    } finally {
+      setFetchingRepository(false);
+    }
+  };
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
     <WorkbenchTopBar projectName={projectName} branchName={branchName} repositoryUrl={repositoryUrl} projectId={projectId}
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
-      retryStart={retryStart} />
+      retryStart={retryStart} agentReachable={agentReachable} fetchingRepository={fetchingRepository}
+      onFetchRepository={() => { fetchRepository().catch(() => showNotice("Repository fetch failed safely.", "error")); }} />
     <div className="workbench-body">
       <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab}
@@ -317,14 +341,18 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 }
 
 function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, runtimeState, runtimeAvailable, activeAction, canStart,
-  canStop, retryStart }: {
+  canStop, retryStart, agentReachable, fetchingRepository, onFetchRepository }: {
   projectName: string; branchName: string; repositoryUrl: string; projectId: string; runtimeState: string; runtimeAvailable: boolean;
-  activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
+  activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean; agentReachable: boolean;
+  fetchingRepository: boolean; onFetchRepository: () => void;
 }) {
   return <header className="workbench-topbar">
     <div className="workbench-breadcrumb"><Link href="/" aria-label="Back to Projects">Projects</Link><span aria-hidden="true">/</span><strong>{projectName}</strong></div>
     <div className="workbench-context"><span className="context-item"><span className="context-label">branch</span><code>{branchName}</code></span>
       <a className="topbar-action" href={repositoryUrl} target="_blank" rel="noreferrer">Repository</a>
+      <button type="button" className="topbar-action" disabled={!agentReachable || fetchingRepository} onClick={onFetchRepository}>
+        {fetchingRepository ? "Fetching…" : "Fetch repository"}
+      </button>
       <span className={`runtime-chip ${runtimeState}`}>{runtimeLabel(runtimeState)}</span>
       <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart}
         canStop={canStop} retryStart={retryStart} />

@@ -8,12 +8,20 @@ import {
   githubConnectionIdSchema,
   githubDecimalIdSchema,
   githubInstallationInspectionSchema,
+  githubInstallationRefreshDataSchema,
   githubInstallationVerifyDataSchema,
+  githubRepositoryResolveDataSchema,
+  githubRepositoryResolutionSchema,
+  githubRepositorySchema,
   githubRepositoriesListDataSchema,
   githubRepositoryPageSchema,
   type GithubAppInspection,
   type GithubInstallationInspection,
+  type GithubInstallationRefreshData,
   type GithubInstallationVerifyData,
+  type GithubRepository,
+  type GithubRepositoryResolution,
+  type GithubRepositoryResolveData,
   type GithubRepositoriesListData,
   type GithubRepositoryPage
 } from "@devspace/contracts";
@@ -23,6 +31,12 @@ const MAX_CONFIG_BYTES = 16 * 1024;
 const MAX_KEY_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const GITHUB_API_VERSION = "2022-11-28";
+// Keep this aligned with the maximum authenticated Git execution deadline in
+// managed-workspaces.ts.  The additional margin covers the bounded GitHub
+// token revocation request and a small scheduling allowance.
+const MAX_AUTHENTICATED_GIT_EXECUTION_MS = 120_000;
+const GITHUB_TOKEN_CLEANUP_MARGIN_MS = 30_000;
+const MIN_REQUIRED_TOKEN_LIFETIME_MS = MAX_AUTHENTICATED_GIT_EXECUTION_MS + GITHUB_TOKEN_CLEANUP_MARGIN_MS;
 const MAX_INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 const CONSERVATIVE_UNKNOWN_MINT_LEASE_MS = 70 * 60 * 1000;
 const githubTokenExpirySchema = z.string().datetime({ offset: true });
@@ -50,11 +64,36 @@ export interface GithubHttpResponse { readonly status: number; readonly body: un
 export type GithubHttpTransport = (request: GithubHttpRequest) => Promise<GithubHttpResponse>;
 
 function failure(code: string): Error { return new Error(`github-${code}`); }
-function safePrimaryFailure(error: unknown): Error {
-  if (error instanceof Error && /^(?:github-(?:continuation-invalid|operation-failed|token-mint-failed|upstream-invalid))$/u.test(error.message)) return error;
-  return failure("upstream-invalid");
+type OperationOutcome<T> =
+  | { readonly completed: false }
+  | { readonly completed: true; readonly value: T };
+
+function agentFailureCode(error: unknown): string | null {
+  if (!(error instanceof Error) || error.name !== "AgentExecutionError") return null;
+  const candidate = record((error as { readonly failure?: unknown }).failure);
+  return typeof candidate?.code === "string" ? candidate.code : null;
 }
+
+function safePrimaryFailure(error: unknown): Error {
+  if (error instanceof z.ZodError) return failure("authority-contract-violation");
+  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|contents-permission-required|installation-unavailable|repository-not-authorized|git-authentication-failed))$/u.test(error.message)) return error;
+  const typedCode = agentFailureCode(error);
+  if (typedCode === "SOURCE_UNAVAILABLE") return failure("operation-failed");
+  if (typedCode === "GITHUB_GIT_AUTHENTICATION_FAILED") return failure("git-authentication-failed");
+  if (typedCode === "GITHUB_INSTALLATION_UNAVAILABLE") return failure("installation-unavailable");
+  if (typedCode === "GITHUB_REPOSITORY_NOT_AUTHORIZED") return failure("repository-not-authorized");
+  if (typedCode === "GITHUB_CONTENTS_PERMISSION_REQUIRED") return failure("contents-permission-required");
+  if (typedCode === "GITHUB_TOKEN_LEASE_ACTIVE") return failure("token-lease-active");
+  if (typedCode === "AGENT_INTERNAL_ERROR") return failure("authority-programming-error");
+  return failure("authority-programming-error");
+}
+interface GithubJsonNumber { readonly kind: "github-json-number"; readonly value: string }
+function githubJsonNumber(value: string): GithubJsonNumber { return { kind: "github-json-number", value }; }
 function decimal(value: unknown): string | null {
+  if (record(value)?.kind === "github-json-number" && typeof record(value)?.value === "string") {
+    const candidate = record(value)?.value;
+    return githubDecimalIdSchema.safeParse(candidate).success ? candidate as string : null;
+  }
   if (typeof value === "bigint") return value >= 0n ? value.toString(10) : null;
   if (typeof value === "string") return githubDecimalIdSchema.safeParse(value).success ? value : null;
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
@@ -104,8 +143,92 @@ async function readPrivateFile(file: string, maxBytes: number, afterRead?: () =>
   } finally { await handle.close().catch(() => undefined); }
 }
 
-function parseLosslessGithubJson(text: string): unknown {
-  return JSON.parse(text.replace(/("(?:id|app_id)"\s*:\s*)([0-9]{1,32})(?=\s*[,}])/gu, "$1\"$2\""));
+class GithubJsonParser {
+  private offset = 0;
+  constructor(private readonly text: string) {}
+  parse(): unknown {
+    const value = this.value(); this.space();
+    if (this.offset !== this.text.length) throw failure("upstream-invalid");
+    return value;
+  }
+  private space(): void { while (this.offset < this.text.length && /\s/u.test(this.text[this.offset]!)) this.offset += 1; }
+  private value(): unknown {
+    this.space();
+    const character = this.text[this.offset];
+    if (character === "{") return this.object();
+    if (character === "[") return this.array();
+    if (character === '"') return this.string();
+    if (character === "t" && this.text.startsWith("true", this.offset)) { this.offset += 4; return true; }
+    if (character === "f" && this.text.startsWith("false", this.offset)) { this.offset += 5; return false; }
+    if (character === "n" && this.text.startsWith("null", this.offset)) { this.offset += 4; return null; }
+    if (character === "-" || (character !== undefined && /[0-9]/u.test(character))) return this.number();
+    throw failure("upstream-invalid");
+  }
+  private string(): string {
+    const start = this.offset; this.offset += 1;
+    let escaped = false;
+    while (this.offset < this.text.length) {
+      const character = this.text[this.offset]!;
+      if (character.codePointAt(0)! < 0x20) throw failure("upstream-invalid");
+      this.offset += 1;
+      if (escaped) { escaped = false; continue; }
+      if (character === "\\") { escaped = true; continue; }
+      if (character === '"') {
+        try { return JSON.parse(this.text.slice(start, this.offset)) as string; }
+        catch { throw failure("upstream-invalid"); }
+      }
+    }
+    throw failure("upstream-invalid");
+  }
+  private number(): GithubJsonNumber {
+    const start = this.offset;
+    if (this.text[this.offset] === "-") this.offset += 1;
+    if (this.text[this.offset] === "0") this.offset += 1;
+    else {
+      if (this.text[this.offset] === undefined || !/[1-9]/u.test(this.text[this.offset]!)) throw failure("upstream-invalid");
+      while (this.offset < this.text.length && /[0-9]/u.test(this.text[this.offset]!)) this.offset += 1;
+    }
+    if (this.text[this.offset] === ".") {
+      this.offset += 1; if (this.text[this.offset] === undefined || !/[0-9]/u.test(this.text[this.offset]!)) throw failure("upstream-invalid");
+      while (this.offset < this.text.length && /[0-9]/u.test(this.text[this.offset]!)) this.offset += 1;
+    }
+    if (this.text[this.offset] === "e" || this.text[this.offset] === "E") {
+      this.offset += 1; if (this.text[this.offset] === "+" || this.text[this.offset] === "-") this.offset += 1;
+      if (this.text[this.offset] === undefined || !/[0-9]/u.test(this.text[this.offset]!)) throw failure("upstream-invalid");
+      while (this.offset < this.text.length && /[0-9]/u.test(this.text[this.offset]!)) this.offset += 1;
+    }
+    return githubJsonNumber(this.text.slice(start, this.offset));
+  }
+  private object(): Record<string, unknown> {
+    this.offset += 1; const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>; this.space();
+    if (this.text[this.offset] === "}") { this.offset += 1; return result; }
+    while (true) {
+      this.space(); if (this.text[this.offset] !== '"') throw failure("upstream-invalid");
+      const key = this.string(); this.space(); if (this.text[this.offset] !== ":") throw failure("upstream-invalid");
+      this.offset += 1; if (Object.hasOwn(result, key)) throw failure("upstream-invalid");
+      result[key] = this.value(); this.space();
+      if (this.text[this.offset] === "}") { this.offset += 1; return result; }
+      if (this.text[this.offset] !== ",") throw failure("upstream-invalid"); this.offset += 1;
+    }
+  }
+  private array(): unknown[] {
+    this.offset += 1; const result: unknown[] = []; this.space();
+    if (this.text[this.offset] === "]") { this.offset += 1; return result; }
+    while (true) {
+      result.push(this.value()); this.space();
+      if (this.text[this.offset] === "]") { this.offset += 1; return result; }
+      if (this.text[this.offset] !== ",") throw failure("upstream-invalid"); this.offset += 1;
+    }
+  }
+}
+function parseLosslessGithubJson(text: string): unknown { return new GithubJsonParser(text).parse(); }
+
+function serializeGithubRequestBody(body: unknown): string {
+  const exact = z.strictObject({ kind: z.literal("exact-repository-token"), repositoryId: githubDecimalIdSchema }).safeParse(body);
+  if (exact.success) return `{"repository_ids":[${exact.data.repositoryId}],"permissions":{"contents":"read"}}`;
+  const metadata = z.strictObject({ permissions: z.strictObject({ metadata: z.literal("read") }) }).safeParse(body);
+  if (metadata.success) return '{"permissions":{"metadata":"read"}}';
+  throw failure("upstream-invalid");
 }
 async function cancelResponse(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => undefined);
@@ -161,7 +284,7 @@ const defaultTransport: GithubHttpTransport = async (request) => {
     signal: AbortSignal.timeout(10_000),
     headers: { Accept: "application/vnd.github+json", "Accept-Encoding": "identity", Authorization: request.authorization, "X-GitHub-Api-Version": GITHUB_API_VERSION,
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }) },
-    ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) })
+    ...(request.body === undefined ? {} : { body: serializeGithubRequestBody(request.body) })
   });
   const bytes = await readBoundedResponseBytes(response);
   let body: unknown = {};
@@ -182,11 +305,44 @@ function jwt(privateKey: Buffer, appId: string, now: Date): string {
   return `${input}.${signer.sign(privateKey).toString("base64url")}`;
 }
 
+function safeRepository(value: unknown): GithubRepository {
+  const repository = record(value); const owner = record(repository?.owner);
+  if (repository === null || owner === null || typeof owner.login !== "string" || typeof repository.name !== "string"
+    || typeof repository.full_name !== "string" || typeof repository.default_branch !== "string"
+    || typeof repository.private !== "boolean" || typeof repository.archived !== "boolean" || typeof repository.disabled !== "boolean") {
+    throw failure("upstream-invalid");
+  }
+  try {
+    return githubRepositorySchema.parse({
+      repositoryId: decimal(repository.id), ownerLogin: owner.login, name: repository.name,
+      fullName: repository.full_name, cleanHttpsUrl: `https://github.com/${owner.login}/${repository.name}.git`,
+      defaultBranch: repository.default_branch, private: repository.private, archived: repository.archived, disabled: repository.disabled
+    });
+  } catch { throw failure("upstream-invalid"); }
+}
+
+function exactScopedRepository(value: unknown, repositoryId: string): GithubRepository {
+  const body = record(value); const repositories = body?.repositories;
+  const selection = body?.repository_selection;
+  const permissions = record(body?.permissions);
+  if (selection !== "selected" || permissions === null || permissions.contents !== "read"
+    || Object.entries(permissions).some(([name, level]) => name !== "contents" && !(name === "metadata" && level === "read"))) {
+    throw failure("repository-not-authorized");
+  }
+  if (!Array.isArray(repositories) || repositories.length !== 1) throw failure("repository-not-authorized");
+  const repository = safeRepository(repositories[0]);
+  if (repository.repositoryId !== repositoryId) throw failure("repository-not-authorized");
+  return repository;
+}
+
 export interface GithubAppAuthority {
   inspectApp(): Promise<GithubAppInspection>;
   verifyInstallation(input: GithubInstallationVerifyData): Promise<GithubInstallationInspection>;
+  refreshInstallation(input: GithubInstallationRefreshData): Promise<GithubInstallationInspection>;
   inspectInstallation(connectionId: string): Promise<GithubInstallationInspection>;
   listRepositories(input: GithubRepositoriesListData): Promise<GithubRepositoryPage>;
+  resolveRepository(input: GithubRepositoryResolveData): Promise<GithubRepositoryResolution>;
+  withExactRepositoryToken<T>(input: GithubRepositoryResolveData, operation: (token: string, repository: GithubRepository) => Promise<T>, operationId?: string): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }>;
   /** Agent-private test seam; never part of the server contract. */
   persistBindingForTest(binding: GithubInstallationInspection): Promise<void>;
 }
@@ -201,6 +357,10 @@ export async function createGithubAppAuthority(options: {
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? randomUUID;
   const transport = options.transport ?? defaultTransport;
+  const requestGithub = async (request: GithubHttpRequest): Promise<GithubHttpResponse> => {
+    try { return await transport(request); }
+    catch { throw failure("upstream-invalid"); }
+  };
   const writer = options.writer ?? durableJsonWriter;
   const removeLease = options.removeLease ?? unlink;
   const bindingsRoot = path.join(appRoot, "installations");
@@ -319,246 +479,252 @@ export async function createGithubAppAuthority(options: {
       if (locks.get(connectionId) === current) locks.delete(connectionId);
     }
   };
+  const liveBinding = async (connectionId: string, installationId: string, preserveExisting: boolean): Promise<GithubInstallationInspection> => {
+    const current = requireConfig();
+    const existing = await readBinding(connectionId).catch((error: unknown) => {
+      if (error instanceof Error && error.message === "github-connection-not-found") return null;
+      throw error instanceof Error ? error : failure("private-state-invalid");
+    });
+    const appToken = jwt(current.privateKey, current.config.appId, now());
+    const appResponse = await requestGithub({ method: "GET", path: "/app", authorization: `Bearer ${appToken}` });
+    const app = record(appResponse.body);
+    if (appResponse.status !== 200 || decimal(app?.id) !== current.config.appId) throw failure("authority-invalid");
+    const response = await requestGithub({ method: "GET", path: `/app/installations/${installationId}`, authorization: `Bearer ${appToken}` });
+    const installation = record(response.body); const account = record(installation?.account);
+    if (response.status !== 200) throw failure("installation-unavailable");
+    if (decimal(installation?.id) !== installationId || decimal(installation?.app_id) !== current.config.appId
+      || decimal(account?.id) !== current.config.expectedAccountId || account?.type !== current.config.expectedAccountType
+      || typeof account?.login !== "string" || account.login.length < 1 || account.login.length > 255
+      || (installation?.repository_selection !== "all" && installation?.repository_selection !== "selected")) throw failure("authority-invalid");
+    if (installation?.suspended_at !== null) throw failure("installation-unavailable");
+    const permissionsRaw = record(installation.permissions); const permissions: Record<string, "read" | "write"> = {};
+    if (permissionsRaw === null || Object.entries(permissionsRaw).length > 64) throw failure("authority-invalid");
+    for (const [name, level] of Object.entries(permissionsRaw)) {
+      if (!/^[a-z_]{1,64}$/u.test(name) || (level !== "read" && level !== "write")) throw failure("authority-invalid");
+      permissions[name] = level;
+    }
+    if (permissions.metadata !== "read" && permissions.metadata !== "write") throw failure("authority-invalid");
+    if (existing !== null && existing.installationId !== installationId && preserveExisting) throw failure("installation-conflict");
+    const cleanupDegraded = existing?.cleanupDegraded === true || degradedBindings.has(connectionId) || recoveredUncertainConnections.has(connectionId);
+    const binding = githubInstallationInspectionSchema.parse({ connectionId, installationId,
+      accountId: current.config.expectedAccountId, accountType: current.config.expectedAccountType, accountLogin: account.login,
+      repositorySelection: installation.repository_selection, permissions, status: cleanupDegraded ? "degraded" : "connected",
+      verifiedAt: now().toISOString(), cleanupDegraded });
+    await persist(binding);
+    return await inspectEffective(connectionId);
+  };
+  const runTokenTransaction = async <T>(input: {
+    readonly connectionId: string;
+    readonly operationId?: string;
+    readonly body: unknown;
+    readonly validateMint?: (body: unknown) => void;
+    readonly classifyMintFailure?: (status: number, body: unknown) => Error | null;
+    readonly operation: (token: string) => Promise<T>;
+  }): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }> => await locked(input.connectionId, async () => {
+    const binding = await readBinding(input.connectionId);
+    const current = requireConfig();
+    const leasePath = leaseFile(input.connectionId);
+    const currentTime = now().valueOf();
+    const inProcessExpiry = leaseBlocks.get(input.connectionId);
+    if (inProcessExpiry !== undefined) {
+      if (inProcessExpiry > currentTime) throw failure("token-lease-active");
+      leaseBlocks.delete(input.connectionId);
+    }
+    const leaseEntry = await lstat(leasePath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw failure("private-state-invalid");
+    });
+    if (leaseEntry !== null) {
+      const existingLease = await readLease(input.connectionId);
+      const existingExpiry = new Date(existingLease.expiresAt).valueOf();
+      if (existingExpiry > currentTime) {
+        leaseBlocks.set(input.connectionId, existingExpiry);
+        throw failure("token-lease-active");
+      }
+      try { await removeLease(leasePath); } catch {
+        leaseBlocks.set(input.connectionId, existingExpiry);
+        throw failure("token-lease-active");
+      }
+    }
+    const createdAt = now().toISOString(); const operationId = input.operationId ?? createId();
+    const conservativeExpiryMs = currentTime + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS;
+    let guardExpiryMs = conservativeExpiryMs;
+    const guardExpiresAt = () => new Date(guardExpiryMs).toISOString();
+    try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "minting", createdAt }); }
+    catch { leaseBlocks.set(input.connectionId, conservativeExpiryMs); throw failure("private-state-invalid"); }
+    leaseBlocks.set(input.connectionId, conservativeExpiryMs);
+
+    let token: string | null = null; let mintState: "token" | "definitive-rejection" | "uncertain" = "uncertain";
+    let outcome: OperationOutcome<T> = { completed: false }; let primaryError: Error | null = null;
+    try {
+      const appToken = jwt(current.privateKey, current.config.appId, now());
+      let minted: GithubHttpResponse;
+      try { minted = await requestGithub({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: input.body }); }
+      catch { primaryError = failure("token-mint-failed"); throw primaryError; }
+      const mintedBody = record(minted.body);
+      const candidateToken = typeof mintedBody?.token === "string" && mintedBody.token.length > 0 && mintedBody.token.length <= 16 * 1024 ? mintedBody.token : null;
+      if (minted.status === 201) {
+        const mintedExpiry = typeof mintedBody?.expires_at === "string" && githubTokenExpirySchema.safeParse(mintedBody.expires_at).success ? Date.parse(mintedBody.expires_at) : Number.NaN;
+        if (candidateToken === null) primaryError = failure("token-mint-failed");
+        else {
+          // A 201 response gives us a token authority even when its expiry
+          // metadata is malformed.  Retain it only in memory and attempt
+          // revocation; if expiry cannot be trusted, keep the conservative
+          // uncertain-mint guard.
+          token = candidateToken;
+          if (!Number.isFinite(mintedExpiry) || mintedExpiry <= currentTime
+            || mintedExpiry > currentTime + MAX_INSTALLATION_TOKEN_LIFETIME_MS + 5 * 60 * 1000) {
+            primaryError = failure("token-mint-failed"); mintState = "uncertain"; guardExpiryMs = conservativeExpiryMs;
+            leaseBlocks.set(input.connectionId, conservativeExpiryMs);
+          } else {
+            mintState = "token"; guardExpiryMs = mintedExpiry; leaseBlocks.set(input.connectionId, mintedExpiry);
+            if (mintedExpiry - currentTime < MIN_REQUIRED_TOKEN_LIFETIME_MS) primaryError = failure("token-mint-failed");
+            else {
+              try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "active", createdAt }); }
+              catch { primaryError = failure("token-mint-failed"); token = candidateToken; mintState = "uncertain"; guardExpiryMs = conservativeExpiryMs; leaseBlocks.set(input.connectionId, conservativeExpiryMs); }
+            }
+          }
+        }
+      } else if ([400, 401, 403, 404, 422].includes(minted.status) && record(minted.body) !== null
+        && typeof record(minted.body)?.message === "string" && (record(minted.body)?.message as string).length <= 512) {
+        mintState = "definitive-rejection";
+        primaryError = input.classifyMintFailure?.(minted.status, minted.body) ?? failure("token-mint-failed");
+      } else {
+        if (candidateToken !== null) token = candidateToken;
+        primaryError = failure("token-mint-failed"); mintState = "uncertain";
+      }
+      if (mintState === "token" && token !== null && primaryError === null) {
+        try { input.validateMint?.(mintedBody); outcome = { completed: true, value: await input.operation(token) }; }
+        catch (error) { primaryError = safePrimaryFailure(error); }
+      }
+    } catch (error) { if (primaryError === null) primaryError = safePrimaryFailure(error); }
+
+    let revocation: "succeeded" | "failed" | "not-needed" | "uncertain" = "uncertain";
+    if (token !== null) {
+      try { revocation = (await requestGithub({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204 ? "succeeded" : "failed"; }
+      catch { revocation = "uncertain"; }
+    } else if (mintState === "definitive-rejection") revocation = "not-needed";
+    token = null; // eslint-disable-line no-useless-assignment -- explicitly drop credential authority before returning
+    let leaseSettled = false;
+    if (revocation === "succeeded" || revocation === "not-needed") {
+      try { await removeLease(leasePath); leaseSettled = true; leaseBlocks.delete(input.connectionId); }
+      catch { leaseBlocks.set(input.connectionId, guardExpiryMs); }
+    } else {
+      try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt }); } catch { /* conservative lease remains */ }
+      leaseBlocks.set(input.connectionId, guardExpiryMs);
+    }
+    let cleanupDegraded = !leaseSettled;
+    if (!leaseSettled) {
+      recoveredUncertainConnections.add(input.connectionId);
+      try { await persist({ ...binding, status: "degraded", cleanupDegraded: true }); } catch { degradedBindings.add(input.connectionId); }
+      cleanupDegraded = true;
+    } else if (!outcome.completed && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
+      try { await persist({ ...binding, status: "degraded", cleanupDegraded: true }); }
+      catch {
+        degradedBindings.add(input.connectionId);
+        recoveredUncertainConnections.add(input.connectionId);
+        guardExpiryMs = Math.max(guardExpiryMs, now().valueOf() + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS);
+        leaseBlocks.set(input.connectionId, guardExpiryMs);
+        try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt }); } catch { /* in-memory barrier remains fail-closed */ }
+      }
+      cleanupDegraded = true;
+    } else if (outcome.completed && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
+      try { await persist({ ...binding, status: "connected", cleanupDegraded: false }); degradedBindings.delete(input.connectionId); recoveredUncertainConnections.delete(input.connectionId); }
+      catch {
+        degradedBindings.add(input.connectionId); recoveredUncertainConnections.add(input.connectionId); cleanupDegraded = true;
+        guardExpiryMs = Math.max(guardExpiryMs, now().valueOf() + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS);
+        leaseBlocks.set(input.connectionId, guardExpiryMs);
+        try { await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt }); } catch { /* in-memory barrier remains fail-closed */ }
+      }
+    }
+    if (primaryError !== null) throw primaryError;
+    if (!outcome.completed) throw failure("operation-failed");
+    return { value: outcome.value, cleanupDegraded };
+  });
   return {
     inspectApp: async () => await Promise.resolve(githubAppInspectionSchema.parse(configured && config !== null
       ? { configured: true, appId: config.appId, expectedAccountId: config.expectedAccountId, expectedAccountType: config.expectedAccountType, installationUrl: config.installationUrl }
       : { configured: false, appId: null, expectedAccountId: null, expectedAccountType: null, installationUrl: null })),
     verifyInstallation: async (raw) => {
-      const input = githubInstallationVerifyDataSchema.parse(raw); const current = requireConfig();
+      const input = githubInstallationVerifyDataSchema.parse(raw);
       const existing = await readBinding(input.connectionId).catch((error: unknown) => {
         if (error instanceof Error && error.message === "github-connection-not-found") return null;
         throw error instanceof Error ? error : failure("private-state-invalid");
       });
       if (existing !== null) {
         if (existing.installationId !== input.installationId) throw failure("installation-conflict");
-        return existing;
+        return await liveBinding(input.connectionId, input.installationId, true);
       }
-      const appToken = jwt(current.privateKey, current.config.appId, now());
-      const appResponse = await transport({ method: "GET", path: "/app", authorization: `Bearer ${appToken}` });
-      const app = record(appResponse.body);
-      if (appResponse.status !== 200 || decimal(app?.id) !== current.config.appId) throw failure("authority-invalid");
-      const response = await transport({ method: "GET", path: `/app/installations/${input.installationId}`, authorization: `Bearer ${appToken}` });
-      const installation = record(response.body); const account = record(installation?.account);
-      if (response.status !== 200 || decimal(installation?.id) !== input.installationId || decimal(installation?.app_id) !== current.config.appId
-        || decimal(account?.id) !== current.config.expectedAccountId || account?.type !== current.config.expectedAccountType
-        || typeof account?.login !== "string" || account.login.length < 1 || account.login.length > 255 || installation?.suspended_at !== null
-        || (installation?.repository_selection !== "all" && installation?.repository_selection !== "selected")) throw failure("authority-invalid");
-      const permissionsRaw = record(installation.permissions); const permissions: Record<string, "read" | "write"> = {};
-      if (permissionsRaw === null || Object.entries(permissionsRaw).length > 64) throw failure("authority-invalid");
-      for (const [name, level] of Object.entries(permissionsRaw)) {
-        if (!/^[a-z_]{1,64}$/u.test(name) || (level !== "read" && level !== "write")) throw failure("authority-invalid");
-        permissions[name] = level;
-      }
-      if (permissions.metadata !== "read" && permissions.metadata !== "write") throw failure("authority-invalid");
-      const binding = githubInstallationInspectionSchema.parse({ connectionId: input.connectionId, installationId: input.installationId,
-        accountId: current.config.expectedAccountId, accountType: current.config.expectedAccountType, accountLogin: account.login,
-        repositorySelection: installation.repository_selection, permissions, status: "connected", verifiedAt: now().toISOString(), cleanupDegraded: false });
-      await persist(binding); return binding;
+      return await liveBinding(input.connectionId, input.installationId, false);
+    },
+    refreshInstallation: async (raw) => {
+      const input = githubInstallationRefreshDataSchema.parse(raw);
+      const existing = await readBinding(input.connectionId);
+      return await liveBinding(input.connectionId, existing.installationId, true);
     },
     inspectInstallation: inspectEffective,
     persistBindingForTest: persist,
+    resolveRepository: async (raw) => {
+      const input = githubRepositoryResolveDataSchema.parse(raw);
+      await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true);
+      const result = await runTokenTransaction({
+        connectionId: input.connectionId,
+        body: { permissions: { metadata: "read" } },
+        operation: async (token) => {
+          for (let page = 1; page <= 1_000; page += 1) {
+            const response = await requestGithub({ method: "GET", path: `/installation/repositories?per_page=100&page=${page}`, authorization: `Bearer ${token}` });
+            const responseBody = record(response.body);
+            if (response.status !== 200 || !Array.isArray(responseBody?.repositories) || responseBody.repositories.length > 100) throw failure("upstream-invalid");
+            const repository = responseBody.repositories.map((candidate) => safeRepository(candidate)).find((candidate) => candidate.repositoryId === input.repositoryId);
+            if (repository !== undefined) return repository;
+            if (responseBody.repositories.length < 100) break;
+          }
+          throw failure("repository-not-authorized");
+        }
+      });
+      return githubRepositoryResolutionSchema.parse({ repository: result.value, cleanupDegraded: result.cleanupDegraded });
+    },
+    withExactRepositoryToken: async <T>(raw: GithubRepositoryResolveData,
+      operation: (token: string, repository: GithubRepository) => Promise<T>, operationId?: string) => {
+      const input = githubRepositoryResolveDataSchema.parse(raw);
+      const binding = await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true);
+      if (binding.permissions.contents !== "read" && binding.permissions.contents !== "write") throw failure("contents-permission-required");
+      let scopedRepository: GithubRepository | undefined;
+      const result = await runTokenTransaction<T>({
+        connectionId: input.connectionId,
+        ...(operationId === undefined ? {} : { operationId }),
+        body: { kind: "exact-repository-token", repositoryId: input.repositoryId },
+        classifyMintFailure: (status) => status === 404 ? failure("installation-unavailable")
+          : status === 403 || status === 422 ? failure("repository-not-authorized") : null,
+        validateMint: (body) => { scopedRepository = exactScopedRepository(body, input.repositoryId); },
+        operation: async (token) => scopedRepository === undefined ? Promise.reject(failure("repository-not-authorized")) : await operation(token, scopedRepository)
+      });
+      return result;
+    },
     listRepositories: async (raw) => {
       const input = githubRepositoriesListDataSchema.parse(raw);
-      return await locked(input.connectionId, async () => {
-        const binding = await readBinding(input.connectionId);
-        const current = requireConfig();
-        const leasePath = leaseFile(input.connectionId);
-        const currentTime = now().valueOf();
-        const inProcessExpiry = leaseBlocks.get(input.connectionId);
-        if (inProcessExpiry !== undefined) {
-          if (inProcessExpiry > currentTime) throw failure("token-lease-active");
-          leaseBlocks.delete(input.connectionId);
+      // Listing is the retained, safe metadata snapshot.  The browser's explicit
+      // Refresh GitHub access action and every authenticated Git operation perform
+      // the live App/installation proof; a stale snapshot must never authorize Git.
+      const result = await runTokenTransaction({
+        connectionId: input.connectionId,
+        body: { permissions: { metadata: "read" } },
+        operation: async (token) => {
+          let page = 1;
+          if (input.continuation !== undefined) {
+            try { page = Number(Buffer.from(input.continuation, "base64url").toString("ascii")); } catch { throw failure("continuation-invalid"); }
+          }
+          if (!Number.isInteger(page) || page < 1 || page > 1_000_000) throw failure("continuation-invalid");
+          const listed = await requestGithub({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
+          const listedBody = record(listed.body);
+          if (listed.status !== 200 || !Array.isArray(listedBody?.repositories) || listedBody.repositories.length > input.pageSize) throw failure("upstream-invalid");
+          const repositories = listedBody.repositories.map((rawRepository) => safeRepository(rawRepository));
+          return githubRepositoryPageSchema.parse({ repositories,
+            continuation: repositories.length === input.pageSize ? Buffer.from(String(page + 1), "ascii").toString("base64url") : null,
+            cleanupDegraded: false });
         }
-        const leaseEntry = await lstat(leasePath).catch((error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw failure("private-state-invalid");
-        });
-        if (leaseEntry !== null) {
-          const existingLease = await readLease(input.connectionId);
-          const existingExpiry = new Date(existingLease.expiresAt).valueOf();
-          if (existingExpiry > currentTime) {
-            leaseBlocks.set(input.connectionId, existingExpiry);
-            throw failure("token-lease-active");
-          }
-          try { await removeLease(leasePath); } catch {
-            leaseBlocks.set(input.connectionId, existingExpiry);
-            throw failure("token-lease-active");
-          }
-        }
-        const createdAt = now().toISOString();
-        const operationId = createId();
-        const conservativeExpiryMs = currentTime + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS;
-        let guardExpiryMs = conservativeExpiryMs;
-        const guardExpiresAt = () => new Date(guardExpiryMs).toISOString();
-        try {
-          await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "minting", createdAt });
-        } catch {
-          leaseBlocks.set(input.connectionId, conservativeExpiryMs);
-          throw failure("private-state-invalid");
-        }
-        leaseBlocks.set(input.connectionId, conservativeExpiryMs);
-
-        let token: string | null = null;
-        let mintState: "token" | "definitive-rejection" | "uncertain" = "uncertain";
-        let primaryPage: GithubRepositoryPage | null = null;
-        let primaryError: Error | null = null;
-        let primaryOutcome: "pending" | "succeeded" | "failed" = "pending";
-        let bindingHealthPersistenceOutcome: "not-needed" | "succeeded" | "failed" = "not-needed";
-        try {
-          const appToken = jwt(current.privateKey, current.config.appId, now());
-          let minted: GithubHttpResponse;
-          try {
-            minted = await transport({ method: "POST", path: `/app/installations/${binding.installationId}/access_tokens`, authorization: `Bearer ${appToken}`, body: { permissions: { metadata: "read" } } });
-          } catch {
-            primaryError = failure("token-mint-failed");
-            mintState = "uncertain";
-            throw primaryError;
-          }
-          const mintedBody = record(minted.body);
-          const candidateToken = typeof mintedBody?.token === "string" && mintedBody.token.length > 0 && mintedBody.token.length <= 16 * 1024
-            ? mintedBody.token : null;
-          if (minted.status === 201) {
-            if (candidateToken !== null) token = candidateToken;
-            const mintedExpiry = typeof mintedBody?.expires_at === "string" && githubTokenExpirySchema.safeParse(mintedBody.expires_at).success
-              ? Date.parse(mintedBody.expires_at) : Number.NaN;
-            if (candidateToken === null || !Number.isFinite(mintedExpiry) || mintedExpiry <= currentTime
-              || mintedExpiry > currentTime + MAX_INSTALLATION_TOKEN_LIFETIME_MS + 5 * 60 * 1000) {
-              primaryError = failure("token-mint-failed");
-              mintState = "uncertain";
-            } else {
-              mintState = "token";
-              guardExpiryMs = mintedExpiry;
-              try {
-                await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "active", createdAt });
-                leaseBlocks.set(input.connectionId, mintedExpiry);
-              } catch {
-                primaryError = failure("token-mint-failed");
-                mintState = "uncertain";
-                guardExpiryMs = conservativeExpiryMs;
-                leaseBlocks.set(input.connectionId, conservativeExpiryMs);
-              }
-            }
-          } else if ([400, 401, 403, 404, 422].includes(minted.status)
-            && record(minted.body) !== null && typeof record(minted.body)?.message === "string"
-            && (record(minted.body)?.message as string).length <= 512) {
-            mintState = "definitive-rejection";
-            primaryError = failure("token-mint-failed");
-          } else {
-            if (candidateToken !== null) token = candidateToken;
-            mintState = "uncertain";
-            primaryError = failure("token-mint-failed");
-          }
-
-          if (mintState === "token" && token !== null && primaryError === null) {
-            let page = 1;
-            if (input.continuation !== undefined) {
-              try { page = Number(Buffer.from(input.continuation, "base64url").toString("ascii")); } catch { throw failure("continuation-invalid"); }
-            }
-            if (!Number.isInteger(page) || page < 1 || page > 1_000_000) throw failure("continuation-invalid");
-            const listed = await transport({ method: "GET", path: `/installation/repositories?per_page=${input.pageSize}&page=${page}`, authorization: `Bearer ${token}` });
-            const listedBody = record(listed.body);
-            if (listed.status !== 200 || !Array.isArray(listedBody?.repositories) || listedBody.repositories.length > input.pageSize) throw failure("upstream-invalid");
-            const repositories = listedBody.repositories.map((rawRepository) => {
-              const repository = record(rawRepository); const owner = record(repository?.owner); const repositoryId = decimal(repository?.id);
-              const ownerLogin = owner?.login; const name = repository?.name; const fullName = repository?.full_name;
-              if (repository === null || owner === null || repositoryId === null || typeof ownerLogin !== "string" || !/^[A-Za-z0-9_.-]{1,255}$/u.test(ownerLogin)
-                || typeof name !== "string" || !/^[A-Za-z0-9_.-]{1,255}$/u.test(name) || typeof fullName !== "string" || fullName !== `${ownerLogin}/${name}`
-                || typeof repository.default_branch !== "string" || repository.default_branch.length < 1 || repository.default_branch.length > 255
-                || typeof repository.private !== "boolean" || typeof repository.archived !== "boolean" || typeof repository.disabled !== "boolean") throw failure("upstream-invalid");
-              return { repositoryId, ownerLogin, name, fullName,
-                cleanHttpsUrl: `https://github.com/${ownerLogin}/${name}.git`, defaultBranch: repository.default_branch,
-                private: repository.private, archived: repository.archived, disabled: repository.disabled };
-            });
-            primaryPage = githubRepositoryPageSchema.parse({ repositories,
-              continuation: repositories.length === input.pageSize ? Buffer.from(String(page + 1), "ascii").toString("base64url") : null, cleanupDegraded: false });
-            primaryOutcome = "succeeded";
-          }
-        } catch (error) {
-          if (primaryError === null) primaryError = safePrimaryFailure(error);
-          primaryOutcome = "failed";
-        }
-
-        let revocation: "succeeded" | "failed" | "not-needed" | "uncertain" = "uncertain";
-        if (token !== null) {
-          try {
-            revocation = (await transport({ method: "DELETE", path: "/installation/token", authorization: `Bearer ${token}` })).status === 204 ? "succeeded" : "failed";
-          } catch { revocation = "uncertain"; }
-        } else if (mintState === "definitive-rejection") revocation = "not-needed";
-        token = null; // eslint-disable-line no-useless-assignment -- explicitly drop credential authority before returning
-
-        let leaseSettled = false;
-        if (revocation === "succeeded" || revocation === "not-needed") {
-          try {
-            await removeLease(leasePath);
-            leaseSettled = true;
-            leaseBlocks.delete(input.connectionId);
-          } catch {
-            leaseBlocks.set(input.connectionId, guardExpiryMs);
-          }
-        } else {
-          try {
-            await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt });
-          } catch {
-            // The already-written minting/active guard remains the conservative restart barrier.
-          }
-          leaseBlocks.set(input.connectionId, guardExpiryMs);
-        }
-
-        let cleanupDegraded = !leaseSettled;
-        if (!leaseSettled) {
-          recoveredUncertainConnections.add(input.connectionId);
-          try {
-            await persist({ ...binding, status: "degraded", cleanupDegraded: true });
-            bindingHealthPersistenceOutcome = "succeeded";
-          } catch {
-            degradedBindings.add(input.connectionId);
-            bindingHealthPersistenceOutcome = "failed";
-          }
-          cleanupDegraded = true;
-        } else if (primaryPage === null && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
-          try {
-            await persist({ ...binding, status: "degraded", cleanupDegraded: true });
-            bindingHealthPersistenceOutcome = "succeeded";
-          } catch {
-            degradedBindings.add(input.connectionId);
-            recoveredUncertainConnections.add(input.connectionId);
-            const recoveryLeaseExpiry = Math.max(guardExpiryMs, now().valueOf() + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS);
-            guardExpiryMs = recoveryLeaseExpiry;
-            leaseBlocks.set(input.connectionId, recoveryLeaseExpiry);
-            try {
-              await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt });
-            } catch {
-              // The in-memory degraded marker remains fail-closed when durable re-marking is unavailable.
-            }
-            bindingHealthPersistenceOutcome = "failed";
-          }
-          cleanupDegraded = true;
-        } else if (primaryPage !== null && (binding.status === "degraded" || binding.cleanupDegraded || degradedBindings.has(input.connectionId) || recoveredUncertainConnections.has(input.connectionId))) {
-          try {
-            await persist({ ...binding, status: "connected", cleanupDegraded: false });
-            degradedBindings.delete(input.connectionId);
-            recoveredUncertainConnections.delete(input.connectionId);
-            bindingHealthPersistenceOutcome = "succeeded";
-          } catch {
-            degradedBindings.add(input.connectionId);
-            recoveredUncertainConnections.add(input.connectionId);
-            const recoveryLeaseExpiry = Math.max(guardExpiryMs, now().valueOf() + CONSERVATIVE_UNKNOWN_MINT_LEASE_MS);
-            guardExpiryMs = recoveryLeaseExpiry;
-            leaseBlocks.set(input.connectionId, recoveryLeaseExpiry);
-            try {
-              await writeLease(leasePath, { connectionId: input.connectionId, operationId, expiresAt: guardExpiresAt(), phase: "cleanup-degraded", createdAt });
-            } catch {
-              // The in-memory degraded marker remains fail-closed when durable re-marking is unavailable.
-            }
-            cleanupDegraded = true;
-            bindingHealthPersistenceOutcome = "failed";
-          }
-        }
-        const outcomes = { primary: primaryOutcome, revocation, leaseSettlement: leaseSettled ? "proven" : "degraded", bindingHealthPersistence: bindingHealthPersistenceOutcome } as const;
-        if (primaryError !== null || outcomes.primary === "failed") throw primaryError ?? failure("operation-failed");
-        if (primaryPage === null) throw failure("operation-failed");
-        return { ...primaryPage, cleanupDegraded: cleanupDegraded || outcomes.bindingHealthPersistence === "failed" };
       });
-    }
+      return { ...result.value, cleanupDegraded: result.cleanupDegraded };
+    },
   };
 }
