@@ -12,7 +12,7 @@ import {
   type AtomicJsonWriter
 } from "./private-state.js";
 
-const executionRoleSchema = z.enum(["store-clone", "project-fetch", "workspace-branch-update", "workspace-add"]);
+const executionRoleSchema = z.enum(["store-clone", "project-fetch", "project-push", "workspace-branch-update", "workspace-add"]);
 export type ExternalExecutionRole = z.infer<typeof executionRoleSchema>;
 const processIdentitySchema = z.strictObject({
   pid: z.number().int().min(2), processGroupId: z.number().int().min(2), startTimeTicks: z.string().regex(/^[0-9]+$/u)
@@ -98,6 +98,7 @@ export interface ExternalExecutionResult {
 export class ExternalExecutionFence {
   private corruption: PrivateStateCorruptionError | null = null;
   private readonly markers = new Map<string, ExternalExecutionMarker>();
+  private readonly settlingProjects = new Map<string, Promise<void>>();
 
   constructor(
     private readonly root: string,
@@ -123,6 +124,7 @@ export class ExternalExecutionFence {
   async initialize(): Promise<void> {
     this.corruption = null;
     this.markers.clear();
+    this.settlingProjects.clear();
     for (const name of await readdir(this.root)) {
       if (!name.endsWith(".json")) continue;
       try {
@@ -220,7 +222,42 @@ export class ExternalExecutionFence {
     }
   }
 
+  private async settleInterruptedPush(marker: ExternalExecutionMarker): Promise<void> {
+    try {
+      if (marker.phase === "reserved") {
+        await this.retire(marker);
+        return;
+      }
+      const processes = await findExecutionProcesses(marker.executionId);
+      this.validateProcesses(marker, processes);
+      if (processes.length === 0) {
+        await this.retire(marker);
+        return;
+      }
+      const running = marker.phase === "launch-committed"
+        ? await this.confirmLaunchCommitted(marker)
+        : marker;
+      await this.waitForMarker(running);
+    } catch (error) {
+      this.corruption ??= error instanceof PrivateStateCorruptionError
+        ? error
+        : new PrivateStateCorruptionError(this.markerPath(marker.operationId), "interrupted push marker settlement failed");
+    }
+  }
+
+  private queueInterruptedPushSettlement(marker: ExternalExecutionMarker): void {
+    this.markers.delete(marker.operationId);
+    const previous = this.settlingProjects.get(marker.projectId) ?? Promise.resolve();
+    const current = previous.then(() => this.settleInterruptedPush(marker)).finally(() => {
+      if (this.settlingProjects.get(marker.projectId) === current) this.settlingProjects.delete(marker.projectId);
+    });
+    this.settlingProjects.set(marker.projectId, current);
+    void current.catch(() => undefined);
+  }
+
   async awaitProject(projectId: string): Promise<void> {
+    this.assertHealthy();
+    await this.settlingProjects.get(projectId);
     this.assertHealthy();
     for (const marker of [...this.markers.values()].filter((candidate) => candidate.projectId === projectId)) {
       await this.waitForMarker(marker);
@@ -229,6 +266,7 @@ export class ExternalExecutionFence {
 
   validateJournalBindings(findOperation: (operationId: string) => {
     readonly operationName: string; readonly request: unknown; readonly state: string;
+    readonly failure?: { readonly code?: string } | null;
   } | undefined): void {
     this.assertHealthy();
     for (const marker of this.markers.values()) {
@@ -236,7 +274,14 @@ export class ExternalExecutionFence {
       const requestProjectId = operation?.request !== null && typeof operation?.request === "object"
         && "projectId" in operation.request ? (operation.request as { projectId?: unknown }).projectId : undefined;
       const expectedOperation = marker.role === "store-clone" ? "project.managed-store.create"
-        : marker.role === "project-fetch" ? "project.fetch" : "workspace.create";
+        : marker.role === "project-fetch" ? "project.fetch"
+        : marker.role === "project-push" ? "project.push" : "workspace.create";
+      const interruptedPush = marker.role === "project-push" && operation?.operationName === "project.push"
+        && operation.state === "failed" && operation.failure?.code === "GITHUB_PUSH_OUTCOME_UNCERTAIN";
+      if (interruptedPush) {
+        this.queueInterruptedPushSettlement(marker);
+        continue;
+      }
       if (operation === undefined || operation.operationName !== expectedOperation || requestProjectId !== marker.projectId
         || (operation.state !== "accepted" && operation.state !== "running")) {
         this.fail(marker, "execution marker is not bound to its nonterminal durable journal operation");

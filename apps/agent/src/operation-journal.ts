@@ -28,6 +28,7 @@ export const supportedMutationNames = [
   "configuration-runtime-plan.register",
   "project.managed-store.create",
   "project.fetch",
+  "project.push",
   "workspace.create",
   "workspace.start",
   "workspace.stop",
@@ -133,6 +134,26 @@ export class OperationJournal {
           ? error
           : new PrivateStateCorruptionError(path.join(this.root, name), "journal load failed");
       }
+    }
+    if (this.corruption === null) await this.terminalizeInterruptedPushes();
+  }
+
+  private async terminalizeInterruptedPushes(): Promise<void> {
+    for (const record of [...this.records.values()]) {
+      if (record.operationName !== "project.push" || (record.state !== "accepted" && record.state !== "running")) continue;
+      const next = journalRecordSchema.parse({ ...record, state: "failed", updatedAt: this.now().toISOString(), failure: {
+        code: "GITHUB_PUSH_OUTCOME_UNCERTAIN",
+        message: "The push outcome is uncertain after Agent interruption. Inspect the remote branch before explicitly retrying.",
+        retryable: false,
+        details: {}
+      }});
+      try {
+        await this.writer.write(this.file(record.operationId), next);
+      } catch {
+        this.corruption ??= new PrivateStateCorruptionError(this.file(record.operationId), "push uncertainty terminalization failed");
+        return;
+      }
+      this.records.set(record.operationId, next);
     }
   }
 

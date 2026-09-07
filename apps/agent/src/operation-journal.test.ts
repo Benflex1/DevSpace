@@ -33,6 +33,30 @@ test("first acceptance, exact replay, conflicts, terminal reload, and restart re
   await expect(restartedTerminal.accept(operationId, "project.fetch", request)).resolves.toMatchObject({ state: "succeeded" });
 });
 
+test("restart terminalizes an interrupted project.push as uncertain without losing its intent", async () => {
+  const directory = await root();
+  const journal = new OperationJournal(directory, () => new Date(timestamp)); await journal.initialize();
+  const pushRequest = {
+    projectId,
+    workspaceId: otherOperationId,
+    source: { kind: "github-app", connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", repositoryId: "9007199254740993" },
+    branchName: "feature/push",
+    commitOid: "a".repeat(40),
+    githubAuthorityGeneration: 1
+  };
+  await journal.accept(operationId, "project.push", pushRequest);
+  await journal.markRunning(operationId);
+  const restarted = new OperationJournal(directory, () => new Date("2026-07-17T12:00:01.000Z")); await restarted.initialize();
+  expect(restarted.get(operationId)).toMatchObject({
+    state: "failed",
+    request: pushRequest,
+    failure: { code: "GITHUB_PUSH_OUTCOME_UNCERTAIN", retryable: false, details: {} }
+  });
+  expect(restarted.resumable()).toEqual([]);
+  const reloaded = new OperationJournal(directory, () => new Date(timestamp)); await reloaded.initialize();
+  expect(reloaded.get(operationId)).toMatchObject({ state: "failed", failure: { code: "GITHUB_PUSH_OUTCOME_UNCERTAIN" } });
+});
+
 test("concurrent exact acceptance converges and conflicting acceptance cannot overwrite intent", async () => {
   const directory = await root();
   const journal = new OperationJournal(directory, () => new Date(timestamp)); await journal.initialize();

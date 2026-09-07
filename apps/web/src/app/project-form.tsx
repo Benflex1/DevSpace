@@ -148,7 +148,7 @@ export function AddProjectForm({ agentReachable }: { agentReachable: boolean }) 
         {connection.status === "reconnect-pending" && <p>GitHub reconnect is pending. Complete the GitHub App installation flow to restore private read access.</p>}
         {connection.status === "installation-removed" && <p>GitHub no longer has this installation. Re-authorize the DevSpace GitHub App to restore access.</p>}
         {connection.status === "installation-suspended" && <p>The GitHub installation is suspended. Resolve that in GitHub, then reconnect.</p>}
-        {connection.status === "permission-required" && <p>The GitHub installation needs metadata and Contents read permission before private access can resume.</p>}
+        {connection.status === "permission-required" && <p>The GitHub installation needs metadata and Contents read permission for private access; reauthorize with Contents write to enable Push.</p>}
         {connection.status === "repository-access-unavailable" && <p>The selected repository is no longer authorized by this GitHub installation.</p>}
         {connection.status === "transient-error" && <p>GitHub is temporarily unavailable. Try again later.</p>}
         {connected && connection.pendingAttempt !== null && connection.pendingAttempt !== undefined

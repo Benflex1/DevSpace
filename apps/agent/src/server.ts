@@ -366,6 +366,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["configuration-runtime-plan.register"].path ? agentApiV1EndpointByOperation["configuration-runtime-plan.register"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.managed-store.create"].path ? agentApiV1EndpointByOperation["project.managed-store.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.fetch"].path ? agentApiV1EndpointByOperation["project.fetch"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.push"].path ? agentApiV1EndpointByOperation["project.push"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.inspect"].path ? agentApiV1EndpointByOperation["project.git.inspect"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.create"].path ? agentApiV1EndpointByOperation["workspace.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.inspect"].path ? agentApiV1EndpointByOperation["workspace.inspect"]
@@ -709,7 +710,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
     }
 
-    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "workspace.create", "workspace.start", "workspace.stop",
+    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "workspace.create", "workspace.start", "workspace.stop",
       "task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"] as const;
     for (const operation of mutationRoutes) {
       const endpoint = agentApiV1EndpointByOperation[operation];

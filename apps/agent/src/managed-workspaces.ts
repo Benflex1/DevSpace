@@ -10,6 +10,7 @@ import {
   githubSourceInspectionDataSchema,
   githubRepositoryResolutionSchema,
   githubRepositoryResolveDataSchema,
+  projectPushDataSchema,
   projectOptionsRevisionHashSchema,
   remoteRepositoryUrlSchema,
   sourceLocatorSchema,
@@ -22,6 +23,7 @@ import {
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
+  type ProjectPushData,
   type GithubRepositoryResolveData,
   type WorkspaceInspectionData,
   type SourceLocator
@@ -174,6 +176,8 @@ export function githubRepositoryResolveDataFromSourceLocator(
 }
 
 const githubTokenOperationResultSchema = z.strictObject({ value: z.unknown(), cleanupDegraded: z.boolean() });
+const PUSH_NON_FAST_FORWARD_PATTERN = /non-fast-forward|fetch first|updates were rejected because|rejected.*(?:non-fast-forward|update rejected)/iu;
+const PUSH_UNSAFE_LOCAL_CONFIG_KEY = /^(?:branch\..+\.pushremote|push\.pushoption|remote\.(?:origin\.(?:mirror|proxy|push|pushoption|pushurl|receivepack|tagopt|uploadpack)|pushdefault)|url\..+\.(?:insteadof|pushinsteadof))$/u;
 export function protectedGitInvocation(args: readonly string[], auth?: { readonly capability: AskpassCapability }): { args: string[]; env: NodeJS.ProcessEnv } {
   const caFile = process.env.DEVSPACE_GIT_CA_FILE;
   const caArguments = caFile === undefined ? [] : ["-c", `http.sslCAInfo=${path.resolve(caFile)}`];
@@ -387,7 +391,7 @@ export class ManagedWorkspaces {
     await this.executionFence.awaitProject(uuidV7Schema.parse(projectId));
   }
   private async operationGit(operationId: string, projectId: string, role: ExternalExecutionRole,
-    args: readonly string[], auth?: AuthenticatedGitContext): Promise<{ stdout: string; stderr: string }> {
+    args: readonly string[], auth?: AuthenticatedGitContext, beforeAuthenticatedLaunch?: () => Promise<void>): Promise<{ stdout: string; stderr: string }> {
     let capability: AskpassCapability | undefined;
     let executionId: string | undefined;
     if (auth !== undefined) {
@@ -396,16 +400,52 @@ export class ManagedWorkspaces {
       capability = this.askpassBroker.register({ ...auth, operationId, executionId, deadlineAt: new Date(Date.now() + GIT_TIMEOUT_MS) });
     }
     try {
-      if (this.git !== runGit) return await this.git(args);
+      if (this.git !== runGit) {
+        try {
+          await beforeAuthenticatedLaunch?.();
+          return await this.git(args);
+        }
+        catch (error) {
+          if (role !== "project-push") throw error;
+          const message = error instanceof Error ? error.message : "";
+          if (PUSH_NON_FAST_FORWARD_PATTERN.test(message)) throw new Error("github-push-non-fast-forward", { cause: error });
+          if (/authentication failed|could not read Username|HTTP 401|HTTP 403|access denied/iu.test(message)) {
+            throw new Error("github-git-authentication-failed", { cause: error });
+          }
+          if (message.startsWith("github-")) throw error;
+          throw new Error("github-push-outcome-uncertain", { cause: error });
+        }
+      }
     if (this.executionFence === null) throw new PrivateStateCorruptionError(this.stateRoot, "execution fence is not initialized");
     const invocation = protectedGitInvocation(args, capability === undefined ? undefined : { capability });
-    const result = await this.executionFence.runGit({ operationId, projectId, role, args: invocation.args,
-      ...(executionId === undefined ? {} : { executionId }), timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env,
-      ...(auth === undefined ? {} : {
-        beforeSpawn: async () => await this.githubAuthorityRequired().acquireGithubLaunchFence(auth.connectionId, auth.lifecycleGeneration)
-      }) });
+    let result: Awaited<ReturnType<ExternalExecutionFence["runGit"]>>;
+    try {
+      result = await this.executionFence.runGit({ operationId, projectId, role, args: invocation.args,
+        ...(executionId === undefined ? {} : { executionId }), timeoutMs: GIT_TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES, env: invocation.env,
+        ...(auth === undefined ? {} : {
+          beforeSpawn: async () => {
+            const release = await this.githubAuthorityRequired().acquireGithubLaunchFence(auth.connectionId, auth.lifecycleGeneration);
+            try { await beforeAuthenticatedLaunch?.(); return release; }
+            catch (error) { release(); throw error; }
+          }
+        }) });
+    } catch (error) {
+      if (role === "project-push") {
+        const message = error instanceof Error ? error.message : "";
+        if (!message.startsWith("github-") && !(error instanceof AgentExecutionError)) throw new Error("github-push-outcome-uncertain", { cause: error });
+      }
+      throw error;
+    }
     if (result.code !== 0 || result.signal !== null) {
       if (auth !== undefined) {
+        if (role === "project-push") {
+          if (result.timedOut || result.signal !== null) throw new Error("github-push-outcome-uncertain");
+          if (PUSH_NON_FAST_FORWARD_PATTERN.test(result.stderr)) throw new Error("github-push-non-fast-forward");
+          const failureKind = classifyAuthenticatedGitFailure(result);
+          if (failureKind === "authentication") throw new Error("github-git-authentication-failed");
+          if (failureKind === "remote-source") throw new Error("github-push-outcome-uncertain");
+          throw new Error("github-push-outcome-uncertain");
+        }
         const failureKind = classifyAuthenticatedGitFailure(result);
         if (failureKind === "authentication") throw new Error("github-git-authentication-failed");
         if (failureKind === "remote-source") throw new Error("github-operation-failed");
@@ -428,6 +468,13 @@ export class ManagedWorkspaces {
     try { await this.askpassBroker.ensureStarted(); }
     catch {
       throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The private repository credential transport is unavailable.", {}));
+    }
+  }
+
+  private async assertPushLocalConfiguration(worktreePath: string): Promise<void> {
+    const configured = await this.git(["-C", worktreePath, "config", "--local", "--name-only", "--null", "--list"]);
+    if (configured.stdout.split("\0").some((key) => PUSH_UNSAFE_LOCAL_CONFIG_KEY.test(key))) {
+      throw new Error("github-push-config-invalid");
     }
   }
 
@@ -464,12 +511,20 @@ export class ManagedWorkspaces {
         ? ["GITHUB_UPSTREAM_TRANSIENT", "GitHub is temporarily unavailable. Try again."] as const
       : message === "github-contents-permission-required"
       ? ["GITHUB_CONTENTS_PERMISSION_REQUIRED", "GitHub Contents read permission is required."] as const
+      : message === "github-contents-write-permission-required"
+      ? ["GITHUB_CONTENTS_WRITE_PERMISSION_REQUIRED", "GitHub Contents write permission is required. Reauthorize the GitHub App connection."] as const
       : message === "github-installation-unavailable" || message === "github-connection-not-found"
         ? ["GITHUB_INSTALLATION_UNAVAILABLE", "The GitHub installation is unavailable."] as const
         : message === "github-repository-not-authorized"
           ? ["GITHUB_REPOSITORY_NOT_AUTHORIZED", "The selected GitHub repository is not authorized."] as const
           : message === "github-git-authentication-failed"
             ? ["GITHUB_GIT_AUTHENTICATION_FAILED", "GitHub rejected the fresh repository credential."] as const
+          : message === "github-push-intent-stale"
+            ? ["GITHUB_PUSH_INTENT_STALE", "The workspace branch or commit changed. Prepare the push again."] as const
+          : message === "github-push-non-fast-forward"
+            ? ["GITHUB_PUSH_NON_FAST_FORWARD", "The remote branch moved ahead. Fetch first, integrate the remote changes using Git or terminal, then explicitly Push again."] as const
+          : message === "github-push-outcome-uncertain"
+            ? ["GITHUB_PUSH_OUTCOME_UNCERTAIN", "The push outcome is uncertain. Inspect the remote branch before explicitly retrying."] as const
           : message === "github-token-lease-active"
               ? ["GITHUB_TOKEN_LEASE_ACTIVE", "A previous GitHub token transaction is still being settled."] as const
               : message === "github-upstream-invalid" || message === "github-token-mint-failed" || message === "github-operation-failed"
@@ -501,6 +556,21 @@ export class ManagedWorkspaces {
       await this.ensurePrivateCredentialTransport();
       const resolveData = githubRepositoryResolveDataFromSourceLocator(source, lifecycleGeneration);
       const result = await authority.withExactRepositoryToken(resolveData, operation, operationId);
+      const envelope = githubTokenOperationResultSchema.parse(result);
+      return { value: envelope.value as T, cleanupDegraded: envelope.cleanupDegraded };
+    } catch (error) {
+      throw this.githubExecutionError(error);
+    }
+  }
+
+  private async withGithubWriteToken<T>(source: Extract<SourceLocator, { kind: "github-app" }>, operationId: string,
+    lifecycleGeneration: number,
+    operation: (token: string, repository: import("@devspace/contracts").GithubRepository, lifecycleGeneration: number) => Promise<T>): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }> {
+    const authority = this.githubAuthorityRequired();
+    try {
+      await this.ensurePrivateCredentialTransport();
+      const resolveData = githubRepositoryResolveDataFromSourceLocator(source, lifecycleGeneration);
+      const result = await authority.withExactRepositoryWriteToken(resolveData, operation, operationId);
       const envelope = githubTokenOperationResultSchema.parse(result);
       return { value: envelope.value as T, cleanupDegraded: envelope.cleanupDegraded };
     } catch (error) {
@@ -1005,6 +1075,49 @@ export class ManagedWorkspaces {
       throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {}));
     }
     await this.loadStoreOwnership(projectId);
+  }
+
+  async push(input: ProjectPushData, operationId?: string): Promise<void> {
+    this.assertHealthy();
+    const data = projectPushDataSchema.parse(input);
+    let store = await this.loadStoreOwnership(data.projectId);
+    const workspace = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
+    if (store.source.kind !== "github-app"
+      || store.source.connectionId !== data.source.connectionId || store.source.repositoryId !== data.source.repositoryId
+      || workspace.branchName !== data.branchName) {
+      throw new AgentExecutionError(executionFailure("GITHUB_PUSH_INTENT_STALE", "The captured push intent no longer matches the managed workspace.", {}));
+    }
+    const assertCapturedWorkspace = async (): Promise<void> => {
+      const inspection = await this.inspectGit(data.projectId, data.workspaceId);
+      if (inspection.branchName !== data.branchName || inspection.headCommit !== data.commitOid) {
+        throw new Error("github-push-intent-stale");
+      }
+    };
+    try {
+      await assertCapturedWorkspace();
+      const pushOperationId = operationId ?? uuidv7();
+      await this.withGithubWriteToken(store.source, pushOperationId, data.githubAuthorityGeneration,
+        async (token, repository, effectiveGeneration) => {
+          store = await this.transitionStoreOrigin(store, data.projectId, repository.cleanHttpsUrl);
+          await this.operationGit(pushOperationId, data.projectId, "project-push",
+            // Use the live authority-resolved URL instead of consulting repository-local
+            // pushurl/remote selection.  This is the exact origin URL after the transition above.
+            ["-C", workspace.worktreePath, "push", "--", repository.cleanHttpsUrl, `${data.commitOid}:refs/heads/${data.branchName}`], {
+              connectionId: data.source.connectionId, repositoryId: data.source.repositoryId,
+              lifecycleGeneration: effectiveGeneration, token, originUrl: repository.cleanHttpsUrl
+            }, async () => {
+              await this.assertPushLocalConfiguration(workspace.worktreePath);
+              await assertCapturedWorkspace();
+            });
+        });
+    } catch (error) {
+      if (error instanceof AgentExecutionError) throw error;
+      if (error instanceof Error && error.message === "github-push-intent-stale") {
+        throw new AgentExecutionError(executionFailure("GITHUB_PUSH_INTENT_STALE", "The workspace branch or commit changed. Prepare the push again.", {}));
+      }
+      throw this.githubExecutionError(error);
+    }
+    await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
   }
 
   private async loadRevision(projectId: string, revisionId: string): Promise<ConfigurationRevisionData> {

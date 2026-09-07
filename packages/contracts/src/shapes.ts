@@ -71,6 +71,18 @@ export const projectFetchDataSchema = z.strictObject({
   source: sourceLocatorSchema.optional(),
   githubAuthorityGeneration: z.number().int().min(1).max(2_147_483_647).optional()
 });
+export const projectPushDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  source: z.strictObject({
+    kind: z.literal("github-app"),
+    connectionId: githubConnectionIdSchema,
+    repositoryId: githubDecimalIdSchema
+  }),
+  branchName: gitBranchNameSchema,
+  commitOid: gitObjectIdSchema,
+  githubAuthorityGeneration: z.number().int().min(1).max(2_147_483_647)
+});
 export const inspectGitDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema.nullable()
@@ -296,6 +308,7 @@ export type InspectSourceData = z.infer<typeof inspectSourceDataSchema>;
 export type CreateManagedStoreData = z.infer<typeof createManagedStoreDataSchema>;
 export type ProjectIdentityData = z.infer<typeof projectIdentityDataSchema>;
 export type InspectGitData = z.infer<typeof inspectGitDataSchema>;
+export type ProjectPushData = z.infer<typeof projectPushDataSchema>;
 export type WorkspaceIdentityData = z.infer<typeof workspaceIdentityDataSchema>;
 export type CreateWorkspaceData = z.infer<typeof createWorkspaceDataSchema>;
 export type RebuildWorkspaceData = z.infer<typeof rebuildWorkspaceDataSchema>;

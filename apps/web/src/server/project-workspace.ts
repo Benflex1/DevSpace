@@ -17,6 +17,7 @@ export interface DashboardData {
 
 export interface ProjectWorkspaceData {
   readonly project: ManagedProjectView;
+  readonly pushAvailable: boolean;
   readonly agentStatus: AgentConnectionStatus;
   readonly agentReachable: boolean;
   readonly runtimeAvailability: "available" | "unavailable";
@@ -101,8 +102,11 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
 
   const reconciledProject = database.getManagedProject(projectId);
   if (reconciledProject === undefined) return null;
+  const pushAvailable = reconciledProject.state === "ready"
+    && reconciledProject.primaryWorkspace !== null
+    && database.getProjectGithubSource(projectId)?.private === true;
   return { project: reconciledProject, agentStatus: agentState.status, agentReachable: agentState.reachable,
-    runtimeAvailability: agentState.runtimeAvailability, live, runtimeOperation, previewMaterializationError };
+    pushAvailable, runtimeAvailability: agentState.runtimeAvailability, live, runtimeOperation, previewMaterializationError };
 }
 
 function actorForPreviewReconciliation(): string {

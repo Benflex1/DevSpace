@@ -34,8 +34,8 @@ const acceptedErrors = {
 
 describe("F09, F10, and complete Agent API v1 inventory composition", () => {
   test("preserves the exact F09 classification counts", () => {
-    expect(agentApiV1Endpoints).toHaveLength(30);
-    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(20);
+    expect(agentApiV1Endpoints).toHaveLength(31);
+    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(21);
     expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(9);
     expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
   });
@@ -59,18 +59,18 @@ describe("F09, F10, and complete Agent API v1 inventory composition", () => {
   });
 
   test("composes the exact complete v1 counts", () => {
-    expect(completeAgentApiV1Endpoints).toHaveLength(46);
-    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(23);
+    expect(completeAgentApiV1Endpoints).toHaveLength(47);
+    expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(24);
     expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(22);
     expect(completeAgentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
-    expect(new Set(completeAgentApiV1Endpoints.map((endpoint) => endpoint.operation)).size).toBe(46);
+    expect(new Set(completeAgentApiV1Endpoints.map((endpoint) => endpoint.operation)).size).toBe(47);
   });
 
   test("keeps error registry views exactly separated", () => {
-    expect(executableAgentErrorCodes).toHaveLength(36);
+    expect(executableAgentErrorCodes).toHaveLength(40);
     expect(f10ExecutableAgentErrorCodes).toEqual(["EVENT_CURSOR_INVALID", "EVENT_SNAPSHOT_REQUIRED"]);
-    expect(completeAgentApiV1ErrorCodes).toHaveLength(38);
-    expect(new Set(completeAgentApiV1ErrorCodes).size).toBe(38);
+    expect(completeAgentApiV1ErrorCodes).toHaveLength(42);
+    expect(new Set(completeAgentApiV1ErrorCodes).size).toBe(42);
     expect(executableAgentErrorCodes).not.toContain("EVENT_CURSOR_INVALID");
     expect(executableAgentErrorCodes).not.toContain("EVENT_SNAPSHOT_REQUIRED");
   });

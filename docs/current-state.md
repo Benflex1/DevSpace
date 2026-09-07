@@ -162,9 +162,20 @@ files, commits, dirty changes, or runtime state. Pending cleanup remains visible
 unavailable, and stale refreshes or callbacks cannot re-enable an older generation. The browser
 offers minimal disconnect confirmation and reconnect/re-authorize guidance.
 
-CP3B push remains deferred: Contents write permission, write-scoped tokens, push intents,
-confirmation, effect records, reconciliation, force push, tags, and branch-management UI are not
-part of CP3A. Installation deletion, repository creation, PAT/OAuth fallback, generic provider
-abstraction, webhooks, GitHub Enterprise, multiple identities, manual authenticated Git inside
-workspace containers, hostile same-UID/multi-tenant hardening, and production deployment remain
-outside this slice.
+CP3B explicit private GitHub push is implemented on the current feature branch. The temporary
+Workbench Push action prepares a server-captured `{connectionId, repositoryId, branch, commit,
+generation}` intent, requires explicit confirmation, and dispatches only the fixed same-name
+`<commit>:refs/heads/<branch>` update through exact `contents:write` GitHub App authority. The
+destination is the live authority-resolved HTTPS origin URL, and repository-local push
+destination/rewrite settings are rejected. Read operations retain their read-only scopes. Missing write permission follows the existing
+permission-loss/reauthorization path. Submitted or interrupted pushes are terminalized as
+`GITHUB_PUSH_OUTCOME_UNCERTAIN`, retain their captured intent for inspection, and are never
+automatically resent. Agent snapshot reconciliation also clears a submitted Web operation after
+an Agent restart. This branch has not been pushed, merged, or deployed.
+
+CP3B intentionally does not include force push, force-with-lease, tag or branch deletion, arbitrary
+refspecs/remotes, branch-management, merge/rebase, conflict resolution, or a general remote-effect
+reconciliation framework. Installation deletion, repository creation, PAT/OAuth fallback, generic
+provider abstraction, webhooks, GitHub Enterprise, multiple identities, manual authenticated Git
+inside workspace containers, hostile same-UID/multi-tenant hardening, and production deployment
+remain outside this slice.

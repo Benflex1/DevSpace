@@ -93,13 +93,14 @@ function agentFailureCode(error: unknown): string | null {
 
 function safePrimaryFailure(error: unknown): Error {
   if (error instanceof z.ZodError) return failure("authority-contract-violation");
-  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|upstream-transient|authority-invalid|permission-required|contents-permission-required|installation-unavailable|installation-removed|installation-suspended|repository-not-authorized|repository-access-unavailable|git-authentication-failed|connection-disabled|authority-generation-stale|token-lease-active))$/u.test(error.message)) return error;
+  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|upstream-transient|authority-invalid|permission-required|contents-permission-required|contents-write-permission-required|installation-unavailable|installation-removed|installation-suspended|repository-not-authorized|repository-access-unavailable|git-authentication-failed|connection-disabled|authority-generation-stale|token-lease-active|push-intent-stale|push-non-fast-forward|push-outcome-uncertain))$/u.test(error.message)) return error;
   const typedCode = agentFailureCode(error);
   if (typedCode === "SOURCE_UNAVAILABLE") return failure("operation-failed");
   if (typedCode === "GITHUB_GIT_AUTHENTICATION_FAILED") return failure("git-authentication-failed");
   if (typedCode === "GITHUB_INSTALLATION_UNAVAILABLE") return failure("installation-unavailable");
   if (typedCode === "GITHUB_REPOSITORY_NOT_AUTHORIZED") return failure("repository-not-authorized");
   if (typedCode === "GITHUB_CONTENTS_PERMISSION_REQUIRED") return failure("contents-permission-required");
+  if (typedCode === "GITHUB_CONTENTS_WRITE_PERMISSION_REQUIRED") return failure("contents-write-permission-required");
   if (typedCode === "GITHUB_AUTHORITY_INVALID") return failure("authority-invalid");
   if (typedCode === "GITHUB_TOKEN_LEASE_ACTIVE") return failure("token-lease-active");
   if (typedCode === "GITHUB_CONNECTION_DISABLED") return failure("connection-disabled");
@@ -253,8 +254,9 @@ class GithubJsonParser {
 function parseLosslessGithubJson(text: string): unknown { return new GithubJsonParser(text).parse(); }
 
 function serializeGithubRequestBody(body: unknown): string {
-  const exact = z.strictObject({ kind: z.literal("exact-repository-token"), repositoryId: githubDecimalIdSchema }).safeParse(body);
-  if (exact.success) return `{"repository_ids":[${exact.data.repositoryId}],"permissions":{"contents":"read"}}`;
+  const exact = z.strictObject({ kind: z.literal("exact-repository-token"), repositoryId: githubDecimalIdSchema,
+    contentsPermission: z.enum(["read", "write"]).optional() }).safeParse(body);
+  if (exact.success) return `{"repository_ids":[${exact.data.repositoryId}],"permissions":{"contents":"${exact.data.contentsPermission ?? "read"}"}}`;
   const metadata = z.strictObject({ permissions: z.strictObject({ metadata: z.literal("read") }) }).safeParse(body);
   if (metadata.success) return '{"permissions":{"metadata":"read"}}';
   throw failure("upstream-invalid");
@@ -350,17 +352,19 @@ function safeRepository(value: unknown): GithubRepository {
   } catch { throw failure("upstream-invalid"); }
 }
 
-function exactScopedRepository(value: unknown, repositoryId: string): GithubRepository {
+function exactScopedRepository(value: unknown, repositoryId: string, requiredContents: "read" | "write"): GithubRepository {
   const body = record(value); const repositories = body?.repositories;
   const selection = body?.repository_selection;
   const permissions = record(body?.permissions);
-  if (selection !== "selected" || permissions === null || permissions.contents !== "read"
+  if (selection !== "selected" || permissions === null || permissions.contents !== requiredContents
     || Object.entries(permissions).some(([name, level]) => name !== "contents" && !(name === "metadata" && level === "read"))) {
     throw failure("repository-not-authorized");
   }
   if (!Array.isArray(repositories) || repositories.length !== 1) throw failure("repository-not-authorized");
   const repository = safeRepository(repositories[0]);
-  if (repository.repositoryId !== repositoryId) throw failure("repository-not-authorized");
+  if (repository.repositoryId !== repositoryId || (requiredContents === "write" && repository.private !== true)) {
+    throw failure("repository-not-authorized");
+  }
   return repository;
 }
 
@@ -376,6 +380,9 @@ export interface GithubAppAuthority {
   listRepositories(input: GithubRepositoriesListData): Promise<GithubRepositoryPage>;
   resolveRepository(input: GithubRepositoryResolveData): Promise<GithubRepositoryResolution>;
   withExactRepositoryToken<T>(input: GithubRepositoryResolveData,
+    operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>,
+    operationId?: string): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }>;
+  withExactRepositoryWriteToken<T>(input: GithubRepositoryResolveData,
     operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>,
     operationId?: string): Promise<{ readonly value: T; readonly cleanupDegraded: boolean }>;
   /** Agent-private test seam; never part of the server contract. */
@@ -883,7 +890,7 @@ export async function createGithubAppAuthority(options: {
       const remaining = activeFor(input.connectionId) - 1;
       if (remaining <= 0) activeTransactions.delete(input.connectionId);
       else activeTransactions.set(input.connectionId, remaining);
-      void maybeFinalizeDisconnect(input.connectionId).catch(() => undefined);
+      await maybeFinalizeDisconnect(input.connectionId).catch(() => undefined);
     }
   });
   if (configured) {
@@ -895,6 +902,32 @@ export async function createGithubAppAuthority(options: {
       }
     }
   }
+  const withExactRepositoryTokenForPermission = async <T>(raw: GithubRepositoryResolveData,
+    operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>,
+    operationId: string | undefined, requiredContents: "read" | "write") => {
+    const input = githubRepositoryResolveDataSchema.parse(raw);
+    const lifecycle = await lifecycleFor(input.connectionId);
+    const generation = input.lifecycleGeneration ?? lifecycle.lifecycleGeneration;
+    await assertGithubAdmission(input.connectionId, generation);
+    const binding = await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true, generation);
+    if (requiredContents === "read") {
+      if (binding.permissions.contents !== "read" && binding.permissions.contents !== "write") throw failure("contents-permission-required");
+    } else if (binding.permissions.contents !== "write") throw failure("contents-write-permission-required");
+    let scopedRepository: GithubRepository | undefined;
+    const result = await runTokenTransaction<T>({
+      connectionId: input.connectionId,
+      lifecycleGeneration: generation,
+      ...(operationId === undefined ? {} : { operationId }),
+      body: { kind: "exact-repository-token", repositoryId: input.repositoryId, ...(requiredContents === "write" ? { contentsPermission: "write" as const } : {}) },
+      classifyMintFailure: (status, body) => status === 404 ? failure("repository-access-unavailable")
+        : isTransientGithubResponse(status, body) ? failure("upstream-transient")
+        : status === 403 || status === 422 ? (requiredContents === "write" ? failure("contents-write-permission-required") : failure("repository-access-unavailable")) : null,
+      validateMint: (body) => { scopedRepository = exactScopedRepository(body, input.repositoryId, requiredContents); },
+      operation: async (token) => scopedRepository === undefined ? Promise.reject(failure("repository-not-authorized"))
+        : await operation(token, scopedRepository, generation)
+    });
+    return result;
+  };
   return {
     inspectApp: async () => await Promise.resolve(githubAppInspectionSchema.parse(configured && config !== null
       ? { configured: true, appId: config.appId, expectedAccountId: config.expectedAccountId, expectedAccountType: config.expectedAccountType, installationUrl: config.installationUrl }
@@ -1015,28 +1048,11 @@ export async function createGithubAppAuthority(options: {
       return githubRepositoryResolutionSchema.parse({ repository: result.value, cleanupDegraded: result.cleanupDegraded });
     },
     withExactRepositoryToken: async <T>(raw: GithubRepositoryResolveData,
-      operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>, operationId?: string) => {
-      const input = githubRepositoryResolveDataSchema.parse(raw);
-      const lifecycle = await lifecycleFor(input.connectionId);
-      const generation = input.lifecycleGeneration ?? lifecycle.lifecycleGeneration;
-      await assertGithubAdmission(input.connectionId, generation);
-      const binding = await liveBinding(input.connectionId, (await readBinding(input.connectionId)).installationId, true, generation);
-      if (binding.permissions.contents !== "read" && binding.permissions.contents !== "write") throw failure("contents-permission-required");
-      let scopedRepository: GithubRepository | undefined;
-      const result = await runTokenTransaction<T>({
-        connectionId: input.connectionId,
-        lifecycleGeneration: generation,
-        ...(operationId === undefined ? {} : { operationId }),
-        body: { kind: "exact-repository-token", repositoryId: input.repositoryId },
-        classifyMintFailure: (status, body) => status === 404 ? failure("repository-access-unavailable")
-          : isTransientGithubResponse(status, body) ? failure("upstream-transient")
-          : status === 403 || status === 422 ? failure("repository-access-unavailable") : null,
-        validateMint: (body) => { scopedRepository = exactScopedRepository(body, input.repositoryId); },
-        operation: async (token) => scopedRepository === undefined ? Promise.reject(failure("repository-not-authorized"))
-          : await operation(token, scopedRepository, generation)
-      });
-      return result;
-    },
+      operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>, operationId?: string) =>
+      await withExactRepositoryTokenForPermission(raw, operation, operationId, "read"),
+    withExactRepositoryWriteToken: async <T>(raw: GithubRepositoryResolveData,
+      operation: (token: string, repository: GithubRepository, lifecycleGeneration: number) => Promise<T>, operationId?: string) =>
+      await withExactRepositoryTokenForPermission(raw, operation, operationId, "write"),
     listRepositories: async (raw) => {
       const input = githubRepositoriesListDataSchema.parse(raw);
       const lifecycle = await lifecycleFor(input.connectionId);

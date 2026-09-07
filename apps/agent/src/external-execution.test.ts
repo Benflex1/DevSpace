@@ -80,6 +80,18 @@ test("an execution marker must bind to the exact nonterminal journal operation a
   expect(fence.isHealthy).toBe(false);
 });
 
+test("a project-push execution marker binds only to the project.push journal operation", async () => {
+  const root = await executionRoot();
+  const marker = externalExecutionMarkerSchema.parse({ version: 1, phase: "reserved", operationId, projectId, executionId,
+    role: "project-push", createdAt: new Date(Date.now() - 1_000).toISOString(), deadlineAt: new Date(Date.now() + 10_000).toISOString() });
+  await writeFile(path.join(root, `${operationId}.json`), `${JSON.stringify(marker)}\n`, "utf8");
+  const fence = new ExternalExecutionFence(root); await fence.initialize();
+  expect(() => fence.validateJournalBindings(() => ({ operationName: "project.push", state: "failed", failure: { code: "GITHUB_PUSH_OUTCOME_UNCERTAIN" }, request: { projectId } }))).not.toThrow();
+  expect(fence.isHealthy).toBe(true);
+  await expect(fence.awaitProject(projectId)).resolves.toBeUndefined();
+  expect(await readdir(root)).not.toContain(`${operationId}.json`);
+});
+
 test("a timed-out real Git process group is terminated and its marker is retired", async () => {
   const root = await executionRoot();
   const fence = new ExternalExecutionFence(root); await fence.initialize();
