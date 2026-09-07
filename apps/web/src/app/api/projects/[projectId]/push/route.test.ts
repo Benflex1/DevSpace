@@ -2,15 +2,15 @@ import { afterEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ prepare: vi.fn(), confirm: vi.fn(), latest: vi.fn(), database: {}, agent: {} }));
 vi.mock("../../../../../server/project-push.js", async (importOriginal) => {
-  const original = Object.assign({}, await importOriginal<typeof import("../../../../../server/project-push.js")>());
+  const original = Object.assign({}, await importOriginal());
   return { ...original, prepareProjectPush: mocks.prepare, confirmProjectPush: mocks.confirm, getLatestProjectPushStatus: mocks.latest };
 });
 vi.mock("../../../../../server/database.js", async (importOriginal) => {
-  const original = Object.assign({}, await importOriginal<typeof import("../../../../../server/database.js")>());
+  const original = Object.assign({}, await importOriginal());
   return { ...original, getProjectDatabase: () => mocks.database };
 });
 vi.mock("../../../../../server/agent-client.js", async (importOriginal) => {
-  const original = Object.assign({}, await importOriginal<typeof import("../../../../../server/agent-client.js")>());
+  const original = Object.assign({}, await importOriginal());
   return { ...original, createAgentClient: () => mocks.agent };
 });
 
