@@ -93,7 +93,7 @@ function agentFailureCode(error: unknown): string | null {
 
 function safePrimaryFailure(error: unknown): Error {
   if (error instanceof z.ZodError) return failure("authority-contract-violation");
-  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|upstream-transient|authority-invalid|permission-required|contents-permission-required|contents-write-permission-required|installation-unavailable|installation-removed|installation-suspended|repository-not-authorized|repository-access-unavailable|git-authentication-failed|connection-disabled|authority-generation-stale|token-lease-active))$/u.test(error.message)) return error;
+  if (error instanceof Error && /^(?:github-(?:authority-contract-violation|authority-programming-error|continuation-invalid|operation-failed|token-mint-failed|upstream-invalid|upstream-transient|authority-invalid|permission-required|contents-permission-required|contents-write-permission-required|installation-unavailable|installation-removed|installation-suspended|repository-not-authorized|repository-access-unavailable|git-authentication-failed|connection-disabled|authority-generation-stale|token-lease-active|push-intent-stale|push-non-fast-forward|push-outcome-uncertain))$/u.test(error.message)) return error;
   const typedCode = agentFailureCode(error);
   if (typedCode === "SOURCE_UNAVAILABLE") return failure("operation-failed");
   if (typedCode === "GITHUB_GIT_AUTHENTICATION_FAILED") return failure("git-authentication-failed");

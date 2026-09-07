@@ -123,7 +123,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function createHarness(authority: GithubAppAuthority | GithubAuthorityFactory, ensureStarted: () => Promise<void> = () => Promise.resolve(), useProductionFence = false) {
+async function createHarness(authority: GithubAppAuthority | GithubAuthorityFactory, ensureStarted: () => Promise<void> = () => Promise.resolve(), useProductionFence = false,
+  pushFailure?: string) {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-managed-github-test-"));
   temporaryRoots.push(root);
   const source = path.join(root, "source");
@@ -141,6 +142,7 @@ async function createHarness(authority: GithubAppAuthority | GithubAuthorityFact
   };
   await Promise.all(Object.values(roots).map((directory) => mkdir(directory, { recursive: true })));
   const git: GitRunner = async (args) => {
+    if (pushFailure !== undefined && args.includes("push")) throw new Error(pushFailure);
     const invocation = protectedGitInvocation([
       "-c", `url.${source}.insteadOf=${sourceUrl}`, "-c", "protocol.file.allow=always", ...args
     ]);
@@ -388,6 +390,44 @@ test("pushes the captured local commit to the same-name remote branch with write
   expect(calls).toEqual([{ method: "write", input: { connectionId, repositoryId, lifecycleGeneration: 1 } }]);
   await expect(exec("/usr/bin/git", ["-C", h.source, "rev-parse", "refs/heads/feature/push"]))
     .resolves.toMatchObject({ stdout: `${commitOid}\n` });
+});
+
+test("advances an existing same-name remote branch without changing its destination", async () => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls));
+  await prepareWorkspace(h);
+  const worktree = h.managed.worktreePath(workspaceId);
+  await writeFile(path.join(worktree, "README.md"), "first push\n", "utf8");
+  await exec("/usr/bin/git", ["-C", worktree, "add", "README.md"]);
+  await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "first push"]);
+  const firstCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid: firstCommit, githubAuthorityGeneration: 1 },
+    "018f0f00-0000-7000-8000-000000000110");
+
+  await writeFile(path.join(worktree, "README.md"), "second push\n", "utf8");
+  await exec("/usr/bin/git", ["-C", worktree, "add", "README.md"]);
+  await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "second push"]);
+  const secondCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid: secondCommit, githubAuthorityGeneration: 1 },
+    "018f0f00-0000-7000-8000-000000000111");
+
+  expect(calls.filter((call) => call.method === "write")).toHaveLength(2);
+  await expect(exec("/usr/bin/git", ["-C", h.source, "rev-parse", "refs/heads/feature/push"]))
+    .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+});
+
+test.each([
+  ["non-fast-forward", "! [rejected] feature/push -> feature/push (non-fast-forward)", "GITHUB_PUSH_NON_FAST_FORWARD"],
+  ["ambiguous Git failure", "fatal: the remote closed the connection after launch", "GITHUB_PUSH_OUTCOME_UNCERTAIN"]
+] as const)("preserves %s from the authenticated Git transaction", async (_name, pushFailure, code) => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls), () => Promise.resolve(), false, pushFailure);
+  await prepareWorkspace(h);
+  const worktree = h.managed.worktreePath(workspaceId);
+  const commitOid = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+
+  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid, githubAuthorityGeneration: 1 },
+    "018f0f00-0000-7000-8000-000000000112")).rejects.toMatchObject({ failure: { code } });
 });
 
 test("rejects a push intent when the captured commit no longer matches the workspace", async () => {

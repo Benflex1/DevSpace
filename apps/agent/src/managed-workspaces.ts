@@ -404,11 +404,11 @@ export class ManagedWorkspaces {
         catch (error) {
           if (role !== "project-push") throw error;
           const message = error instanceof Error ? error.message : "";
-          if (PUSH_NON_FAST_FORWARD_PATTERN.test(message)) throw new Error("github-push-non-fast-forward");
+          if (PUSH_NON_FAST_FORWARD_PATTERN.test(message)) throw new Error("github-push-non-fast-forward", { cause: error });
           if (/authentication failed|could not read Username|HTTP 401|HTTP 403|access denied/iu.test(message)) {
-            throw new Error("github-git-authentication-failed");
+            throw new Error("github-git-authentication-failed", { cause: error });
           }
-          throw new Error("github-push-outcome-uncertain");
+          throw new Error("github-push-outcome-uncertain", { cause: error });
         }
       }
     if (this.executionFence === null) throw new PrivateStateCorruptionError(this.stateRoot, "execution fence is not initialized");
@@ -427,7 +427,7 @@ export class ManagedWorkspaces {
     } catch (error) {
       if (role === "project-push") {
         const message = error instanceof Error ? error.message : "";
-        if (!message.startsWith("github-") && !(error instanceof AgentExecutionError)) throw new Error("github-push-outcome-uncertain");
+        if (!message.startsWith("github-") && !(error instanceof AgentExecutionError)) throw new Error("github-push-outcome-uncertain", { cause: error });
       }
       throw error;
     }
@@ -439,7 +439,7 @@ export class ManagedWorkspaces {
           const failureKind = classifyAuthenticatedGitFailure(result);
           if (failureKind === "authentication") throw new Error("github-git-authentication-failed");
           if (failureKind === "remote-source") throw new Error("github-push-outcome-uncertain");
-          throw new Error("git-command-failed");
+          throw new Error("github-push-outcome-uncertain");
         }
         const failureKind = classifyAuthenticatedGitFailure(result);
         if (failureKind === "authentication") throw new Error("github-git-authentication-failed");

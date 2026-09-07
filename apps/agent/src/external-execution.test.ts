@@ -88,6 +88,8 @@ test("a project-push execution marker binds only to the project.push journal ope
   const fence = new ExternalExecutionFence(root); await fence.initialize();
   expect(() => fence.validateJournalBindings(() => ({ operationName: "project.push", state: "failed", failure: { code: "GITHUB_PUSH_OUTCOME_UNCERTAIN" }, request: { projectId } }))).not.toThrow();
   expect(fence.isHealthy).toBe(true);
+  await expect(fence.awaitProject(projectId)).resolves.toBeUndefined();
+  expect(await readdir(root)).not.toContain(`${operationId}.json`);
 });
 
 test("a timed-out real Git process group is terminated and its marker is retired", async () => {
