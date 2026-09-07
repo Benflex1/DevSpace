@@ -8,6 +8,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import * as z from "zod";
 import {
   githubRepositoryResolveDataSchema,
+  gitBranchNameSchema,
   createWorkspaceDataSchema,
   type GithubRepository,
   type GithubRepositoryResolveData,
@@ -41,6 +42,7 @@ const repositoryId = "9007199254740993";
 const workspaceId = "018f0f00-0000-7000-8000-000000000103";
 const revisionId = "018f0f00-0000-7000-8000-000000000104";
 const sourceUrl = "https://github.com/org/private-repo.git";
+const pushBranch = gitBranchNameSchema.parse("feature/push");
 const sourceLocator = { kind: "github-app", connectionId, repositoryId } as const satisfies SourceLocator;
 const repository: GithubRepository = {
   repositoryId,
@@ -384,7 +386,7 @@ test("pushes the captured local commit to the same-name remote branch with write
   const commitOid = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
   calls.splice(0);
 
-  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid, githubAuthorityGeneration: 1 },
+  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch, commitOid, githubAuthorityGeneration: 1 },
     "018f0f00-0000-7000-8000-000000000108");
 
   expect(calls).toEqual([{ method: "write", input: { connectionId, repositoryId, lifecycleGeneration: 1 } }]);
@@ -401,14 +403,14 @@ test("advances an existing same-name remote branch without changing its destinat
   await exec("/usr/bin/git", ["-C", worktree, "add", "README.md"]);
   await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "first push"]);
   const firstCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
-  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid: firstCommit, githubAuthorityGeneration: 1 },
+  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch, commitOid: firstCommit, githubAuthorityGeneration: 1 },
     "018f0f00-0000-7000-8000-000000000110");
 
   await writeFile(path.join(worktree, "README.md"), "second push\n", "utf8");
   await exec("/usr/bin/git", ["-C", worktree, "add", "README.md"]);
   await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "second push"]);
   const secondCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
-  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid: secondCommit, githubAuthorityGeneration: 1 },
+  await h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch, commitOid: secondCommit, githubAuthorityGeneration: 1 },
     "018f0f00-0000-7000-8000-000000000111");
 
   expect(calls.filter((call) => call.method === "write")).toHaveLength(2);
@@ -426,7 +428,7 @@ test.each([
   const worktree = h.managed.worktreePath(workspaceId);
   const commitOid = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
 
-  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid, githubAuthorityGeneration: 1 },
+  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch, commitOid, githubAuthorityGeneration: 1 },
     "018f0f00-0000-7000-8000-000000000112")).rejects.toMatchObject({ failure: { code } });
 });
 
@@ -441,7 +443,7 @@ test("rejects a push intent when the captured commit no longer matches the works
   await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "drifted"]);
   calls.splice(0);
 
-  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: "feature/push", commitOid: capturedCommit, githubAuthorityGeneration: 1 },
+  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch, commitOid: capturedCommit, githubAuthorityGeneration: 1 },
     "018f0f00-0000-7000-8000-000000000109")).rejects.toMatchObject({ failure: { code: "GITHUB_PUSH_INTENT_STALE" } });
   expect(calls).toEqual([]);
 });
