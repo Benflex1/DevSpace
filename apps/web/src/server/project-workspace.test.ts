@@ -77,6 +77,7 @@ test("normal project loading materializes a preview from the active setup revisi
   vi.stubEnv("DEVSPACE_PREVIEW_BASES", JSON.stringify([{ id: "preview-main", domain: "preview.example.com", labelSuffix: "-preview" }]));
   const loaded = await loadProjectWorkspaceData(project.id);
   expect(loaded?.project.previews).toEqual([expect.objectContaining({ previewKey: "web", containerPort: 5173 })]);
+  expect(loaded?.pushAvailable).toBe(false);
   getProjectDatabase(databasePath).close();
 });
 

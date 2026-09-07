@@ -18,8 +18,13 @@ import {
 
 type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
+type PushStatus = {
+  operationId: string; state: "prepared" | "submitted" | "succeeded" | "failed";
+  repository: string; branchName: string; commitOid: string; dirty: boolean;
+  aheadCount: number; behindCount: number; errorCode: string | null; message: string | null;
+};
 export function ProjectWorkbench({ projectId, workspaceId, projectName, branchName, runtimeState, runtimeRunning, runtimeAvailable,
-  agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, initialTasks, initialTaskRuns, initialTerminals, initialPreviews,
+  agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, pushAvailable, initialTasks, initialTaskRuns, initialTerminals, initialPreviews,
   previewGateway, repositoryUrl, actor, initialMessage }: {
   projectId: string;
   workspaceId: string;
@@ -34,6 +39,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   canStart: boolean;
   canStop: boolean;
   retryStart: boolean;
+  pushAvailable: boolean;
   initialTasks: readonly Task[];
   initialTaskRuns: readonly TaskRun[];
   initialTerminals: readonly TerminalView[];
@@ -52,6 +58,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [runs, setRuns] = useState<readonly TaskRun[]>(initialTaskRuns);
   const [previews, setPreviews] = useState<readonly PreviewLifecycleView[]>(initialPreviews);
   const [fetchingRepository, setFetchingRepository] = useState(false);
+  const [preparingPush, setPreparingPush] = useState(false);
+  const [confirmingPush, setConfirmingPush] = useState(false);
+  const [pushIntent, setPushIntent] = useState<PushStatus | null>(null);
+  const [lastPushStatus, setLastPushStatus] = useState<PushStatus | null>(null);
   const currentPreviews = useRef(initialPreviews);
   const previewLivenessPoller = useRef<PreviewLivenessPoller | null>(null);
   const { notice, show: showNotice, clear: clearNotice } = useTransientNotice(initialMessage);
@@ -116,6 +126,19 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     setPreviews(initialPreviews);
     currentPreviews.current = initialPreviews;
   }, [initialPreviews]);
+  useEffect(() => {
+    if (!pushAvailable) return;
+    let cancelled = false;
+    fetch(`/api/projects/${projectId}/push`, { cache: "no-store" }).then(async (response) => {
+      if (!response.ok) return;
+      const result = await response.json() as { push?: PushStatus | null };
+      if (!cancelled && result.push !== undefined && result.push !== null) {
+        setLastPushStatus(result.push);
+        if (result.push.state === "prepared") setPushIntent(result.push);
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectId, pushAvailable]);
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
     return terminal.title;
   }, []);
@@ -307,11 +330,63 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       setFetchingRepository(false);
     }
   };
+  const preparePush = async () => {
+    if (!pushAvailable || !agentReachable || preparingPush || confirmingPush) return;
+    setPreparingPush(true);
+    showNotice("Preparing push…", "pending");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/push`, {
+        method: "POST", headers: { "content-type": "application/json", Origin: window.location.origin, "x-devspace-csrf": "1" },
+        body: JSON.stringify({ action: "prepare" })
+      });
+      const result = await response.json() as PushStatus & { code?: string; message?: string; incidentId?: string };
+      if (!response.ok || result.operationId === undefined) {
+        showNotice(result.message ?? "Push preparation failed.", "error", result.incidentId);
+        return;
+      }
+      setPushIntent(result);
+      setLastPushStatus(result);
+      showNotice("Review the captured branch and commit, then confirm the push.", "pending");
+    } catch {
+      showNotice("Push preparation failed safely.", "error");
+    } finally {
+      setPreparingPush(false);
+    }
+  };
+  const confirmPush = async () => {
+    if (pushIntent === null || confirmingPush) return;
+    setConfirmingPush(true);
+    showNotice("Pushing the captured commit…", "pending");
+    try {
+      const response = await fetch(`/api/projects/${projectId}/push`, {
+        method: "POST", headers: { "content-type": "application/json", Origin: window.location.origin, "x-devspace-csrf": "1" },
+        body: JSON.stringify({ action: "confirm", operationId: pushIntent.operationId })
+      });
+      const result = await response.json() as PushStatus & { code?: string; message?: string; incidentId?: string };
+      if (!response.ok) {
+        setLastPushStatus({ ...pushIntent, state: "failed", errorCode: result.code ?? null, message: result.message ?? null });
+        setPushIntent(null);
+        showNotice(result.message ?? "Repository push failed.", "error", result.incidentId);
+        return;
+      }
+      setLastPushStatus(result);
+      setPushIntent(null);
+      showNotice("Repository push succeeded.", "success");
+    } catch {
+      setLastPushStatus({ ...pushIntent, state: "failed", errorCode: "GITHUB_PUSH_OUTCOME_UNCERTAIN", message: "The push outcome is uncertain. Inspect the remote branch before explicitly retrying." });
+      setPushIntent(null);
+      showNotice("Repository push outcome is uncertain. Inspect the remote branch before retrying.", "error");
+    } finally {
+      setConfirmingPush(false);
+    }
+  };
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
     <WorkbenchTopBar projectName={projectName} branchName={branchName} repositoryUrl={repositoryUrl} projectId={projectId}
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
       retryStart={retryStart} agentReachable={agentReachable} fetchingRepository={fetchingRepository}
+      pushAvailable={pushAvailable} pushingRepository={preparingPush} lastPushStatus={lastPushStatus}
+      onPushRepository={() => { preparePush().catch(() => showNotice("Push preparation failed safely.", "error")); }}
       onFetchRepository={() => { fetchRepository().catch(() => showNotice("Repository fetch failed safely.", "error")); }} />
     <div className="workbench-body">
       <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
@@ -336,20 +411,28 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         lostTerminalRecoveryIds.current = [];
         dismissLostTerminalDialog(lostDialogIds);
       }} onRestartInitiated={handleLostTerminalRestartInitiated} onRestartSuccess={handleLostTerminalRestartSuccess} />}
+    {pushIntent !== null && <PushConfirmationDialog intent={pushIntent} confirming={confirmingPush}
+      onCancel={() => { if (!confirmingPush) { setPushIntent(null); clearNotice(); } }} onConfirm={() => { confirmPush().catch(() => showNotice("Repository push failed safely.", "error")); }} />}
     <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
 
 function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, runtimeState, runtimeAvailable, activeAction, canStart,
-  canStop, retryStart, agentReachable, fetchingRepository, onFetchRepository }: {
+  canStop, retryStart, agentReachable, fetchingRepository, pushAvailable, pushingRepository, lastPushStatus, onPushRepository, onFetchRepository }: {
   projectName: string; branchName: string; repositoryUrl: string; projectId: string; runtimeState: string; runtimeAvailable: boolean;
   activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean; agentReachable: boolean;
-  fetchingRepository: boolean; onFetchRepository: () => void;
+  fetchingRepository: boolean; pushAvailable: boolean; pushingRepository: boolean; lastPushStatus: PushStatus | null;
+  onPushRepository: () => void; onFetchRepository: () => void;
 }) {
   return <header className="workbench-topbar">
     <div className="workbench-breadcrumb"><Link href="/" aria-label="Back to Projects">Projects</Link><span aria-hidden="true">/</span><strong>{projectName}</strong></div>
     <div className="workbench-context"><span className="context-item"><span className="context-label">branch</span><code>{branchName}</code></span>
       <a className="topbar-action" href={repositoryUrl} target="_blank" rel="noreferrer">Repository</a>
+      {pushAvailable && <button type="button" className="topbar-action push-action" disabled={!agentReachable || pushingRepository || fetchingRepository} onClick={onPushRepository}>
+        {pushingRepository ? "Preparing…" : "Push"}
+      </button>}
+      {lastPushStatus?.state === "failed" && lastPushStatus.errorCode === "GITHUB_PUSH_OUTCOME_UNCERTAIN" &&
+        <span className="push-outcome-note" title={`${lastPushStatus.repository} · ${lastPushStatus.branchName} · ${lastPushStatus.commitOid}`}>Last push needs inspection</span>}
       <button type="button" className="topbar-action" disabled={!agentReachable || fetchingRepository} onClick={onFetchRepository}>
         {fetchingRepository ? "Fetching…" : "Fetch repository"}
       </button>
@@ -453,6 +536,33 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
       })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} /> : null)}
+  </div>;
+}
+
+function PushConfirmationDialog({ intent, confirming, onCancel, onConfirm }: {
+  intent: PushStatus; confirming: boolean; onCancel: () => void; onConfirm: () => void;
+}) {
+  const relation = intent.aheadCount === 0 && intent.behindCount === 0
+    ? "Remote branch relation is unchanged or unavailable."
+    : `${intent.aheadCount} commit${intent.aheadCount === 1 ? "" : "s"} ahead, ${intent.behindCount} behind`;
+  return <div className="push-dialog-backdrop">
+    <section className="push-dialog" role="dialog" aria-modal="true" aria-labelledby="push-dialog-title" aria-describedby="push-dialog-description">
+      <h2 id="push-dialog-title">Confirm push</h2>
+      <p id="push-dialog-description">DevSpace will update the same branch on the selected private GitHub repository with this captured commit.</p>
+      <dl className="push-intent-details">
+        <div><dt>Repository</dt><dd>{intent.repository}</dd></div>
+        <div><dt>Branch</dt><dd><code>{intent.branchName}</code></dd></div>
+        <div><dt>Local commit</dt><dd><code>{intent.commitOid}</code></dd></div>
+        <div><dt>Remote relation</dt><dd>{relation}</dd></div>
+      </dl>
+      {intent.dirty && <p className="push-dialog-warning">This workspace still has uncommitted changes; only the captured commit will be pushed.</p>}
+      <div className="push-dialog-actions">
+        <button type="button" className="push-cancel" disabled={confirming} onClick={onCancel}>Cancel</button>
+        <button type="button" className="push-confirm" disabled={confirming} onClick={onConfirm}>
+          {confirming ? "Pushing…" : "Confirm push"}
+        </button>
+      </div>
+    </section>
   </div>;
 }
 

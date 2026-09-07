@@ -485,6 +485,6 @@ export function createAgentClient(socketPath: string, options: {
 export type FullAgentClient = ReturnType<typeof createAgentClient>;
 export type WorkspaceAgentClient = Pick<FullAgentClient,
   "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" |
-  "fetchProject" | "pushProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
+  "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
 export type AgentClient = Pick<FullAgentClient, "health" | "inspectSource">
   & Partial<Pick<FullAgentClient, "resolveGithubRepository">>;

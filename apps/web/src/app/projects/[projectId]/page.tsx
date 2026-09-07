@@ -16,7 +16,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
   const data = await loadProjectWorkspaceData(projectId);
   if (data === null) notFound();
 
-  const { project, agentStatus, agentReachable, runtimeAvailability, live, runtimeOperation, previewMaterializationError } = data;
+  const { project, pushAvailable, agentStatus, agentReachable, runtimeAvailability, live, runtimeOperation, previewMaterializationError } = data;
   const activeAction = runtimeOperation?.activeAction ?? null;
   const inspectedWorkspace = runtimeOperation?.inspection ?? live?.workspace ?? null;
   const workspaceState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping"
@@ -30,6 +30,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       runtimeRunning={runtimeState === "running"} runtimeAvailable={runtimeAvailability === "available"} agentStatus={agentStatus}
       agentReachable={agentReachable} activeAction={activeAction} canStart={runtimeOperation?.canStart === true}
       canStop={runtimeOperation?.canStop === true} retryStart={runtimeOperation?.canRetryStart === true}
+      pushAvailable={pushAvailable}
       initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} initialPreviews={project.previews}
       previewGateway={{ protocol: config.previewGatewayProtocol, port: config.previewGatewayPort }} actor={actor.identity}
       initialMessage={previewMaterializationError} />;

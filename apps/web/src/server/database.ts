@@ -241,6 +241,30 @@ export function openProjectDatabase(path: string, options: {
   const db = drizzle({ client });
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? uuidv7;
+  const terminalizeInterruptedProjectPushes = (): void => {
+    const timestamp = now().toISOString();
+    const active = db.select().from(operations).where(and(
+      eq(operations.operationName, "project.push"),
+      or(eq(operations.state, "accepted"), eq(operations.state, "running"))
+    )).all();
+    for (const operation of active) {
+      let phase: unknown = "submitted";
+      try {
+        phase = operation.progressJson === null ? "submitted" : (JSON.parse(operation.progressJson) as { phase?: unknown }).phase;
+      } catch {
+        // A malformed active push record is conservatively treated as an
+        // interrupted submission; its durable intent is still retained.
+      }
+      if (operation.state !== "running" && phase === "prepared") continue;
+      db.update(operations).set({ state: "failed", finishedAt: timestamp,
+        errorCode: "GITHUB_PUSH_OUTCOME_UNCERTAIN",
+        errorMessage: "The push outcome is uncertain after Web interruption. Inspect the remote branch before explicitly retrying."
+      }).where(and(eq(operations.operationId, operation.operationId), or(
+        eq(operations.state, "accepted"), eq(operations.state, "running")
+      ))).run();
+    }
+  };
+  terminalizeInterruptedProjectPushes();
   const pruneExpiredLostTerminalSessions = (): void => {
     const retirementCutoff = new Date(now().valueOf() - terminalRetirementGracePeriodMs).toISOString();
     const expired = db.select({ id: terminalSessions.id, processId: terminalSessions.processId })
@@ -1190,6 +1214,82 @@ export function openProjectDatabase(path: string, options: {
         return operation;
       }).immediate();
     },
+    prepareProjectPushOperation(input: {
+      projectId: string; workspaceId: string; actor: string; progressJson: string;
+    }): Operation {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        if (context.workspace.id !== input.workspaceId || context.workspace.kind !== "primary") {
+          throw new ProjectSetupConflictError("A managed primary workspace is required to push.");
+        }
+        const active = db.select().from(operations).where(and(
+          eq(operations.projectId, input.projectId), eq(operations.workspaceId, input.workspaceId),
+          eq(operations.operationName, "project.push")
+        )).orderBy(desc(operations.createdAt), desc(operations.operationId)).all()
+          .find((candidate) => candidate.state === "accepted" || candidate.state === "running");
+        const createdAt = now().toISOString();
+        if (active?.state === "running") throw new ProjectSetupConflictError("A push is already in progress.");
+        if (active !== undefined) {
+          let prepared = false;
+          try {
+            const parsed: unknown = JSON.parse(active.progressJson ?? "{}");
+            prepared = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+              && "phase" in parsed && (parsed as { readonly phase?: unknown }).phase === "prepared";
+          } catch { /* terminalize conservatively on restart */ }
+          if (!prepared) throw new ProjectSetupConflictError("A push is already in progress.");
+          db.update(operations).set({ state: "failed", finishedAt: createdAt,
+            errorCode: "GITHUB_PUSH_INTENT_STALE", errorMessage: "A newer push preparation superseded this intent."
+          }).where(and(eq(operations.operationId, active.operationId), eq(operations.state, "accepted"))).run();
+        }
+        const operation: Operation = {
+          operationId: createId(), projectId: input.projectId, workspaceId: input.workspaceId, actor: input.actor,
+          operationName: "project.push", resourceType: "workspace", resourceId: input.workspaceId,
+          state: "accepted", progressJson: input.progressJson, errorCode: null, errorMessage: null,
+          createdAt, startedAt: null, finishedAt: null
+        };
+        db.insert(operations).values(operation).run();
+        return operation;
+      }).immediate();
+    },
+    getProjectPushOperation(input: { operationId: string; projectId: string; actor: string }): Operation | undefined {
+      return db.select().from(operations).where(and(
+        eq(operations.operationId, input.operationId), eq(operations.projectId, input.projectId),
+        eq(operations.operationName, "project.push"), eq(operations.actor, input.actor)
+      )).get();
+    },
+    getLatestProjectPushOperation(input: { projectId: string; actor: string }): Operation | undefined {
+      return db.select().from(operations).where(and(
+        eq(operations.projectId, input.projectId), eq(operations.operationName, "project.push"),
+        eq(operations.actor, input.actor)
+      )).orderBy(desc(operations.createdAt), desc(operations.operationId)).get();
+    },
+    claimProjectPushOperation(input: {
+      operationId: string; projectId: string; workspaceId: string; actor: string;
+      expectedProgressJson: string; progressJson: string;
+    }): Operation {
+      return client.transaction(() => {
+        const operation = db.select().from(operations).where(and(
+          eq(operations.operationId, input.operationId), eq(operations.projectId, input.projectId),
+          eq(operations.workspaceId, input.workspaceId), eq(operations.operationName, "project.push"),
+          eq(operations.resourceType, "workspace"), eq(operations.resourceId, input.workspaceId),
+          eq(operations.actor, input.actor)
+        )).get();
+        if (operation === undefined) throw new ProjectSetupConflictError("The push intent was not found.");
+        if ((operation.state !== "accepted" && operation.state !== "running")
+          || operation.progressJson !== input.expectedProgressJson) {
+          throw new ProjectSetupConflictError("The push intent is no longer available for confirmation.");
+        }
+        const timestamp = now().toISOString();
+        const updated = db.update(operations).set({ state: "running", startedAt: operation.startedAt ?? timestamp,
+          progressJson: input.progressJson
+        }).where(and(eq(operations.operationId, input.operationId), eq(operations.state, operation.state),
+          eq(operations.progressJson, input.expectedProgressJson))).run();
+        if (updated.changes !== 1) throw new ProjectSetupConflictError("The push intent changed concurrently.");
+        const claimed = db.select().from(operations).where(eq(operations.operationId, input.operationId)).get();
+        if (claimed === undefined) throw new ProjectSetupConflictError("The push intent could not be claimed.");
+        return claimed;
+      }).immediate();
+    },
     finishOperation(operationId: string, outcome: { state: "succeeded" } | { state: "failed"; code: string; message: string }): void {
       const timestamp = now().toISOString();
       db.update(operations).set({
@@ -1777,7 +1877,7 @@ export function openProjectDatabase(path: string, options: {
         };
         for (const operation of snapshot.operationObservations) {
           const local = db.select().from(operations).where(eq(operations.operationId, operation.operationId)).get();
-          if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"].includes(local.operationName)) continue;
+          if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate", "project.push"].includes(local.operationName)) continue;
           if (operation.state === "succeeded") this.finishOperation(local.operationId, { state: "succeeded" });
           else if (operation.state === "failed") {
             const message = persistedFailureMessage(operation.failure.code);
