@@ -165,8 +165,9 @@ offers minimal disconnect confirmation and reconnect/re-authorize guidance.
 CP3B explicit private GitHub push is implemented on the current feature branch. The temporary
 Workbench Push action prepares a server-captured `{connectionId, repositoryId, branch, commit,
 generation}` intent, requires explicit confirmation, and dispatches only the fixed same-name
-`<commit>:refs/heads/<branch>` update through exact `contents:write` GitHub App authority. Read
-operations retain their read-only scopes. Missing write permission follows the existing
+`<commit>:refs/heads/<branch>` update through exact `contents:write` GitHub App authority. The
+destination is the live authority-resolved HTTPS origin URL, and repository-local push
+destination/rewrite settings are rejected. Read operations retain their read-only scopes. Missing write permission follows the existing
 permission-loss/reauthorization path. Submitted or interrupted pushes are terminalized as
 `GITHUB_PUSH_OUTCOME_UNCERTAIN`, retain their captured intent for inspection, and are never
 automatically resent. Agent snapshot reconciliation also clears a submitted Web operation after

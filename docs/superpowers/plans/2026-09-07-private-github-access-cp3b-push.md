@@ -14,7 +14,7 @@
 
 - Browser requests contain only push action and opaque operation/intent IDs; branch, commit, URL, remote, refspec, and force options are Web/Agent-owned.
 - Push is restricted to an actor-owned GitHub App source and a managed primary workspace in the temporary Web UX; public clone/fetch/inspect behavior remains unchanged.
-- The only push refspec is <captured-commit>:refs/heads/<captured-branch> on fixed remote origin.
+- The only push refspec is <captured-commit>:refs/heads/<captured-branch> on the live authority-resolved HTTPS URL for managed origin.
 - Push requests exact selected-repository contents: write; read/list/resolve/clone/fetch requests retain their existing read-only scopes.
 - Tokens are Agent-only, short-lived, in-memory, askpass-delivered, and settled through the existing lease model.
 - A disconnected or stale lifecycle generation must fail before token mint or Git launch; reconnect never resumes an old push.
@@ -136,10 +136,10 @@ Expected: FAIL because push execution, the write authority callback, role, and n
 
 - [ ] **Step 3: Implement the bounded push path**
 
-Reuse protectedGitInvocation and withExactRepositoryWriteToken. Load and revalidate store/workspace ownership. Construct only:
+Reuse protectedGitInvocation and withExactRepositoryWriteToken. Load and revalidate store/workspace ownership. Construct only (using the live authority-resolved HTTPS URL for managed origin):
 
 ~~~text
-git [protected options] -C <owned-worktree> push origin <captured-commit>:refs/heads/<captured-branch>
+git [protected options] -C <owned-worktree> push -- <authority-resolved-origin-url> <captured-commit>:refs/heads/<captured-branch>
 ~~~
 
 Acquire the existing lifecycle launch fence and recheck branch/HEAD while it is held. Treat timeout, signal, or an execution exception after possible launch as uncertainty. Keep public fetch/clone/inspect unchanged.

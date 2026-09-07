@@ -177,6 +177,7 @@ export function githubRepositoryResolveDataFromSourceLocator(
 
 const githubTokenOperationResultSchema = z.strictObject({ value: z.unknown(), cleanupDegraded: z.boolean() });
 const PUSH_NON_FAST_FORWARD_PATTERN = /non-fast-forward|fetch first|updates were rejected because|rejected.*(?:non-fast-forward|update rejected)/iu;
+const PUSH_UNSAFE_LOCAL_CONFIG_KEY = /^(?:branch\..+\.pushremote|push\.pushoption|remote\.(?:origin\.(?:mirror|proxy|push|pushoption|pushurl|receivepack|tagopt|uploadpack)|pushdefault)|url\..+\.(?:insteadof|pushinsteadof))$/u;
 export function protectedGitInvocation(args: readonly string[], auth?: { readonly capability: AskpassCapability }): { args: string[]; env: NodeJS.ProcessEnv } {
   const caFile = process.env.DEVSPACE_GIT_CA_FILE;
   const caArguments = caFile === undefined ? [] : ["-c", `http.sslCAInfo=${path.resolve(caFile)}`];
@@ -400,7 +401,10 @@ export class ManagedWorkspaces {
     }
     try {
       if (this.git !== runGit) {
-        try { return await this.git(args); }
+        try {
+          await beforeAuthenticatedLaunch?.();
+          return await this.git(args);
+        }
         catch (error) {
           if (role !== "project-push") throw error;
           const message = error instanceof Error ? error.message : "";
@@ -408,6 +412,7 @@ export class ManagedWorkspaces {
           if (/authentication failed|could not read Username|HTTP 401|HTTP 403|access denied/iu.test(message)) {
             throw new Error("github-git-authentication-failed", { cause: error });
           }
+          if (message.startsWith("github-")) throw error;
           throw new Error("github-push-outcome-uncertain", { cause: error });
         }
       }
@@ -463,6 +468,13 @@ export class ManagedWorkspaces {
     try { await this.askpassBroker.ensureStarted(); }
     catch {
       throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The private repository credential transport is unavailable.", {}));
+    }
+  }
+
+  private async assertPushLocalConfiguration(worktreePath: string): Promise<void> {
+    const configured = await this.git(["-C", worktreePath, "config", "--local", "--name-only", "--null", "--list"]);
+    if (configured.stdout.split("\0").some((key) => PUSH_UNSAFE_LOCAL_CONFIG_KEY.test(key))) {
+      throw new Error("github-push-config-invalid");
     }
   }
 
@@ -1088,10 +1100,15 @@ export class ManagedWorkspaces {
         async (token, repository, effectiveGeneration) => {
           store = await this.transitionStoreOrigin(store, data.projectId, repository.cleanHttpsUrl);
           await this.operationGit(pushOperationId, data.projectId, "project-push",
-            ["-C", workspace.worktreePath, "push", "origin", `${data.commitOid}:refs/heads/${data.branchName}`], {
+            // Use the live authority-resolved URL instead of consulting repository-local
+            // pushurl/remote selection.  This is the exact origin URL after the transition above.
+            ["-C", workspace.worktreePath, "push", "--", repository.cleanHttpsUrl, `${data.commitOid}:refs/heads/${data.branchName}`], {
               connectionId: data.source.connectionId, repositoryId: data.source.repositoryId,
               lifecycleGeneration: effectiveGeneration, token, originUrl: repository.cleanHttpsUrl
-            }, assertCapturedWorkspace);
+            }, async () => {
+              await this.assertPushLocalConfiguration(workspace.worktreePath);
+              await assertCapturedWorkspace();
+            });
         });
     } catch (error) {
       if (error instanceof AgentExecutionError) throw error;

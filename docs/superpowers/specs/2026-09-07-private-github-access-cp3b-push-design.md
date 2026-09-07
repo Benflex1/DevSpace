@@ -77,7 +77,10 @@ Before Git launch, the Agent:
 5. Requires the live binding and returned token scope to contain exact selected-repository `contents: write` authority. A binding without write permission fails with the existing CP3A permission/reauthorization path; it never falls back to a read token or broadens scope.
 6. Performs the existing final lifecycle admission check and launch fence immediately before authenticated Git spawn.
 7. Rechecks branch and commit while the launch fence is held.
-8. Invokes Git with the existing positive protected environment and askpass transport, fixed remote `origin`, and exactly one refspec:
+8. Invokes Git with the existing positive protected environment and askpass transport, the live
+   authority-resolved HTTPS URL for managed `origin`, and exactly one refspec. Repository-local
+   push destination/rewrite settings are rejected before launch so `pushurl` and URL rewriting cannot
+   redirect the write:
 
    ```text
    <captured-commit>:refs/heads/<captured-branch>

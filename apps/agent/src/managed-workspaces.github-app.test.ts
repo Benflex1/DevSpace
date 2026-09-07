@@ -394,6 +394,21 @@ test("pushes the captured local commit to the same-name remote branch with write
     .resolves.toMatchObject({ stdout: `${commitOid}\n` });
 });
 
+test.each(["remote pushurl", "URL rewrite"] as const)("fails closed when repository-local %s configuration could change the push destination", async (kind) => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls));
+  await prepareWorkspace(h);
+  const worktree = h.managed.worktreePath(workspaceId);
+  const configKey = kind === "remote pushurl" ? "remote.origin.pushurl" : `url.${h.source}.insteadof`;
+  const configValue = kind === "remote pushurl" ? "https://github.com/other/remote.git" : sourceUrl;
+  await h.git(["-C", worktree, "config", configKey, configValue]);
+  const commitOid = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+
+  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch, commitOid, githubAuthorityGeneration: 1 },
+    "018f0f00-0000-7000-8000-000000000113")).rejects.toMatchObject({ failure: { code: "AGENT_INTERNAL_ERROR" } });
+  expect(calls.filter((call) => call.method === "write")).toHaveLength(1);
+});
+
 test("advances an existing same-name remote branch without changing its destination", async () => {
   const calls: AuthorityCall[] = [];
   const h = await createHarness(createAuthority(calls));

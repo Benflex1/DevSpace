@@ -362,7 +362,9 @@ function exactScopedRepository(value: unknown, repositoryId: string, requiredCon
   }
   if (!Array.isArray(repositories) || repositories.length !== 1) throw failure("repository-not-authorized");
   const repository = safeRepository(repositories[0]);
-  if (repository.repositoryId !== repositoryId) throw failure("repository-not-authorized");
+  if (repository.repositoryId !== repositoryId || (requiredContents === "write" && repository.private !== true)) {
+    throw failure("repository-not-authorized");
+  }
   return repository;
 }
 
@@ -888,7 +890,7 @@ export async function createGithubAppAuthority(options: {
       const remaining = activeFor(input.connectionId) - 1;
       if (remaining <= 0) activeTransactions.delete(input.connectionId);
       else activeTransactions.set(input.connectionId, remaining);
-      void maybeFinalizeDisconnect(input.connectionId).catch(() => undefined);
+      await maybeFinalizeDisconnect(input.connectionId).catch(() => undefined);
     }
   });
   if (configured) {

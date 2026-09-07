@@ -272,5 +272,12 @@ test("an Agent uncertainty snapshot terminalizes the matching submitted Web push
   const failed = database.getProjectPushOperation({ operationId: operation.operationId, projectId: project.id, actor });
   expect(failed).toMatchObject({ state: "failed", errorCode: "GITHUB_PUSH_OUTCOME_UNCERTAIN" });
   expect(JSON.parse(failed!.progressJson!)).toEqual(intent);
+  database.applyExecutionSnapshot({ agentBootId: "018f0f00-0000-7000-8000-000000000109",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000000.0", resources: [], operationObservations: [{
+      operationId: operation.operationId, state: "running", updatedAt: "2026-09-07T00:00:01.000Z", failure: null
+    }] });
+  expect(database.getProjectPushOperation({ operationId: operation.operationId, projectId: project.id, actor })).toMatchObject({
+    state: "failed", errorCode: "GITHUB_PUSH_OUTCOME_UNCERTAIN"
+  });
   database.close();
 });

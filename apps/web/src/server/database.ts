@@ -1878,6 +1878,7 @@ export function openProjectDatabase(path: string, options: {
         for (const operation of snapshot.operationObservations) {
           const local = db.select().from(operations).where(eq(operations.operationId, operation.operationId)).get();
           if (local === undefined || !["task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate", "project.push"].includes(local.operationName)) continue;
+          if (local.operationName === "project.push" && ["succeeded", "failed", "cancelled"].includes(local.state)) continue;
           if (operation.state === "succeeded") this.finishOperation(local.operationId, { state: "succeeded" });
           else if (operation.state === "failed") {
             const message = persistedFailureMessage(operation.failure.code);
