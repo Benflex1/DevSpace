@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { GitInspectionData } from "@devspace/contracts";
 import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogCopy, lostTerminalDialogStepAfter, lostTerminalSetKey, type LostTerminalDialogStep } from "./lost-terminal-dialog.js";
@@ -11,6 +12,7 @@ import { previewPresentationLabel, previewPresentationState, previewPresentation
 import { PreviewTab } from "./preview-tab.js";
 import { AiSessionTab } from "./ai-session-tab.js";
 import { EditorTab } from "./editor-tab.js";
+import { WorkspaceChanges, type GitCommitFormInput } from "./workspace-changes.js";
 import { WorkspaceFileTree } from "./workspace-file-tree.js";
 import { IncidentReference } from "./incident-reference.js";
 import { useTransientNotice } from "./transient-notice.js";
@@ -25,9 +27,10 @@ type PushStatus = {
   repository: string; branchName: string; commitOid: string; dirty: boolean;
   aheadCount: number; behindCount: number; errorCode: string | null; message: string | null;
 };
+type GitFailure = { readonly code: string; readonly message: string; readonly incidentId?: string };
 export function ProjectWorkbench({ projectId, workspaceId, projectName, branchName, runtimeState, runtimeRunning, runtimeAvailable,
   agentStatus, agentReachable, activeAction, canStart, canStop, retryStart, pushAvailable, initialTasks, initialTaskRuns, initialTerminals, initialPreviews,
-  previewGateway, repositoryUrl, actor, initialMessage }: {
+  previewGateway, repositoryUrl, actor, initialMessage, initialGit }: {
   projectId: string;
   workspaceId: string;
   projectName: string;
@@ -50,6 +53,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   repositoryUrl: string;
   actor: string;
   initialMessage?: string | null;
+  initialGit: GitInspectionData | null;
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [dirtyEditorIds, setDirtyEditorIds] = useState<ReadonlySet<string>>(new Set());
@@ -65,6 +69,12 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [confirmingPush, setConfirmingPush] = useState(false);
   const [pushIntent, setPushIntent] = useState<PushStatus | null>(null);
   const [lastPushStatus, setLastPushStatus] = useState<PushStatus | null>(null);
+  const [gitStatus, setGitStatus] = useState<GitInspectionData | null>(initialGit);
+  const [gitLoading, setGitLoading] = useState(initialGit === null);
+  const [gitError, setGitError] = useState<string | null>(null);
+  const [gitBusyAction, setGitBusyAction] = useState<string | null>(null);
+  const [persistentGitFailure, setPersistentGitFailure] = useState<GitFailure | null>(null);
+  const [editorViews, setEditorViews] = useState<Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged" }>>>({});
   const currentPreviews = useRef(initialPreviews);
   const previewLivenessPoller = useRef<PreviewLivenessPoller | null>(null);
   const { notice, show: showNotice, clear: clearNotice } = useTransientNotice(initialMessage);
@@ -138,10 +148,28 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       if (!cancelled && result.push !== undefined && result.push !== null) {
         setLastPushStatus(result.push);
         if (result.push.state === "prepared") setPushIntent(result.push);
+        if (result.push.state === "failed" && result.push.errorCode !== null) {
+          setPersistentGitFailure({ code: result.push.errorCode, message: result.push.message ?? "The repository mutation failed." });
+        }
       }
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [projectId, pushAvailable]);
+  const refreshGitStatus = useCallback(async () => {
+    setGitLoading(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/changes`, { cache: "no-store" });
+      const body = await response.json() as GitInspectionData & { message?: string };
+      if (!response.ok || typeof body.branchName !== "string" && body.branchName !== null) throw new Error(body.message ?? "Git status could not be loaded.");
+      setGitStatus(body);
+      setGitError(null);
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : "Git status could not be loaded.");
+    } finally {
+      setGitLoading(false);
+    }
+  }, [projectId]);
+  useEffect(() => { refreshGitStatus().catch(() => undefined); }, [refreshGitStatus]);
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
     return terminal.title;
   }, []);
@@ -270,8 +298,13 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const openAiTab = useCallback(() => {
     setTabs((current) => openWorkbenchTab(current, { id: aiTabId(workspaceId), kind: "ai", sessionId: workspaceId }));
   }, [workspaceId]);
-  const openEditorTab = useCallback((relativePath: string) => {
+  const openEditorTab = useCallback((relativePath: string, mode: "edit" | "changes" = "edit", diffKind: "staged" | "unstaged" = "unstaged") => {
+    const tabId = editorTab(relativePath).id;
+    setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind } }));
     setTabs((current) => openWorkbenchTab(current, editorTab(relativePath)));
+  }, []);
+  const updateEditorMode = useCallback((tabId: string, mode: "edit" | "changes") => {
+    setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind: current[tabId]?.diffKind ?? "unstaged" } }));
   }, []);
   const updateEditorDirty = useCallback((tabId: string, dirty: boolean) => {
     setDirtyEditorIds((current) => {
@@ -281,6 +314,42 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       return next;
     });
   }, []);
+  const reportGitFailure = useCallback((result: { code?: string; message?: string; incidentId?: string }, fallback: string) => {
+    setPersistentGitFailure({ code: result.code ?? "GIT_OPERATION_FAILED", message: result.message ?? fallback,
+      ...(result.incidentId === undefined ? {} : { incidentId: result.incidentId }) });
+  }, []);
+  const mutateGit = useCallback(async (input: { action: "stage" | "unstage"; path: string } | ({ action: "commit" } & GitCommitFormInput), busyKey: string): Promise<boolean> => {
+    if (!agentReachable || gitBusyAction !== null) return false;
+    setGitBusyAction(busyKey);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/changes`, {
+        method: "POST", headers: { "content-type": "application/json", Origin: window.location.origin, "x-devspace-csrf": "1" }, body: JSON.stringify(input)
+      });
+      const result = await response.json() as { state?: string; status?: GitInspectionData; commitOid?: string | null; code?: string; message?: string; incidentId?: string };
+      if (!response.ok) {
+        reportGitFailure(result, "The Git operation could not be completed safely.");
+        showNotice(result.message ?? "The Git operation could not be completed safely.", "error", result.incidentId);
+        await refreshGitStatus();
+        return false;
+      }
+      if (result.status !== undefined) setGitStatus(result.status);
+      if (response.status === 202 || result.state === "in-progress") {
+        showNotice("Git operation is still in progress. Refreshing status shortly.", "pending");
+        window.setTimeout(() => { refreshGitStatus().catch(() => undefined); }, 700);
+      } else {
+        showNotice(input.action === "commit" ? `Committed ${result.commitOid ?? result.status?.headCommit ?? "staged changes"}.` : input.action === "stage" ? "File staged." : "File unstaged.", "success");
+        await refreshGitStatus();
+      }
+      return true;
+    } catch {
+      const fallback = "The Git operation could not be completed safely.";
+      setPersistentGitFailure({ code: "GIT_OPERATION_FAILED", message: fallback });
+      showNotice(fallback, "error");
+      return false;
+    } finally {
+      setGitBusyAction(null);
+    }
+  }, [agentReachable, gitBusyAction, projectId, refreshGitStatus, reportGitFailure, showNotice]);
   const createTerminal = async () => {
     if (!actionsAvailable) return;
     showNotice("Creating terminal…", "pending");
@@ -336,11 +405,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       if (response.status === 202) {
         showNotice(result.message ?? "Fetch is still in progress. Retry to reconcile it.", "pending", result.incidentId);
       } else {
+        if (!response.ok) reportGitFailure(result, "Repository fetch failed safely.");
         showNotice(response.ok ? "Repository fetched." : result.message ?? "Repository fetch failed.", response.ok ? "success" : "error",
           response.ok ? undefined : result.incidentId);
       }
-      if (response.ok) await refresh();
+      if (response.ok) {
+        await Promise.all([refresh(), refreshGitStatus()]);
+      }
     } catch {
+      setPersistentGitFailure({ code: "GIT_OPERATION_FAILED", message: "Repository fetch failed safely." });
       showNotice("Repository fetch failed safely.", "error");
     } finally {
       setFetchingRepository(false);
@@ -357,6 +430,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       });
       const result = await response.json() as PushStatus & { code?: string; message?: string; incidentId?: string };
       if (!response.ok || result.operationId === undefined) {
+        reportGitFailure(result, "Push preparation failed safely.");
         showNotice(result.message ?? "Push preparation failed.", "error", result.incidentId);
         return;
       }
@@ -364,6 +438,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       setLastPushStatus(result);
       showNotice("Review the captured branch and commit, then confirm the push.", "pending");
     } catch {
+      setPersistentGitFailure({ code: "GIT_OPERATION_FAILED", message: "Push preparation failed safely." });
       showNotice("Push preparation failed safely.", "error");
     } finally {
       setPreparingPush(false);
@@ -382,6 +457,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       if (!response.ok) {
         setLastPushStatus({ ...pushIntent, state: "failed", errorCode: result.code ?? null, message: result.message ?? null });
         setPushIntent(null);
+        const nff = result.code === "GITHUB_PUSH_NON_FAST_FORWARD";
+        reportGitFailure(result, nff ? "The remote branch moved. Fetch, integrate the remote changes, then explicitly Push again." : "Repository push failed safely.");
         showNotice(result.message ?? "Repository push failed.", "error", result.incidentId);
         return;
       }
@@ -391,6 +468,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     } catch {
       setLastPushStatus({ ...pushIntent, state: "failed", errorCode: "GITHUB_PUSH_OUTCOME_UNCERTAIN", message: "The push outcome is uncertain. Inspect the remote branch before explicitly retrying." });
       setPushIntent(null);
+      setPersistentGitFailure({ code: "GITHUB_PUSH_OUTCOME_UNCERTAIN", message: "The push outcome is uncertain. Inspect the remote branch before explicitly retrying." });
       showNotice("Repository push outcome is uncertain. Inspect the remote branch before retrying.", "error");
     } finally {
       setConfirmingPush(false);
@@ -398,14 +476,17 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   };
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
-    <WorkbenchTopBar projectName={projectName} branchName={branchName} repositoryUrl={repositoryUrl} projectId={projectId}
+    <WorkbenchTopBar projectName={projectName} branchName={gitStatus === null ? branchName : gitStatus.branchName ?? "detached HEAD"} repositoryUrl={repositoryUrl} projectId={projectId}
       runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
       retryStart={retryStart} agentReachable={agentReachable} fetchingRepository={fetchingRepository}
       pushAvailable={pushAvailable} pushingRepository={preparingPush} lastPushStatus={lastPushStatus}
       onPushRepository={() => { preparePush().catch(() => showNotice("Push preparation failed safely.", "error")); }}
       onFetchRepository={() => { fetchRepository().catch(() => showNotice("Repository fetch failed safely.", "error")); }} />
     <div className="workbench-body">
-      <WorkbenchSidebar projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} onOpenFile={openEditorTab}
+      <WorkbenchSidebar projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} gitStatus={gitStatus} gitLoading={gitLoading} gitError={gitError}
+        gitBusyAction={gitBusyAction} onRefreshGit={() => { refreshGitStatus().catch(() => undefined); }} onOpenFile={(path) => openEditorTab(path)}
+        onOpenChangedFile={(path, kind) => openEditorTab(path, "changes", kind)} onStage={(path) => mutateGit({ action: "stage", path }, `stage:${path}`)}
+        onUnstage={(path) => mutateGit({ action: "unstage", path }, `unstage:${path}`)} onCommit={(input) => mutateGit({ action: "commit", ...input }, "commit")}
         terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
@@ -414,9 +495,9 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         <WorkbenchTabStrip tabs={tabs} onActivate={(tabId) => setTabs((current) => activateWorkbenchTab(current, tabId))}
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
           canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} />
-        <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId}
+        <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId} editorViews={editorViews}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
-          onEditorDirtyChange={updateEditorDirty} />
+          onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }} />
         {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">
           <span>{notice.message}</span>
           <IncidentReference incidentId={notice.referenceId} />
@@ -431,6 +512,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       }} onRestartInitiated={handleLostTerminalRestartInitiated} onRestartSuccess={handleLostTerminalRestartSuccess} />}
     {pushIntent !== null && <PushConfirmationDialog intent={pushIntent} confirming={confirmingPush}
       onCancel={() => { if (!confirmingPush) { setPushIntent(null); clearNotice(); } }} onConfirm={() => { confirmPush().catch(() => showNotice("Repository push failed safely.", "error")); }} />}
+    {persistentGitFailure !== null && <GitFailureDialog failure={persistentGitFailure} onDismiss={() => setPersistentGitFailure(null)} />}
     <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
@@ -461,9 +543,11 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ projectId, workspaceId, agentReachable, onOpenFile, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi,
+function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, gitLoading, gitError, gitBusyAction, onRefreshGit, onOpenFile, onOpenChangedFile, onStage, onUnstage, onCommit, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
-  projectId: string; workspaceId: string; agentReachable: boolean; onOpenFile: (relativePath: string) => void;
+  projectId: string; workspaceId: string; agentReachable: boolean; gitStatus: GitInspectionData | null; gitLoading: boolean; gitError: string | null; gitBusyAction: string | null;
+  onRefreshGit: () => void; onOpenFile: (relativePath: string) => void; onOpenChangedFile: (relativePath: string, kind: "staged" | "unstaged") => void;
+  onStage: (path: string) => Promise<boolean>; onUnstage: (path: string) => Promise<boolean>; onCommit: (input: GitCommitFormInput) => Promise<boolean>;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
   previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void; onOpenAi: () => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
@@ -484,6 +568,8 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, onOpenFile, 
       <div className="sidebar-section-heading"><h2>Files</h2></div>
       <WorkspaceFileTree projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} onOpenFile={onOpenFile} />
     </div>
+    <WorkspaceChanges status={gitStatus} loading={gitLoading} error={gitError} agentReachable={agentReachable} busyAction={gitBusyAction}
+      onRefresh={onRefreshGit} onOpenFile={onOpenChangedFile} onStage={onStage} onUnstage={onUnstage} onCommit={onCommit} />
     <div className="sidebar-section">
       <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!actionsAvailable}
         onClick={onCreateTerminal} aria-label="Create terminal" title={actionsAvailable ? "Create terminal" : "The Agent and runtime must be available to create a terminal"}>+</button></div>
@@ -544,12 +630,12 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
-  projectId: string; workspaceId: string; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
+  projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged" }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   onReloadPreview: (previewId: string) => Promise<void>;
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
-  onEditorDirtyChange: (tabId: string, dirty: boolean) => void;
+  onEditorDirtyChange: (tabId: string, dirty: boolean) => void; onEditorModeChange: (tabId: string, mode: "edit" | "changes") => void; onEditorSaved: () => void;
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a file or terminal to start working in this project.</p></div>}
@@ -562,7 +648,21 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
       })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} />
         : tab.kind === "editor" ? <EditorTab key={tab.id} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
-          active={tab.id === tabs.activeTabId} onDirtyChange={onEditorDirtyChange} /> : null)}
+          mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
+          active={tab.id === tabs.activeTabId} onModeChange={(mode) => onEditorModeChange(tab.id, mode)} onDirtyChange={onEditorDirtyChange} onSaved={onEditorSaved} /> : null)}
+  </div>;
+}
+
+function GitFailureDialog({ failure, onDismiss }: { failure: GitFailure; onDismiss: () => void }) {
+  const nonFastForward = failure.code === "GITHUB_PUSH_NON_FAST_FORWARD";
+  return <div className="git-failure-backdrop">
+    <section className="git-failure-dialog" role="alertdialog" aria-modal="true" aria-labelledby="git-failure-title" aria-describedby="git-failure-description">
+      <h2 id="git-failure-title">Git action needs attention</h2>
+      {nonFastForward ? <p id="git-failure-description">The remote branch moved. Fetch, integrate the remote changes, then explicitly Push again. DevSpace will not merge, rebase, or retry this push automatically.</p>
+        : <p id="git-failure-description">{failure.message}</p>}
+      {failure.incidentId !== undefined && <IncidentReference incidentId={failure.incidentId} />}
+      <div className="git-failure-actions"><button type="button" onClick={onDismiss}>OK</button></div>
+    </section>
   </div>;
 }
 

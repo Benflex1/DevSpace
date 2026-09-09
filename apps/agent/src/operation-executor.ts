@@ -10,6 +10,7 @@ function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
   if (typeof request.projectId !== "string") return null;
   if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close", "project.push",
+    "project.git.stage", "project.git.unstage", "project.git.commit",
     "preview.activate", "preview.deactivate"].includes(record.operationName)
     && typeof request.workspaceId === "string") {
     if (["preview.activate", "preview.deactivate"].includes(record.operationName) && typeof request.previewId === "string") {
@@ -117,6 +118,21 @@ export class OperationExecutor {
         case "project.push":
           await this.managed.push(record.request as Parameters<ManagedWorkspaces["push"]>[0], operationId);
           break;
+        case "project.git.stage": {
+          const request = record.request as { projectId: string; workspaceId: string; path: string };
+          await this.managed.stageWorkspaceFile(request.projectId, request.workspaceId, request.path);
+          break;
+        }
+        case "project.git.unstage": {
+          const request = record.request as { projectId: string; workspaceId: string; path: string };
+          await this.managed.unstageWorkspaceFile(request.projectId, request.workspaceId, request.path);
+          break;
+        }
+        case "project.git.commit": {
+          const request = record.request as { projectId: string; workspaceId: string; message: string; userName?: string; userEmail?: string };
+          await this.managed.commitWorkspace(request.projectId, request.workspaceId, request.message, request.userName, request.userEmail);
+          break;
+        }
         case "workspace.create": {
           const request = record.request as Parameters<ManagedWorkspaces["createWorkspace"]>[0];
           await this.managed.createWorkspace(request, operationId);
@@ -166,6 +182,13 @@ export class OperationExecutor {
         const request = record.request as { projectId: string; workspaceId?: string };
         if (record.operationName === "workspace.create" && request.workspaceId !== undefined) {
           this.events.workspaceCreated(operationId, request.projectId, request.workspaceId);
+          const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
+          const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
+            item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
+          if (inspection === undefined) throw new Error("workspace-observation-missing");
+          this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+        } else if (["project.git.stage", "project.git.unstage", "project.git.commit"].includes(record.operationName)
+          && request.workspaceId !== undefined) {
           const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
           const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
             item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
