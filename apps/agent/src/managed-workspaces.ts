@@ -228,8 +228,7 @@ function gitOperationFailure(action: "inspect" | "diff" | "stage" | "unstage" | 
 }
 
 function isRecoverableGitObservationFailure(error: unknown): error is AgentExecutionError {
-  return error instanceof AgentExecutionError && error.failure.code === "GIT_OPERATION_FAILED"
-    && error.failure.details.action === "inspect";
+  return error instanceof AgentExecutionError && error.failure.code === "GIT_OPERATION_FAILED";
 }
 
 function gitCommitMessageFailure(reason: "empty" | "too-large"): AgentExecutionError {
