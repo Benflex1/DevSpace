@@ -81,6 +81,7 @@ import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy 
 import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, type PreviewGatewayProbe, type PreviewInspectionResult } from "./preview-runtime.js";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
+import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
 
 const GIT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -224,6 +225,11 @@ function workspaceFileChanged(relativePath: string, expectedRevision: string, cu
 
 function gitOperationFailure(action: "inspect" | "diff" | "stage" | "unstage" | "commit", message = "The managed Git operation failed safely."): AgentExecutionError {
   return new AgentExecutionError(executionFailure("GIT_OPERATION_FAILED", message, { action }));
+}
+
+function isRecoverableGitObservationFailure(error: unknown): error is AgentExecutionError {
+  return error instanceof AgentExecutionError && error.failure.code === "GIT_OPERATION_FAILED"
+    && error.failure.details.action === "inspect";
 }
 
 function gitCommitMessageFailure(reason: "empty" | "too-large"): AgentExecutionError {
@@ -491,7 +497,8 @@ export class ManagedWorkspaces {
     previewBaseRegistry: ApprovedPreviewBaseRegistry = readPreviewBaseRegistry(),
     previewProbe?: PreviewGatewayProbe,
     previewGateway?: PreviewGatewayAdapterContract,
-    askpassBroker: GithubAskpassBroker = createGithubAskpassBroker()
+    askpassBroker: GithubAskpassBroker = createGithubAskpassBroker(),
+    private readonly logger: StructuredLogger = createLogger({ component: "agent", subsystem: "managed-workspaces" })
   ) {
     this.githubAuthority = null;
     this.askpassBroker = askpassBroker;
@@ -2233,17 +2240,36 @@ export class ManagedWorkspaces {
     const resources: AgentSnapshotResource[] = [];
     for (const project of projectRecords) {
       const children = workspaceRecords.filter((record) => record.projectId === project.projectId);
-      resources.push({ type: "project", projectId: project.projectId, gitInspections: [
-        { scope: { kind: "managed-store" }, inspection: await this.inspectGit(project.projectId, null) },
-        ...await Promise.all(children.map(async (record) => ({ scope: { kind: "workspace" as const, workspaceId: record.workspaceId }, inspection: await this.inspectGit(project.projectId, record.workspaceId) })))
-      ] });
+      const gitInspections: Array<{
+        scope: { kind: "managed-store" } | { kind: "workspace"; workspaceId: string };
+        inspection: GitInspectionData;
+      }> = [{ scope: { kind: "managed-store" }, inspection: await this.inspectGit(project.projectId, null) }];
+      for (const record of children) {
+        try {
+          gitInspections.push({ scope: { kind: "workspace", workspaceId: record.workspaceId },
+            inspection: await this.inspectGit(project.projectId, record.workspaceId) });
+        } catch (error) {
+          if (!isRecoverableGitObservationFailure(error)) throw error;
+          this.logger.warn("agent.observation.workspace_git_degraded", "Workspace Git observation was omitted because it exceeded the bounded representation.", {
+            projectId: project.projectId, workspaceId: record.workspaceId, errorCode: error.failure.code, action: "inspect"
+          });
+        }
+      }
+      resources.push({ type: "project", projectId: project.projectId, gitInspections });
     }
     for (const record of workspaceRecords) {
-      const observation = await this.inspectWorkspace(record.projectId, record.workspaceId);
-      resources.push({ type: "workspace", observation });
-      resources.push({ type: "runtime-stack", projectId: record.projectId, workspaceId: record.workspaceId, observation: observation.runtimeStack });
-      resources.push({ type: "service", projectId: record.projectId, workspaceId: record.workspaceId, serviceKey: "development",
-        observation: { desiredState: observation.runtimeStack.desiredState, observedState: observation.runtimeStack.observedState, health: "unknown" } });
+      try {
+        const observation = await this.inspectWorkspace(record.projectId, record.workspaceId);
+        resources.push({ type: "workspace", observation });
+        resources.push({ type: "runtime-stack", projectId: record.projectId, workspaceId: record.workspaceId, observation: observation.runtimeStack });
+        resources.push({ type: "service", projectId: record.projectId, workspaceId: record.workspaceId, serviceKey: "development",
+          observation: { desiredState: observation.runtimeStack.desiredState, observedState: observation.runtimeStack.observedState, health: "unknown" } });
+      } catch (error) {
+        if (!isRecoverableGitObservationFailure(error)) throw error;
+        this.logger.warn("agent.observation.workspace_degraded", "Workspace observation was omitted because its Git state exceeded the bounded representation.", {
+          projectId: record.projectId, workspaceId: record.workspaceId, errorCode: error.failure.code, action: "inspect"
+        });
+      }
     }
     return [...resources, ...await this.preview.snapshotResources()];
   }

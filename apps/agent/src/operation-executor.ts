@@ -44,15 +44,36 @@ export class OperationExecutor {
   ) {}
 
   get isHealthy(): boolean { return this.observationHealthy; }
+  private observationFailureFields(error: unknown): Record<string, unknown> {
+    if (error instanceof AgentExecutionError) {
+      const details = error.failure.details as Record<string, unknown>;
+      const action = typeof details["action"] === "string" ? details["action"] : undefined;
+      return { errorCode: error.failure.code, ...(action === undefined ? {} : { action }) };
+    }
+    return { errorName: error instanceof Error ? error.name : "unknown" };
+  }
+
+  private async refreshResources(event: string, message: string, fields: Record<string, unknown> = {}): Promise<boolean> {
+    try {
+      this.resources = await this.managed.snapshotResources();
+      this.observationHealthy = true;
+      return true;
+    } catch (error) {
+      this.observationHealthy = false;
+      this.logger.warn(event, message, { ...fields, ...this.observationFailureFields(error) });
+      return false;
+    }
+  }
+
   async initialize(): Promise<void> {
-    try { this.resources = await this.managed.snapshotResources(); }
-    catch { this.observationHealthy = false; this.resources = []; }
+    await this.refreshResources("agent.observation.initialize_failed", "Initial Agent resource observation failed; retaining the previous snapshot.");
   }
   snapshotResources(): AgentSnapshotResource[] { return [...this.resources, ...this.execution.snapshotResources()]; }
 
-  private async refreshAfterPreviewMutation(): Promise<void> {
-    try { this.resources = await this.managed.snapshotResources(); }
-    catch { this.observationHealthy = false; this.resources = []; }
+  private async refreshAfterPreviewMutation(operationId: string, operationName: string, resourceFields: Record<string, unknown>): Promise<boolean> {
+    return await this.refreshResources("agent.observation.refresh_failed", "Agent resource observation refresh failed; retaining the previous snapshot.", {
+      operationId, operationName, ...resourceFields
+    });
   }
 
   schedule(record: JournalRecord): void {
@@ -173,32 +194,48 @@ export class OperationExecutor {
           await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
           break;
       }
-      if (previewMutation) await this.refreshAfterPreviewMutation();
+      if (previewMutation) await this.refreshAfterPreviewMutation(operationId, record.operationName, resourceFields);
       if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close",
         "preview.activate", "preview.deactivate"]
         .includes(record.operationName)) {
-        try { this.resources = await this.managed.snapshotResources(); }
-        catch (error) { this.observationHealthy = false; throw error; }
+        const refreshed = await this.refreshResources("agent.observation.refresh_failed", "Agent resource observation refresh failed; retaining the previous snapshot.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
         const request = record.request as { projectId: string; workspaceId?: string };
         if (record.operationName === "workspace.create" && request.workspaceId !== undefined) {
           this.events.workspaceCreated(operationId, request.projectId, request.workspaceId);
-          const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
-          const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
-            item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
-          if (inspection === undefined) throw new Error("workspace-observation-missing");
-          this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+          if (refreshed) {
+            const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
+            const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
+              item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
+            if (inspection === undefined) {
+              this.logger.warn("agent.observation.target_missing", "Successful operation completed without a target workspace inspection.", {
+                operationId, operationName: record.operationName, projectId: request.projectId, workspaceId: request.workspaceId
+              });
+            } else this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+          }
         } else if (["project.git.stage", "project.git.unstage", "project.git.commit"].includes(record.operationName)
           && request.workspaceId !== undefined) {
-          const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
-          const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
-            item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
-          if (inspection === undefined) throw new Error("workspace-observation-missing");
-          this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+          if (refreshed) {
+            const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
+            const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
+              item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
+            if (inspection === undefined) {
+              this.logger.warn("agent.observation.target_missing", "Successful operation completed without a target workspace inspection.", {
+                operationId, operationName: record.operationName, projectId: request.projectId, workspaceId: request.workspaceId
+              });
+            } else this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+          }
         } else if (record.operationName !== "workspace.start" && record.operationName !== "workspace.stop") {
-          const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
-          const inspection = project?.type === "project" ? project.gitInspections.find((item) => item.scope.kind === "managed-store")?.inspection : undefined;
-          if (inspection === undefined) throw new Error("project-observation-missing");
-          this.events.projectInspected(request.projectId, null, inspection);
+          if (refreshed) {
+            const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
+            const inspection = project?.type === "project" ? project.gitInspections.find((item) => item.scope.kind === "managed-store")?.inspection : undefined;
+            if (inspection === undefined) {
+              this.logger.warn("agent.observation.target_missing", "Successful operation completed without a target project inspection.", {
+                operationId, operationName: record.operationName, projectId: request.projectId
+              });
+            } else this.events.projectInspected(request.projectId, null, inspection);
+          }
         }
       }
       await this.journal.succeed(operationId);
@@ -207,7 +244,7 @@ export class OperationExecutor {
         operationId, operationName: record.operationName, operationState: "succeeded", ...resourceFields
       });
     } catch (error) {
-      if (previewMutation) await this.refreshAfterPreviewMutation();
+      if (previewMutation) await this.refreshAfterPreviewMutation(operationId, record.operationName, resourceFields);
       // Once private execution evidence says the start occurred, a later journal write outage
       // must leave this operation resumable; it must never rewrite successful start as failure.
       if (record.operationName === "task.start" && (taskStartCompleted || error instanceof TaskStartRecoveryRequiredError)) return;

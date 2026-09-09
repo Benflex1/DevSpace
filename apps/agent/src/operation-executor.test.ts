@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { gitInspectionDataSchema } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import { AgentEventLog } from "./event-log.js";
 import { ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
@@ -86,6 +87,75 @@ test("dispatches project.push through ManagedWorkspaces exactly once", async () 
   await executor.drain();
   expect(calls).toBe(1);
   expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+});
+
+test.each([
+  { name: "project.fetch", request: { projectId: project }, method: "fetch" },
+  { name: "project.git.stage", request: { projectId: project, workspaceId: boot, path: "README.md" }, method: "stageWorkspaceFile" },
+  { name: "project.git.unstage", request: { projectId: project, workspaceId: boot, path: "README.md" }, method: "unstageWorkspaceFile" },
+  { name: "project.git.commit", request: { projectId: project, workspaceId: boot, message: "fixture commit" }, method: "commitWorkspace" },
+  { name: "project.push", request: {
+    projectId: project, workspaceId: boot,
+    source: { kind: "github-app" as const, connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", repositoryId: "9007199254740993" },
+    branchName: "feature/push", commitOid: "a".repeat(40), githubAuthorityGeneration: 1
+  }, method: "push" }
+] as const)("journals %s as succeeded when only post-mutation observation fails", async ({ name, request, method }) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-observation-refresh-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  let snapshotCalls = 0;
+  const calls: string[] = [];
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls > 1) throw new Error("observation output exceeded the bound");
+      return await projectResources();
+    },
+    fetch: async () => { calls.push("fetch"); },
+    stageWorkspaceFile: async () => { calls.push("stageWorkspaceFile"); },
+    unstageWorkspaceFile: async () => { calls.push("unstageWorkspaceFile"); },
+    commitWorkspace: async () => { calls.push("commitWorkspace"); },
+    push: async () => { calls.push("push"); }
+  } as unknown as ManagedWorkspaces;
+  const logLines: string[] = [];
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)), undefined, undefined,
+    createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) }));
+  await executor.initialize();
+  const accepted = await journal.accept(operation1, name, request);
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(calls).toEqual([method]);
+  expect(journal.get(operation1)).toMatchObject({ state: "succeeded", failure: null });
+  expect(executor.isHealthy).toBe(false);
+  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "project", projectId: project })
+  ]));
+  expect(logLines.some((line) => line.includes("agent.observation.refresh_failed"))).toBe(true);
+});
+
+test("recovers executor observation health after a later successful refresh", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-observation-health-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  let fail = true;
+  const managed = {
+    snapshotResources: async () => {
+      if (fail) throw new Error("observation unavailable");
+      return await projectResources();
+    }
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+
+  await executor.initialize();
+  expect(executor.isHealthy).toBe(false);
+  fail = false;
+  await executor.initialize();
+  expect(executor.isHealthy).toBe(true);
+  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "project", projectId: project })
+  ]));
 });
 
 test("an exact task.start replay after Agent restart reuses the accepted execution", async () => {

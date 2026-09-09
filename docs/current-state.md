@@ -72,8 +72,10 @@ Workbench 1B adds bounded status/diff inspection, staged and unstaged groups, fi
 unstage, explicit staged-only commits with bounded identity inputs, branch/ahead/behind context, and
 the existing explicit Fetch and Push actions. Persistent Git mutation failures require explicit
 dismissal; non-fast-forward Push failures direct the user to Fetch, integrate, and explicitly Push
-again without automatic retry. Project creation from scratch, persistent terminals, and later
-Workbench polish remain deferred product work.
+again without automatic retry. Snapshot observation now isolates bounded Git-state failures to the
+affected workspace, preserves successful mutations when a later refresh is stale, and recovers Agent
+observation health after a later successful refresh. Project creation from scratch, persistent
+terminals, and later Workbench polish remain deferred product work.
 
 ## Private GitHub Repository Access status
 
