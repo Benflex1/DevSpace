@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
-import { createWorkspaceDataSchema } from "@devspace/contracts";
+import { createWorkspaceDataSchema, gitBranchNameSchema } from "@devspace/contracts";
 import {
   canonicalizeProjectOptionsV1, canonicalizeRuntimePlanV1, compileRuntimePlanV1, hashProjectOptionsV1, hashRuntimePlanV1,
   parseProjectOptionsV1
@@ -148,12 +148,12 @@ test("isolates a recoverable workspace Git observation failure during snapshots"
   await h.register(); await h.createStore(); await h.managed.fetch(projectId);
   const failedWorkspaceId = "018f0f00-0000-7000-8000-000000000099";
   await h.managed.createWorkspace(h.workspace, workspaceOperation);
-  await h.managed.createWorkspace({ ...h.workspace, workspaceId: failedWorkspaceId, workspaceSlug: "oversized", branchName: "oversized" },
+  await h.managed.createWorkspace({ ...h.workspace, workspaceId: failedWorkspaceId, workspaceSlug: "oversized", branchName: gitBranchNameSchema.parse("oversized") },
     "018f0f00-0000-7000-8000-000000000012");
   class DegradedManagedWorkspaces extends ManagedWorkspaces {
     override async inspectGit(project: string, workspace: string | null) {
       if (workspace === failedWorkspaceId) {
-        throw new AgentExecutionError({ code: "GIT_OPERATION_FAILED", message: "status output exceeded the observation bound.", retryable: true, details: { action: "inspect" } });
+        throw new AgentExecutionError({ code: "GIT_OPERATION_FAILED", message: "status output exceeded the observation bound.", retryable: false, details: { action: "inspect" } });
       }
       return await super.inspectGit(project, workspace);
     }
