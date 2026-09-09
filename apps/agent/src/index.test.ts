@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, githubAgentApiV1EndpointByOperation, sourceInspectionDataSchema, type AgentExecutionFailure } from "@devspace/contracts";
+import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, githubAgentApiV1EndpointByOperation, sourceInspectionDataSchema,
+  type AgentExecutionFailure, type WorkspaceFileReadResult, type WorkspaceFileSaveResult, type WorkspaceFilesListResult } from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
@@ -93,6 +94,20 @@ class ReturningPreviewManagedWorkspaces extends ManagedWorkspaces {
   }
 }
 
+class ReturningWorkspaceFilesManagedWorkspaces extends ManagedWorkspaces {
+  constructor(roots: ConstructorParameters<typeof ManagedWorkspaces>[0]) { super(roots); }
+
+  override listWorkspaceDirectory(_projectId: string, _workspaceId: string, path: string): Promise<WorkspaceFilesListResult> {
+    return Promise.resolve({ path, entries: [{ path: "README.md", name: "README.md", kind: "file", size: 6 }] });
+  }
+  override readWorkspaceFile(_projectId: string, _workspaceId: string, path: string): Promise<WorkspaceFileReadResult> {
+    return Promise.resolve({ path, content: "hello\n", revision: "a".repeat(64), size: 6 });
+  }
+  override saveWorkspaceFile(_projectId: string, _workspaceId: string, path: string, _content: string, _expectedRevision: string): Promise<WorkspaceFileSaveResult> {
+    return Promise.resolve({ path, revision: "b".repeat(64) });
+  }
+}
+
 const previewInspectBody = JSON.stringify({ data: {
   projectId: "018f0f00-0000-7000-8000-000000000005",
   workspaceId: "018f0f00-0000-7000-8000-000000000009",
@@ -130,6 +145,33 @@ test("serves health and source inspection through the executable Agent contracts
     }, body });
     expect(inspected.status).toBe(200);
     expect(agentApiV1EndpointByOperation["project.source.inspect"].successBodySchema.parse(inspected.body).data.defaultBranch).toBe("main");
+  } finally { await server.stop(); }
+});
+
+test("serves typed workspace file list, read, and save operations", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-files-api-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const roots = { projects: path.join(directory, ".devspace-managed/projects"),
+    workspaces: path.join(directory, ".devspace-managed/workspaces"), state: path.join(directory, ".devspace-managed/state") };
+  const server = createAgentServer({ socketPath, managedRoots: roots, managedWorkspaces: new ReturningWorkspaceFilesManagedWorkspaces(roots), now: () => now, createId: () => id });
+  await server.start();
+  try {
+    const projectId = "018f0f00-0000-7000-8000-000000000005";
+    const workspaceId = "018f0f00-0000-7000-8000-000000000009";
+    const operations = [
+      ["workspace.files.list", { path: "" }],
+      ["workspace.files.read", { path: "README.md" }],
+      ["workspace.files.save", { path: "README.md", content: "updated\n", expectedRevision: "a".repeat(64) }]
+    ] as const;
+    for (const [operation, fileData] of operations) {
+      const body = JSON.stringify({ data: { projectId, workspaceId, ...fileData } });
+      const result = await request(socketPath, { method: "POST", path: agentApiV1EndpointByOperation[operation].path, headers: {
+        ...headers, "content-length": String(Buffer.byteLength(body))
+      }, body });
+      expect(result.status).toBe(200);
+      expect(agentApiV1EndpointByOperation[operation].successBodySchema.parse(result.body).data).toMatchObject(fileData.path === "" ? { path: "" } : { path: fileData.path });
+    }
   } finally { await server.stop(); }
 });
 

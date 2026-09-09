@@ -2,9 +2,10 @@
 
 ## Delivery status
 
-Milestones 0 and 1 are complete. PR #43 / AI Session Beta Checkpoint 1 is merged. The current
-objective is the finished owner-controlled MVP, and private GitHub repository access is the active
-slice.
+Milestones 0 and 1 are complete. PR #43 / AI Session Beta Checkpoint 1 and PR #47 / private
+GitHub access are merged. CP3A/CP3B private GitHub access is complete, including real-provider
+private Push and non-fast-forward rejection acceptance. The private GitHub infrastructure phase is
+closed; Files + Monaco is the active Rapid Public Alpha product slice.
 
 Private GitHub Repository Access Checkpoint 1 was merged by PR #44 at
 `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`. The validated CP1 head was
@@ -63,8 +64,9 @@ Traefik → Cloudflare Tunnel/Access → reserved preview namespace → connecto
 loopback lease; this deployment choice is not a universal DevSpace core requirement.
 
 The current dashboard and Workbench expose project onboarding, workspace runtime controls, terminal,
-tasks, and previews. File editing, richer Git controls, persistent terminals, project creation from
-scratch, and later Workbench polish remain post-M1 product work.
+tasks, previews, and the Agent-backed Files + Monaco editor slice. File browsing and editing remain
+available when the Docker runtime is stopped. Richer Git controls, persistent terminals, project
+creation from scratch, and later Workbench polish remain deferred product work.
 
 ## Private GitHub Repository Access status
 
@@ -83,10 +85,11 @@ shared root tree:
 9647bd27929a7300aaa627416f8111f447b68899
 ```
 
-Checkpoint 3A is the active implementation slice on
-`feat/private-github-access-cp3a-lifecycle`. It adds durable connection lifecycle generations,
-explicit disconnect, bounded cleanup settlement, same-ID reconnect/re-authorization, and
-authoritative upstream-loss classifications. It does not claim production deployment.
+Checkpoint 3A/3B are complete. PR #47 merged the durable connection lifecycle generations, explicit
+disconnect, bounded cleanup settlement, same-ID reconnect/re-authorization, authoritative
+upstream-loss classifications, and explicit private Push. Real-provider private Push and
+non-fast-forward rejection passed acceptance. The private GitHub infrastructure phase is closed;
+this document does not claim production deployment.
 
 The authority model remains App-only: no user OAuth, OAuth client secret, user access token, PAT,
 Git password, or browser account discovery exists. Administrator configuration supplies one expected
@@ -162,8 +165,8 @@ files, commits, dirty changes, or runtime state. Pending cleanup remains visible
 unavailable, and stale refreshes or callbacks cannot re-enable an older generation. The browser
 offers minimal disconnect confirmation and reconnect/re-authorize guidance.
 
-CP3B explicit private GitHub push is implemented on the current feature branch. The temporary
-Workbench Push action prepares a server-captured `{connectionId, repositoryId, branch, commit,
+CP3B explicit private GitHub push was merged in PR #47. The Workbench Push action prepares a
+server-captured `{connectionId, repositoryId, branch, commit,
 generation}` intent, requires explicit confirmation, and dispatches only the fixed same-name
 `<commit>:refs/heads/<branch>` update through exact `contents:write` GitHub App authority. The
 destination is the live authority-resolved HTTPS origin URL, and repository-local push
@@ -171,7 +174,8 @@ destination/rewrite settings are rejected. Read operations retain their read-onl
 permission-loss/reauthorization path. Submitted or interrupted pushes are terminalized as
 `GITHUB_PUSH_OUTCOME_UNCERTAIN`, retain their captured intent for inspection, and are never
 automatically resent. Agent snapshot reconciliation also clears a submitted Web operation after
-an Agent restart. This branch has not been pushed, merged, or deployed.
+an Agent restart. The private GitHub infrastructure phase is complete; this document does not
+claim production deployment.
 
 CP3B intentionally does not include force push, force-with-lease, tag or branch deletion, arbitrary
 refspecs/remotes, branch-management, merge/rebase, conflict resolution, or a general remote-effect

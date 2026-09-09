@@ -10,10 +10,12 @@ import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./previ
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import { AiSessionTab } from "./ai-session-tab.js";
+import { EditorTab } from "./editor-tab.js";
+import { WorkspaceFileTree } from "./workspace-file-tree.js";
 import { IncidentReference } from "./incident-reference.js";
 import { useTransientNotice } from "./transient-notice.js";
 import {
-  activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
+  activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 
 type Task = { key: string; displayName: string };
@@ -50,6 +52,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   initialMessage?: string | null;
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
+  const [dirtyEditorIds, setDirtyEditorIds] = useState<ReadonlySet<string>>(new Set());
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
   const lostTerminalObservedAt = useRef(new Map<string, number>());
   const [sidebarNow, setSidebarNow] = useState(() => Date.now());
@@ -267,6 +270,17 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const openAiTab = useCallback(() => {
     setTabs((current) => openWorkbenchTab(current, { id: aiTabId(workspaceId), kind: "ai", sessionId: workspaceId }));
   }, [workspaceId]);
+  const openEditorTab = useCallback((relativePath: string) => {
+    setTabs((current) => openWorkbenchTab(current, editorTab(relativePath)));
+  }, []);
+  const updateEditorDirty = useCallback((tabId: string, dirty: boolean) => {
+    setDirtyEditorIds((current) => {
+      if (current.has(tabId) === dirty) return current;
+      const next = new Set(current);
+      if (dirty) next.add(tabId); else next.delete(tabId);
+      return next;
+    });
+  }, []);
   const createTerminal = async () => {
     if (!actionsAvailable) return;
     showNotice("Creating terminal…", "pending");
@@ -287,6 +301,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     clearNotice();
   };
   const closeTab = (tab: WorkbenchTab) => {
+    if (tab.kind === "editor" && dirtyEditorIds.has(tab.id) && !window.confirm(`Discard unsaved changes in ${tab.title}?`)) return;
+    if (tab.kind === "editor") updateEditorDirty(tab.id, false);
     setTabs((current) => closeWorkbenchTab(current, tab.id));
   };
   const runTask = async (taskKey: string) => {
@@ -389,16 +405,18 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       onPushRepository={() => { preparePush().catch(() => showNotice("Push preparation failed safely.", "error")); }}
       onFetchRepository={() => { fetchRepository().catch(() => showNotice("Repository fetch failed safely.", "error")); }} />
     <div className="workbench-body">
-      <WorkbenchSidebar terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
+      <WorkbenchSidebar projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} onOpenFile={openEditorTab}
+        terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
         previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => showNotice("Task action failed.", "error")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
         <WorkbenchTabStrip tabs={tabs} onActivate={(tabId) => setTabs((current) => activateWorkbenchTab(current, tabId))}
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
-          canCreateTerminal={actionsAvailable} />
+          canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId}
-          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway} />
+          onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
+          onEditorDirtyChange={updateEditorDirty} />
         {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">
           <span>{notice.message}</span>
           <IncidentReference incidentId={notice.referenceId} />
@@ -443,8 +461,9 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi,
+function WorkbenchSidebar({ projectId, workspaceId, agentReachable, onOpenFile, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
+  projectId: string; workspaceId: string; agentReachable: boolean; onOpenFile: (relativePath: string) => void;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
   previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void; onOpenAi: () => void;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
@@ -461,6 +480,10 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable,
         <span aria-hidden="true">▾</span> Previews <span className="nav-count">{previews.length}</span>
       </button>
     </nav>
+    <div className="sidebar-section files-sidebar-section">
+      <div className="sidebar-section-heading"><h2>Files</h2></div>
+      <WorkspaceFileTree projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} onOpenFile={onOpenFile} />
+    </div>
     <div className="sidebar-section">
       <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!actionsAvailable}
         onClick={onCreateTerminal} aria-label="Create terminal" title={actionsAvailable ? "Create terminal" : "The Agent and runtime must be available to create a terminal"}>+</button></div>
@@ -506,13 +529,14 @@ function WorkbenchSidebar({ terminals, getTerminalTitle, tabs, actionsAvailable,
   </aside>;
 }
 
-function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCreateTerminal }: {
+function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCreateTerminal, dirtyEditorIds }: {
   tabs: WorkbenchTabState; onActivate: (tabId: string) => void; onClose: (tab: WorkbenchTab) => void; onCreateTerminal: () => void;
-  canCreateTerminal: boolean;
+  canCreateTerminal: boolean; dirtyEditorIds: ReadonlySet<string>;
 }) {
   return <div className="workbench-tabstrip" role="tablist" aria-label="Project tabs">
     {tabs.tabs.map((tab) => <div className={`workbench-tab ${tab.id === tabs.activeTabId ? "active" : ""}`} key={tab.id}>
-      <button type="button" role="tab" aria-selected={tab.id === tabs.activeTabId} onClick={() => onActivate(tab.id)}>{tab.kind === "terminal" && <span className="tab-dot" aria-hidden="true" />}{tabTitle(tab)}</button>
+      <button type="button" role="tab" aria-selected={tab.id === tabs.activeTabId} onClick={() => onActivate(tab.id)}>{tab.kind === "terminal" && <span className="tab-dot" aria-hidden="true" />}
+        {tab.kind === "editor" && dirtyEditorIds.has(tab.id) && <span className="editor-tab-dirty" aria-label="Unsaved changes" />}{tabTitle(tab)}</button>
       <button type="button" className="tab-close" aria-label={`Close ${tabTitle(tab)}`} onClick={() => onClose(tab)}>×</button>
     </div>)}
     <button type="button" className="tab-create" disabled={!canCreateTerminal} onClick={onCreateTerminal} aria-label="Create terminal tab" title={canCreateTerminal ? "Create terminal" : "Start the runtime to create a terminal"}>+</button>
@@ -520,14 +544,15 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
   projectId: string; workspaceId: string; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   onReloadPreview: (previewId: string) => Promise<void>;
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
+  onEditorDirtyChange: (tabId: string, dirty: boolean) => void;
 }) {
   return <div className="workbench-surface">
-    {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a terminal to start working in this project.</p></div>}
+    {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a file or terminal to start working in this project.</p></div>}
     {tabs.tabs.map((tab) => tab.kind === "terminal" ? <TerminalTab key={tab.id} projectId={projectId} workspaceId={workspaceId}
       terminal={terminalById.get(tab.terminalId) ?? { id: tab.terminalId, processId: tab.terminalId, title: tab.title, state: "disconnected" }}
       active={tab.id === tabs.activeTabId} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
@@ -535,7 +560,9 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
-      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} /> : null)}
+      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} />
+        : tab.kind === "editor" ? <EditorTab key={tab.id} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
+          active={tab.id === tabs.activeTabId} onDirtyChange={onEditorDirtyChange} /> : null)}
   </div>;
 }
 
@@ -614,6 +641,6 @@ function runtimeLabel(state: string): string {
 }
 
 function tabTitle(tab: WorkbenchTab): string {
-  return tab.kind === "terminal" ? tab.title : tab.kind === "editor" ? "Editor" : tab.kind === "preview" ? "Preview"
+  return tab.kind === "terminal" ? tab.title : tab.kind === "editor" ? tab.title : tab.kind === "preview" ? "Preview"
     : tab.kind === "ai" ? "AI session" : tab.kind === "git" ? "Git" : "Task output";
 }

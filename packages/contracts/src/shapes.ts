@@ -21,6 +21,10 @@ import {
   projectOptionsRevisionHashSchema,
   remoteRepositoryUrlSchema,
   utcTimestampMsSchema,
+  workspaceFileRevisionSchema,
+  workspaceRelativePathSchema,
+  WORKSPACE_DIRECTORY_ENTRY_MAX,
+  WORKSPACE_FILE_MAX_BYTES,
   uuidV7Schema
 } from "./primitives.js";
 import { githubConnectionIdSchema, githubDecimalIdSchema, githubRepositorySchema } from "./github-app.js";
@@ -91,6 +95,39 @@ export const inspectGitDataSchema = z.strictObject({
 export const workspaceIdentityDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema
+});
+export const listWorkspaceFilesDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  path: workspaceRelativePathSchema
+});
+export const readWorkspaceFileDataSchema = listWorkspaceFilesDataSchema;
+export const saveWorkspaceFileDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  path: workspaceRelativePathSchema,
+  content: z.string().max(WORKSPACE_FILE_MAX_BYTES),
+  expectedRevision: workspaceFileRevisionSchema
+});
+export const workspaceFileEntrySchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  name: z.string().min(1).max(255),
+  kind: z.enum(["file", "directory"]),
+  size: z.number().int().min(0).max(WORKSPACE_FILE_MAX_BYTES).optional()
+});
+export const workspaceFilesListResultSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  entries: z.array(workspaceFileEntrySchema).max(WORKSPACE_DIRECTORY_ENTRY_MAX)
+});
+export const workspaceFileReadResultSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  content: z.string().max(WORKSPACE_FILE_MAX_BYTES),
+  revision: workspaceFileRevisionSchema,
+  size: z.number().int().min(0).max(WORKSPACE_FILE_MAX_BYTES)
+});
+export const workspaceFileSaveResultSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  revision: workspaceFileRevisionSchema
 });
 export const createWorkspaceDataSchema = z.strictObject({
   projectId: uuidV7Schema,
@@ -310,6 +347,13 @@ export type ProjectIdentityData = z.infer<typeof projectIdentityDataSchema>;
 export type InspectGitData = z.infer<typeof inspectGitDataSchema>;
 export type ProjectPushData = z.infer<typeof projectPushDataSchema>;
 export type WorkspaceIdentityData = z.infer<typeof workspaceIdentityDataSchema>;
+export type ListWorkspaceFilesData = z.infer<typeof listWorkspaceFilesDataSchema>;
+export type ReadWorkspaceFileData = z.infer<typeof readWorkspaceFileDataSchema>;
+export type SaveWorkspaceFileData = z.infer<typeof saveWorkspaceFileDataSchema>;
+export type WorkspaceFileEntry = z.infer<typeof workspaceFileEntrySchema>;
+export type WorkspaceFilesListResult = z.infer<typeof workspaceFilesListResultSchema>;
+export type WorkspaceFileReadResult = z.infer<typeof workspaceFileReadResultSchema>;
+export type WorkspaceFileSaveResult = z.infer<typeof workspaceFileSaveResultSchema>;
 export type CreateWorkspaceData = z.infer<typeof createWorkspaceDataSchema>;
 export type RebuildWorkspaceData = z.infer<typeof rebuildWorkspaceDataSchema>;
 export type ArchiveWorkspaceData = z.infer<typeof archiveWorkspaceDataSchema>;

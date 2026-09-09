@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab
+  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab
 } from "./workbench-tabs.js";
 
 const terminal = (id: string): WorkbenchTab => ({ id: terminalTabId(id), kind: "terminal", terminalId: id, title: `Terminal ${id}` });
+const editor = (path: string): WorkbenchTab => editorTab(path);
 
 describe("Workbench tab state", () => {
   test("uses stable terminal identity and preserves ordered tabs", () => {
@@ -48,5 +49,20 @@ describe("Workbench tab state", () => {
     const next = closeWorkbenchTabsForTerminalIds(state, ["lost-1", "lost-2"]);
     expect(next.tabs.map((tab) => tab.id)).toEqual(["terminal:healthy"]);
     expect(next.activeTabId).toBe("terminal:healthy");
+  });
+
+  test("uses stable editor identity and focuses an already-open file", () => {
+    const first = editor("src/index.ts");
+    const state = openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, first), editor("src/index.ts"));
+    expect(first.id).toBe("editor:src%2Findex.ts");
+    expect(state.tabs).toHaveLength(1);
+    expect(state.activeTabId).toBe(first.id);
+  });
+
+  test("closes an editor tab to the adjacent fallback", () => {
+    const first = editor("README.md");
+    const second = editor("src/index.ts");
+    const state = openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, first), second);
+    expect(closeWorkbenchTab(state, second.id).activeTabId).toBe(first.id);
   });
 });

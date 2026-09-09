@@ -30,7 +30,11 @@ import {
   type GithubLifecycleInspection,
   type GithubInstallationInspection,
   type GithubRepositoryPage,
-  type GithubRepositoryResolution
+  type GithubRepositoryResolution,
+  WORKSPACE_FILE_MAX_BYTES,
+  type WorkspaceFileReadResult,
+  type WorkspaceFileSaveResult,
+  type WorkspaceFilesListResult
 } from "@devspace/contracts";
 import {
   classifyFailureCode, createLogger, type FailureCategory, type LogContext, type StructuredLogger
@@ -42,6 +46,7 @@ import {
 } from "./ai-stream-admission.js";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
+const WORKSPACE_FILE_RESPONSE_MAX_BYTES = WORKSPACE_FILE_MAX_BYTES * 8;
 const AI_EVENT_STREAM_PARSER_SLAB_BYTES = 64 * 1024;
 const AI_EVENT_STREAM_PARSER_MAX_SEGMENTS =
   Math.ceil(AI_EVENT_STREAM_FRAME_MAX_BYTES / AI_EVENT_STREAM_PARSER_SLAB_BYTES);
@@ -176,7 +181,7 @@ export function createAgentClient(socketPath: string, options: {
     | "github.installation.disconnect" | "github.installation.reconnect.prepare"
     | "github.repositories.list" | "github.repositories.resolve"
     | "project.managed-store.create" | "project.fetch" | "project.push" | "project.git.inspect" | "workspace.create"
-    | "workspace.inspect" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
+    | "workspace.inspect" | "workspace.files.list" | "workspace.files.read" | "workspace.files.save" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
     | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
     | "ai-provider.inspect" | "ai-session.start" | "ai-session.resume" | "ai-session.turn.send" | "ai-session.turn.interrupt"
     | "ai-session.approval.respond" | "ai-session.input.respond" | "ai-session.stop" | "ai-session.events.acknowledge";
@@ -232,6 +237,7 @@ export function createAgentClient(socketPath: string, options: {
       });
     };
     const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs : observationTimeoutMs;
+    const maxResponseBytes = operation.startsWith("workspace.files.") ? WORKSPACE_FILE_RESPONSE_MAX_BYTES : MAX_RESPONSE_BYTES;
     let body: string | undefined;
     try { body = data === undefined ? undefined : JSON.stringify(endpoint.requestBodySchema.parse({ data })); }
     catch (error) {
@@ -259,7 +265,7 @@ export function createAgentClient(socketPath: string, options: {
         let bytes = 0;
         response.on("data", (chunk: Buffer) => {
           bytes += chunk.length;
-          if (bytes > MAX_RESPONSE_BYTES) {
+          if (bytes > maxResponseBytes) {
             logFailure("agent-transport", "AGENT_RESPONSE_TOO_LARGE");
             request.destroy(new AgentUnavailableError("AGENT_RESPONSE_TOO_LARGE", "transport-failure", requestId, operationId, diagnosticContext));
           }
@@ -367,6 +373,12 @@ export function createAgentClient(socketPath: string, options: {
       await call("project.git.inspect", { projectId, workspaceId }) as GitInspectionData,
     inspectWorkspace: async (projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> =>
       await call("workspace.inspect", { projectId, workspaceId }) as WorkspaceInspectionData,
+    listWorkspaceDirectory: async (projectId: string, workspaceId: string, path: string): Promise<WorkspaceFilesListResult> =>
+      await call("workspace.files.list", { projectId, workspaceId, path }) as WorkspaceFilesListResult,
+    readWorkspaceFile: async (projectId: string, workspaceId: string, path: string): Promise<WorkspaceFileReadResult> =>
+      await call("workspace.files.read", { projectId, workspaceId, path }) as WorkspaceFileReadResult,
+    saveWorkspaceFile: async (projectId: string, workspaceId: string, path: string, content: string, expectedRevision: string): Promise<WorkspaceFileSaveResult> =>
+      await call("workspace.files.save", { projectId, workspaceId, path, content, expectedRevision }) as WorkspaceFileSaveResult,
     startWorkspace: async (operationId: string, projectId: string, workspaceId: string): Promise<void> => {
       await call("workspace.start", { projectId, workspaceId }, operationId);
     },
@@ -485,6 +497,7 @@ export function createAgentClient(socketPath: string, options: {
 export type FullAgentClient = ReturnType<typeof createAgentClient>;
 export type WorkspaceAgentClient = Pick<FullAgentClient,
   "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" |
-  "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "startWorkspace" | "stopWorkspace" | "snapshot">;
+  "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "listWorkspaceDirectory" | "readWorkspaceFile" |
+  "saveWorkspaceFile" | "startWorkspace" | "stopWorkspace" | "snapshot">;
 export type AgentClient = Pick<FullAgentClient, "health" | "inspectSource">
   & Partial<Pick<FullAgentClient, "resolveGithubRepository">>;

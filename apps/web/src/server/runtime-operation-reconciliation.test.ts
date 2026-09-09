@@ -76,7 +76,10 @@ async function runtimeFixture() {
       kind: "primary", revisionId, revisionHash, desiredState: runtimeState === "running" ? "running" : "stopped",
       observedState: runtimeState === "running" ? "running" : runtimeState === "lost" ? "lost" : "stopped", dirty: false,
       runtimeStack: { desiredState: runtimeState === "absent" ? "absent" : runtimeState === "running" ? "running" : "stopped",
-        observedState: runtimeState } }))
+        observedState: runtimeState } })),
+    listWorkspaceDirectory: () => Promise.resolve({ path: "", entries: [] }),
+    readWorkspaceFile: () => Promise.resolve({ path: "README.md", content: "", revision: "a".repeat(64), size: 0 }),
+    saveWorkspaceFile: () => Promise.resolve({ path: "README.md", revision: "a".repeat(64) })
   } satisfies WorkspaceAgentClient;
   const context = database.getRuntimeContext(project.id);
   return { database, project, runtimeAgent, observations, context,

@@ -71,6 +71,9 @@ test("lazily compiles an old null-plan revision and persists desired state befor
         && database.listRuntimeStacks().some((item) => item.desiredState === "stopped"));
       runtimeState = "stopped"; succeed(operationId); return Promise.resolve();
     },
+    listWorkspaceDirectory: () => Promise.resolve({ path: "", entries: [] }),
+    readWorkspaceFile: () => Promise.resolve({ path: "README.md", content: "", revision: "a".repeat(64), size: 0 }),
+    saveWorkspaceFile: () => Promise.resolve({ path: "README.md", revision: "a".repeat(64) }),
     inspectWorkspace: (projectId, selectedWorkspaceId) => Promise.resolve(workspaceInspectionDataSchema.parse({ projectId, workspaceId: selectedWorkspaceId,
       kind: "primary", revisionId, revisionHash, desiredState: runtimeState, observedState: runtimeState, dirty: false,
       runtimeStack: { desiredState: runtimeState, observedState: runtimeState } }))

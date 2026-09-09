@@ -79,6 +79,41 @@ button { justify-self: start; border: 0; border-radius: 9px; padding: 12px 18px;
 .workbench-message.success { border-color: #2a7650; color: #8cdaad; }
 .workbench-message.error { border-color: #744246; color: #e6a5a5; }
 .workbench-message.pending { border-color: #77603a; color: #e5c386; }
+
+.files-sidebar-section { padding-bottom: 12px; }
+.workspace-file-tree { min-width: 0; }
+.file-tree-root { list-style: none; margin: 0; padding: 0; }
+.file-tree-children { list-style: none; margin: 0; padding: 0; }
+.file-tree-entry { align-items: center; background: transparent; border-radius: 4px; color: #aebfb7; display: flex; gap: 6px; justify-self: stretch; min-width: 0; overflow: hidden; padding-bottom: 5px; padding-right: 5px; padding-top: 5px; text-align: left; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+.file-tree-entry:hover { background: #22302d; color: #eaf6ed; }
+.file-tree-entry > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.file-tree-chevron { color: #687b72; flex: 0 0 9px; font-size: .85rem; text-align: center; }
+.file-tree-icon { color: #77bc91; flex: 0 0 14px; font-size: .7rem; text-align: center; }
+.file-tree-icon.file-icon { color: #879b92; }
+.file-tree-state { color: #6f8178; font-size: .72rem; line-height: 1.4; margin: 3px 5px; }
+.file-tree-state.nested { margin-bottom: 4px; margin-top: 2px; }
+.file-tree-state span { display: block; overflow: hidden; text-overflow: ellipsis; }
+.file-tree-retry { background: transparent; color: #9bd2ac; font-size: .7rem; margin-top: 3px; padding: 0; text-decoration: underline; }
+
+.editor-tab-surface { background: #101519; display: flex; flex-direction: column; height: 100%; min-width: 0; width: 100%; }
+.editor-tab-surface.is-inactive { display: none; }
+.editor-tab-header { align-items: center; background: #131d20; border-bottom: 1px solid #263438; display: flex; gap: 14px; justify-content: space-between; min-height: 48px; padding: 7px 14px; }
+.editor-tab-identity { display: grid; gap: 2px; min-width: 0; }
+.editor-tab-identity strong { color: #e6f0e9; font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-tab-identity span { color: #6e8378; font-family: ui-monospace, monospace; font-size: .66rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-tab-actions { align-items: center; display: flex; flex: 0 0 auto; gap: 9px; }
+.editor-dirty-label, .editor-save-status { color: #d4aa6f; font-size: .69rem; }
+.editor-save-status { color: #82c99a; }
+.editor-save-button, .editor-tab-conflict button, .editor-tab-message button { background: #2d6148; border-radius: 4px; color: #e8f7ed; font-size: .72rem; padding: 5px 10px; }
+.editor-save-button:hover:not(:disabled), .editor-tab-conflict button:hover, .editor-tab-message button:hover { background: #3a7958; }
+.editor-save-button:disabled { cursor: default; opacity: .45; }
+.editor-tab-content { flex: 1; min-height: 0; min-width: 0; }
+.editor-tab-message { align-items: center; color: #80928a; display: flex; flex: 1; flex-direction: column; font-size: .8rem; gap: 10px; justify-content: center; padding: 20px; text-align: center; }
+.editor-tab-message.error { color: #e2a1a1; }
+.editor-tab-message p { margin: 0; }
+.editor-tab-conflict { align-items: center; background: #432d22; border-bottom: 1px solid #8b5d3a; color: #f1c58a; display: flex; font-size: .74rem; gap: 12px; justify-content: space-between; padding: 7px 14px; }
+.editor-tab-conflict button { background: #70472e; flex: 0 0 auto; }
+.editor-tab-dirty { background: #d4aa6f; border-radius: 50%; display: inline-block; flex: 0 0 auto; height: 6px; width: 6px; }
 .push-dialog-backdrop { align-items: center; background: rgb(0 0 0 / 62%); display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 20; }
 .push-dialog { background: #1d282b; border: 1px solid #416b56; border-radius: 10px; box-shadow: 0 18px 60px rgb(0 0 0 / 45%); color: #e8efeb; max-width: 480px; padding: 22px; width: 100%; }
 .push-dialog h2 { color: #e0f2e6; font-size: 1.05rem; margin: 0 0 10px; }.push-dialog p { color: #c0cec7; font-size: .84rem; line-height: 1.5; margin: 0; }

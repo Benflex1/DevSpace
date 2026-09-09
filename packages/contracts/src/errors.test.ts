@@ -15,8 +15,8 @@ const envelope = (code: string, retryable: boolean, details: object) => ({
 
 describe("executable Agent error registry", () => {
   test("contains exactly the accepted executable errors", () => {
-    expect(executableAgentErrorCodes).toHaveLength(40);
-    expect(new Set(executableAgentErrorCodes).size).toBe(40);
+    expect(executableAgentErrorCodes).toHaveLength(46);
+    expect(new Set(executableAgentErrorCodes).size).toBe(46);
     expect(executableAgentErrorCodes).not.toContain("EVENT_SNAPSHOT_REQUIRED");
     expect(executableAgentErrorCodes).not.toContain("EVENT_CURSOR_INVALID");
     expect(executableAgentErrorCodes.join(" ")).not.toMatch(/RUNTIME_PLAN|ATTACHMENT_GRANT|REQUEST_HASH/u);

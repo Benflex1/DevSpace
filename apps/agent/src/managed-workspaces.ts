@@ -1,4 +1,6 @@
-import { readFile, readdir, realpath, rename, rm, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import { open, readFile, readdir, realpath, rename, rm, unlink, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import {
   configurationRevisionDataSchema,
@@ -12,9 +14,19 @@ import {
   githubRepositoryResolveDataSchema,
   projectPushDataSchema,
   projectOptionsRevisionHashSchema,
+  listWorkspaceFilesDataSchema,
+  readWorkspaceFileDataSchema,
   remoteRepositoryUrlSchema,
+  saveWorkspaceFileDataSchema,
   sourceLocatorSchema,
+  WORKSPACE_DIRECTORY_ENTRY_MAX,
+  WORKSPACE_FILE_MAX_BYTES,
+  type WorkspaceFileEntry,
+  type WorkspaceFileReadResult,
+  type WorkspaceFileSaveResult,
+  type WorkspaceFilesListResult,
   uuidV7Schema,
+  workspaceRelativePathSchema,
   workspaceInspectionDataSchema,
   type AgentExecutionFailure,
   type AgentSnapshotResource,
@@ -62,6 +74,9 @@ import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 
 const GIT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
+const WORKSPACE_DIRECTORY_FLAGS = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+const WORKSPACE_READ_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const WORKSPACE_WRITE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
 const objectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
 const absolutePathSchema = z.string().refine((value) => path.isAbsolute(value), "Expected absolute path");
 
@@ -153,6 +168,96 @@ function workspaceConflict(workspaceId: string, observedState: "lost" | "provisi
   return new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", "The workspace path is not provably owned by DevSpace.", {
     workspaceId, desiredState: "stopped", observedState, action: "create"
   }));
+}
+
+type WorkspacePathInvalidReason = "absolute" | "backslash" | "control" | "dot" | "dot-dot" | "empty-component" | "git" | "nul" | "symlink";
+
+function workspacePathDisplay(relativePath: string): string {
+  return relativePath.slice(0, 4096);
+}
+
+function workspacePathFailure(relativePath: string, reason: WorkspacePathInvalidReason): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("WORKSPACE_PATH_INVALID", "The workspace-relative path is invalid or not allowed.", {
+    path: workspacePathDisplay(relativePath), reason
+  }));
+}
+
+function workspaceFileNotFound(relativePath: string): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("WORKSPACE_FILE_NOT_FOUND", "The workspace file or directory was not found.", {
+    path: workspacePathDisplay(relativePath)
+  }));
+}
+
+function workspaceFileTooLarge(relativePath: string): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("WORKSPACE_FILE_TOO_LARGE", "The workspace file is too large to edit.", {
+    path: workspacePathDisplay(relativePath), maxBytes: WORKSPACE_FILE_MAX_BYTES
+  }));
+}
+
+function workspaceDirectoryTooLarge(relativePath: string): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("WORKSPACE_DIRECTORY_TOO_LARGE", "The workspace directory contains too many entries.", {
+    path: workspacePathDisplay(relativePath), maxEntries: WORKSPACE_DIRECTORY_ENTRY_MAX
+  }));
+}
+
+function workspaceFileUnsupported(relativePath: string, reason: "binary" | "directory" | "special"): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("WORKSPACE_FILE_UNSUPPORTED", "The workspace file is not supported for text editing.", {
+    path: workspacePathDisplay(relativePath), reason
+  }));
+}
+
+function workspaceFileChanged(relativePath: string, expectedRevision: string, currentRevision: string): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("WORKSPACE_FILE_CHANGED", "The workspace file changed since it was opened.", {
+    path: workspacePathDisplay(relativePath), expectedRevision, currentRevision
+  }));
+}
+
+function parseWorkspaceRelativePath(relativePath: string): string[] {
+  try { workspaceRelativePathSchema.parse(relativePath); }
+  catch { throw workspacePathFailure(relativePath, "control"); }
+  if (relativePath === "") return [];
+  if (path.isAbsolute(relativePath) || path.win32.isAbsolute(relativePath)) throw workspacePathFailure(relativePath, "absolute");
+  if (relativePath.includes("\\")) throw workspacePathFailure(relativePath, "backslash");
+  if (relativePath.includes("\0")) throw workspacePathFailure(relativePath, "nul");
+  if ([...relativePath].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint !== undefined && (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159));
+  })) throw workspacePathFailure(relativePath, "control");
+  const components = relativePath.split("/");
+  for (const component of components) {
+    if (component === "") throw workspacePathFailure(relativePath, "empty-component");
+    if (component === ".") throw workspacePathFailure(relativePath, "dot");
+    if (component === "..") throw workspacePathFailure(relativePath, "dot-dot");
+    if (component === ".git") throw workspacePathFailure(relativePath, "git");
+  }
+  return components;
+}
+
+function procDirectoryPath(directory: FileHandle, name: string): string {
+  return `/proc/self/fd/${directory.fd}/${name}`;
+}
+
+function sameFileIdentity(stats: { readonly dev: bigint; readonly ino: bigint }, identity: FileIdentity): boolean {
+  return stats.dev.toString() === identity.device && stats.ino.toString() === identity.inode;
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function strictUtf8(bytes: Buffer, relativePath: string): string {
+  if (bytes.includes(0)) throw workspaceFileUnsupported(relativePath, "binary");
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw workspaceFileUnsupported(relativePath, "binary"); }
+}
+
+function strictTextBytes(content: string, relativePath: string): Buffer {
+  const bytes = Buffer.from(content, "utf8");
+  if (bytes.includes(0) || new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== content) {
+    throw workspaceFileUnsupported(relativePath, "binary");
+  }
+  if (bytes.byteLength > WORKSPACE_FILE_MAX_BYTES) throw workspaceFileTooLarge(relativePath);
+  return bytes;
 }
 
 function logOwnershipDeviceRebind(resourceType: "project" | "workspace", resourceId: string,
@@ -1421,6 +1526,160 @@ export class ManagedWorkspaces {
       desiredState, observedState: workspaceObserved, dirty: (await this.inspectGit(projectId, workspaceId)).dirty,
       runtimeStack: { desiredState: runtimeDesired, observedState: runtime.observedState }
     });
+  }
+
+  private async openWorkspaceDirectory(projectId: string, workspaceId: string, relativePath: string): Promise<FileHandle> {
+    const record = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const components = parseWorkspaceRelativePath(relativePath);
+    let directory: FileHandle;
+    try { directory = await open(record.worktreePath, WORKSPACE_DIRECTORY_FLAGS); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") throw workspacePathFailure(relativePath, "symlink");
+      throw workspaceConflict(workspaceId);
+    }
+    try {
+      const rootStats = await directory.stat({ bigint: true });
+      if (!rootStats.isDirectory() || !sameFileIdentity(rootStats, record.identity)) throw workspaceConflict(workspaceId);
+      for (const component of components) {
+        let next: FileHandle;
+        try { next = await open(procDirectoryPath(directory, component), WORKSPACE_DIRECTORY_FLAGS); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ELOOP") throw workspacePathFailure(relativePath, "symlink");
+          if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+            throw workspaceFileNotFound(relativePath);
+          }
+          throw error;
+        }
+        await directory.close();
+        directory = next;
+      }
+      return directory;
+    } catch (error) {
+      await directory.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async openWorkspaceFile(directory: FileHandle, basename: string, relativePath: string): Promise<FileHandle> {
+    try { return await open(procDirectoryPath(directory, basename), WORKSPACE_READ_FLAGS); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ELOOP") throw workspacePathFailure(relativePath, "symlink");
+      if (code === "ENOENT" || code === "ENOTDIR") throw workspaceFileNotFound(relativePath);
+      throw error;
+    }
+  }
+
+  private async readWorkspaceFileFromDirectory(directory: FileHandle, basename: string, relativePath: string): Promise<{
+    readonly bytes: Buffer;
+    readonly revision: string;
+    readonly mode: number;
+  }> {
+    const file = await this.openWorkspaceFile(directory, basename, relativePath);
+    try {
+      const stats = await file.stat({ bigint: true });
+      if (!stats.isFile()) throw workspaceFileUnsupported(relativePath, stats.isDirectory() ? "directory" : "special");
+      if (stats.size > BigInt(WORKSPACE_FILE_MAX_BYTES)) throw workspaceFileTooLarge(relativePath);
+      const bytes = await file.readFile();
+      if (bytes.byteLength > WORKSPACE_FILE_MAX_BYTES) throw workspaceFileTooLarge(relativePath);
+      strictUtf8(bytes, relativePath);
+      return { bytes, revision: sha256(bytes), mode: Number(stats.mode) & 0o777 };
+    } finally {
+      await file.close();
+    }
+  }
+
+  async listWorkspaceDirectory(projectId: string, workspaceId: string, relativePath: string): Promise<WorkspaceFilesListResult> {
+    const data = listWorkspaceFilesDataSchema.parse({ projectId, workspaceId, path: relativePath });
+    const components = parseWorkspaceRelativePath(data.path);
+    const canonicalPath = components.join("/");
+    const directory = await this.openWorkspaceDirectory(data.projectId, data.workspaceId, canonicalPath);
+    try {
+      const entries = await readdir(procDirectoryPath(directory, "."), { encoding: "utf8", withFileTypes: true });
+      if (entries.length > WORKSPACE_DIRECTORY_ENTRY_MAX) throw workspaceDirectoryTooLarge(canonicalPath);
+      const visible: WorkspaceFileEntry[] = [];
+      for (const entry of entries) {
+        if (entry.name === ".git" || entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) continue;
+        const entryPath = canonicalPath === "" ? entry.name : `${canonicalPath}/${entry.name}`;
+        if (entry.isDirectory()) {
+          visible.push({ path: entryPath, name: entry.name, kind: "directory" });
+          continue;
+        }
+        let size: number | undefined;
+        try {
+          const file = await this.openWorkspaceFile(directory, entry.name, entryPath);
+          try {
+            const stats = await file.stat({ bigint: true });
+            if (stats.isFile() && stats.size <= BigInt(WORKSPACE_FILE_MAX_BYTES)) size = Number(stats.size);
+          } finally { await file.close(); }
+        } catch (error) {
+          if (!(error instanceof AgentExecutionError)
+            || !["WORKSPACE_FILE_NOT_FOUND", "WORKSPACE_PATH_INVALID"].includes(error.failure.code)) throw error;
+        }
+        visible.push({ path: entryPath, name: entry.name, kind: "file", ...(size === undefined ? {} : { size }) });
+      }
+      visible.sort((left, right) => {
+        const kindOrder = left.kind === right.kind ? 0 : left.kind === "directory" ? -1 : 1;
+        if (kindOrder !== 0) return kindOrder;
+        const insensitive = left.name.toLocaleLowerCase("en-US").localeCompare(right.name.toLocaleLowerCase("en-US"), "en-US");
+        return insensitive !== 0 ? insensitive : left.name.localeCompare(right.name, "en-US");
+      });
+      return { path: canonicalPath, entries: visible };
+    } finally {
+      await directory.close();
+    }
+  }
+
+  async readWorkspaceFile(projectId: string, workspaceId: string, relativePath: string): Promise<WorkspaceFileReadResult> {
+    const data = readWorkspaceFileDataSchema.parse({ projectId, workspaceId, path: relativePath });
+    const components = parseWorkspaceRelativePath(data.path);
+    if (components.length === 0) throw workspaceFileUnsupported(data.path, "directory");
+    const canonicalPath = components.join("/");
+    const parentPath = components.slice(0, -1).join("/");
+    const directory = await this.openWorkspaceDirectory(data.projectId, data.workspaceId, parentPath);
+    try {
+      const basename = components.at(-1)!;
+      const result = await this.readWorkspaceFileFromDirectory(directory, basename, canonicalPath);
+      return { path: canonicalPath, content: strictUtf8(result.bytes, canonicalPath), revision: result.revision, size: result.bytes.byteLength };
+    } finally {
+      await directory.close();
+    }
+  }
+
+  async saveWorkspaceFile(projectId: string, workspaceId: string, relativePath: string, content: string, expectedRevision: string): Promise<WorkspaceFileSaveResult> {
+    const data = saveWorkspaceFileDataSchema.parse({ projectId, workspaceId, path: relativePath, content, expectedRevision });
+    const components = parseWorkspaceRelativePath(data.path);
+    if (components.length === 0) throw workspaceFileUnsupported(data.path, "directory");
+    const canonicalPath = components.join("/");
+    const bytes = strictTextBytes(data.content, canonicalPath);
+    const directory = await this.openWorkspaceDirectory(data.projectId, data.workspaceId, components.slice(0, -1).join("/"));
+    const basename = components.at(-1)!;
+    let temporaryPath: string | null = null;
+    try {
+      const current = await this.readWorkspaceFileFromDirectory(directory, basename, canonicalPath);
+      if (current.revision !== data.expectedRevision) throw workspaceFileChanged(canonicalPath, data.expectedRevision, current.revision);
+
+      // Re-read immediately before the write while retaining the opened directory fd. A
+      // replaced parent path cannot redirect this operation, and rename replaces a symlink
+      // entry rather than following it.
+      const verified = await this.readWorkspaceFileFromDirectory(directory, basename, canonicalPath);
+      if (verified.revision !== data.expectedRevision) throw workspaceFileChanged(canonicalPath, data.expectedRevision, verified.revision);
+      temporaryPath = `.devspace-file-${uuidv7()}.tmp`;
+      const temporary = await open(procDirectoryPath(directory, temporaryPath), WORKSPACE_WRITE_FLAGS, verified.mode);
+      try {
+        await temporary.writeFile(bytes);
+        await temporary.sync();
+      } finally {
+        await temporary.close();
+      }
+      await rename(procDirectoryPath(directory, temporaryPath), procDirectoryPath(directory, basename));
+      temporaryPath = null;
+      const saved = await this.readWorkspaceFileFromDirectory(directory, basename, canonicalPath);
+      return { path: canonicalPath, revision: saved.revision };
+    } finally {
+      if (temporaryPath !== null) await unlink(procDirectoryPath(directory, temporaryPath)).catch(() => undefined);
+      await directory.close();
+    }
   }
 
   async runtimeStatus(): Promise<"available" | "unavailable"> { return await this.runtime.status(); }
