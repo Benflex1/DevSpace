@@ -122,8 +122,8 @@ describe("F10 AgentExecutionFailure", () => {
   });
 
   test("contains exactly the accepted 30 variants", () => {
-    expect(agentExecutionFailureCodes).toHaveLength(34);
-    expect(new Set(agentExecutionFailureCodes).size).toBe(34);
+    expect(agentExecutionFailureCodes).toHaveLength(40);
+    expect(new Set(agentExecutionFailureCodes).size).toBe(40);
     for (const value of validFailures) {
       expect(agentExecutionFailureSchema.safeParse(value).success, value.code).toBe(true);
     }

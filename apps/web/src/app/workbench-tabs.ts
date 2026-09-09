@@ -1,6 +1,6 @@
 export type WorkbenchTab =
   | { readonly id: `terminal:${string}`; readonly kind: "terminal"; readonly terminalId: string; readonly title: string }
-  | { readonly id: string; readonly kind: "editor"; readonly fileId: string }
+  | { readonly id: `editor:${string}`; readonly kind: "editor"; readonly fileId: string; readonly title: string }
   | { readonly id: string; readonly kind: "preview"; readonly previewId: string }
   | { readonly id: string; readonly kind: "ai"; readonly sessionId: string }
   | { readonly id: string; readonly kind: "git"; readonly viewId: string }
@@ -15,6 +15,14 @@ export const emptyWorkbenchTabs: WorkbenchTabState = { tabs: [], activeTabId: nu
 
 export function terminalTabId(terminalId: string): `terminal:${string}` {
   return `terminal:${terminalId}`;
+}
+
+export function editorTabId(relativePath: string): `editor:${string}` {
+  return `editor:${encodeURIComponent(relativePath)}`;
+}
+
+export function editorTab(relativePath: string): Extract<WorkbenchTab, { kind: "editor" }> {
+  return { id: editorTabId(relativePath), kind: "editor", fileId: relativePath, title: relativePath.split("/").at(-1) ?? relativePath };
 }
 
 export function previewTabId(previewId: string): `preview:${string}` {

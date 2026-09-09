@@ -370,6 +370,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.inspect"].path ? agentApiV1EndpointByOperation["project.git.inspect"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.create"].path ? agentApiV1EndpointByOperation["workspace.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.inspect"].path ? agentApiV1EndpointByOperation["workspace.inspect"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.files.list"].path ? agentApiV1EndpointByOperation["workspace.files.list"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.files.read"].path ? agentApiV1EndpointByOperation["workspace.files.read"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.files.save"].path ? agentApiV1EndpointByOperation["workspace.files.save"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.start"].path ? agentApiV1EndpointByOperation["workspace.start"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.stop"].path ? agentApiV1EndpointByOperation["workspace.stop"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["task.start"].path ? agentApiV1EndpointByOperation["task.start"]
@@ -849,6 +852,43 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           code: "RESOURCE_NOT_FOUND", message: "The workspace was not found.", retryable: false,
           details: { resource: { type: "workspace", id: body.data.workspaceId } }
         } }));
+      }
+    }
+
+    const workspaceFileOperation = request.method === "POST"
+      ? (["workspace.files.list", "workspace.files.read", "workspace.files.save"] as const)
+        .map((operation) => agentApiV1EndpointByOperation[operation])
+        .find((candidate) => candidate.path === url.pathname)
+      : undefined;
+    if (workspaceFileOperation !== undefined) {
+      let body;
+      try { body = workspaceFileOperation.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      try {
+        const requestData = body.data as {
+          readonly projectId: string;
+          readonly workspaceId: string;
+          readonly path: string;
+          readonly content?: string;
+          readonly expectedRevision?: string;
+        };
+        const data = workspaceFileOperation.operation === "workspace.files.list"
+          ? await managed.listWorkspaceDirectory(requestData.projectId, requestData.workspaceId, requestData.path)
+          : workspaceFileOperation.operation === "workspace.files.read"
+            ? await managed.readWorkspaceFile(requestData.projectId, requestData.workspaceId, requestData.path)
+            : await managed.saveWorkspaceFile(requestData.projectId, requestData.workspaceId, requestData.path, requestData.content!, requestData.expectedRevision!);
+        return sendJson(response, 200, workspaceFileOperation.successBodySchema.parse({ meta: meta(requestId, now), data }));
+      } catch (error) {
+        const failure: AgentExecutionFailure = error instanceof AgentExecutionError ? error.failure : {
+          code: "AGENT_INTERNAL_ERROR", message: "The workspace file operation failed safely.", retryable: true,
+          details: { incidentId: createId() }
+        };
+        const status = failure.code === "RESOURCE_NOT_FOUND" || failure.code === "WORKSPACE_FILE_NOT_FOUND" ? 404
+          : failure.code === "WORKSPACE_FILE_TOO_LARGE" || failure.code === "WORKSPACE_DIRECTORY_TOO_LARGE" ? 413
+            : failure.code === "WORKSPACE_PATH_INVALID" || failure.code === "WORKSPACE_FILE_UNSUPPORTED" ? 422
+              : failure.code === "WORKSPACE_FILE_CHANGED" ? 409 : 500;
+        sendEndpointErrorResponse(workspaceFileOperation, response, status, requestId, now, failure, error, createId, logger);
+        return;
       }
     }
 

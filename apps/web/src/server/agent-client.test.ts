@@ -817,3 +817,34 @@ test("sends the canonical typed preview activation fields and parses the mutatio
     expect(requestBody).toContain('"workspaceSlug":"primary"');
   } finally { await service.close(); }
 });
+
+test("sends typed workspace file list, read, and save requests", async () => {
+  const seen: { path: string; body: string }[] = [];
+  const service = await listen((request, response) => {
+    let body = "";
+    request.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
+    request.on("end", () => {
+      seen.push({ path: request.url ?? "", body });
+      const data = request.url?.endsWith("/list")
+        ? { path: "", entries: [] }
+        : request.url?.endsWith("/read")
+          ? { path: "README.md", content: "hello\n", revision: "a".repeat(64), size: 6 }
+          : { path: "README.md", revision: "b".repeat(64) };
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp }, data }));
+    });
+  });
+  try {
+    const client = createAgentClient(service.socketPath, { createId: () => id, now: () => new Date(timestamp) });
+    await expect(client.listWorkspaceDirectory(id, "018f0f00-0000-7000-8000-000000000002", "")).resolves.toEqual({ path: "", entries: [] });
+    await expect(client.readWorkspaceFile(id, "018f0f00-0000-7000-8000-000000000002", "README.md")).resolves.toMatchObject({ content: "hello\n" });
+    await expect(client.saveWorkspaceFile(id, "018f0f00-0000-7000-8000-000000000002", "README.md", "updated\n", "a".repeat(64))).resolves.toEqual({
+      path: "README.md", revision: "b".repeat(64)
+    });
+    expect(seen.map((entry) => entry.path)).toEqual([
+      "/v1/workspaces/files/list", "/v1/workspaces/files/read", "/v1/workspaces/files/save"
+    ]);
+    expect(seen[2]?.body).toContain('"expectedRevision":"' + "a".repeat(64) + '"');
+  } finally { await service.close(); }
+});

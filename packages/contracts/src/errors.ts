@@ -5,6 +5,10 @@ import {
   projectOptionsRevisionHashSchema,
   resourceReferenceSchema,
   responseMetaSchema,
+  workspaceFileRevisionSchema,
+  workspaceRelativePathSchema,
+  WORKSPACE_DIRECTORY_ENTRY_MAX,
+  WORKSPACE_FILE_MAX_BYTES,
   uuidV7Schema
 } from "./primitives.js";
 import { workspaceDesiredStateSchema, workspaceObservedStateSchema } from "./shapes.js";
@@ -15,6 +19,24 @@ const protocolDetailsSchema = z.strictObject({
   receivedProtocolVersion: z.number().int().min(1).max(2_147_483_647).nullable()
 });
 const requestFieldSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9.[\]_-]+$/u).nullable();
+const workspaceFilePathDetailsSchema = z.strictObject({ path: workspaceRelativePathSchema });
+const workspacePathInvalidDetailsSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  reason: z.enum(["absolute", "backslash", "control", "dot", "dot-dot", "empty-component", "git", "nul", "symlink"])
+});
+const workspaceFileTooLargeDetailsSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  maxBytes: z.literal(WORKSPACE_FILE_MAX_BYTES)
+});
+const workspaceDirectoryTooLargeDetailsSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  maxEntries: z.literal(WORKSPACE_DIRECTORY_ENTRY_MAX)
+});
+const workspaceFileChangedDetailsSchema = z.strictObject({
+  path: workspaceRelativePathSchema,
+  expectedRevision: workspaceFileRevisionSchema,
+  currentRevision: workspaceFileRevisionSchema
+});
 
 export const executableAgentErrorRegistry = Object.freeze({
   PROTOCOL_VERSION_UNSUPPORTED: { statuses: [400, 426], retryable: false, detailsSchema: protocolDetailsSchema },
@@ -43,6 +65,15 @@ export const executableAgentErrorRegistry = Object.freeze({
   }) },
   PROJECT_NOT_FOUND: { statuses: [404], retryable: false, detailsSchema: z.strictObject({ projectId: uuidV7Schema }) },
   RESOURCE_NOT_FOUND: { statuses: [404], retryable: false, detailsSchema: z.strictObject({ resource: resourceReferenceSchema }) },
+  WORKSPACE_PATH_INVALID: { statuses: [422], retryable: false, detailsSchema: workspacePathInvalidDetailsSchema },
+  WORKSPACE_FILE_NOT_FOUND: { statuses: [404], retryable: false, detailsSchema: workspaceFilePathDetailsSchema },
+  WORKSPACE_FILE_TOO_LARGE: { statuses: [413], retryable: false, detailsSchema: workspaceFileTooLargeDetailsSchema },
+  WORKSPACE_DIRECTORY_TOO_LARGE: { statuses: [413], retryable: false, detailsSchema: workspaceDirectoryTooLargeDetailsSchema },
+  WORKSPACE_FILE_UNSUPPORTED: { statuses: [422], retryable: false, detailsSchema: z.strictObject({
+    path: workspaceRelativePathSchema,
+    reason: z.enum(["binary", "directory", "special"])
+  }) },
+  WORKSPACE_FILE_CHANGED: { statuses: [409], retryable: false, detailsSchema: workspaceFileChangedDetailsSchema },
   SOURCE_NOT_FOUND: { statuses: [404], retryable: false, detailsSchema: z.strictObject({ sourceId: uuidV7Schema }) },
   SOURCE_INVALID: { statuses: [422], retryable: false, detailsSchema: z.strictObject({
     reason: z.enum(["not-a-git-repository", "unsupported-repository-format"])

@@ -7,6 +7,8 @@ export const AGENT_SOCKET_PATH = "/run/devspace/agent.sock" as const;
 export const TERMINAL_SUBPROTOCOL = "devspace.terminal.v1" as const;
 export const MUTATION_OPERATION_ID_HEADER = "X-DevSpace-Operation-Id" as const;
 export const PROJECT_OPTIONS_REVISION_MAX_BYTES = 2_097_152 as const;
+export const WORKSPACE_FILE_MAX_BYTES = 2_097_152 as const;
+export const WORKSPACE_DIRECTORY_ENTRY_MAX = 500 as const;
 
 export const uuidV7Schema = z.string().regex(
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
@@ -26,6 +28,9 @@ export type ProjectOptionsRevisionHash = z.infer<typeof projectOptionsRevisionHa
 
 export const configurationKeySchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]{0,63}$/u);
 export type ConfigurationKey = z.infer<typeof configurationKeySchema>;
+
+export const workspaceRelativePathSchema = z.string().max(4096);
+export const workspaceFileRevisionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 
 export const gitObjectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
 export type GitObjectId = z.infer<typeof gitObjectIdSchema>;
