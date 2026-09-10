@@ -19,6 +19,7 @@ import { useTransientNotice } from "./transient-notice.js";
 import {
   activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
+import { editorDocumentKey, WorkbenchEditorDocuments } from "./workbench-editor-documents.js";
 
 type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
@@ -56,6 +57,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   initialGit: GitInspectionData | null;
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
+  const [editorDocuments] = useState(() => new WorkbenchEditorDocuments());
+  const [editorPresentationGeneration, setEditorPresentationGeneration] = useState(0);
   const [dirtyEditorIds, setDirtyEditorIds] = useState<ReadonlySet<string>>(new Set());
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
   const lostTerminalObservedAt = useRef(new Map<string, number>());
@@ -83,6 +86,12 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const remountEditors = () => setEditorPresentationGeneration((current) => current + 1);
+    window.addEventListener("devspace:test:remount-editor", remountEditors);
+    return () => window.removeEventListener("devspace:test:remount-editor", remountEditors);
+  }, []);
   const dismissLostTerminalDialog = useCallback((ids: readonly string[]) => {
     const key = lostTerminalSetKey(ids);
     lostDialogSession.current?.dismiss(ids);
@@ -304,9 +313,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, [workspaceId]);
   const openEditorTab = useCallback((relativePath: string, mode: "edit" | "changes" = "edit", diffKind: "staged" | "unstaged" = "unstaged") => {
     const tabId = editorTab(relativePath).id;
+    editorDocuments.ensure(editorDocumentKey(workspaceId, relativePath), relativePath);
     setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind } }));
     setTabs((current) => openWorkbenchTab(current, editorTab(relativePath)));
-  }, []);
+  }, [editorDocuments, workspaceId]);
   const updateEditorMode = useCallback((tabId: string, mode: "edit" | "changes") => {
     setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind: current[tabId]?.diffKind ?? "unstaged" } }));
   }, []);
@@ -375,7 +385,16 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   };
   const closeTab = (tab: WorkbenchTab) => {
     if (tab.kind === "editor" && dirtyEditorIds.has(tab.id) && !window.confirm(`Discard unsaved changes in ${tab.title}?`)) return;
-    if (tab.kind === "editor") updateEditorDirty(tab.id, false);
+    if (tab.kind === "editor") {
+      editorDocuments.release(editorDocumentKey(workspaceId, tab.fileId));
+      updateEditorDirty(tab.id, false);
+      setEditorViews((current) => {
+        if (current[tab.id] === undefined) return current;
+        const next = { ...current };
+        delete next[tab.id];
+        return next;
+      });
+    }
     setTabs((current) => closeWorkbenchTab(current, tab.id));
   };
   const runTask = async (taskKey: string) => {
@@ -492,7 +511,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         onOpenChangedFile={(path, kind) => openEditorTab(path, "changes", kind)} onStage={(path) => mutateGit({ action: "stage", path }, `stage:${path}`)}
         onUnstage={(path) => mutateGit({ action: "unstage", path }, `unstage:${path}`)} onCommit={(input) => mutateGit({ action: "commit", ...input }, "commit")}
         terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
-        previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab}
+        previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab} hasUnsavedEditorChanges={dirtyEditorIds.size > 0}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => showNotice("Task action failed.", "error")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
@@ -500,6 +519,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
           canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId} editorViews={editorViews}
+          editorDocuments={editorDocuments} editorPresentationGeneration={editorPresentationGeneration}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
           onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }}
           onDiffNoLongerPresent={handleDiffNoLongerPresent} />
@@ -548,13 +568,14 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, gitLoading, gitError, gitBusyAction, onRefreshGit, onOpenFile, onOpenChangedFile, onStage, onUnstage, onCommit, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi,
+function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, gitLoading, gitError, gitBusyAction, onRefreshGit, onOpenFile, onOpenChangedFile, onStage, onUnstage, onCommit, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi, hasUnsavedEditorChanges,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
   projectId: string; workspaceId: string; agentReachable: boolean; gitStatus: GitInspectionData | null; gitLoading: boolean; gitError: string | null; gitBusyAction: string | null;
   onRefreshGit: () => void; onOpenFile: (relativePath: string) => void; onOpenChangedFile: (relativePath: string, kind: "staged" | "unstaged") => void;
   onStage: (path: string) => Promise<boolean>; onUnstage: (path: string) => Promise<boolean>; onCommit: (input: GitCommitFormInput) => Promise<boolean>;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
   previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void; onOpenAi: () => void;
+  hasUnsavedEditorChanges: boolean;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
   return <aside className="workbench-sidebar" aria-label="Project navigation">
@@ -573,7 +594,7 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
       <div className="sidebar-section-heading"><h2>Files</h2></div>
       <WorkspaceFileTree projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} onOpenFile={onOpenFile} />
     </div>
-    <WorkspaceChanges status={gitStatus} loading={gitLoading} error={gitError} agentReachable={agentReachable} busyAction={gitBusyAction}
+    <WorkspaceChanges status={gitStatus} loading={gitLoading} error={gitError} agentReachable={agentReachable} hasUnsavedEditorChanges={hasUnsavedEditorChanges} busyAction={gitBusyAction}
       onRefresh={onRefreshGit} onOpenFile={onOpenChangedFile} onStage={onStage} onUnstage={onUnstage} onCommit={onCommit} />
     <div className="sidebar-section">
       <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!actionsAvailable}
@@ -635,9 +656,10 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
   projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged" }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
+  editorDocuments: WorkbenchEditorDocuments; editorPresentationGeneration: number;
   onReloadPreview: (previewId: string) => Promise<void>;
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   onEditorDirtyChange: (tabId: string, dirty: boolean) => void; onEditorModeChange: (tabId: string, mode: "edit" | "changes") => void; onEditorSaved: () => void;
@@ -653,8 +675,9 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
       })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} />
-        : tab.kind === "editor" ? <EditorTab key={tab.id} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
+        : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
           mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
+          documents={editorDocuments} remountCount={editorPresentationGeneration + 1}
           active={tab.id === tabs.activeTabId} onModeChange={(mode) => onEditorModeChange(tab.id, mode)} onDirtyChange={onEditorDirtyChange}
           onDiffNoLongerPresent={onDiffNoLongerPresent} onSaved={onEditorSaved} /> : null)}
   </div>;

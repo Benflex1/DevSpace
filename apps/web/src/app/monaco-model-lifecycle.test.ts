@@ -1,25 +1,17 @@
 import { expect, test } from "vitest";
-import { disposeModelsAfterWidget } from "./monaco-model-lifecycle.js";
+import { disposeDiffEditorResources } from "./monaco-model-lifecycle.js";
 
-test("waits for widget disposal before disposing retained DevSpace-owned models", () => {
-  let widgetDisposed = false;
-  let modelDisposed = false;
-  let disposeWidget: () => void = () => undefined;
-  let subscriptionDisposed = false;
-  const model = { dispose: () => { expect(widgetDisposed).toBe(true); modelDisposed = true; } };
+test("detaches the diff model before disposing the widget and its models", () => {
+  const events: string[] = [];
+  const models = [
+    { dispose: () => { events.push("original.dispose"); } },
+    { dispose: () => { events.push("modified.dispose"); } }
+  ] as const;
   const widget = {
-    onDidDispose: (listener: () => void) => {
-      disposeWidget = listener;
-      return { dispose: () => { subscriptionDisposed = true; } };
-    }
+    setModel: (model: null) => { expect(model).toBeNull(); events.push("widget.setModel(null)"); },
+    dispose: () => { events.push("widget.dispose"); }
   };
 
-  disposeModelsAfterWidget(widget, [model]);
-  expect(modelDisposed).toBe(false);
-
-  widgetDisposed = true;
-  disposeWidget();
-
-  expect(modelDisposed).toBe(true);
-  expect(subscriptionDisposed).toBe(true);
+  disposeDiffEditorResources(widget, models);
+  expect(events).toEqual(["widget.setModel(null)", "widget.dispose", "original.dispose", "modified.dispose"]);
 });

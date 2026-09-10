@@ -10,11 +10,12 @@ export interface GitCommitFormInput {
   readonly userEmail?: string;
 }
 
-export function WorkspaceChanges({ status, loading, error, agentReachable, busyAction, onRefresh, onOpenFile, onStage, onUnstage, onCommit }: {
+export function WorkspaceChanges({ status, loading, error, agentReachable, hasUnsavedEditorChanges, busyAction, onRefresh, onOpenFile, onStage, onUnstage, onCommit }: {
   status: GitInspectionData | null;
   loading: boolean;
   error: string | null;
   agentReachable: boolean;
+  hasUnsavedEditorChanges: boolean;
   busyAction: string | null;
   onRefresh: () => void;
   onOpenFile: (path: string, kind: "staged" | "unstaged") => void;
@@ -32,6 +33,7 @@ export function WorkspaceChanges({ status, loading, error, agentReachable, busyA
     {loading && <p className="sidebar-empty">Inspecting Git status…</p>}
     {!loading && error !== null && <p className="sidebar-empty changes-error" role="alert">{error}<button type="button" className="file-tree-retry" onClick={onRefresh}>Retry</button></p>}
     {!loading && error === null && !agentReachable && <p className="sidebar-empty">The Agent is unavailable.</p>}
+    {!loading && error === null && agentReachable && status !== null && groups.changes.length === 0 && groups.staged.length === 0 && hasUnsavedEditorChanges && <p className="sidebar-empty" role="status">Save this file to see your edits in Git Changes.</p>}
     {!loading && error === null && agentReachable && status !== null && groups.changes.length === 0 && groups.staged.length === 0 && <p className="sidebar-empty">Working tree clean.</p>}
     {groups.changes.length > 0 && <GitChangeGroup title="Changes" entries={groups.changes} staged={false} busyAction={busyAction} agentReachable={agentReachable} onOpenFile={onOpenFile} onAction={onStage} />}
     {groups.staged.length > 0 && <GitChangeGroup title="Staged Changes" entries={groups.staged} staged busyAction={busyAction} agentReachable={agentReachable} onOpenFile={onOpenFile} onAction={onUnstage} />}
