@@ -68,6 +68,9 @@ loopback lease; this deployment choice is not a universal DevSpace core requirem
 The current dashboard and Workbench expose project onboarding, workspace runtime controls, terminal,
 tasks, previews, and the Agent-backed Files + Monaco editor slice. File browsing, editing, and the
 Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime is stopped.
+The confirmed Workbench 1B dogfood corrections reconcile stale Changes entries, preserve unsaved
+editor buffers across Edit/Changes presentation toggles, and use deterministic local Monaco model
+identity and disposal ownership.
 Workbench 1B adds bounded status/diff inspection, staged and unstaged groups, file-level stage and
 unstage, explicit staged-only commits with bounded identity inputs, branch/ahead/behind context, and
 the existing explicit Fetch and Push actions. Persistent Git mutation failures require explicit

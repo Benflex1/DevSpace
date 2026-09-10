@@ -169,6 +169,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       setGitLoading(false);
     }
   }, [projectId]);
+  const handleDiffNoLongerPresent = useCallback(() => {
+    showNotice("This change is no longer present.", "info");
+    refreshGitStatus().catch(() => undefined);
+  }, [refreshGitStatus, showNotice]);
   useEffect(() => { refreshGitStatus().catch(() => undefined); }, [refreshGitStatus]);
   const getTerminalTitle = useCallback((terminal: TerminalView): string => {
     return terminal.title;
@@ -497,7 +501,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId} editorViews={editorViews}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
-          onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }} />
+          onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }}
+          onDiffNoLongerPresent={handleDiffNoLongerPresent} />
         {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">
           <span>{notice.message}</span>
           <IncidentReference incidentId={notice.referenceId} />
@@ -630,12 +635,13 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
   projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged" }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   onReloadPreview: (previewId: string) => Promise<void>;
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   onEditorDirtyChange: (tabId: string, dirty: boolean) => void; onEditorModeChange: (tabId: string, mode: "edit" | "changes") => void; onEditorSaved: () => void;
+  onDiffNoLongerPresent: (path: string) => void;
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a file or terminal to start working in this project.</p></div>}
@@ -649,7 +655,8 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
       })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} />
         : tab.kind === "editor" ? <EditorTab key={tab.id} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
           mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
-          active={tab.id === tabs.activeTabId} onModeChange={(mode) => onEditorModeChange(tab.id, mode)} onDirtyChange={onEditorDirtyChange} onSaved={onEditorSaved} /> : null)}
+          active={tab.id === tabs.activeTabId} onModeChange={(mode) => onEditorModeChange(tab.id, mode)} onDirtyChange={onEditorDirtyChange}
+          onDiffNoLongerPresent={onDiffNoLongerPresent} onSaved={onEditorSaved} /> : null)}
   </div>;
 }
 

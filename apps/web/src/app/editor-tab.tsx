@@ -2,22 +2,28 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { OnMount } from "@monaco-editor/react";
+import type { DiffOnMount, OnMount } from "@monaco-editor/react";
 import type { GitDiffData } from "@devspace/contracts";
+import { classifyDiffResult } from "./editor-diff-state.js";
+import { emptyEditorFileLoadState, editorFileKey, requestExplicitEditorFileLoad, requestInitialEditorFileLoad, type EditorFileLoadState } from "./editor-file-lifecycle.js";
 import { EDITOR_SAVED_STATUS_DURATION_MS, editorLanguageForPath, markEditorConflict, markEditorSaved, type EditorDocument, updateEditorContent } from "./editor-state.js";
+import { editorViewVisibility } from "./editor-view-lifecycle.js";
+import { disposeModelsAfterWidget } from "./monaco-model-lifecycle.js";
+import { monacoModelPaths } from "./monaco-model-paths.js";
+import { loadMonacoReact } from "./monaco-runtime.js";
 
-const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
+const MonacoEditor = dynamic(() => loadMonacoReact().then(({ default: Editor }) => Editor), {
   ssr: false,
   loading: () => <div className="editor-tab-message">Loading editor…</div>
 });
-const MonacoDiffEditor = dynamic(async () => (await import("@monaco-editor/react")).DiffEditor, {
+const MonacoDiffEditor = dynamic(() => loadMonacoReact().then(({ DiffEditor }) => DiffEditor), {
   ssr: false,
   loading: () => <div className="editor-tab-message">Loading diff editor…</div>
 });
 
 type ApiFailure = { readonly code?: string; readonly message?: string };
 
-export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onModeChange, onDirtyChange, onSaved }: {
+export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, diffKind, onModeChange, onDirtyChange, onDiffNoLongerPresent, onSaved }: {
   projectId: string;
   workspaceId: string;
   path: string;
@@ -27,6 +33,7 @@ export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onMo
   diffKind: "staged" | "unstaged";
   onModeChange: (mode: "edit" | "changes") => void;
   onDirtyChange: (tabId: string, dirty: boolean) => void;
+  onDiffNoLongerPresent?: (path: string) => void;
   onSaved?: () => void;
 }) {
   const [document, setDocument] = useState<EditorDocument | null>(null);
@@ -38,6 +45,7 @@ export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onMo
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   const documentRef = useRef<EditorDocument | null>(null);
+  const fileLoadStateRef = useRef<EditorFileLoadState>(emptyEditorFileLoadState);
   const saveRef = useRef<(() => Promise<void>) | null>(null);
   const savingRef = useRef(false);
   const savedTimer = useRef<number | null>(null);
@@ -48,7 +56,13 @@ export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onMo
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
   }, []);
 
-  const loadFile = useCallback(async () => {
+  const loadFile = useCallback(async (intent: "initial" | "retry" | "reload" = "initial") => {
+    const fileKey = editorFileKey(projectId, path);
+    const request = intent === "initial"
+      ? requestInitialEditorFileLoad(fileLoadStateRef.current, fileKey)
+      : requestExplicitEditorFileLoad(fileKey);
+    if (!request.shouldLoad) return;
+    fileLoadStateRef.current = request.state;
     setLoading(true);
     setError(null);
     setStatus(null);
@@ -68,25 +82,25 @@ export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onMo
     }
   }, [path, projectId]);
 
-  useEffect(() => {
-    if (mode === "edit") loadFile().catch(() => undefined);
-  }, [loadFile, mode]);
+  useEffect(() => { loadFile("initial").catch(() => undefined); }, [loadFile]);
   useEffect(() => {
     if (mode !== "changes") return;
     let cancelled = false;
     setDiffLoading(true);
     setDiffError(null);
-    setDiff(null);
     const query = new URLSearchParams({ path, kind: diffKind });
     fetch(`/api/projects/${projectId}/changes/diff?${query.toString()}`, { cache: "no-store" }).then(async (response) => {
       const body = await response.json() as GitDiffData & { message?: string };
       if (!response.ok) throw new Error(body.message ?? "The diff could not be loaded.");
-      if (!cancelled) setDiff(body);
+      if (!cancelled) {
+        setDiff(body);
+        if (classifyDiffResult(body).kind === "no-longer-present") onDiffNoLongerPresent?.(path);
+      }
     }).catch((diffLoadError) => {
       if (!cancelled) setDiffError(diffLoadError instanceof Error ? diffLoadError.message : "The diff could not be loaded.");
     }).finally(() => { if (!cancelled) setDiffLoading(false); });
     return () => { cancelled = true; };
-  }, [diffKind, mode, path, projectId]);
+  }, [diffKind, mode, onDiffNoLongerPresent, path, projectId]);
   useEffect(() => { onDirtyChange(tabId, document?.dirty ?? false); }, [document?.dirty, onDirtyChange, tabId]);
 
   const save = useCallback(async () => {
@@ -129,7 +143,16 @@ export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onMo
   const onMount = useCallback<OnMount>((editor, monaco) => {
     const keyboard = monaco as unknown as { readonly KeyMod: { readonly CtrlCmd: number }; readonly KeyCode: { readonly KeyS: number } };
     editor.addCommand(keyboard.KeyMod.CtrlCmd | keyboard.KeyCode.KeyS, () => { saveRef.current?.().catch(() => undefined); });
+    const model = editor.getModel();
+    if (model !== null) disposeModelsAfterWidget(editor, [model]);
   }, []);
+  const onDiffMount = useCallback<DiffOnMount>((editor) => {
+    const model = editor.getModel();
+    if (model !== null) disposeModelsAfterWidget(editor, [model.original, model.modified]);
+  }, []);
+  const modelPaths = monacoModelPaths(workspaceId, path, diffKind);
+  const diffPresentation = diff === null ? null : classifyDiffResult(diff);
+  const viewVisibility = editorViewVisibility(mode);
 
   return <section className={`editor-tab-surface ${active ? "" : "is-inactive"}`} aria-label={`Editor for ${path}`} aria-hidden={!active}>
     <header className="editor-tab-header">
@@ -148,21 +171,35 @@ export function EditorTab({ projectId, path, active, tabId, mode, diffKind, onMo
       </div>
     </header>
     {document !== null && document.conflict !== null && <div className="editor-tab-conflict" role="alert">
-      <span>{document.conflict}</span><button type="button" onClick={() => { loadFile().catch(() => undefined); }}>Reload from workspace</button>
+      <span>{document.conflict}</span><button type="button" onClick={() => { loadFile("reload").catch(() => undefined); }}>Reload from workspace</button>
     </div>}
-    {mode === "changes" ? diffLoading ? <div className="editor-tab-message">Reviewing changes for {path}…</div> : diffError !== null ? <div className="editor-tab-message error" role="alert">
-      <p>{diffError}</p><button type="button" onClick={() => onModeChange("edit")}>Open in Edit mode</button>
-    </div> : diff?.available === false ? <div className="editor-tab-message" role="status">
-      <p>Diff not available for this file ({diff.reason}).</p><button type="button" onClick={() => onModeChange("edit")}>Open in Edit mode</button>
-    </div> : diff?.available === true ? <div className="editor-tab-content">
-      <MonacoDiffEditor height="100%" width="100%" language={editorLanguageForPath(path)} theme="vs-dark"
-        original={diff.oldContent} modified={diff.newContent} options={{ automaticLayout: true, fontSize: 13, minimap: { enabled: false }, padding: { top: 8 }, scrollBeyondLastLine: false, wordWrap: "on" }} />
-    </div> : null : loading ? <div className="editor-tab-message">Opening {path}…</div> : error !== null ? <div className="editor-tab-message error" role="alert">
-      <p>{error}</p><button type="button" onClick={() => { loadFile().catch(() => undefined); }}>Retry</button>
-    </div> : document !== null ? <div className="editor-tab-content">
-      <MonacoEditor height="100%" width="100%" language={editorLanguageForPath(path)} theme="vs-dark" value={document.content} onMount={onMount}
-        onChange={(value) => { if (value !== undefined) setDocument((current) => current === null ? current : updateEditorContent(current, value)); }}
-        options={{ automaticLayout: true, fontSize: 13, minimap: { enabled: false }, padding: { top: 8 }, scrollBeyondLastLine: false, wordWrap: "on" }} />
-    </div> : null}
+    <div className="editor-tab-view" hidden={viewVisibility.changesHidden}>
+      {diffLoading && diff === null && <div className="editor-tab-message">Reviewing changes for {path}…</div>}
+      {diffError !== null && <div className="editor-tab-message error" role="alert">
+        <p>{diffError}</p><button type="button" onClick={() => onModeChange("edit")}>Open in Edit mode</button>
+      </div>}
+      {diffError === null && diffPresentation?.kind === "no-longer-present" && <div className="editor-tab-message" role="status">
+        <p>{diffPresentation.message}</p><button type="button" onClick={() => onModeChange("edit")}>Open in Edit mode</button>
+      </div>}
+      {diffError === null && diffPresentation?.kind === "unavailable" && <div className="editor-tab-message" role="status">
+        <p>{diffPresentation.message}</p><button type="button" onClick={() => onModeChange("edit")}>Open in Edit mode</button>
+      </div>}
+      {diffError === null && diff?.available === true && <div className="editor-tab-content">
+        <MonacoDiffEditor height="100%" width="100%" language={editorLanguageForPath(path)} theme="vs-dark"
+          key={modelPaths.diffOriginal}
+          original={diff.oldContent} modified={diff.newContent} originalModelPath={modelPaths.diffOriginal} modifiedModelPath={modelPaths.diffModified}
+          keepCurrentOriginalModel keepCurrentModifiedModel onMount={onDiffMount}
+          options={{ automaticLayout: true, fontSize: 13, minimap: { enabled: false }, padding: { top: 8 }, scrollBeyondLastLine: false, wordWrap: "on" }} />
+      </div>}
+    </div>
+    <div className="editor-tab-view" hidden={viewVisibility.editHidden}>
+      {loading ? <div className="editor-tab-message">Opening {path}…</div> : error !== null ? <div className="editor-tab-message error" role="alert">
+        <p>{error}</p><button type="button" onClick={() => { loadFile("retry").catch(() => undefined); }}>Retry</button>
+      </div> : document !== null ? <div className="editor-tab-content">
+        <MonacoEditor height="100%" width="100%" language={editorLanguageForPath(path)} theme="vs-dark" path={modelPaths.editable} keepCurrentModel value={document.content} onMount={onMount}
+          onChange={(value) => { if (value !== undefined) setDocument((current) => current === null ? current : updateEditorContent(current, value)); }}
+          options={{ automaticLayout: true, fontSize: 13, minimap: { enabled: false }, padding: { top: 8 }, scrollBeyondLastLine: false, wordWrap: "on" }} />
+      </div> : null}
+    </div>
   </section>;
 }
