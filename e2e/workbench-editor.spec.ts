@@ -7,6 +7,36 @@ type MonacoRuntimeDiagnostic = {
   readonly identityMatches: boolean;
 };
 
+type GeometryBox = {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+
+type GeometryStyle = {
+  readonly display: string;
+  readonly flex: string;
+  readonly height: string;
+  readonly minHeight: string;
+  readonly minWidth: string;
+  readonly overflow: string;
+};
+
+type GeometryNode = {
+  readonly box: GeometryBox | null;
+  readonly style: GeometryStyle | null;
+};
+
+type EditorGeometry = {
+  readonly workbenchSurface: GeometryNode;
+  readonly surface: GeometryNode;
+  readonly header: GeometryNode;
+  readonly view: GeometryNode;
+  readonly content: GeometryNode;
+  readonly editor: GeometryNode;
+};
+
 test.describe.configure({ timeout: 300_000 });
 
 async function createReadyProject(page: Page, label: string): Promise<{ projectId: string; workbench: ReturnType<Page["locator"]> }> {
@@ -83,6 +113,109 @@ async function diffModelUris(page: Page): Promise<string[]> {
     return Array.isArray(uris) && uris.every((uri): uri is string => typeof uri === "string") ? uris : [];
   });
 }
+
+async function captureEditorGeometry(page: Page, editorSelector: string): Promise<EditorGeometry> {
+  return await page.evaluate(({ editorSelector, surfaceSelector, viewSelector, contentSelector }) => {
+    type BrowserElement = {
+      readonly getBoundingClientRect: () => { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+    };
+    type BrowserStyle = {
+      readonly display: string;
+      readonly flex: string;
+      readonly height: string;
+      readonly minHeight: string;
+      readonly minWidth: string;
+      readonly overflow: string;
+    };
+    const browserGlobal = globalThis as typeof globalThis & {
+      readonly document: { readonly querySelector: (selector: string) => BrowserElement | null };
+      readonly getComputedStyle: (element: BrowserElement) => BrowserStyle;
+    };
+    const readNode = (selector: string): { readonly box: GeometryBox | null; readonly style: GeometryStyle | null } => {
+      const element = browserGlobal.document.querySelector(selector);
+      if (element === null) return { box: null, style: null };
+      const rect = element.getBoundingClientRect();
+      const computed = browserGlobal.getComputedStyle(element);
+      return {
+        box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        style: {
+          display: computed.display,
+          flex: computed.flex,
+          height: computed.height,
+          minHeight: computed.minHeight,
+          minWidth: computed.minWidth,
+          overflow: computed.overflow
+        }
+      };
+    };
+    return {
+      workbenchSurface: readNode(".workbench-surface"),
+      surface: readNode(surfaceSelector),
+      header: readNode(`${surfaceSelector} .editor-tab-header`),
+      view: readNode(viewSelector),
+      content: readNode(contentSelector),
+      editor: readNode(`${viewSelector} ${editorSelector}`)
+    };
+  }, {
+    contentSelector: ".editor-tab-surface:not(.is-inactive) .editor-tab-view:not([hidden]) .editor-tab-content",
+    editorSelector,
+    surfaceSelector: ".editor-tab-surface:not(.is-inactive)",
+    viewSelector: ".editor-tab-surface:not(.is-inactive) .editor-tab-view:not([hidden])"
+  });
+}
+
+function assertUsableEditorGeometry(label: string, geometry: EditorGeometry): void {
+  console.log(`[geometry] ${label} ${JSON.stringify(geometry)}`);
+  const evidence = JSON.stringify(geometry);
+  const workbenchSurface = geometry.workbenchSurface.box;
+  const surface = geometry.surface.box;
+  const header = geometry.header.box;
+  const editor = geometry.editor.box;
+  if (workbenchSurface === null || surface === null || header === null || editor === null) {
+    throw new Error(`${label} is missing required geometry: ${evidence}`);
+  }
+  const availableBelowHeader = surface.y + surface.height - (header.y + header.height);
+  expect(workbenchSurface.height, `${label} workbench height: ${evidence}`).toBeGreaterThan(240);
+  expect(surface.height, `${label} surface height: ${evidence}`).toBeGreaterThan(workbenchSurface.height * 0.9);
+  expect(availableBelowHeader, `${label} available height: ${evidence}`).toBeGreaterThan(workbenchSurface.height * 0.5);
+  expect(editor.height, `${label} editor height: ${evidence}`).toBeGreaterThan(availableBelowHeader * 0.75);
+  expect(editor.y, `${label} editor top: ${evidence}`).toBeGreaterThanOrEqual(header.y + header.height - 2);
+  expect(editor.y + editor.height, `${label} editor bottom: ${evidence}`).toBeLessThanOrEqual(surface.y + surface.height + 2);
+}
+
+test("keeps Edit and Changes Monaco surfaces usable through a mode toggle", async ({ page }) => {
+  const pageErrors: Error[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  const { projectId } = await createReadyProject(page, "Editor Geometry");
+  let reads = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === `/api/projects/${projectId}/files` && url.searchParams.get("action") === "read") reads += 1;
+  });
+  const surface = await openReadme(page);
+
+  const editGeometry = await captureEditorGeometry(page, ".monaco-editor");
+  assertUsableEditorGeometry("initial Edit", editGeometry);
+
+  await replaceEditorText(page, "saved worktree content for geometry regression\n");
+  await surface.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(surface.getByText("Saved", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await surface.getByRole("button", { name: "Changes", exact: true }).click();
+  const changedFile = page.locator(".git-change-file", { hasText: "README.md" }).first();
+  await expect(changedFile).toBeVisible({ timeout: 30_000 });
+  await changedFile.click();
+  await expect(surface.locator("[data-devspace-diff-editor] .monaco-diff-editor")).toHaveCount(1, { timeout: 60_000 });
+
+  const diffGeometry = await captureEditorGeometry(page, "[data-devspace-diff-editor] .monaco-diff-editor");
+  assertUsableEditorGeometry("Changes", diffGeometry);
+
+  await surface.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(surface.getByRole("textbox", { name: "Editor content" })).toBeVisible({ timeout: 60_000 });
+  const editAfterToggleGeometry = await captureEditorGeometry(page, ".monaco-editor");
+  assertUsableEditorGeometry("Edit after Changes", editAfterToggleGeometry);
+  expect(reads).toBe(1);
+  expect(pageErrors.map((error) => error.message)).toEqual([]);
+});
 
 test("preserves exact unsaved text through a forced EditorTab remount and repeated mode toggles", async ({ page }) => {
   const pageErrors: Error[] = [];
