@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -373,6 +373,93 @@ test("composes a private fetch through the real transaction and reports success 
   expect(calls.filter((request) => request.method === "DELETE" && request.path === "/installation/token")).toHaveLength(1);
   await expect(exec("/usr/bin/git", ["--git-dir", managed.repositoryPath(projectId), "rev-parse", "refs/remotes/origin/main"]))
     .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+});
+
+test("keeps a real successful Fetch recoverable when final ownership validation fails", async () => {
+  const calls: GithubHttpRequest[] = [];
+  const h = await createHarness((roots) => createRealAuthority(roots, calls));
+  await h.managed.createManagedStore({ projectId, source: sourceLocator }, "018f0f00-0000-7000-8000-000000000114");
+  calls.splice(0);
+
+  await writeFile(path.join(h.source, "README.md"), "post-validation-failure\n", "utf8");
+  await exec("/usr/bin/git", ["-C", h.source, "add", "README.md"]);
+  await exec("/usr/bin/git", ["-C", h.source, "commit", "-m", "post-validation-failure"]);
+  const secondCommit = (await exec("/usr/bin/git", ["-C", h.source, "rev-parse", "HEAD"])).stdout.trim();
+
+  const privateManaged = h.managed as unknown as {
+    loadStoreOwnership: (projectId: string) => Promise<unknown>;
+  };
+  const originalLoadStoreOwnership = privateManaged.loadStoreOwnership.bind(h.managed);
+  let failDuringFetch = false;
+  let fetchOwnershipLoads = 0;
+  vi.spyOn(privateManaged, "loadStoreOwnership").mockImplementation(async (id) => {
+    if (failDuringFetch && ++fetchOwnershipLoads === 2) throw new Error("post-fetch-ownership-validation-failed");
+    return await originalLoadStoreOwnership(id);
+  });
+
+  const journalRoot = path.join(h.roots.state, "operations");
+  await mkdir(journalRoot, { recursive: true });
+  const journal = new OperationJournal(journalRoot, () => new Date("2026-08-04T12:00:00.000Z"));
+  await journal.initialize();
+  const events = new AgentEventLog("018f0f00-0000-7000-8000-000000000115", () => new Date("2026-08-04T12:00:00.000Z"));
+  const failed = vi.spyOn(events, "failed");
+  const executor = new OperationExecutor(journal, h.managed, events);
+  await executor.initialize();
+  failDuringFetch = true;
+  const operationId = "018f0f00-0000-7000-8000-000000000116";
+  const accepted = await journal.accept(operationId, "project.fetch", { projectId, source: sourceLocator });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operationId)).toMatchObject({ state: "running", failure: null });
+  expect(failed).not.toHaveBeenCalled();
+  expect(fetchOwnershipLoads).toBe(2);
+  await expect(exec("/usr/bin/git", ["--git-dir", h.managed.repositoryPath(projectId), "rev-parse", "refs/remotes/origin/main"]))
+    .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+  expect((await readFile(path.join(h.managed.repositoryPath(projectId), "FETCH_HEAD"))).byteLength).toBeGreaterThan(0);
+  expect(calls.filter((request) => request.method === "DELETE" && request.path === "/installation/token")).toHaveLength(1);
+});
+
+test("does not cross the completed boundary when a real Fetch runner fails after local updates", async () => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls));
+  const remoteSource = { kind: "remote" as const, url: sourceUrl };
+  await h.managed.createManagedStore({ projectId, source: remoteSource }, "018f0f00-0000-7000-8000-000000000117");
+
+  await writeFile(path.join(h.source, "README.md"), "runner-failure\n", "utf8");
+  await exec("/usr/bin/git", ["-C", h.source, "add", "README.md"]);
+  await exec("/usr/bin/git", ["-C", h.source, "commit", "-m", "runner-failure"]);
+  const secondCommit = (await exec("/usr/bin/git", ["-C", h.source, "rev-parse", "HEAD"])).stdout.trim();
+
+  await h.managed.shutdown();
+  const failingGit: GitRunner = async (args) => {
+    const result = await h.git(args);
+    if (args.includes("fetch")) throw new Error("simulated-git-nonzero-after-local-update");
+    return result;
+  };
+  const managed = new ManagedWorkspaces(h.roots, failingGit, undefined, undefined, undefined, undefined, undefined, undefined, h.broker);
+  await managed.initialize();
+  managedInstances.push(managed);
+
+  const journalRoot = path.join(h.roots.state, "operations");
+  await mkdir(journalRoot, { recursive: true });
+  const journal = new OperationJournal(journalRoot, () => new Date("2026-08-04T12:00:00.000Z"));
+  await journal.initialize();
+  const events = new AgentEventLog("018f0f00-0000-7000-8000-000000000118", () => new Date("2026-08-04T12:00:00.000Z"));
+  const succeeded = vi.spyOn(events, "succeeded");
+  const executor = new OperationExecutor(journal, managed, events);
+  const operationId = "018f0f00-0000-7000-8000-000000000119";
+  const accepted = await journal.accept(operationId, "project.fetch", { projectId, source: remoteSource });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operationId)).toMatchObject({ state: "failed", failure: { code: "SOURCE_UNAVAILABLE" } });
+  expect(succeeded).not.toHaveBeenCalled();
+  await expect(exec("/usr/bin/git", ["--git-dir", managed.repositoryPath(projectId), "rev-parse", "refs/remotes/origin/main"]))
+    .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+  expect((await readFile(path.join(managed.repositoryPath(projectId), "FETCH_HEAD"))).byteLength).toBeGreaterThan(0);
 });
 
 test("pushes the captured local commit to the same-name remote branch with write authority", async () => {

@@ -1,7 +1,7 @@
 import type { AgentExecutionFailure, AgentResourceReference, AgentSnapshotResource } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { AgentEventLog } from "./event-log.js";
-import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
+import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -106,6 +106,7 @@ export class OperationExecutor {
     };
     const previewMutation = record.operationName === "preview.activate" || record.operationName === "preview.deactivate";
     let taskStartCompleted = false;
+    let fetchMutationCompleted = false;
     try {
       this.logger.info("agent.operation.started", "Agent operation execution started", {
         operationId, operationName: record.operationName, operationState: record.state, ...resourceFields
@@ -135,6 +136,7 @@ export class OperationExecutor {
           await this.managed.fetch((record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).projectId,
             operationId, (record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).source,
             (record.request as { githubAuthorityGeneration?: number }).githubAuthorityGeneration);
+          fetchMutationCompleted = true;
           break;
         case "project.push":
           await this.managed.push(record.request as Parameters<ManagedWorkspaces["push"]>[0], operationId);
@@ -248,6 +250,12 @@ export class OperationExecutor {
       // Once private execution evidence says the start occurred, a later journal write outage
       // must leave this operation resumable; it must never rewrite successful start as failure.
       if (record.operationName === "task.start" && (taskStartCompleted || error instanceof TaskStartRecoveryRequiredError)) return;
+      if (record.operationName === "project.fetch" && (fetchMutationCompleted || error instanceof FetchMutationRecoveryRequiredError)) {
+        this.logger.warn("agent.operation.fetch_recovery_required", "Git Fetch completed; operation remains recoverable after post-success failure.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
+        return;
+      }
       const failure: AgentExecutionFailure = error instanceof AgentExecutionError ? error.failure : {
         code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
         details: { incidentId: this.createId() }

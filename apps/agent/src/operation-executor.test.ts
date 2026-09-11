@@ -2,11 +2,11 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { gitInspectionDataSchema } from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
 import { AgentEventLog } from "./event-log.js";
-import { ManagedWorkspaces } from "./managed-workspaces.js";
+import { FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationJournal } from "./operation-journal.js";
 import { TaskStartRecoveryRequiredError } from "./execution-manager.js";
@@ -133,6 +133,73 @@ test.each([
     expect.objectContaining({ type: "project", projectId: project })
   ]));
   expect(logLines.some((line) => line.includes("agent.observation.refresh_failed"))).toBe(true);
+});
+
+test("does not rewrite a completed Fetch as failed when journal settlement fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-fetch-journal-settlement-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failed = vi.spyOn(events, "failed");
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    fetch: async () => undefined,
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  vi.spyOn(journal, "succeed").mockRejectedValue(new Error("journal-success-write-failed"));
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, "project.fetch", { projectId: project });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(failed).not.toHaveBeenCalled();
+});
+
+test("keeps a Fetch resumable when ManagedWorkspaces reports completed-mutation recovery", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-fetch-recovery-signal-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failed = vi.spyOn(events, "failed");
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    fetch: async () => { throw new FetchMutationRecoveryRequiredError(); },
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, "project.fetch", { projectId: project });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(failed).not.toHaveBeenCalled();
+});
+
+test("does not rewrite a durably succeeded Fetch when success event emission fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-fetch-event-settlement-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const succeeded = vi.spyOn(events, "succeeded");
+  const failed = vi.spyOn(events, "failed");
+  succeeded.mockImplementation(() => { throw new Error("success-event-write-failed"); });
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    fetch: async () => undefined,
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, "project.fetch", { projectId: project });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "succeeded", failure: null });
+  expect(succeeded).toHaveBeenCalledOnce();
+  expect(failed).not.toHaveBeenCalled();
 });
 
 test("recovers executor observation health after a later successful refresh", async () => {

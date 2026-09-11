@@ -164,6 +164,12 @@ export class ConfigurationValidationError extends Error {
     this.name = "ConfigurationValidationError";
   }
 }
+export class FetchMutationRecoveryRequiredError extends Error {
+  constructor() {
+    super("The Git Fetch completed; post-fetch recovery is required before the operation can complete.");
+    this.name = "FetchMutationRecoveryRequiredError";
+  }
+}
 
 function executionFailure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionFailure {
   const retryable = ["SOURCE_UNAVAILABLE", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_TOKEN_LEASE_ACTIVE", "GITHUB_UPSTREAM_TRANSIENT",
@@ -1302,6 +1308,14 @@ export class ManagedWorkspaces {
             ? expectedSource.connectionId === store.source.connectionId && expectedSource.repositoryId === store.source.repositoryId : false);
       if (!sameSource) throw storeConflict(projectId);
     }
+    let mutationCompleted = false;
+    const recoveryRequired = (error: unknown): FetchMutationRecoveryRequiredError => {
+      this.logger.warn("agent.operation.fetch_recovery_required", "Git Fetch completed; post-fetch recovery is required.", {
+        projectId, ...(operationId === undefined ? {} : { operationId }),
+        errorName: error instanceof Error ? error.name : "unknown"
+      });
+      return new FetchMutationRecoveryRequiredError();
+    };
     try {
       const args = ["--git-dir", store.repositoryPath, "fetch", "--no-recurse-submodules", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"];
       if (store.source.kind === "github-app") {
@@ -1313,18 +1327,29 @@ export class ManagedWorkspaces {
             connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId,
             lifecycleGeneration: effectiveGeneration, token, originUrl: repository.cleanHttpsUrl
           });
+          mutationCompleted = true;
         });
-      } else if (operationId === undefined) await this.git(args);
-      else await this.operationGit(operationId, projectId, "project-fetch", args);
+      } else if (operationId === undefined) {
+        await this.git(args);
+        mutationCompleted = true;
+      } else {
+        await this.operationGit(operationId, projectId, "project-fetch", args);
+        mutationCompleted = true;
+      }
     }
     catch (error) {
+      if (mutationCompleted) throw recoveryRequired(error);
       if (error instanceof AgentExecutionError) throw error;
       if (error instanceof Error && error.message === "github-git-authentication-failed") {
         throw new AgentExecutionError(executionFailure("GITHUB_GIT_AUTHENTICATION_FAILED", "GitHub rejected the fresh repository credential.", {}));
       }
       throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {}));
     }
-    await this.loadStoreOwnership(projectId);
+    try { await this.loadStoreOwnership(projectId); }
+    catch (error) {
+      if (mutationCompleted) throw recoveryRequired(error);
+      throw error;
+    }
   }
 
   async push(input: ProjectPushData, operationId?: string): Promise<void> {
