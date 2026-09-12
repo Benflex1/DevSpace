@@ -66,16 +66,16 @@ Milestones 0 and 1, TypeScript 7 acceleration, and PR #43 / AI Session Beta Chec
 complete and merged. PR #44 merged Private GitHub Checkpoint 1 at
 `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`; its validated head was
 `ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`, and the accepted snapshots were proven
-tree-equivalent. Real CP1 local/dev GitHub App acceptance is complete. The current objective is the
-finished owner-controlled MVP, and CP3A is the active implementation slice on
-`feat/private-github-access-cp3a-lifecycle`. CP2 real-provider acceptance completed successfully
-with PR #45; production deployment remains explicitly pending. The remaining path prioritizes:
+tree-equivalent. Real CP1 local/dev GitHub App acceptance is complete. CP2 real-provider acceptance
+completed successfully with PR #45, and CP3A/CP3B are complete. The current objective is the
+finished owner-controlled MVP, with Workbench 1B Changes + Commit active on
+`feat/workbench-git-changes-commit`. Production deployment remains explicitly pending. The remaining
+path prioritizes:
 
-1. private GitHub repository access Checkpoints 1–3;
-2. the remaining browser-usable Codex approvals and structured-question flow;
-3. project creation from scratch;
-4. essential files, Git, task, Project Options, and Workbench UX;
-5. focused stabilization and visual polish based on real use.
+1. the remaining browser-usable Codex approvals and structured-question flow;
+2. project creation from scratch;
+3. essential task, Project Options, and Workbench UX;
+4. focused stabilization and visual polish based on real use.
 
 AI-session contracts and capability research are complete. Production-safe termination of arbitrary
 hostile descendant processes remains deliberately unclaimed; the owner-only beta may use cooperative
@@ -418,10 +418,9 @@ Stop rule:
      `a9dabaece59ea9927ebb5a62767849cda96245ff`, squash merge
      `3ffd07fad4995ac73bb2dccc1514bf5cb5fe5193`, shared root tree
      `9647bd27929a7300aaa627416f8111f447b68899`;
-   - 🟡 CP3A adds lifecycle generations, explicit disconnect, bounded cleanup, same-ID reconnect,
+   - ✅ CP3A lifecycle generations, explicit disconnect, bounded cleanup, same-ID reconnect,
      reinstall recovery, and safe authority-loss classification;
-   - ⏳ CP3B remains the deferred push boundary: write permission, push intents, confirmation,
-     effects, and reconciliation are not part of CP3A;
+   - ✅ CP3B write permission, explicit push intents, confirmation, effects, and reconciliation;
    - no OAuth, PAT, or fine-grained-token fallback is planned for this authority model.
 
 3. ⏳ **Create a project from scratch**
@@ -431,9 +430,9 @@ Stop rule:
      step 2;
    - defer template marketplaces and broad scaffolding catalogs.
 
-4. ⏳ **Workbench beta completion**
-   - basic file tree/editing;
-   - practical Git status/diff/stage/commit/push;
+4. 🟡 **Workbench beta completion**
+   - ✅ basic file tree/editing;
+   - 🟡 Workbench 1B practical Git status/diff/stage/commit with existing explicit push;
    - better task/process output and controls;
    - essential Project Options editing;
    - cohesive T3 Code-inspired Workbench navigation and visual polish.
@@ -451,7 +450,7 @@ Stop rule:
 
 ### Private GitHub repository access
 
-**Status: 🟡 Checkpoint 3A connection lifecycle on `feat/private-github-access-cp3a-lifecycle`**
+**Status: ✅ Checkpoint 3A/3B private GitHub access complete; Workbench 1B is the active product slice**
 
 - ✅ Authenticate the administrator-configured owner account/installation through a GitHub App
 - ✅ List authorized repositories outside project onboarding and refresh live installation authority
@@ -465,7 +464,7 @@ Stop rule:
 - ✅ Disconnect one retained connection with exact Agent-private cleanup and no local-work deletion
 - ✅ Reconnect or replace the GitHub installation while retaining the same DevSpace connection ID
 - ✅ Classify installation removal, suspension, permission loss, repository access loss, and transient upstream failures
-- ❌ Push through an explicit user action
+- ✅ Push through an explicit user action
 
 Sequencing decision:
 
@@ -492,6 +491,13 @@ Sequencing decision:
   path.
 - Complete it before broad Workbench polish because onboarding must support both existing and new
   projects for the beta to feel coherent.
+
+### Persistent Git identity
+
+**Status: 🧊 Deferred P1 UX**
+
+- 🧊 Add User Settings for a default Git author name and email used explicitly for DevSpace-created
+  commits; keep the current temporary identity behavior until this item is implemented.
 
 ### Persistent terminals
 
@@ -559,20 +565,20 @@ Remaining delivery order:
 
 ## Files and editor
 
-- ❌ File tree
-- ❌ File viewing/editing
+- ✅ File tree
+- ✅ File viewing/editing
 - ❌ Create/rename/delete files
 - ❌ Search/navigation
-- ❌ Editor tabs
+- ✅ Editor tabs
 
 ## Git experience
 
-- ❌ Better status view
-- ❌ Diff UI
-- ❌ Staging
-- ❌ Commit workflow
-- ❌ Push workflow
-- ❌ Branch awareness
+- 🟡 Better status view — Workbench 1B Changes + Commit active on the current feature branch
+- 🟡 Diff UI — Workbench 1B Changes + Commit active on the current feature branch
+- 🟡 Staging — Workbench 1B Changes + Commit active on the current feature branch
+- 🟡 Commit workflow — Workbench 1B Changes + Commit active on the current feature branch
+- ✅ Push workflow
+- 🟡 Branch awareness — Workbench 1B Changes + Commit active on the current feature branch
 
 ## AI sessions
 

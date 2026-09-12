@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { editorLanguageForPath, markEditorConflict, markEditorSaved, updateEditorContent, type EditorDocument } from "./editor-state.js";
+import { EDITOR_SAVED_STATUS_DURATION_MS, editorLanguageForPath, markEditorConflict, markEditorSaved, updateEditorContent, type EditorDocument } from "./editor-state.js";
 
 const document: EditorDocument = {
   path: "src/index.ts", content: "const value = 1;\n", savedContent: "const value = 1;\n", revision: "a".repeat(64), dirty: false, conflict: null
@@ -22,4 +22,9 @@ test("clears dirty and conflict state after save while retaining a conflict buff
   const dirty = updateEditorContent(document, "changed\n");
   expect(markEditorSaved(dirty, "b".repeat(64))).toMatchObject({ content: "changed\n", savedContent: "changed\n", revision: "b".repeat(64), dirty: false, conflict: null });
   expect(markEditorConflict(dirty, "The file changed externally.")).toMatchObject({ content: "changed\n", dirty: true, conflict: "The file changed externally." });
+});
+
+test("keeps the saved indicator intentionally brief", () => {
+  expect(EDITOR_SAVED_STATUS_DURATION_MS).toBeGreaterThanOrEqual(1_000);
+  expect(EDITOR_SAVED_STATUS_DURATION_MS).toBeLessThanOrEqual(2_000);
 });

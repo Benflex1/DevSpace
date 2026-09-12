@@ -5,7 +5,9 @@
 Milestones 0 and 1 are complete. PR #43 / AI Session Beta Checkpoint 1 and PR #47 / private
 GitHub access are merged. CP3A/CP3B private GitHub access is complete, including real-provider
 private Push and non-fast-forward rejection acceptance. The private GitHub infrastructure phase is
-closed; Files + Monaco is the active Rapid Public Alpha product slice.
+closed. Workbench 1A Files + Monaco merged as PR #48 at
+`e96afb4ac37b05099af1b6f8b7639677d0482113`, and the browser smoke passed. Workbench 1B Changes +
+Commit is the active Rapid Public Alpha product slice.
 
 Private GitHub Repository Access Checkpoint 1 was merged by PR #44 at
 `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`. The validated CP1 head was
@@ -64,9 +66,24 @@ Traefik → Cloudflare Tunnel/Access → reserved preview namespace → connecto
 loopback lease; this deployment choice is not a universal DevSpace core requirement.
 
 The current dashboard and Workbench expose project onboarding, workspace runtime controls, terminal,
-tasks, previews, and the Agent-backed Files + Monaco editor slice. File browsing and editing remain
-available when the Docker runtime is stopped. Richer Git controls, persistent terminals, project
-creation from scratch, and later Workbench polish remain deferred product work.
+tasks, previews, and the Agent-backed Files + Monaco editor slice. File browsing, editing, and the
+Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime is stopped.
+The confirmed Workbench 1B dogfood corrections reconcile stale Changes entries, preserve unsaved
+editor buffers across Edit/Changes presentation toggles, and use deterministic local Monaco model
+identity and disposal ownership.
+Workbench 1B adds bounded status/diff inspection, staged and unstaged groups, file-level stage and
+unstage, explicit staged-only commits with bounded identity inputs, branch/ahead/behind context, and
+the existing explicit Fetch and Push actions. Persistent Git mutation failures require explicit
+dismissal; non-fast-forward Push failures direct the user to Fetch, integrate, and explicitly Push
+again without automatic retry. Snapshot observation now isolates bounded Git-state failures to the
+affected workspace, preserves successful mutations when a later refresh is stale, and recovers Agent
+observation health after a later successful refresh. On Agent startup, interrupted `running`
+`project.git.stage`, `project.git.unstage`, and `project.git.commit` records are durably
+terminalized as non-retryable `GIT_MUTATION_OUTCOME_UNCERTAIN` failures and are never replayed;
+`accepted` local Git mutations remain resumable because they may not have started. A live-process
+mutation that is known to have completed but cannot settle observation or its journal remains
+recoverable, preserving mutation truthfulness until restart reconciliation. Project creation from
+scratch, persistent terminals, and later Workbench polish remain deferred product work.
 
 ## Private GitHub Repository Access status
 

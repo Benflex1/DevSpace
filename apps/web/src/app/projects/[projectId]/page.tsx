@@ -32,6 +32,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       canStop={runtimeOperation?.canStop === true} retryStart={runtimeOperation?.canRetryStart === true}
       pushAvailable={pushAvailable}
       initialTasks={project.tasks} initialTaskRuns={project.taskRuns} initialTerminals={project.terminals} initialPreviews={project.previews}
+      initialGit={live?.workspaceGit ?? null}
       previewGateway={{ protocol: config.previewGatewayProtocol, port: config.previewGatewayPort }} actor={actor.identity}
       initialMessage={previewMaterializationError} />;
   }

@@ -60,6 +60,7 @@ The names below are normative reusable scalar schemas.
 | `ConfigurationKey` | JSON string of 1 through 64 ASCII characters matching `^[a-z][a-z0-9-]{0,63}$`. |
 | `GitObjectId` | JSON string of exactly 40 or 64 lowercase hexadecimal characters. |
 | `GitBranchName` | A string accepted by the foundation `git-branch-shorthand` policy: non-empty; no NUL, ASCII control, whitespace, backslash, `~`, `^`, `:`, `?`, `*`, or `[`; no `..`, `@{`, lone `@`, leading `-`, leading/trailing `/`, repeated `//`, or trailing `.`; and no slash-delimited component beginning with `.` or ending with `.lock`. This is exactly the accepted F06 behavior, not a second contracts-owned grammar. |
+| `GitPath` | A non-empty workspace-relative path of at most 4,096 UTF-8 bytes; Agent policy rejects absolute paths, backslashes, control characters, empty/dot/dot-dot components, and `.git` components. |
 | `GitBaseRef` | Strict union `{ kind: "branch", branchName: GitBranchName } | { kind: "commit", commit: GitObjectId }`. Tags, revision expressions, reflog syntax, and arbitrary Git ref syntax are not accepted in v1. |
 | `RemoteRepositoryUrl` | Absolute `https:` or `ssh:` URL of 1 through 2048 UTF-8 bytes, with a non-empty host, no fragment, and no control or whitespace character. HTTPS URLs have no user-info. SSH URLs may have a non-empty username but no password. Other schemes are invalid. Approval remains Agent policy. |
 | `CanonicalJsonObjectText` | JSON string whose UTF-8 encoding is 2 through 2,097,152 bytes and is exactly the RFC 8785/JCS serialization of one JSON object. Duplicate keys, non-object roots, and non-canonical spellings are invalid. The upper bound is the same revision-level final canonical UTF-8 representation limit enforced by F08; exactly 2,097,152 bytes is valid and 2,097,153 is invalid. |
@@ -252,6 +253,39 @@ complete-v1 endpoint composition. The remaining 26 rows are unchanged and author
 
 The only F09 path parameter is `terminalId`. It is one decoded path segment and must be a `UuidV7`;
 percent-encoded or non-canonical UUID spellings are rejected.
+
+## Workbench 1B Git Changes + Commit extension
+
+Workbench 1B extends the existing managed-workspace Git inspection with bounded, workspace-scoped
+diff and file-level index operations. These routes remain Agent operations against the exact managed
+workspace derived from `{ projectId, workspaceId }`; Web never invokes Git and the browser never
+submits a repository path, remote, refspec, command, or arbitrary Git arguments.
+
+| Stable operation name | Method | Exact path | Body data schema | Class | Success |
+| --- | --- | --- | --- | --- | --- |
+| `project.git.diff` | POST | `/v1/projects/git-diff` | `GitDiffDataRequest` | non-mutating | `200 GitDiffData` |
+| `project.git.stage` | POST | `/v1/projects/stage` | `GitWorkspaceFileData` | mutation | `202 MutationReceipt` |
+| `project.git.unstage` | POST | `/v1/projects/unstage` | `GitWorkspaceFileData` | mutation | `202 MutationReceipt` |
+| `project.git.commit` | POST | `/v1/projects/commit` | `GitCommitData` | mutation | `202 MutationReceipt` |
+
+Git status uses bounded porcelain-v2 `-z` parsing. A workspace inspection returns at most 1,000
+entries, with workspace-relative paths, optional rename source paths, staged and unstaged states,
+untracked state, a file classification, branch, exact HEAD OID, and bounded ahead/behind counts.
+The managed store inspection remains clean-state metadata and never exposes `.git` internals.
+
+`project.git.diff` returns either bounded UTF-8 `oldContent`/`newContent` for staged (`HEAD → index`)
+or unstaged (`index → worktree`) review, or an explicit unavailable reason for binary, oversized,
+unsupported, or missing content. Untracked files use an empty old side. External diff drivers and
+textconv are disabled; the Agent reads Git blobs and the managed worktree directly.
+
+File-level stage and unstage accept only one bounded workspace-relative path. Staging uses
+no-filter object hashing and direct index updates, preserving ordinary file mode bits and
+deletions without invoking repository clean/process filters. Commit accepts only a bounded,
+non-whitespace-only message, commits the staged index, returns the resulting exact HEAD OID through
+the Web mutation result, and suppresses hooks, signing helpers, and editors. A local Git identity
+is read without includes; when unavailable, bounded name/email values are supplied for that commit
+only and are never written to Git config. Symlink, submodule, and other special-file cases remain
+unsupported for this alpha slice.
 
 ## Active GitHub App endpoint extension
 
@@ -612,13 +646,58 @@ GitInspectionData = {
   headCommit: GitObjectId | null,
   dirty: boolean,
   aheadCount: NonNegativeCount,
-  behindCount: NonNegativeCount
+  behindCount: NonNegativeCount,
+  files: GitStatusEntry[0..1000],
+  identity: GitIdentityData
 }
 ```
 
 For the managed store (`workspaceId: null`), `dirty` is always false. `branchName` and `headCommit`
 may be null for an unborn repository state. Counts are relative to the configured upstream; both
 are zero when no upstream is configured.
+
+```text
+GitStatusEntry = {
+  path: bounded workspace-relative GitPath,
+  oldPath: bounded GitPath | null,
+  stagedState: "unchanged" | "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked",
+  unstagedState: "unchanged" | "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked",
+  untracked: boolean,
+  classification: "added" | "modified" | "deleted" | "renamed" | "copied"
+}
+
+GitIdentityData = {
+  name: bounded non-control string | null,
+  email: bounded non-control string | null
+}
+
+GitDiffDataRequest = {
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  path: GitPath,
+  kind: "staged" | "unstaged"
+}
+
+GitDiffData = {
+  available: true,
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  path: GitPath,
+  oldPath: GitPath | null,
+  kind: "staged" | "unstaged",
+  oldContent: bounded UTF-8 text,
+  newContent: bounded UTF-8 text
+}
+| {
+  available: false,
+  projectId: UuidV7,
+  workspaceId: UuidV7,
+  path: GitPath,
+  oldPath: GitPath | null,
+  kind: "staged" | "unstaged",
+  reason: "binary" | "too-large" | "unsupported" | "not-found"
+}
+```
 
 The lifecycle enum values below exactly reuse the accepted domain values:
 
@@ -742,6 +821,11 @@ document are not members of this registry, F09 runtime schemas, exports, or fixt
 | `GITHUB_INSTALLATION_UNAVAILABLE` | The bound installation is missing, suspended, or unavailable. | `503` | true | `{}` | GitHub/private Git routes |
 | `GITHUB_REPOSITORY_NOT_AUTHORIZED` | The exact repository ID is missing, unselected, foreign, or not returned by scoped mint validation. | `403` or `404` | false | `{}` | GitHub/private Git routes |
 | `GITHUB_GIT_AUTHENTICATION_FAILED` | Git rejected a freshly delivered exact-repository credential. | `502` or `503` | false | `{}` | private Git routes |
+| `GIT_NOTHING_TO_COMMIT` | The workspace index contains no staged changes. | `409` | false | `{}` | Workbench Git commit |
+| `GIT_COMMIT_MESSAGE_INVALID` | The commit message is empty/whitespace-only or exceeds the bounded size. | `422` | false | `{ reason: "empty" | "too-large" }` | Workbench Git commit |
+| `GIT_IDENTITY_REQUIRED` | Neither usable local identity nor bounded per-commit name/email input is available. | `422` | false | `{}` | Workbench Git commit |
+| `GIT_OPERATION_FAILED` | A bounded managed-workspace Git operation could not complete safely. | `409` or `503` | false | `{ action: "inspect" | "diff" | "stage" | "unstage" | "commit" }` | Workbench Git routes |
+| `GIT_MUTATION_OUTCOME_UNCERTAIN` | The Agent cannot prove whether a local Git mutation completed before interruption; inspect the repository state before explicitly continuing. | `503` | false | `{}` | Workbench Git mutations |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | The dedicated rootless runtime required by the route is unavailable. | `503` | true | `{ component: "docker" }` | route-specific |
 | `AGENT_INTERNAL_ERROR` | An unexpected redacted Agent failure occurred. | `500` | true | `{ incidentId: UuidV7 }` | global |
 
@@ -782,7 +866,11 @@ except the already-exact `G` protocol-version mapping.
 | `github.installation.reconnect.prepare` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_GENERATION_STALE (409)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `AGENT_INTERNAL_ERROR (500)` |
 | `github.repositories.list` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `H`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)` |
 | `github.repositories.resolve` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `H`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_REPOSITORY_NOT_AUTHORIZED (403/404)`; `GITHUB_CONTENTS_PERMISSION_REQUIRED (403/422)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)` |
-| `project.git.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `SOURCE_UNAVAILABLE (503)` |
+| `project.git.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `SOURCE_UNAVAILABLE (503)`; `GIT_OPERATION_FAILED (409/503)` |
+| `project.git.diff` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `GIT_OPERATION_FAILED (409/503)` |
+| `project.git.stage` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `WORKSPACE_FILE_UNSUPPORTED (422)`; `GIT_OPERATION_FAILED (409/503)`; `GIT_MUTATION_OUTCOME_UNCERTAIN (503)` |
+| `project.git.unstage` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `GIT_OPERATION_FAILED (409/503)`; `GIT_MUTATION_OUTCOME_UNCERTAIN (503)` |
+| `project.git.commit` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `GIT_NOTHING_TO_COMMIT (409)`; `GIT_COMMIT_MESSAGE_INVALID (422)`; `GIT_IDENTITY_REQUIRED (422)`; `GIT_OPERATION_FAILED (409/503)`; `GIT_MUTATION_OUTCOME_UNCERTAIN (503)` |
 | `workspace.create` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `CONFIGURATION_NOT_REGISTERED (422)`; `WORKSPACE_STATE_CONFLICT (409)`; `RUNTIME_POLICY_VIOLATION (422)`; `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
 | `workspace.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
 | `workspace.start` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `CONFIGURATION_NOT_REGISTERED (422)`; `WORKSPACE_STATE_CONFLICT (409)`; `RUNTIME_POLICY_VIOLATION (422)`; `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
@@ -1127,7 +1215,7 @@ that can arise after a mutation has already been durably accepted and returned H
 not the F09 route-error union and has no response `meta` wrapper.
 
 Every variant is the strict object `{ code, message: ErrorMessage, retryable, details }`.
-`code` discriminates the exact 30-member union below. Retryability and details reuse the existing
+`code` discriminates the exact 31-member union below. Retryability and details reuse the existing
 F09 contracts exactly:
 
 | Allowed code | Retryable | Exact strict details |
@@ -1160,6 +1248,7 @@ F09 contracts exactly:
 | `AI_NOT_CONFIGURED` | false | `{ workspaceId: UuidV7, revisionId: UuidV7 }` |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | false | `{ previewId: UuidV7 }` |
 | `GATEWAY_UPDATE_FAILED` | true | `{ previewId: UuidV7 }` |
+| `GIT_MUTATION_OUTCOME_UNCERTAIN` | false | `{}` |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | true | `{ component: "docker" }` |
 | `AGENT_INTERNAL_ERROR` | true | `{ incidentId: UuidV7 }` |
 
@@ -1170,7 +1259,7 @@ with a new operation ID after the transient condition changes or is addressed. I
 replay of the same operation ID to execute again; same-ID replay remains governed by F09 durable
 idempotency and returns the retained outcome without retrying execution.
 
-The classification of all 30 executable codes is exhaustive:
+The classification of all 31 executable codes is exhaustive:
 
 | F09 code | Classification for asynchronous execution | Accepted semantic reason |
 | --- | --- | --- |
@@ -1195,6 +1284,7 @@ The classification of all 30 executable codes is exhaustive:
 | `AI_NOT_CONFIGURED` | potentially post-acceptance | the workspace's effective revision may change to one with no AI profile |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | potentially post-acceptance | approved-domain policy may change before gateway application |
 | `GATEWAY_UPDATE_FAILED` | potentially post-acceptance | accepted preview execution may fail while applying the gateway update |
+| `GIT_MUTATION_OUTCOME_UNCERTAIN` | potentially post-acceptance | an interrupted local Git mutation has no provable completion outcome and requires repository inspection before explicit continuation |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | potentially post-acceptance | the runtime may become unavailable while accepted work executes |
 | `AGENT_INTERNAL_ERROR` | potentially post-acceptance | an unexpected redacted Agent failure may occur during accepted execution |
 
@@ -1208,6 +1298,9 @@ wire failure does not duplicate the operation name.
 | `configuration-runtime-plan.register` | `CONFIGURATION_NOT_REGISTERED`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
 | `project.managed-store.create` | `RESOURCE_STATE_CONFLICT`; `SOURCE_NOT_FOUND`; `SOURCE_INVALID`; `SOURCE_UNAVAILABLE`; `GITHUB_CONTENTS_PERMISSION_REQUIRED`; `GITHUB_INSTALLATION_UNAVAILABLE`; `GITHUB_REPOSITORY_NOT_AUTHORIZED`; `GITHUB_GIT_AUTHENTICATION_FAILED`; `GITHUB_TOKEN_LEASE_ACTIVE`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
 | `project.fetch` | `PROJECT_NOT_FOUND`; `SOURCE_UNAVAILABLE`; `GITHUB_CONTENTS_PERMISSION_REQUIRED`; `GITHUB_INSTALLATION_UNAVAILABLE`; `GITHUB_REPOSITORY_NOT_AUTHORIZED`; `GITHUB_GIT_AUTHENTICATION_FAILED`; `GITHUB_TOKEN_LEASE_ACTIVE`; `AGENT_INTERNAL_ERROR` |
+| `project.git.stage` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_PATH_INVALID`; `WORKSPACE_FILE_NOT_FOUND`; `WORKSPACE_FILE_UNSUPPORTED`; `GIT_OPERATION_FAILED`; `GIT_MUTATION_OUTCOME_UNCERTAIN`; `AGENT_INTERNAL_ERROR` |
+| `project.git.unstage` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_PATH_INVALID`; `WORKSPACE_FILE_NOT_FOUND`; `GIT_OPERATION_FAILED`; `GIT_MUTATION_OUTCOME_UNCERTAIN`; `AGENT_INTERNAL_ERROR` |
+| `project.git.commit` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `GIT_NOTHING_TO_COMMIT`; `GIT_COMMIT_MESSAGE_INVALID`; `GIT_IDENTITY_REQUIRED`; `GIT_OPERATION_FAILED`; `GIT_MUTATION_OUTCOME_UNCERTAIN`; `AGENT_INTERNAL_ERROR` |
 | `workspace.create` | `PROJECT_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.start` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.stop` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |

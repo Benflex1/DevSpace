@@ -29,7 +29,7 @@ describe("F11 AI Session Agent API extension", () => {
       endpoint.classification,
       endpoint.successStatus
     ])).toEqual(accepted);
-    expect(nonAiAgentApiV1Endpoints).toHaveLength(30);
+    expect(nonAiAgentApiV1Endpoints).toHaveLength(34);
     expect(nonAiAgentApiV1Endpoints.some((endpoint) =>
       endpoint.operation.startsWith("ai-session.")
     )).toBe(false);

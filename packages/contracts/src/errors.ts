@@ -124,6 +124,13 @@ export const executableAgentErrorRegistry = Object.freeze({
   GITHUB_PUSH_INTENT_STALE: { statuses: [409], retryable: false, detailsSchema: emptyDetailsSchema },
   GITHUB_PUSH_NON_FAST_FORWARD: { statuses: [409], retryable: false, detailsSchema: emptyDetailsSchema },
   GITHUB_PUSH_OUTCOME_UNCERTAIN: { statuses: [503], retryable: false, detailsSchema: emptyDetailsSchema },
+  GIT_MUTATION_OUTCOME_UNCERTAIN: { statuses: [503], retryable: false, detailsSchema: emptyDetailsSchema },
+  GIT_NOTHING_TO_COMMIT: { statuses: [409], retryable: false, detailsSchema: emptyDetailsSchema },
+  GIT_COMMIT_MESSAGE_INVALID: { statuses: [422], retryable: false, detailsSchema: z.strictObject({ reason: z.enum(["empty", "too-large"]) }) },
+  GIT_IDENTITY_REQUIRED: { statuses: [422], retryable: false, detailsSchema: emptyDetailsSchema },
+  GIT_OPERATION_FAILED: { statuses: [409, 503], retryable: false, detailsSchema: z.strictObject({
+    action: z.enum(["inspect", "diff", "stage", "unstage", "commit"])
+  }) },
   ROOTLESS_RUNTIME_UNAVAILABLE: { statuses: [503], retryable: true, detailsSchema: z.strictObject({ component: z.literal("docker") }) },
   AGENT_INTERNAL_ERROR: { statuses: [500], retryable: true, detailsSchema: z.strictObject({ incidentId: uuidV7Schema }) }
 } as const);

@@ -8,6 +8,11 @@ import {
   configurationKeySchema,
   createManagedStoreDataSchema,
   createWorkspaceDataSchema,
+  gitCommitDataSchema,
+  gitDiffDataRequestSchema,
+  gitDiffDataSchema,
+  gitStatusEntrySchema,
+  gitWorkspaceFileDataSchema,
   gitInspectionDataSchema,
   githubSourceInspectionDataSchema,
   githubRepositoryResolutionSchema,
@@ -21,6 +26,9 @@ import {
   sourceLocatorSchema,
   WORKSPACE_DIRECTORY_ENTRY_MAX,
   WORKSPACE_FILE_MAX_BYTES,
+  GIT_COMMIT_MESSAGE_MAX_BYTES,
+  GIT_DIFF_MAX_BYTES,
+  GIT_STATUS_ENTRY_MAX,
   type WorkspaceFileEntry,
   type WorkspaceFileReadResult,
   type WorkspaceFileSaveResult,
@@ -35,6 +43,8 @@ import {
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
+  type GitDiffData,
+  type GitStatusEntry,
   type ProjectPushData,
   type GithubRepositoryResolveData,
   type WorkspaceInspectionData,
@@ -71,6 +81,7 @@ import { DockerEngineClient, defaultRootlessDockerSocketPath, readRuntimePolicy 
 import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, type PreviewGatewayProbe, type PreviewInspectionResult } from "./preview-runtime.js";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
+import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
 
 const GIT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -153,6 +164,12 @@ export class ConfigurationValidationError extends Error {
     this.name = "ConfigurationValidationError";
   }
 }
+export class FetchMutationRecoveryRequiredError extends Error {
+  constructor() {
+    super("The Git Fetch completed; post-fetch recovery is required before the operation can complete.");
+    this.name = "FetchMutationRecoveryRequiredError";
+  }
+}
 
 function executionFailure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionFailure {
   const retryable = ["SOURCE_UNAVAILABLE", "GITHUB_INSTALLATION_UNAVAILABLE", "GITHUB_TOKEN_LEASE_ACTIVE", "GITHUB_UPSTREAM_TRANSIENT",
@@ -212,6 +229,26 @@ function workspaceFileChanged(relativePath: string, expectedRevision: string, cu
   }));
 }
 
+function gitOperationFailure(action: "inspect" | "diff" | "stage" | "unstage" | "commit", message = "The managed Git operation failed safely."): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("GIT_OPERATION_FAILED", message, { action }));
+}
+
+function isRecoverableGitObservationFailure(error: unknown): error is AgentExecutionError {
+  return error instanceof AgentExecutionError && error.failure.code === "GIT_OPERATION_FAILED";
+}
+
+function gitCommitMessageFailure(reason: "empty" | "too-large"): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("GIT_COMMIT_MESSAGE_INVALID", "The commit message is empty or too large.", { reason }));
+}
+
+function gitIdentityRequired(): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("GIT_IDENTITY_REQUIRED", "A usable Git author name and email are required to commit.", {}));
+}
+
+function gitNothingToCommit(): AgentExecutionError {
+  return new AgentExecutionError(executionFailure("GIT_NOTHING_TO_COMMIT", "There are no staged changes to commit.", {}));
+}
+
 function parseWorkspaceRelativePath(relativePath: string): string[] {
   try { workspaceRelativePathSchema.parse(relativePath); }
   catch { throw workspacePathFailure(relativePath, "control"); }
@@ -231,6 +268,118 @@ function parseWorkspaceRelativePath(relativePath: string): string[] {
     if (component === ".git") throw workspacePathFailure(relativePath, "git");
   }
   return components;
+}
+
+function canonicalGitPath(relativePath: string): string {
+  const components = parseWorkspaceRelativePath(relativePath);
+  if (components.length === 0) throw workspacePathFailure(relativePath, "empty-component");
+  return components.join("/");
+}
+
+function gitStatusState(code: string): GitStatusEntry["stagedState"] {
+  if (code === ".") return "unchanged";
+  if (code === "A") return "added";
+  if (code === "D") return "deleted";
+  if (code === "R") return "renamed";
+  if (code === "C") return "copied";
+  if (code === "?") return "untracked";
+  return "modified";
+}
+
+function gitStatusClassification(stagedState: GitStatusEntry["stagedState"], unstagedState: GitStatusEntry["unstagedState"], oldPath: string | null): GitStatusEntry["classification"] {
+  if (oldPath !== null || stagedState === "renamed" || unstagedState === "renamed") return "renamed";
+  if (stagedState === "copied" || unstagedState === "copied") return "copied";
+  if (stagedState === "added" || unstagedState === "added" || unstagedState === "untracked") return "added";
+  if (stagedState === "deleted" || unstagedState === "deleted") return "deleted";
+  return "modified";
+}
+
+export function parseGitStatusPorcelainV2(output: string): {
+  readonly branchName: string | null;
+  readonly headCommit: string | null;
+  readonly aheadCount: number;
+  readonly behindCount: number;
+  readonly files: readonly GitStatusEntry[];
+} {
+  if (Buffer.byteLength(output, "utf8") > MAX_OUTPUT_BYTES) throw gitOperationFailure("inspect", "The Git status output is too large.");
+  const records = output.split("\0");
+  let branchName: string | null = null;
+  let headCommit: string | null = null;
+  let aheadCount = 0;
+  let behindCount = 0;
+  const files: GitStatusEntry[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record === undefined || record === "") continue;
+    if (record.startsWith("# branch.head ")) {
+      const value = record.slice("# branch.head ".length);
+      branchName = value === "(detached)" ? null : value;
+      continue;
+    }
+    if (record.startsWith("# branch.oid ")) {
+      const value = record.slice("# branch.oid ".length);
+      headCommit = value === "(initial)" ? null : value;
+      continue;
+    }
+    if (record.startsWith("# branch.ab ")) {
+      const match = /^# branch\.ab \+([0-9]+) -([0-9]+)$/u.exec(record);
+      if (match !== null) {
+        aheadCount = Number(match[1]);
+        behindCount = Number(match[2]);
+      }
+      continue;
+    }
+    if (record.startsWith("#") || record.startsWith("!")) continue;
+    if (files.length >= GIT_STATUS_ENTRY_MAX) throw gitOperationFailure("inspect", "The Git status contains too many entries.");
+    if (record.startsWith("? ")) {
+      const pathValue = canonicalGitPath(record.slice(2));
+      files.push(gitStatusEntrySchema.parse({ path: pathValue, oldPath: null, stagedState: "unchanged",
+        unstagedState: "untracked", untracked: true, classification: "added" }));
+      continue;
+    }
+    const fields = record.split(" ");
+    const type = fields[0];
+    if (type !== "1" && type !== "2" && type !== "u") continue;
+    const xy = fields[1];
+    if (xy === undefined || xy.length !== 2) throw gitOperationFailure("inspect", "The Git status record is malformed.");
+    const pathStart = type === "1" ? 8 : type === "2" ? 9 : 11;
+    if (fields.length <= pathStart) throw gitOperationFailure("inspect", "The Git status record is malformed.");
+    const pathValue = canonicalGitPath(fields.slice(pathStart).join(" "));
+    let oldPath: string | null = null;
+    if (type === "2") {
+      const oldValue = records[index + 1];
+      if (oldValue === undefined || oldValue === "") throw gitOperationFailure("inspect", "The Git rename record is malformed.");
+      index += 1;
+      oldPath = canonicalGitPath(oldValue);
+    }
+    const stagedState = gitStatusState(xy[0]!);
+    const unstagedState = gitStatusState(xy[1]!);
+    files.push(gitStatusEntrySchema.parse({ path: pathValue, oldPath, stagedState, unstagedState,
+      untracked: false, classification: gitStatusClassification(stagedState, unstagedState, oldPath) }));
+  }
+  files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1
+    : left.oldPath === right.oldPath ? 0 : (left.oldPath ?? "") < (right.oldPath ?? "") ? -1 : 1);
+  return { branchName, headCommit, aheadCount, behindCount, files };
+}
+
+interface GitIndexEntry {
+  readonly mode: string;
+  readonly oid: string;
+  readonly path: string;
+}
+
+function parseGitIndexEntry(output: string): GitIndexEntry | null {
+  const record = output.split("\0").find((value) => value.length > 0);
+  if (record === undefined) return null;
+  const match = /^(\d{6}) ([0-9a-f]{40}|[0-9a-f]{64}) [0-3]\t([\s\S]+)$/u.exec(record);
+  return match === null ? null : { mode: match[1]!, oid: match[2]!, path: match[3]! };
+}
+
+function parseGitTreeEntry(output: string): GitIndexEntry | null {
+  const record = output.split("\0").find((value) => value.length > 0);
+  if (record === undefined) return null;
+  const match = /^(\d{6}) blob ([0-9a-f]{40}|[0-9a-f]{64})\t([\s\S]+)$/u.exec(record);
+  return match === null ? null : { mode: match[1]!, oid: match[2]!, path: match[3]! };
 }
 
 function procDirectoryPath(directory: FileHandle, name: string): string {
@@ -297,7 +446,8 @@ export function protectedGitInvocation(args: readonly string[], auth?: { readonl
     Object.assign(environment, auth.capability.environment);
   } else environment.GIT_ASKPASS = "/bin/false";
   return {
-    args: ["-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "credential.helper=",
+    args: ["--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+      "-c", "submodule.recurse=false", "-c", "credential.helper=",
       "-c", "credential.useHttpPath=true", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
       "-c", "http.followRedirects=false", "-c", "core.sshCommand=/bin/false", ...caArguments, ...args],
     env: environment
@@ -352,7 +502,8 @@ export class ManagedWorkspaces {
     previewBaseRegistry: ApprovedPreviewBaseRegistry = readPreviewBaseRegistry(),
     previewProbe?: PreviewGatewayProbe,
     previewGateway?: PreviewGatewayAdapterContract,
-    askpassBroker: GithubAskpassBroker = createGithubAskpassBroker()
+    askpassBroker: GithubAskpassBroker = createGithubAskpassBroker(),
+    private readonly logger: StructuredLogger = createLogger({ component: "agent", subsystem: "managed-workspaces" })
   ) {
     this.githubAuthority = null;
     this.askpassBroker = askpassBroker;
@@ -1157,6 +1308,14 @@ export class ManagedWorkspaces {
             ? expectedSource.connectionId === store.source.connectionId && expectedSource.repositoryId === store.source.repositoryId : false);
       if (!sameSource) throw storeConflict(projectId);
     }
+    let mutationCompleted = false;
+    const recoveryRequired = (error: unknown): FetchMutationRecoveryRequiredError => {
+      this.logger.warn("agent.operation.fetch_recovery_required", "Git Fetch completed; post-fetch recovery is required.", {
+        projectId, ...(operationId === undefined ? {} : { operationId }),
+        errorName: error instanceof Error ? error.name : "unknown"
+      });
+      return new FetchMutationRecoveryRequiredError();
+    };
     try {
       const args = ["--git-dir", store.repositoryPath, "fetch", "--no-recurse-submodules", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"];
       if (store.source.kind === "github-app") {
@@ -1168,18 +1327,29 @@ export class ManagedWorkspaces {
             connectionId: githubSource.connectionId, repositoryId: githubSource.repositoryId,
             lifecycleGeneration: effectiveGeneration, token, originUrl: repository.cleanHttpsUrl
           });
+          mutationCompleted = true;
         });
-      } else if (operationId === undefined) await this.git(args);
-      else await this.operationGit(operationId, projectId, "project-fetch", args);
+      } else if (operationId === undefined) {
+        await this.git(args);
+        mutationCompleted = true;
+      } else {
+        await this.operationGit(operationId, projectId, "project-fetch", args);
+        mutationCompleted = true;
+      }
     }
     catch (error) {
+      if (mutationCompleted) throw recoveryRequired(error);
       if (error instanceof AgentExecutionError) throw error;
       if (error instanceof Error && error.message === "github-git-authentication-failed") {
         throw new AgentExecutionError(executionFailure("GITHUB_GIT_AUTHENTICATION_FAILED", "GitHub rejected the fresh repository credential.", {}));
       }
       throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {}));
     }
-    await this.loadStoreOwnership(projectId);
+    try { await this.loadStoreOwnership(projectId); }
+    catch (error) {
+      if (mutationCompleted) throw recoveryRequired(error);
+      throw error;
+    }
   }
 
   async push(input: ProjectPushData, operationId?: string): Promise<void> {
@@ -1496,17 +1666,246 @@ export class ManagedWorkspaces {
     const store = await this.loadStoreOwnership(projectId);
     const workspace = workspaceId === null ? null : await this.loadWorkspaceOwnership(projectId, workspaceId);
     const prefix = workspace === null ? ["--git-dir", store.repositoryPath] : ["-C", workspace.worktreePath];
-    const branchName = (await this.git([...prefix, "symbolic-ref", "--quiet", "--short", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "")) || null;
-    const headCommit = (await this.git([...prefix, "rev-parse", "--verify", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "")) || null;
-    const dirty = workspace === null ? false : await this.git([...prefix, "status", "--porcelain=v1"]).then((result) => result.stdout !== "");
-    let aheadCount = 0; let behindCount = 0;
-    if (workspace !== null && branchName !== null) {
-      const counts = await this.git([...prefix, "rev-list", "--left-right", "--count", `HEAD...refs/remotes/origin/${branchName}`])
-        .then((result) => result.stdout.trim().split(/\s+/u).map(Number)).catch(() => []);
-      aheadCount = counts[0] ?? 0; behindCount = counts[1] ?? 0;
+    let branchName: string | null;
+    let headCommit: string | null;
+    let aheadCount = 0;
+    let behindCount = 0;
+    let files: readonly GitStatusEntry[] = [];
+    if (workspace === null) {
+      branchName = (await this.git([...prefix, "symbolic-ref", "--quiet", "--short", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "")) || null;
+      headCommit = (await this.git([...prefix, "rev-parse", "--verify", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "")) || null;
+    } else {
+      try {
+        const filterOverrides = await this.localGitFilterOverrides(prefix);
+        const status = parseGitStatusPorcelainV2((await this.git([...prefix, ...filterOverrides, "status", "--porcelain=v2", "--branch", "--untracked-files=all", "--renames", "-z"])).stdout);
+        branchName = status.branchName;
+        headCommit = status.headCommit;
+        aheadCount = status.aheadCount;
+        behindCount = status.behindCount;
+        files = status.files;
+      } catch (error) {
+        if (error instanceof AgentExecutionError) throw error;
+        throw gitOperationFailure("inspect");
+      }
     }
+    const identity = await this.readGitIdentity(prefix);
     await (workspace === null ? this.loadStoreOwnership(projectId) : this.loadWorkspaceOwnership(projectId, workspaceId!));
-    return gitInspectionDataSchema.parse({ projectId, workspaceId, branchName, headCommit, dirty, aheadCount, behindCount });
+    return gitInspectionDataSchema.parse({ projectId, workspaceId, branchName, headCommit, dirty: files.length > 0, aheadCount, behindCount, files, identity });
+  }
+
+  private async readGitIdentity(prefix: readonly string[]): Promise<{ readonly name: string | null; readonly email: string | null }> {
+    const read = async (key: "user.name" | "user.email"): Promise<string | null> => {
+      try {
+        const value = (await this.git([...prefix, "config", "--local", "--no-includes", "--get", key])).stdout.trim();
+        if (value === "" || Buffer.byteLength(value, "utf8") > 512 || [...value].some((character) => {
+          const codePoint = character.codePointAt(0);
+          return codePoint !== undefined && (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159));
+        })) return null;
+        return value;
+      } catch { return null; }
+    };
+    return { name: await read("user.name"), email: await read("user.email") };
+  }
+
+  private async localGitFilterOverrides(prefix: readonly string[]): Promise<readonly string[]> {
+    try {
+      const keys = (await this.git([...prefix, "config", "--local", "--no-includes", "--name-only", "--list"])).stdout
+        .split(/\r?\n/u).filter((key) => /^filter\..+\.(?:clean|process|smudge|required)$/u.test(key));
+      const overrides: string[] = [];
+      for (const key of keys) {
+        overrides.push("-c", key.endsWith(".required") ? `${key}=false` : `${key}=`);
+      }
+      return overrides;
+    } catch { return []; }
+  }
+
+  private async readIndexEntry(worktreePath: string, relativePath: string): Promise<GitIndexEntry | null> {
+    const result = await this.git(["-C", worktreePath, "ls-files", "--stage", "-z", "--", relativePath]);
+    return parseGitIndexEntry(result.stdout);
+  }
+
+  private async readTreeEntry(worktreePath: string, ref: string, relativePath: string): Promise<GitIndexEntry | null> {
+    const result = await this.git(["-C", worktreePath, "ls-tree", "-z", ref, "--", relativePath]);
+    return parseGitTreeEntry(result.stdout);
+  }
+
+  private async updateIndexEntry(worktreePath: string, relativePath: string, entry: GitIndexEntry | null): Promise<void> {
+    if (entry === null) {
+      await this.git(["-C", worktreePath, "update-index", "--force-remove", "--", relativePath]);
+      return;
+    }
+    await this.git(["-C", worktreePath, "update-index", "--add", "--cacheinfo", `${entry.mode},${entry.oid},${relativePath}`]);
+  }
+
+  private async workspaceFileMode(projectId: string, workspaceId: string, relativePath: string): Promise<number> {
+    const components = parseWorkspaceRelativePath(relativePath);
+    const directory = await this.openWorkspaceDirectory(projectId, workspaceId, components.slice(0, -1).join("/"));
+    try {
+      const basename = components.at(-1)!;
+      const file = await this.openWorkspaceFile(directory, basename, relativePath);
+      try {
+        const stats = await file.stat({ bigint: true });
+        if (!stats.isFile()) throw workspaceFileUnsupported(relativePath, stats.isDirectory() ? "directory" : "special");
+        return Number(stats.mode) & 0o111 ? 0o100755 : 0o100644;
+      } finally {
+        await file.close();
+      }
+    } finally {
+      await directory.close();
+    }
+  }
+
+  async stageWorkspaceFile(projectId: string, workspaceId: string, relativePath: string): Promise<void> {
+    const data = gitWorkspaceFileDataSchema.parse({ projectId, workspaceId, path: relativePath });
+    const canonicalPath = canonicalGitPath(data.path);
+    const workspace = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
+    const existingIndex = await this.readIndexEntry(workspace.worktreePath, canonicalPath).catch(() => null);
+    try {
+      const mode = await this.workspaceFileMode(data.projectId, data.workspaceId, canonicalPath);
+      const objectId = (await this.git(["-C", workspace.worktreePath, "hash-object", "--no-filters", "-w", "--", canonicalPath])).stdout.trim();
+      if (!objectIdSchema.safeParse(objectId).success) throw new Error("invalid-object-id");
+      await this.updateIndexEntry(workspace.worktreePath, canonicalPath, { mode: mode.toString(8), oid: objectId, path: canonicalPath });
+    } catch (error) {
+      if (error instanceof AgentExecutionError) {
+        if (error.failure.code === "WORKSPACE_FILE_NOT_FOUND" && existingIndex !== null) {
+          try { await this.updateIndexEntry(workspace.worktreePath, canonicalPath, null); }
+          catch { throw gitOperationFailure("stage"); }
+          return;
+        }
+        throw error;
+      }
+      if (existingIndex !== null && error instanceof Error && error.message === "git-command-failed") {
+        throw gitOperationFailure("stage");
+      }
+      throw gitOperationFailure("stage");
+    }
+  }
+
+  async unstageWorkspaceFile(projectId: string, workspaceId: string, relativePath: string): Promise<void> {
+    const data = gitWorkspaceFileDataSchema.parse({ projectId, workspaceId, path: relativePath });
+    const canonicalPath = canonicalGitPath(data.path);
+    const workspace = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
+    const status = await this.inspectGit(data.projectId, data.workspaceId);
+    const entry = status.files.find((candidate) => candidate.path === canonicalPath);
+    if (entry === undefined || entry.stagedState === "unchanged") return;
+    try {
+      const restorePath = entry.oldPath ?? canonicalPath;
+      const headEntry = await this.readTreeEntry(workspace.worktreePath, "HEAD", restorePath);
+      if (entry.oldPath !== null) await this.updateIndexEntry(workspace.worktreePath, canonicalPath, null);
+      await this.updateIndexEntry(workspace.worktreePath, restorePath, headEntry);
+    } catch (error) {
+      if (error instanceof AgentExecutionError) throw error;
+      throw gitOperationFailure("unstage");
+    }
+  }
+
+  private async readGitBlobText(worktreePath: string, oid: string, relativePath: string): Promise<
+    { readonly content: string } | { readonly reason: "binary" | "too-large" }
+  > {
+    try {
+      const output = (await this.git(["-C", worktreePath, "cat-file", "blob", oid])).stdout;
+      if (Buffer.byteLength(output, "utf8") > GIT_DIFF_MAX_BYTES) return { reason: "too-large" };
+      return { content: strictUtf8(Buffer.from(output, "utf8"), relativePath) };
+    } catch (error) {
+      if (error instanceof AgentExecutionError && error.failure.code === "WORKSPACE_FILE_UNSUPPORTED") return { reason: "binary" };
+      throw error;
+    }
+  }
+
+  private async readWorkspaceDiffText(projectId: string, workspaceId: string, relativePath: string): Promise<
+    { readonly content: string } | { readonly content: ""; readonly missing: true } | { readonly reason: "binary" | "too-large" | "unsupported" }
+  > {
+    try {
+      const components = parseWorkspaceRelativePath(relativePath);
+      const directory = await this.openWorkspaceDirectory(projectId, workspaceId, components.slice(0, -1).join("/"));
+      try {
+        const result = await this.readWorkspaceFileFromDirectory(directory, components.at(-1)!, relativePath);
+        if (result.bytes.byteLength > GIT_DIFF_MAX_BYTES) return { reason: "too-large" };
+        return { content: strictUtf8(result.bytes, relativePath) };
+      } finally { await directory.close(); }
+    } catch (error) {
+      if (error instanceof AgentExecutionError) {
+        if (error.failure.code === "WORKSPACE_FILE_NOT_FOUND") return { content: "", missing: true };
+        if (error.failure.code === "WORKSPACE_FILE_TOO_LARGE") return { reason: "too-large" };
+        if (error.failure.code === "WORKSPACE_FILE_UNSUPPORTED") return { reason: error.failure.details.reason === "binary" ? "binary" : "unsupported" };
+      }
+      throw error;
+    }
+  }
+
+  async diffGit(projectId: string, workspaceId: string, relativePath: string, kind: "staged" | "unstaged"): Promise<GitDiffData> {
+    const data = gitDiffDataRequestSchema.parse({ projectId, workspaceId, path: relativePath, kind });
+    const canonicalPath = canonicalGitPath(data.path);
+    const workspace = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
+    const status = await this.inspectGit(data.projectId, data.workspaceId);
+    const statusEntry = status.files.find((candidate) => candidate.path === canonicalPath);
+    const base = { projectId: data.projectId, workspaceId: data.workspaceId, path: canonicalPath,
+      oldPath: statusEntry?.oldPath ?? null, kind: data.kind } as const;
+    if (statusEntry === undefined) return gitDiffDataSchema.parse({ ...base, available: false, reason: "not-found" });
+    try {
+      // This operation deliberately uses Git plumbing below. The explicit no-helper diff
+      // probe keeps the host boundary clear even when repository diff configuration is hostile.
+      await this.git(["-C", workspace.worktreePath, "diff", "--no-ext-diff", "--no-textconv", "--quiet", "--", canonicalPath]).catch(() => undefined);
+      let oldContent = "";
+      let newContent = "";
+      if (data.kind === "staged") {
+        const oldEntry = await this.readTreeEntry(workspace.worktreePath, "HEAD", statusEntry.oldPath ?? canonicalPath);
+        const newEntry = await this.readIndexEntry(workspace.worktreePath, canonicalPath);
+        if (oldEntry !== null) {
+          const content = await this.readGitBlobText(workspace.worktreePath, oldEntry.oid, statusEntry.oldPath ?? canonicalPath);
+          if ("reason" in content) return gitDiffDataSchema.parse({ ...base, available: false, reason: content.reason });
+          oldContent = content.content;
+        }
+        if (newEntry !== null) {
+          const content = await this.readGitBlobText(workspace.worktreePath, newEntry.oid, canonicalPath);
+          if ("reason" in content) return gitDiffDataSchema.parse({ ...base, available: false, reason: content.reason });
+          newContent = content.content;
+        }
+      } else {
+        const oldEntry = await this.readIndexEntry(workspace.worktreePath, canonicalPath);
+        if (oldEntry !== null) {
+          const content = await this.readGitBlobText(workspace.worktreePath, oldEntry.oid, canonicalPath);
+          if ("reason" in content) return gitDiffDataSchema.parse({ ...base, available: false, reason: content.reason });
+          oldContent = content.content;
+        }
+        const content = await this.readWorkspaceDiffText(data.projectId, data.workspaceId, canonicalPath);
+        if ("reason" in content) return gitDiffDataSchema.parse({ ...base, available: false, reason: content.reason });
+        newContent = content.content;
+      }
+      return gitDiffDataSchema.parse({ ...base, available: true, oldContent, newContent });
+    } catch (error) {
+      if (error instanceof AgentExecutionError) throw error;
+      throw gitOperationFailure("diff");
+    }
+  }
+
+  async commitWorkspace(projectId: string, workspaceId: string, message: string, userName?: string, userEmail?: string): Promise<string> {
+    const parsed = gitCommitDataSchema.safeParse({ projectId, workspaceId, message, ...(userName === undefined ? {} : { userName }), ...(userEmail === undefined ? {} : { userEmail }) });
+    if (!parsed.success) {
+      if (typeof message !== "string" || message.trim() === "") throw gitCommitMessageFailure("empty");
+      if (Buffer.byteLength(message, "utf8") > GIT_COMMIT_MESSAGE_MAX_BYTES) throw gitCommitMessageFailure("too-large");
+      throw gitOperationFailure("commit", "The commit request is invalid.");
+    }
+    const data = parsed.data;
+    if (data.message.trim() === "") throw gitCommitMessageFailure("empty");
+    if (Buffer.byteLength(data.message, "utf8") > GIT_COMMIT_MESSAGE_MAX_BYTES) throw gitCommitMessageFailure("too-large");
+    const workspace = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
+    const inspection = await this.inspectGit(data.projectId, data.workspaceId);
+    if (!inspection.files.some((entry) => entry.stagedState !== "unchanged")) throw gitNothingToCommit();
+    const name = data.userName ?? inspection.identity.name;
+    const email = data.userEmail ?? inspection.identity.email;
+    if (name === undefined || name === null || email === undefined || email === null) throw gitIdentityRequired();
+    try {
+      await this.git(["-c", `user.name=${name}`, "-c", `user.email=${email}`, "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false",
+        "-c", "gpg.program=/bin/false", "-c", "gpg.ssh.program=/bin/false", "-c", "core.editor=/bin/false", "-C", workspace.worktreePath,
+        "commit", "--no-verify", "--no-gpg-sign", "--cleanup=strip", "-m", data.message]);
+      const oid = (await this.git(["-C", workspace.worktreePath, "rev-parse", "--verify", "HEAD"])).stdout.trim();
+      if (!objectIdSchema.safeParse(oid).success) throw new Error("invalid-commit-oid");
+      return oid;
+    } catch (error) {
+      if (error instanceof AgentExecutionError) throw error;
+      throw gitOperationFailure("commit");
+    }
   }
 
   async inspectWorkspace(projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> {
@@ -1865,17 +2264,36 @@ export class ManagedWorkspaces {
     const resources: AgentSnapshotResource[] = [];
     for (const project of projectRecords) {
       const children = workspaceRecords.filter((record) => record.projectId === project.projectId);
-      resources.push({ type: "project", projectId: project.projectId, gitInspections: [
-        { scope: { kind: "managed-store" }, inspection: await this.inspectGit(project.projectId, null) },
-        ...await Promise.all(children.map(async (record) => ({ scope: { kind: "workspace" as const, workspaceId: record.workspaceId }, inspection: await this.inspectGit(project.projectId, record.workspaceId) })))
-      ] });
+      const gitInspections: Array<{
+        scope: { kind: "managed-store" } | { kind: "workspace"; workspaceId: string };
+        inspection: GitInspectionData;
+      }> = [{ scope: { kind: "managed-store" }, inspection: await this.inspectGit(project.projectId, null) }];
+      for (const record of children) {
+        try {
+          gitInspections.push({ scope: { kind: "workspace", workspaceId: record.workspaceId },
+            inspection: await this.inspectGit(project.projectId, record.workspaceId) });
+        } catch (error) {
+          if (!isRecoverableGitObservationFailure(error)) throw error;
+          this.logger.warn("agent.observation.workspace_git_degraded", "Workspace Git observation was omitted because it exceeded the bounded representation.", {
+            projectId: project.projectId, workspaceId: record.workspaceId, errorCode: error.failure.code, action: "inspect"
+          });
+        }
+      }
+      resources.push({ type: "project", projectId: project.projectId, gitInspections });
     }
     for (const record of workspaceRecords) {
-      const observation = await this.inspectWorkspace(record.projectId, record.workspaceId);
-      resources.push({ type: "workspace", observation });
-      resources.push({ type: "runtime-stack", projectId: record.projectId, workspaceId: record.workspaceId, observation: observation.runtimeStack });
-      resources.push({ type: "service", projectId: record.projectId, workspaceId: record.workspaceId, serviceKey: "development",
-        observation: { desiredState: observation.runtimeStack.desiredState, observedState: observation.runtimeStack.observedState, health: "unknown" } });
+      try {
+        const observation = await this.inspectWorkspace(record.projectId, record.workspaceId);
+        resources.push({ type: "workspace", observation });
+        resources.push({ type: "runtime-stack", projectId: record.projectId, workspaceId: record.workspaceId, observation: observation.runtimeStack });
+        resources.push({ type: "service", projectId: record.projectId, workspaceId: record.workspaceId, serviceKey: "development",
+          observation: { desiredState: observation.runtimeStack.desiredState, observedState: observation.runtimeStack.observedState, health: "unknown" } });
+      } catch (error) {
+        if (!isRecoverableGitObservationFailure(error)) throw error;
+        this.logger.warn("agent.observation.workspace_degraded", "Workspace observation was omitted because its Git state exceeded the bounded representation.", {
+          projectId: record.projectId, workspaceId: record.workspaceId, errorCode: error.failure.code, action: "inspect"
+        });
+      }
     }
     return [...resources, ...await this.preview.snapshotResources()];
   }

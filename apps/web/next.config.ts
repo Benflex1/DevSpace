@@ -1,8 +1,9 @@
+import path from "node:path";
 import type { NextConfig } from "next";
 
 interface WebpackConfiguration {
   readonly externals: unknown[];
-  readonly resolve: { extensionAlias?: Record<string, string[]> };
+  readonly resolve: { alias?: Record<string, string>; extensionAlias?: Record<string, string[]> };
 }
 
 function developmentOrigins(): string[] {
@@ -24,6 +25,10 @@ const nextConfig: NextConfig = {
       ...config.resolve.extensionAlias,
       ".js": [".ts", ".tsx", ".js"],
       ".mjs": [".mts", ".mjs"]
+    };
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "monaco-editor/esm": path.resolve(process.cwd(), "node_modules/monaco-editor/esm")
     };
     return config;
   },

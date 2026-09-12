@@ -41,7 +41,8 @@ const retainedSource = {
 };
 
 function inspection(commit = commitA, branch = branchName): GitInspectionData {
-  return { projectId, workspaceId, branchName: branch, headCommit: commit, dirty: false, aheadCount: 1, behindCount: 0 };
+  return { projectId, workspaceId, branchName: branch, headCommit: commit, dirty: false, aheadCount: 1, behindCount: 0,
+    files: [], identity: { name: null, email: null } };
 }
 
 function observation(state: "accepted" | "running" | "succeeded" | "failed", failure?: Exclude<AgentOperationObservation["failure"], null>): AgentOperationObservation {

@@ -23,6 +23,11 @@ import {
   utcTimestampMsSchema,
   workspaceFileRevisionSchema,
   workspaceRelativePathSchema,
+  gitPathSchema,
+  GIT_COMMIT_MESSAGE_MAX_BYTES,
+  GIT_DIFF_MAX_BYTES,
+  GIT_IDENTITY_MAX_BYTES,
+  GIT_STATUS_ENTRY_MAX,
   WORKSPACE_DIRECTORY_ENTRY_MAX,
   WORKSPACE_FILE_MAX_BYTES,
   uuidV7Schema
@@ -90,6 +95,64 @@ export const projectPushDataSchema = z.strictObject({
 export const inspectGitDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema.nullable()
+});
+export const gitWorkspaceFileDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  path: gitPathSchema
+});
+export const gitDiffDataRequestSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  path: gitPathSchema,
+  kind: z.enum(["staged", "unstaged"])
+});
+const boundedGitIdentityFieldSchema = z.string().min(1).max(GIT_IDENTITY_MAX_BYTES).superRefine((value, context) => {
+  if ([...value].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint !== undefined && (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159));
+  })) context.addIssue({ code: "custom", message: "Git identity fields must not contain control characters" });
+});
+export const gitIdentityDataSchema = z.strictObject({
+  name: boundedGitIdentityFieldSchema.nullable(),
+  email: boundedGitIdentityFieldSchema.nullable()
+});
+export const gitFileStateSchema = z.enum(["unchanged", "added", "modified", "deleted", "renamed", "copied", "untracked"]);
+export const gitStatusEntrySchema = z.strictObject({
+  path: gitPathSchema,
+  oldPath: gitPathSchema.nullable(),
+  stagedState: gitFileStateSchema,
+  unstagedState: gitFileStateSchema,
+  untracked: z.boolean(),
+  classification: z.enum(["added", "modified", "deleted", "renamed", "copied"])
+});
+export const gitDiffDataSchema = z.discriminatedUnion("available", [
+  z.strictObject({
+    available: z.literal(true),
+    projectId: uuidV7Schema,
+    workspaceId: uuidV7Schema,
+    path: gitPathSchema,
+    oldPath: gitPathSchema.nullable(),
+    kind: z.enum(["staged", "unstaged"]),
+    oldContent: z.string().max(GIT_DIFF_MAX_BYTES),
+    newContent: z.string().max(GIT_DIFF_MAX_BYTES)
+  }),
+  z.strictObject({
+    available: z.literal(false),
+    projectId: uuidV7Schema,
+    workspaceId: uuidV7Schema,
+    path: gitPathSchema,
+    oldPath: gitPathSchema.nullable(),
+    kind: z.enum(["staged", "unstaged"]),
+    reason: z.enum(["binary", "too-large", "unsupported", "not-found"])
+  })
+]);
+export const gitCommitDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  message: z.string().min(1).max(GIT_COMMIT_MESSAGE_MAX_BYTES),
+  userName: boundedGitIdentityFieldSchema.optional(),
+  userEmail: boundedGitIdentityFieldSchema.optional()
 });
 
 export const workspaceIdentityDataSchema = z.strictObject({
@@ -256,7 +319,9 @@ export const gitInspectionDataSchema = z.strictObject({
   headCommit: gitObjectIdSchema.nullable(),
   dirty: z.boolean(),
   aheadCount: nonNegativeCountSchema,
-  behindCount: nonNegativeCountSchema
+  behindCount: nonNegativeCountSchema,
+  files: z.array(gitStatusEntrySchema).max(GIT_STATUS_ENTRY_MAX).default([]),
+  identity: gitIdentityDataSchema.default({ name: null, email: null })
 }).superRefine((data, context) => {
   if (data.workspaceId === null && data.dirty) {
     context.addIssue({ code: "custom", path: ["dirty"], message: "Managed project stores are never dirty" });
@@ -373,6 +438,13 @@ export type RuntimeStatusData = z.infer<typeof runtimeStatusDataSchema>;
 export type ConfigurationValidationData = z.infer<typeof configurationValidationDataSchema>;
 export type SourceInspectionData = z.infer<typeof sourceInspectionDataSchema>;
 export type GitInspectionData = z.infer<typeof gitInspectionDataSchema>;
+export type GitWorkspaceFileData = z.infer<typeof gitWorkspaceFileDataSchema>;
+export type GitDiffDataRequest = z.infer<typeof gitDiffDataRequestSchema>;
+export type GitIdentityData = z.infer<typeof gitIdentityDataSchema>;
+export type GitFileState = z.infer<typeof gitFileStateSchema>;
+export type GitStatusEntry = z.infer<typeof gitStatusEntrySchema>;
+export type GitDiffData = z.infer<typeof gitDiffDataSchema>;
+export type GitCommitData = z.infer<typeof gitCommitDataSchema>;
 export type WorkspaceInspectionData = z.infer<typeof workspaceInspectionDataSchema>;
 export type ProcessInspectionData = z.infer<typeof processInspectionDataSchema>;
 export type PreviewInspectionData = z.infer<typeof previewInspectionDataSchema>;

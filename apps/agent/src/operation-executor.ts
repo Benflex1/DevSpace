@@ -1,7 +1,7 @@
-import type { AgentExecutionFailure, AgentResourceReference, AgentSnapshotResource } from "@devspace/contracts";
+import type { AgentExecutionFailure, AgentResourceReference, AgentSnapshotResource, GitInspectionData } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { AgentEventLog } from "./event-log.js";
-import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
+import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -10,6 +10,7 @@ function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
   if (typeof request.projectId !== "string") return null;
   if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close", "project.push",
+    "project.git.stage", "project.git.unstage", "project.git.commit",
     "preview.activate", "preview.deactivate"].includes(record.operationName)
     && typeof request.workspaceId === "string") {
     if (["preview.activate", "preview.deactivate"].includes(record.operationName) && typeof request.previewId === "string") {
@@ -43,15 +44,68 @@ export class OperationExecutor {
   ) {}
 
   get isHealthy(): boolean { return this.observationHealthy; }
+  private observationFailureFields(error: unknown): Record<string, unknown> {
+    if (error instanceof AgentExecutionError) {
+      const details = error.failure.details as Record<string, unknown>;
+      const action = typeof details["action"] === "string" ? details["action"] : undefined;
+      return { errorCode: error.failure.code, ...(action === undefined ? {} : { action }) };
+    }
+    return { errorName: error instanceof Error ? error.name : "unknown" };
+  }
+
+  private async refreshResources(event: string, message: string, fields: Record<string, unknown> = {}): Promise<boolean> {
+    try {
+      this.resources = await this.managed.snapshotResources();
+      this.observationHealthy = true;
+      return true;
+    } catch (error) {
+      this.observationHealthy = false;
+      this.logger.warn(event, message, { ...fields, ...this.observationFailureFields(error) });
+      return false;
+    }
+  }
+
   async initialize(): Promise<void> {
-    try { this.resources = await this.managed.snapshotResources(); }
-    catch { this.observationHealthy = false; this.resources = []; }
+    await this.refreshResources("agent.observation.initialize_failed", "Initial Agent resource observation failed; retaining the previous snapshot.");
   }
   snapshotResources(): AgentSnapshotResource[] { return [...this.resources, ...this.execution.snapshotResources()]; }
 
-  private async refreshAfterPreviewMutation(): Promise<void> {
-    try { this.resources = await this.managed.snapshotResources(); }
-    catch { this.observationHealthy = false; this.resources = []; }
+  private async refreshAfterPreviewMutation(operationId: string, operationName: string, resourceFields: Record<string, unknown>): Promise<boolean> {
+    return await this.refreshResources("agent.observation.refresh_failed", "Agent resource observation refresh failed; retaining the previous snapshot.", {
+      operationId, operationName, ...resourceFields
+    });
+  }
+
+  private async refreshWorkspaceGit(operationId: string, operationName: string, projectId: string, workspaceId: string): Promise<void> {
+    let inspection: GitInspectionData;
+    try {
+      inspection = await this.managed.inspectGit(projectId, workspaceId);
+    } catch (error) {
+      this.observationHealthy = false;
+      this.logger.warn("agent.observation.target_refresh_failed", "Target workspace Git observation failed; completed mutation remains recoverable.", {
+        operationId, operationName, projectId, workspaceId, ...this.observationFailureFields(error)
+      });
+      throw error;
+    }
+    const projectIndex = this.resources.findIndex((resource) => resource.type === "project" && resource.projectId === projectId);
+    if (projectIndex === -1) {
+      this.logger.warn("agent.observation.target_cache_missing", "Target workspace Git observation is fresh but its project cache is unavailable.", {
+        operationId, operationName, projectId, workspaceId
+      });
+    } else {
+      const projectResource = this.resources[projectIndex];
+      if (projectResource?.type !== "project") throw new Error("project-resource-index-invalid");
+      type ProjectResource = Extract<AgentSnapshotResource, { type: "project" }>;
+      const inspectionIndex = projectResource.gitInspections.findIndex((item) =>
+        item.scope.kind === "workspace" && item.scope.workspaceId === workspaceId);
+      const target: ProjectResource["gitInspections"][number] = { scope: { kind: "workspace" as const, workspaceId }, inspection };
+      const gitInspections = inspectionIndex === -1
+        ? [...projectResource.gitInspections, target]
+        : projectResource.gitInspections.map((item, index) => index === inspectionIndex ? target : item);
+      this.resources = this.resources.map((resource, index) => index === projectIndex ? { ...projectResource, gitInspections } : resource);
+    }
+    this.observationHealthy = true;
+    this.events.projectInspected(projectId, workspaceId, inspection);
   }
 
   schedule(record: JournalRecord): void {
@@ -83,7 +137,10 @@ export class OperationExecutor {
       ...(typeof request.previewId === "string" ? { previewId: request.previewId } : {})
     };
     const previewMutation = record.operationName === "preview.activate" || record.operationName === "preview.deactivate";
+    const localGitMutation = ["project.git.stage", "project.git.unstage", "project.git.commit"].includes(record.operationName);
     let taskStartCompleted = false;
+    let fetchMutationCompleted = false;
+    let gitMutationCompleted = false;
     try {
       this.logger.info("agent.operation.started", "Agent operation execution started", {
         operationId, operationName: record.operationName, operationState: record.state, ...resourceFields
@@ -113,10 +170,29 @@ export class OperationExecutor {
           await this.managed.fetch((record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).projectId,
             operationId, (record.request as { projectId: string; source?: import("@devspace/contracts").SourceLocator }).source,
             (record.request as { githubAuthorityGeneration?: number }).githubAuthorityGeneration);
+          fetchMutationCompleted = true;
           break;
         case "project.push":
           await this.managed.push(record.request as Parameters<ManagedWorkspaces["push"]>[0], operationId);
           break;
+        case "project.git.stage": {
+          const request = record.request as { projectId: string; workspaceId: string; path: string };
+          await this.managed.stageWorkspaceFile(request.projectId, request.workspaceId, request.path);
+          gitMutationCompleted = true;
+          break;
+        }
+        case "project.git.unstage": {
+          const request = record.request as { projectId: string; workspaceId: string; path: string };
+          await this.managed.unstageWorkspaceFile(request.projectId, request.workspaceId, request.path);
+          gitMutationCompleted = true;
+          break;
+        }
+        case "project.git.commit": {
+          const request = record.request as { projectId: string; workspaceId: string; message: string; userName?: string; userEmail?: string };
+          await this.managed.commitWorkspace(request.projectId, request.workspaceId, request.message, request.userName, request.userEmail);
+          gitMutationCompleted = true;
+          break;
+        }
         case "workspace.create": {
           const request = record.request as Parameters<ManagedWorkspaces["createWorkspace"]>[0];
           await this.managed.createWorkspace(request, operationId);
@@ -157,25 +233,39 @@ export class OperationExecutor {
           await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
           break;
       }
-      if (previewMutation) await this.refreshAfterPreviewMutation();
-      if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close",
+      if (previewMutation) await this.refreshAfterPreviewMutation(operationId, record.operationName, resourceFields);
+      if (localGitMutation) {
+        const request = record.request as { projectId: string; workspaceId: string };
+        await this.refreshWorkspaceGit(operationId, record.operationName, request.projectId, request.workspaceId);
+      } else if (!["configuration-revision.register", "configuration-runtime-plan.register", "task.start", "process.stop", "terminal.create", "terminal.close",
         "preview.activate", "preview.deactivate"]
         .includes(record.operationName)) {
-        try { this.resources = await this.managed.snapshotResources(); }
-        catch (error) { this.observationHealthy = false; throw error; }
+        const refreshed = await this.refreshResources("agent.observation.refresh_failed", "Agent resource observation refresh failed; retaining the previous snapshot.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
         const request = record.request as { projectId: string; workspaceId?: string };
         if (record.operationName === "workspace.create" && request.workspaceId !== undefined) {
           this.events.workspaceCreated(operationId, request.projectId, request.workspaceId);
-          const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
-          const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
-            item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
-          if (inspection === undefined) throw new Error("workspace-observation-missing");
-          this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+          if (refreshed) {
+            const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
+            const inspection = project?.type === "project" ? project.gitInspections.find((item) =>
+              item.scope.kind === "workspace" && item.scope.workspaceId === request.workspaceId)?.inspection : undefined;
+            if (inspection === undefined) {
+              this.logger.warn("agent.observation.target_missing", "Successful operation completed without a target workspace inspection.", {
+                operationId, operationName: record.operationName, projectId: request.projectId, workspaceId: request.workspaceId
+              });
+            } else this.events.projectInspected(request.projectId, request.workspaceId, inspection);
+          }
         } else if (record.operationName !== "workspace.start" && record.operationName !== "workspace.stop") {
-          const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
-          const inspection = project?.type === "project" ? project.gitInspections.find((item) => item.scope.kind === "managed-store")?.inspection : undefined;
-          if (inspection === undefined) throw new Error("project-observation-missing");
-          this.events.projectInspected(request.projectId, null, inspection);
+          if (refreshed) {
+            const project = this.resources.find((item) => item.type === "project" && item.projectId === request.projectId);
+            const inspection = project?.type === "project" ? project.gitInspections.find((item) => item.scope.kind === "managed-store")?.inspection : undefined;
+            if (inspection === undefined) {
+              this.logger.warn("agent.observation.target_missing", "Successful operation completed without a target project inspection.", {
+                operationId, operationName: record.operationName, projectId: request.projectId
+              });
+            } else this.events.projectInspected(request.projectId, null, inspection);
+          }
         }
       }
       await this.journal.succeed(operationId);
@@ -184,10 +274,22 @@ export class OperationExecutor {
         operationId, operationName: record.operationName, operationState: "succeeded", ...resourceFields
       });
     } catch (error) {
-      if (previewMutation) await this.refreshAfterPreviewMutation();
+      if (previewMutation) await this.refreshAfterPreviewMutation(operationId, record.operationName, resourceFields);
       // Once private execution evidence says the start occurred, a later journal write outage
       // must leave this operation resumable; it must never rewrite successful start as failure.
       if (record.operationName === "task.start" && (taskStartCompleted || error instanceof TaskStartRecoveryRequiredError)) return;
+      if (localGitMutation && gitMutationCompleted) {
+        this.logger.warn("agent.operation.git_recovery_required", "Git mutation completed; operation remains recoverable after post-success failure.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
+        return;
+      }
+      if (record.operationName === "project.fetch" && (fetchMutationCompleted || error instanceof FetchMutationRecoveryRequiredError)) {
+        this.logger.warn("agent.operation.fetch_recovery_required", "Git Fetch completed; operation remains recoverable after post-success failure.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
+        return;
+      }
       const failure: AgentExecutionFailure = error instanceof AgentExecutionError ? error.failure : {
         code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
         details: { incidentId: this.createId() }

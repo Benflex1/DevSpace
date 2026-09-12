@@ -7,6 +7,8 @@ export interface EditorDocument {
   readonly conflict: string | null;
 }
 
+export const EDITOR_SAVED_STATUS_DURATION_MS = 1_500 as const;
+
 export function updateEditorContent(document: EditorDocument, content: string): EditorDocument {
   return { ...document, content, dirty: content !== document.savedContent };
 }

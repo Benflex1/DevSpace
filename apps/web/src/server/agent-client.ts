@@ -17,6 +17,9 @@ import {
   type CreateManagedStoreData,
   type CreateWorkspaceData,
   type GitInspectionData,
+  type GitDiffData,
+  type GitCommitData,
+  type GitWorkspaceFileData,
   type HealthData,
   type MutationReceipt,
   type PreviewInspectionData,
@@ -32,6 +35,7 @@ import {
   type GithubRepositoryPage,
   type GithubRepositoryResolution,
   WORKSPACE_FILE_MAX_BYTES,
+  GIT_DIFF_MAX_BYTES,
   type WorkspaceFileReadResult,
   type WorkspaceFileSaveResult,
   type WorkspaceFilesListResult
@@ -46,6 +50,9 @@ import {
 } from "./ai-stream-admission.js";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
+// JSON escaping can roughly double newline/control-heavy text; keep the transport bound
+// above two bounded content sides without making the response unbounded.
+const GIT_DIFF_RESPONSE_MAX_BYTES = GIT_DIFF_MAX_BYTES * 4 + 128 * 1024;
 const WORKSPACE_FILE_RESPONSE_MAX_BYTES = WORKSPACE_FILE_MAX_BYTES * 8;
 const AI_EVENT_STREAM_PARSER_SLAB_BYTES = 64 * 1024;
 const AI_EVENT_STREAM_PARSER_MAX_SEGMENTS =
@@ -180,7 +187,7 @@ export function createAgentClient(socketPath: string, options: {
     | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.installation.refresh"
     | "github.installation.disconnect" | "github.installation.reconnect.prepare"
     | "github.repositories.list" | "github.repositories.resolve"
-    | "project.managed-store.create" | "project.fetch" | "project.push" | "project.git.inspect" | "workspace.create"
+    | "project.managed-store.create" | "project.fetch" | "project.push" | "project.git.inspect" | "project.git.diff" | "project.git.stage" | "project.git.unstage" | "project.git.commit" | "workspace.create"
     | "workspace.inspect" | "workspace.files.list" | "workspace.files.read" | "workspace.files.save" | "workspace.start" | "workspace.stop" | "task.start" | "process.stop" | "process.inspect"
     | "terminal.create" | "terminal.close" | "preview.activate" | "preview.deactivate" | "preview.inspect" | "snapshot.get"
     | "ai-provider.inspect" | "ai-session.start" | "ai-session.resume" | "ai-session.turn.send" | "ai-session.turn.interrupt"
@@ -237,7 +244,8 @@ export function createAgentClient(socketPath: string, options: {
       });
     };
     const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs : observationTimeoutMs;
-    const maxResponseBytes = operation.startsWith("workspace.files.") ? WORKSPACE_FILE_RESPONSE_MAX_BYTES : MAX_RESPONSE_BYTES;
+    const maxResponseBytes = operation === "project.git.diff" ? GIT_DIFF_RESPONSE_MAX_BYTES
+      : operation.startsWith("workspace.files.") ? WORKSPACE_FILE_RESPONSE_MAX_BYTES : MAX_RESPONSE_BYTES;
     let body: string | undefined;
     try { body = data === undefined ? undefined : JSON.stringify(endpoint.requestBodySchema.parse({ data })); }
     catch (error) {
@@ -371,6 +379,17 @@ export function createAgentClient(socketPath: string, options: {
     },
     inspectGit: async (projectId: string, workspaceId: string | null): Promise<GitInspectionData> =>
       await call("project.git.inspect", { projectId, workspaceId }) as GitInspectionData,
+    diffGit: async (projectId: string, workspaceId: string, path: string, kind: "staged" | "unstaged"): Promise<GitDiffData> =>
+      await call("project.git.diff", { projectId, workspaceId, path, kind }) as GitDiffData,
+    stageWorkspaceFile: async (operationId: string, data: GitWorkspaceFileData): Promise<void> => {
+      await call("project.git.stage", data, operationId);
+    },
+    unstageWorkspaceFile: async (operationId: string, data: GitWorkspaceFileData): Promise<void> => {
+      await call("project.git.unstage", data, operationId);
+    },
+    commitWorkspace: async (operationId: string, data: GitCommitData): Promise<void> => {
+      await call("project.git.commit", data, operationId);
+    },
     inspectWorkspace: async (projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> =>
       await call("workspace.inspect", { projectId, workspaceId }) as WorkspaceInspectionData,
     listWorkspaceDirectory: async (projectId: string, workspaceId: string, path: string): Promise<WorkspaceFilesListResult> =>

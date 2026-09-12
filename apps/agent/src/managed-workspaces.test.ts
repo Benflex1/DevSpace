@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
-import { createWorkspaceDataSchema } from "@devspace/contracts";
+import { createWorkspaceDataSchema, gitBranchNameSchema } from "@devspace/contracts";
 import {
   canonicalizeProjectOptionsV1, canonicalizeRuntimePlanV1, compileRuntimePlanV1, hashProjectOptionsV1, hashRuntimePlanV1,
   parseProjectOptionsV1
@@ -15,7 +15,7 @@ import type { GithubAppAuthority } from "./github-app.js";
 import { DockerEngineClient } from "./docker-runtime.js";
 import { PreviewRuntimeManager } from "./preview-runtime.js";
 import { WorkspaceRuntimeError, WorkspaceRuntimeManager } from "./workspace-runtime.js";
-import { durableJsonWriter, identityOf, type AtomicJsonWriter } from "./private-state.js";
+import { PrivateStateCorruptionError, durableJsonWriter, identityOf, type AtomicJsonWriter } from "./private-state.js";
 
 const exec = promisify(execFile);
 const projectId = "018f0f00-0000-7000-8000-000000000001";
@@ -141,6 +141,50 @@ test("creates, owns, revalidates, and reloads a real store and worktree", async 
   await restarted.initialize();
   await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ workspaceId: null });
   await expect(restarted.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "main", headCommit: h.firstCommit, dirty: false });
+});
+
+test("isolates a recoverable workspace Git observation failure during snapshots", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  const failedWorkspaceId = "018f0f00-0000-7000-8000-000000000099";
+  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  await h.managed.createWorkspace({ ...h.workspace, workspaceId: failedWorkspaceId, workspaceSlug: "oversized", branchName: gitBranchNameSchema.parse("oversized") },
+    "018f0f00-0000-7000-8000-000000000012");
+  class DegradedManagedWorkspaces extends ManagedWorkspaces {
+    override async inspectGit(project: string, workspace: string | null) {
+      if (workspace === failedWorkspaceId) {
+        throw new AgentExecutionError({ code: "GIT_OPERATION_FAILED", message: "status output exceeded the observation bound.", retryable: false, details: { action: "inspect" } });
+      }
+      return await super.inspectGit(project, workspace);
+    }
+  }
+  const managed = new DegradedManagedWorkspaces(h.roots, h.git);
+  await managed.initialize();
+
+  const resources = await managed.snapshotResources();
+  const projectResource = resources.find((resource) => resource.type === "project" && resource.projectId === projectId);
+  expect(projectResource?.type).toBe("project");
+  if (projectResource?.type !== "project") throw new Error("project resource missing");
+  expect(projectResource.gitInspections).toEqual(expect.arrayContaining([
+    expect.objectContaining({ scope: { kind: "workspace", workspaceId } })
+  ]));
+  expect(projectResource.gitInspections).not.toEqual(expect.arrayContaining([
+    expect.objectContaining({ scope: { kind: "workspace", workspaceId: failedWorkspaceId } })
+  ]));
+  expect(resources.some((resource) => resource.type === "workspace" && resource.observation.workspaceId === failedWorkspaceId)).toBe(false);
+});
+
+test("propagates private-state corruption instead of swallowing it during snapshots", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId); await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const managed = new ManagedWorkspaces(h.roots, h.git);
+  await managed.initialize();
+  const ownershipPath = path.join(h.roots.state, "ownership/workspaces", `${workspaceId}.json`);
+  const saved = await readJson<WorkspaceOwnershipTestRecord>(ownershipPath);
+  await writeJson(ownershipPath, { ...saved, projectId: "not-a-uuid" });
+
+  await expect(managed.snapshotResources()).rejects.toBeInstanceOf(PrivateStateCorruptionError);
+  expect(managed.isHealthy).toBe(false);
 });
 
 test("rebinds finalized store ownership after a device-only change and persists the live identity", async () => {

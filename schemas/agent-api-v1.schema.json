@@ -741,6 +741,61 @@
       "properties": {},
       "additionalProperties": false
     },
+    "error.GIT_MUTATION_OUTCOME_UNCERTAIN.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "error.GIT_NOTHING_TO_COMMIT.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "error.GIT_COMMIT_MESSAGE_INVALID.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": [
+            "empty",
+            "too-large"
+          ]
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "error.GIT_IDENTITY_REQUIRED.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "error.GIT_OPERATION_FAILED.details": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "inspect",
+            "diff",
+            "stage",
+            "unstage",
+            "commit"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
     "error.ROOTLESS_RUNTIME_UNAVAILABLE.details": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -2010,6 +2065,176 @@
             "details": {
               "type": "object",
               "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GIT_NOTHING_TO_COMMIT"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GIT_COMMIT_MESSAGE_INVALID"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "empty",
+                    "too-large"
+                  ]
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GIT_IDENTITY_REQUIRED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "GIT_OPERATION_FAILED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean",
+              "const": false
+            },
+            "details": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "inspect",
+                    "diff",
+                    "stage",
+                    "unstage",
+                    "commit"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ],
               "additionalProperties": false
             }
           },
@@ -3675,6 +3900,176 @@
                   "properties": {
                     "code": {
                       "type": "string",
+                      "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GIT_NOTHING_TO_COMMIT"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GIT_COMMIT_MESSAGE_INVALID"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "type": "string",
+                          "enum": [
+                            "empty",
+                            "too-large"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GIT_IDENTITY_REQUIRED"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "const": "GIT_OPERATION_FAILED"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "retryable": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "inspect",
+                            "diff",
+                            "stage",
+                            "unstage",
+                            "commit"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "action"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable",
+                    "details"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
                       "const": "GITHUB_TOKEN_LEASE_ACTIVE"
                     },
                     "message": {
@@ -4422,6 +4817,117 @@
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 2147483647
+                      },
+                      "files": {
+                        "default": [],
+                        "maxItems": 1000,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "oldPath": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "stagedState": {
+                              "type": "string",
+                              "enum": [
+                                "unchanged",
+                                "added",
+                                "modified",
+                                "deleted",
+                                "renamed",
+                                "copied",
+                                "untracked"
+                              ]
+                            },
+                            "unstagedState": {
+                              "type": "string",
+                              "enum": [
+                                "unchanged",
+                                "added",
+                                "modified",
+                                "deleted",
+                                "renamed",
+                                "copied",
+                                "untracked"
+                              ]
+                            },
+                            "untracked": {
+                              "type": "boolean"
+                            },
+                            "classification": {
+                              "type": "string",
+                              "enum": [
+                                "added",
+                                "modified",
+                                "deleted",
+                                "renamed",
+                                "copied"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "oldPath",
+                            "stagedState",
+                            "unstagedState",
+                            "untracked",
+                            "classification"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "identity": {
+                        "default": {
+                          "name": null,
+                          "email": null
+                        },
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "email": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "email"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -5046,6 +5552,117 @@
                               "type": "integer",
                               "minimum": 0,
                               "maximum": 2147483647
+                            },
+                            "files": {
+                              "default": [],
+                              "maxItems": 1000,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 4096
+                                  },
+                                  "oldPath": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 4096
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "stagedState": {
+                                    "type": "string",
+                                    "enum": [
+                                      "unchanged",
+                                      "added",
+                                      "modified",
+                                      "deleted",
+                                      "renamed",
+                                      "copied",
+                                      "untracked"
+                                    ]
+                                  },
+                                  "unstagedState": {
+                                    "type": "string",
+                                    "enum": [
+                                      "unchanged",
+                                      "added",
+                                      "modified",
+                                      "deleted",
+                                      "renamed",
+                                      "copied",
+                                      "untracked"
+                                    ]
+                                  },
+                                  "untracked": {
+                                    "type": "boolean"
+                                  },
+                                  "classification": {
+                                    "type": "string",
+                                    "enum": [
+                                      "added",
+                                      "modified",
+                                      "deleted",
+                                      "renamed",
+                                      "copied"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "path",
+                                  "oldPath",
+                                  "stagedState",
+                                  "unstagedState",
+                                  "untracked",
+                                  "classification"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "identity": {
+                              "default": {
+                                "name": null,
+                                "email": null
+                              },
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 512
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "email": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 512
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "email"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "required": [
@@ -6648,6 +7265,176 @@
                           "details": {
                             "type": "object",
                             "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GIT_NOTHING_TO_COMMIT"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GIT_COMMIT_MESSAGE_INVALID"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "empty",
+                                  "too-large"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GIT_IDENTITY_REQUIRED"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable",
+                          "details"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "const": "GIT_OPERATION_FAILED"
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "retryable": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {
+                              "action": {
+                                "type": "string",
+                                "enum": [
+                                  "inspect",
+                                  "diff",
+                                  "stage",
+                                  "unstage",
+                                  "commit"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "action"
+                            ],
                             "additionalProperties": false
                           }
                         },
@@ -8950,6 +9737,176 @@
                       "properties": {
                         "code": {
                           "type": "string",
+                          "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GIT_NOTHING_TO_COMMIT"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GIT_COMMIT_MESSAGE_INVALID"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {
+                            "reason": {
+                              "type": "string",
+                              "enum": [
+                                "empty",
+                                "too-large"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GIT_IDENTITY_REQUIRED"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {},
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "const": "GIT_OPERATION_FAILED"
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "retryable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "details": {
+                          "type": "object",
+                          "properties": {
+                            "action": {
+                              "type": "string",
+                              "enum": [
+                                "inspect",
+                                "diff",
+                                "stage",
+                                "unstage",
+                                "commit"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "action"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "retryable",
+                        "details"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
                           "const": "GITHUB_TOKEN_LEASE_ACTIVE"
                         },
                         "message": {
@@ -9647,6 +10604,117 @@
                       "type": "integer",
                       "minimum": 0,
                       "maximum": 2147483647
+                    },
+                    "files": {
+                      "default": [],
+                      "maxItems": 1000,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          },
+                          "oldPath": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 4096
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "stagedState": {
+                            "type": "string",
+                            "enum": [
+                              "unchanged",
+                              "added",
+                              "modified",
+                              "deleted",
+                              "renamed",
+                              "copied",
+                              "untracked"
+                            ]
+                          },
+                          "unstagedState": {
+                            "type": "string",
+                            "enum": [
+                              "unchanged",
+                              "added",
+                              "modified",
+                              "deleted",
+                              "renamed",
+                              "copied",
+                              "untracked"
+                            ]
+                          },
+                          "untracked": {
+                            "type": "boolean"
+                          },
+                          "classification": {
+                            "type": "string",
+                            "enum": [
+                              "added",
+                              "modified",
+                              "deleted",
+                              "renamed",
+                              "copied"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "oldPath",
+                          "stagedState",
+                          "unstagedState",
+                          "untracked",
+                          "classification"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "identity": {
+                      "default": {
+                        "name": null,
+                        "email": null
+                      },
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "email": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "email"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -26462,6 +27530,76 @@
             "error"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_OPERATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "const": "inspect"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -26578,6 +27716,117 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 2147483647
+            },
+            "files": {
+              "default": [],
+              "maxItems": 1000,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "oldPath": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "stagedState": {
+                    "type": "string",
+                    "enum": [
+                      "unchanged",
+                      "added",
+                      "modified",
+                      "deleted",
+                      "renamed",
+                      "copied",
+                      "untracked"
+                    ]
+                  },
+                  "unstagedState": {
+                    "type": "string",
+                    "enum": [
+                      "unchanged",
+                      "added",
+                      "modified",
+                      "deleted",
+                      "renamed",
+                      "copied",
+                      "untracked"
+                    ]
+                  },
+                  "untracked": {
+                    "type": "boolean"
+                  },
+                  "classification": {
+                    "type": "string",
+                    "enum": [
+                      "added",
+                      "modified",
+                      "deleted",
+                      "renamed",
+                      "copied"
+                    ]
+                  }
+                },
+                "required": [
+                  "path",
+                  "oldPath",
+                  "stagedState",
+                  "unstagedState",
+                  "untracked",
+                  "classification"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "identity": {
+              "default": {
+                "name": null,
+                "email": null
+              },
+              "type": "object",
+              "properties": {
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "email": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "email"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -26588,6 +27837,3906 @@
             "dirty",
             "aheadCount",
             "behindCount"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "meta",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.diff.headers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "X-DevSpace-Protocol-Version": {
+          "type": "string",
+          "const": "1"
+        },
+        "X-DevSpace-Request-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "X-DevSpace-Sent-At": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.diff.pathParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "operation.project.git.diff.errors": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROTOCOL_VERSION_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "supportedProtocolVersion": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "receivedProtocolVersion": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "supportedProtocolVersion",
+                    "receivedProtocolVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "REQUEST_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "enum": [
+                        "headers",
+                        "path",
+                        "query",
+                        "body"
+                      ]
+                    },
+                    "field": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9.[\\]_-]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "missing",
+                        "malformed",
+                        "unknown",
+                        "inconsistent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "field",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AGENT_INTERNAL_ERROR"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "incidentId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROJECT_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "projectId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "projectId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "RESOURCE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "workspace"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_PATH_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "absolute",
+                        "backslash",
+                        "control",
+                        "dot",
+                        "dot-dot",
+                        "empty-component",
+                        "git",
+                        "nul",
+                        "symlink"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_FILE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_OPERATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "const": "diff"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation.project.git.diff.requestBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "staged",
+                "unstaged"
+              ]
+            }
+          },
+          "required": [
+            "projectId",
+            "workspaceId",
+            "path",
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.diff.successBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "respondedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "requestId",
+            "respondedAt"
+          ],
+          "additionalProperties": false
+        },
+        "data": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "available": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "projectId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "oldPath": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "staged",
+                    "unstaged"
+                  ]
+                },
+                "oldContent": {
+                  "type": "string",
+                  "maxLength": 262144
+                },
+                "newContent": {
+                  "type": "string",
+                  "maxLength": 262144
+                }
+              },
+              "required": [
+                "available",
+                "projectId",
+                "workspaceId",
+                "path",
+                "oldPath",
+                "kind",
+                "oldContent",
+                "newContent"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "available": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "projectId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "oldPath": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "staged",
+                    "unstaged"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "binary",
+                    "too-large",
+                    "unsupported",
+                    "not-found"
+                  ]
+                }
+              },
+              "required": [
+                "available",
+                "projectId",
+                "workspaceId",
+                "path",
+                "oldPath",
+                "kind",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "meta",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.stage.headers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "X-DevSpace-Protocol-Version": {
+          "type": "string",
+          "const": "1"
+        },
+        "X-DevSpace-Request-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "X-DevSpace-Sent-At": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "X-DevSpace-Operation-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At",
+        "X-DevSpace-Operation-Id"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.stage.pathParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "operation.project.git.stage.errors": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROTOCOL_VERSION_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "supportedProtocolVersion": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "receivedProtocolVersion": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "supportedProtocolVersion",
+                    "receivedProtocolVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "REQUEST_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "enum": [
+                        "headers",
+                        "path",
+                        "query",
+                        "body"
+                      ]
+                    },
+                    "field": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9.[\\]_-]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "missing",
+                        "malformed",
+                        "unknown",
+                        "inconsistent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "field",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AGENT_INTERNAL_ERROR"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "incidentId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "OPERATION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "operation-name-mismatch",
+                        "request-mismatch"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operationId",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "OPERATION_JOURNAL_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable",
+                        "corrupt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROJECT_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "projectId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "projectId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "RESOURCE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "workspace"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_PATH_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "absolute",
+                        "backslash",
+                        "control",
+                        "dot",
+                        "dot-dot",
+                        "empty-component",
+                        "git",
+                        "nul",
+                        "symlink"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_FILE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_FILE_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "binary",
+                        "directory",
+                        "special"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_OPERATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "const": "stage"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation.project.git.stage.requestBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "projectId",
+            "workspaceId",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.stage.successBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "respondedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "requestId",
+            "respondedAt"
+          ],
+          "additionalProperties": false
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "required": [
+            "operationId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "meta",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.unstage.headers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "X-DevSpace-Protocol-Version": {
+          "type": "string",
+          "const": "1"
+        },
+        "X-DevSpace-Request-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "X-DevSpace-Sent-At": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "X-DevSpace-Operation-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At",
+        "X-DevSpace-Operation-Id"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.unstage.pathParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "operation.project.git.unstage.errors": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROTOCOL_VERSION_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "supportedProtocolVersion": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "receivedProtocolVersion": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "supportedProtocolVersion",
+                    "receivedProtocolVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "REQUEST_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "enum": [
+                        "headers",
+                        "path",
+                        "query",
+                        "body"
+                      ]
+                    },
+                    "field": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9.[\\]_-]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "missing",
+                        "malformed",
+                        "unknown",
+                        "inconsistent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "field",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AGENT_INTERNAL_ERROR"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "incidentId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "OPERATION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "operation-name-mismatch",
+                        "request-mismatch"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operationId",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "OPERATION_JOURNAL_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable",
+                        "corrupt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROJECT_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "projectId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "projectId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "RESOURCE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "workspace"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_PATH_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "absolute",
+                        "backslash",
+                        "control",
+                        "dot",
+                        "dot-dot",
+                        "empty-component",
+                        "git",
+                        "nul",
+                        "symlink"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "WORKSPACE_FILE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_OPERATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "const": "unstage"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation.project.git.unstage.requestBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "projectId",
+            "workspaceId",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.unstage.successBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "respondedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "requestId",
+            "respondedAt"
+          ],
+          "additionalProperties": false
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "required": [
+            "operationId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "meta",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.commit.headers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "X-DevSpace-Protocol-Version": {
+          "type": "string",
+          "const": "1"
+        },
+        "X-DevSpace-Request-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "X-DevSpace-Sent-At": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "X-DevSpace-Operation-Id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At",
+        "X-DevSpace-Operation-Id"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.commit.pathParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "operation.project.git.commit.errors": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROTOCOL_VERSION_UNSUPPORTED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "supportedProtocolVersion": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "receivedProtocolVersion": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "supportedProtocolVersion",
+                    "receivedProtocolVersion"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "REQUEST_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "enum": [
+                        "headers",
+                        "path",
+                        "query",
+                        "body"
+                      ]
+                    },
+                    "field": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9.[\\]_-]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "missing",
+                        "malformed",
+                        "unknown",
+                        "inconsistent"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "field",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "AGENT_INTERNAL_ERROR"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "incidentId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "incidentId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "OPERATION_CONFLICT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "operation-name-mismatch",
+                        "request-mismatch"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operationId",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "OPERATION_JOURNAL_UNAVAILABLE"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable",
+                        "corrupt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "PROJECT_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "projectId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "projectId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "RESOURCE_NOT_FOUND"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "resource": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "workspace"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "resource"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_NOTHING_TO_COMMIT"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_COMMIT_MESSAGE_INVALID"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "empty",
+                        "too-large"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_IDENTITY_REQUIRED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_OPERATION_FAILED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "const": "commit"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "protocolVersion": {
+                  "type": "number",
+                  "const": 1
+                },
+                "requestId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                },
+                "respondedAt": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "protocolVersion",
+                "requestId",
+                "respondedAt"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "details": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "meta",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operation.project.git.commit.requestBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "userName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "userEmail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "projectId",
+            "workspaceId",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "operation.project.git.commit.successBody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "respondedAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "protocolVersion",
+            "requestId",
+            "respondedAt"
+          ],
+          "additionalProperties": false
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "required": [
+            "operationId"
           ],
           "additionalProperties": false
         }
@@ -44342,6 +49491,117 @@
                                   "type": "integer",
                                   "minimum": 0,
                                   "maximum": 2147483647
+                                },
+                                "files": {
+                                  "default": [],
+                                  "maxItems": 1000,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "path": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 4096
+                                      },
+                                      "oldPath": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 4096
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "stagedState": {
+                                        "type": "string",
+                                        "enum": [
+                                          "unchanged",
+                                          "added",
+                                          "modified",
+                                          "deleted",
+                                          "renamed",
+                                          "copied",
+                                          "untracked"
+                                        ]
+                                      },
+                                      "unstagedState": {
+                                        "type": "string",
+                                        "enum": [
+                                          "unchanged",
+                                          "added",
+                                          "modified",
+                                          "deleted",
+                                          "renamed",
+                                          "copied",
+                                          "untracked"
+                                        ]
+                                      },
+                                      "untracked": {
+                                        "type": "boolean"
+                                      },
+                                      "classification": {
+                                        "type": "string",
+                                        "enum": [
+                                          "added",
+                                          "modified",
+                                          "deleted",
+                                          "renamed",
+                                          "copied"
+                                        ]
+                                      }
+                                    },
+                                    "required": [
+                                      "path",
+                                      "oldPath",
+                                      "stagedState",
+                                      "unstagedState",
+                                      "untracked",
+                                      "classification"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "identity": {
+                                  "default": {
+                                    "name": null,
+                                    "email": null
+                                  },
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string",
+                                          "minLength": 1,
+                                          "maxLength": 512
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "email": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string",
+                                          "minLength": 1,
+                                          "maxLength": 512
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "email"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "required": [
@@ -45944,6 +51204,176 @@
                               "details": {
                                 "type": "object",
                                 "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GIT_MUTATION_OUTCOME_UNCERTAIN"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GIT_NOTHING_TO_COMMIT"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GIT_COMMIT_MESSAGE_INVALID"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {
+                                  "reason": {
+                                    "type": "string",
+                                    "enum": [
+                                      "empty",
+                                      "too-large"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "reason"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GIT_IDENTITY_REQUIRED"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message",
+                              "retryable",
+                              "details"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "const": "GIT_OPERATION_FAILED"
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "retryable": {
+                                "type": "boolean",
+                                "const": false
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {
+                                  "action": {
+                                    "type": "string",
+                                    "enum": [
+                                      "inspect",
+                                      "diff",
+                                      "stage",
+                                      "unstage",
+                                      "commit"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "action"
+                                ],
                                 "additionalProperties": false
                               }
                             },
@@ -66227,7 +71657,7 @@
     }
   },
   "x-devspace-protocol-version": 1,
-  "x-devspace-endpoint-count": 50,
+  "x-devspace-endpoint-count": 54,
   "x-devspace-operations": {
     "agent.health.get": {
       "method": "GET",
@@ -67310,6 +72740,414 @@
         },
         {
           "code": "SOURCE_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "GIT_OPERATION_FAILED",
+          "statuses": [
+            409,
+            503
+          ]
+        }
+      ]
+    },
+    "project.git.diff": {
+      "method": "POST",
+      "path": "/v1/projects/git-diff",
+      "classification": "non-mutating",
+      "operationJournalPolicy": null,
+      "requiredDevSpaceHeaders": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At"
+      ],
+      "successStatus": 200,
+      "successContentType": "application/json",
+      "responseKind": "json-envelope",
+      "errorsAfterSuccessBegins": false,
+      "headers": {
+        "$ref": "#/$defs/operation.project.git.diff.headers"
+      },
+      "pathParameters": {
+        "$ref": "#/$defs/operation.project.git.diff.pathParameters"
+      },
+      "query": false,
+      "requestBody": {
+        "$ref": "#/$defs/operation.project.git.diff.requestBody"
+      },
+      "successBody": {
+        "$ref": "#/$defs/operation.project.git.diff.successBody"
+      },
+      "errorSchema": {
+        "$ref": "#/$defs/operation.project.git.diff.errors"
+      },
+      "errors": [
+        {
+          "code": "PROTOCOL_VERSION_UNSUPPORTED",
+          "statuses": [
+            400,
+            426
+          ]
+        },
+        {
+          "code": "REQUEST_INVALID",
+          "statuses": [
+            400
+          ]
+        },
+        {
+          "code": "AGENT_INTERNAL_ERROR",
+          "statuses": [
+            500
+          ]
+        },
+        {
+          "code": "PROJECT_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "RESOURCE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "WORKSPACE_PATH_INVALID",
+          "statuses": [
+            422
+          ]
+        },
+        {
+          "code": "WORKSPACE_FILE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "GIT_OPERATION_FAILED",
+          "statuses": [
+            409,
+            503
+          ]
+        }
+      ]
+    },
+    "project.git.stage": {
+      "method": "POST",
+      "path": "/v1/projects/stage",
+      "classification": "mutation",
+      "operationJournalPolicy": null,
+      "requiredDevSpaceHeaders": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At",
+        "X-DevSpace-Operation-Id"
+      ],
+      "successStatus": 202,
+      "successContentType": "application/json",
+      "responseKind": "json-envelope",
+      "errorsAfterSuccessBegins": false,
+      "headers": {
+        "$ref": "#/$defs/operation.project.git.stage.headers"
+      },
+      "pathParameters": {
+        "$ref": "#/$defs/operation.project.git.stage.pathParameters"
+      },
+      "query": false,
+      "requestBody": {
+        "$ref": "#/$defs/operation.project.git.stage.requestBody"
+      },
+      "successBody": {
+        "$ref": "#/$defs/operation.project.git.stage.successBody"
+      },
+      "errorSchema": {
+        "$ref": "#/$defs/operation.project.git.stage.errors"
+      },
+      "errors": [
+        {
+          "code": "PROTOCOL_VERSION_UNSUPPORTED",
+          "statuses": [
+            400,
+            426
+          ]
+        },
+        {
+          "code": "REQUEST_INVALID",
+          "statuses": [
+            400
+          ]
+        },
+        {
+          "code": "AGENT_INTERNAL_ERROR",
+          "statuses": [
+            500
+          ]
+        },
+        {
+          "code": "OPERATION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
+          "code": "OPERATION_JOURNAL_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "PROJECT_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "RESOURCE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "WORKSPACE_PATH_INVALID",
+          "statuses": [
+            422
+          ]
+        },
+        {
+          "code": "WORKSPACE_FILE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "WORKSPACE_FILE_UNSUPPORTED",
+          "statuses": [
+            422
+          ]
+        },
+        {
+          "code": "GIT_OPERATION_FAILED",
+          "statuses": [
+            409,
+            503
+          ]
+        },
+        {
+          "code": "GIT_MUTATION_OUTCOME_UNCERTAIN",
+          "statuses": [
+            503
+          ]
+        }
+      ]
+    },
+    "project.git.unstage": {
+      "method": "POST",
+      "path": "/v1/projects/unstage",
+      "classification": "mutation",
+      "operationJournalPolicy": null,
+      "requiredDevSpaceHeaders": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At",
+        "X-DevSpace-Operation-Id"
+      ],
+      "successStatus": 202,
+      "successContentType": "application/json",
+      "responseKind": "json-envelope",
+      "errorsAfterSuccessBegins": false,
+      "headers": {
+        "$ref": "#/$defs/operation.project.git.unstage.headers"
+      },
+      "pathParameters": {
+        "$ref": "#/$defs/operation.project.git.unstage.pathParameters"
+      },
+      "query": false,
+      "requestBody": {
+        "$ref": "#/$defs/operation.project.git.unstage.requestBody"
+      },
+      "successBody": {
+        "$ref": "#/$defs/operation.project.git.unstage.successBody"
+      },
+      "errorSchema": {
+        "$ref": "#/$defs/operation.project.git.unstage.errors"
+      },
+      "errors": [
+        {
+          "code": "PROTOCOL_VERSION_UNSUPPORTED",
+          "statuses": [
+            400,
+            426
+          ]
+        },
+        {
+          "code": "REQUEST_INVALID",
+          "statuses": [
+            400
+          ]
+        },
+        {
+          "code": "AGENT_INTERNAL_ERROR",
+          "statuses": [
+            500
+          ]
+        },
+        {
+          "code": "OPERATION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
+          "code": "OPERATION_JOURNAL_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "PROJECT_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "RESOURCE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "WORKSPACE_PATH_INVALID",
+          "statuses": [
+            422
+          ]
+        },
+        {
+          "code": "WORKSPACE_FILE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "GIT_OPERATION_FAILED",
+          "statuses": [
+            409,
+            503
+          ]
+        },
+        {
+          "code": "GIT_MUTATION_OUTCOME_UNCERTAIN",
+          "statuses": [
+            503
+          ]
+        }
+      ]
+    },
+    "project.git.commit": {
+      "method": "POST",
+      "path": "/v1/projects/commit",
+      "classification": "mutation",
+      "operationJournalPolicy": null,
+      "requiredDevSpaceHeaders": [
+        "X-DevSpace-Protocol-Version",
+        "X-DevSpace-Request-Id",
+        "X-DevSpace-Sent-At",
+        "X-DevSpace-Operation-Id"
+      ],
+      "successStatus": 202,
+      "successContentType": "application/json",
+      "responseKind": "json-envelope",
+      "errorsAfterSuccessBegins": false,
+      "headers": {
+        "$ref": "#/$defs/operation.project.git.commit.headers"
+      },
+      "pathParameters": {
+        "$ref": "#/$defs/operation.project.git.commit.pathParameters"
+      },
+      "query": false,
+      "requestBody": {
+        "$ref": "#/$defs/operation.project.git.commit.requestBody"
+      },
+      "successBody": {
+        "$ref": "#/$defs/operation.project.git.commit.successBody"
+      },
+      "errorSchema": {
+        "$ref": "#/$defs/operation.project.git.commit.errors"
+      },
+      "errors": [
+        {
+          "code": "PROTOCOL_VERSION_UNSUPPORTED",
+          "statuses": [
+            400,
+            426
+          ]
+        },
+        {
+          "code": "REQUEST_INVALID",
+          "statuses": [
+            400
+          ]
+        },
+        {
+          "code": "AGENT_INTERNAL_ERROR",
+          "statuses": [
+            500
+          ]
+        },
+        {
+          "code": "OPERATION_CONFLICT",
+          "statuses": [
+            409
+          ]
+        },
+        {
+          "code": "OPERATION_JOURNAL_UNAVAILABLE",
+          "statuses": [
+            503
+          ]
+        },
+        {
+          "code": "PROJECT_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "RESOURCE_NOT_FOUND",
+          "statuses": [
+            404
+          ]
+        },
+        {
+          "code": "GIT_NOTHING_TO_COMMIT",
+          "statuses": [
+            409
+          ]
+        },
+        {
+          "code": "GIT_COMMIT_MESSAGE_INVALID",
+          "statuses": [
+            422
+          ]
+        },
+        {
+          "code": "GIT_IDENTITY_REQUIRED",
+          "statuses": [
+            422
+          ]
+        },
+        {
+          "code": "GIT_OPERATION_FAILED",
+          "statuses": [
+            409,
+            503
+          ]
+        },
+        {
+          "code": "GIT_MUTATION_OUTCOME_UNCERTAIN",
           "statuses": [
             503
           ]

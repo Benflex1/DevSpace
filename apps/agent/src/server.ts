@@ -184,6 +184,15 @@ function requestError(response: ServerResponse, requestId: string, now: () => Da
   });
 }
 
+function gitFailureStatus(code: string): number {
+  if (code === "PROJECT_NOT_FOUND" || code === "WORKSPACE_FILE_NOT_FOUND" || code === "RESOURCE_NOT_FOUND") return 404;
+  if (code === "WORKSPACE_FILE_TOO_LARGE") return 413;
+  if (code === "WORKSPACE_PATH_INVALID" || code === "WORKSPACE_FILE_UNSUPPORTED" || code === "GIT_COMMIT_MESSAGE_INVALID"
+    || code === "GIT_IDENTITY_REQUIRED") return 422;
+  if (code === "GIT_OPERATION_FAILED") return 409;
+  return 500;
+}
+
 function diagnosticResourceFields(value: unknown): { projectId?: string; workspaceId?: string; previewId?: string } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
   const data = value as { projectId?: unknown; workspaceId?: unknown; previewId?: unknown };
@@ -368,6 +377,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.fetch"].path ? agentApiV1EndpointByOperation["project.fetch"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.push"].path ? agentApiV1EndpointByOperation["project.push"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.inspect"].path ? agentApiV1EndpointByOperation["project.git.inspect"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.diff"].path ? agentApiV1EndpointByOperation["project.git.diff"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.stage"].path ? agentApiV1EndpointByOperation["project.git.stage"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.unstage"].path ? agentApiV1EndpointByOperation["project.git.unstage"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.commit"].path ? agentApiV1EndpointByOperation["project.git.commit"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.create"].path ? agentApiV1EndpointByOperation["workspace.create"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.inspect"].path ? agentApiV1EndpointByOperation["workspace.inspect"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.files.list"].path ? agentApiV1EndpointByOperation["workspace.files.list"]
@@ -713,7 +726,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
     }
 
-    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "workspace.create", "workspace.start", "workspace.stop",
+    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "project.git.stage", "project.git.unstage", "project.git.commit", "workspace.create", "workspace.start", "workspace.stop",
       "task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"] as const;
     for (const operation of mutationRoutes) {
       const endpoint = agentApiV1EndpointByOperation[operation];
@@ -824,15 +837,42 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       try {
         const data = await managed.inspectGit(body.data.projectId, body.data.workspaceId);
         return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
-      } catch {
+      } catch (error) {
         if (!managed.isHealthy) return sendJson(response, 500, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
           code: "AGENT_INTERNAL_ERROR", message: "Agent-private state is corrupt.", retryable: true, details: { incidentId: createId() }
         } }));
+        if (error instanceof AgentExecutionError) {
+          sendEndpointErrorResponse(endpoint, response, gitFailureStatus(error.failure.code), requestId, now, error.failure, error, createId, logger);
+          return;
+        }
         const isWorkspace = body.data.workspaceId !== null;
         return sendJson(response, 404, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: isWorkspace
           ? { code: "RESOURCE_NOT_FOUND", message: "The workspace was not found.", retryable: false, details: { resource: { type: "workspace", id: body.data.workspaceId } } }
           : { code: "PROJECT_NOT_FOUND", message: "The managed project was not found.", retryable: false, details: { projectId: body.data.projectId } }
         }));
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["project.git.diff"].path) {
+      const endpoint = agentApiV1EndpointByOperation["project.git.diff"];
+      let body;
+      try { body = endpoint.requestBodySchema.parse(await readJsonBody(request)); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      try {
+        const data = await managed.diffGit(body.data.projectId, body.data.workspaceId, body.data.path, body.data.kind);
+        return sendJson(response, 200, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+      } catch (error) {
+        if (!managed.isHealthy) return sendJson(response, 500, endpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
+          code: "AGENT_INTERNAL_ERROR", message: "Agent-private state is corrupt.", retryable: true, details: { incidentId: createId() }
+        } }));
+        if (error instanceof AgentExecutionError) {
+          sendEndpointErrorResponse(endpoint, response, gitFailureStatus(error.failure.code), requestId, now, error.failure, error, createId, logger);
+          return;
+        }
+        sendEndpointErrorResponse(endpoint, response, 500, requestId, now, {
+          code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true, details: { incidentId: createId() }
+        }, error, createId, logger);
+        return;
       }
     }
 

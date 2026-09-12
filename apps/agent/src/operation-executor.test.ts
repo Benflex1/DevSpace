@@ -2,10 +2,11 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { gitInspectionDataSchema } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import { AgentEventLog } from "./event-log.js";
-import { ManagedWorkspaces } from "./managed-workspaces.js";
+import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationJournal } from "./operation-journal.js";
 import { TaskStartRecoveryRequiredError } from "./execution-manager.js";
@@ -16,6 +17,8 @@ const operation1 = "018f0f00-0000-7000-8000-000000000003";
 const operation2 = "018f0f00-0000-7000-8000-000000000004";
 const operation3 = "018f0f00-0000-7000-8000-000000000005";
 const operation4 = "018f0f00-0000-7000-8000-000000000006";
+const targetWorkspace = "018f0f00-0000-7000-8000-000000000007";
+const unrelatedWorkspace = "018f0f00-0000-7000-8000-000000000008";
 const timestamp = "2026-07-17T12:00:00.000Z";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))); });
@@ -86,6 +89,381 @@ test("dispatches project.push through ManagedWorkspaces exactly once", async () 
   await executor.drain();
   expect(calls).toBe(1);
   expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+});
+
+test.each([
+  { name: "project.fetch", request: { projectId: project }, method: "fetch" },
+  { name: "project.push", request: {
+    projectId: project, workspaceId: boot,
+    source: { kind: "github-app" as const, connectionId: "018f0d84-7b39-7cc3-9d4a-0675d9162a11", repositoryId: "9007199254740993" },
+    branchName: "feature/push", commitOid: "a".repeat(40), githubAuthorityGeneration: 1
+  }, method: "push" }
+] as const)("journals %s as succeeded when only post-mutation observation fails", async ({ name, request, method }) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-observation-refresh-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  let snapshotCalls = 0;
+  const calls: string[] = [];
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls > 1) throw new Error("observation output exceeded the bound");
+      return await projectResources();
+    },
+    fetch: async () => { calls.push("fetch"); },
+    stageWorkspaceFile: async () => { calls.push("stageWorkspaceFile"); },
+    unstageWorkspaceFile: async () => { calls.push("unstageWorkspaceFile"); },
+    commitWorkspace: async () => { calls.push("commitWorkspace"); },
+    push: async () => { calls.push("push"); }
+  } as unknown as ManagedWorkspaces;
+  const logLines: string[] = [];
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)), undefined, undefined,
+    createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) }));
+  await executor.initialize();
+  const accepted = await journal.accept(operation1, name, request);
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(calls).toEqual([method]);
+  expect(journal.get(operation1)).toMatchObject({ state: "succeeded", failure: null });
+  expect(executor.isHealthy).toBe(false);
+  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "project", projectId: project })
+  ]));
+  expect(logLines.some((line) => line.includes("agent.observation.refresh_failed"))).toBe(true);
+});
+
+function workspaceInspection(workspaceId: string, headCommit: string, dirty = false) {
+  return gitInspectionDataSchema.parse({
+    projectId: project, workspaceId, branchName: "main", headCommit, dirty, aheadCount: 0, behindCount: 0
+  });
+}
+
+function projectResourcesWithWorkspaces() {
+  return [{ type: "project" as const, projectId: project, gitInspections: [
+    { scope: { kind: "managed-store" as const }, inspection: gitInspectionDataSchema.parse({
+      projectId: project, workspaceId: null, branchName: null, headCommit: null, dirty: false, aheadCount: 0, behindCount: 0
+    }) },
+    { scope: { kind: "workspace" as const, workspaceId: targetWorkspace }, inspection: workspaceInspection(targetWorkspace, "a".repeat(40)) },
+    { scope: { kind: "workspace" as const, workspaceId: unrelatedWorkspace }, inspection: workspaceInspection(unrelatedWorkspace, "b".repeat(40)) }
+  ] }];
+}
+
+test.each([
+  { name: "project.git.stage", request: { projectId: project, workspaceId: targetWorkspace, path: "README.md" }, method: "stageWorkspaceFile" },
+  { name: "project.git.unstage", request: { projectId: project, workspaceId: targetWorkspace, path: "README.md" }, method: "unstageWorkspaceFile" },
+  { name: "project.git.commit", request: { projectId: project, workspaceId: targetWorkspace, message: "fixture commit" }, method: "commitWorkspace" }
+] as const)("observes only the target workspace after %s and reconciles its cached Git status", async ({ name, request, method }) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-target-git-observation-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const inspected = workspaceInspection(targetWorkspace, "c".repeat(40), true);
+  const snapshotResources = vi.fn(async () => projectResourcesWithWorkspaces());
+  const inspectGit = vi.fn(async (projectId: string, workspaceId: string | null) => {
+    expect(projectId).toBe(project);
+    expect(workspaceId).toBe(targetWorkspace);
+    return inspected;
+  });
+  const calls: string[] = [];
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources,
+    inspectGit,
+    stageWorkspaceFile: async () => { calls.push("stageWorkspaceFile"); },
+    unstageWorkspaceFile: async () => { calls.push("unstageWorkspaceFile"); },
+    commitWorkspace: async () => { calls.push("commitWorkspace"); }
+  } as unknown as ManagedWorkspaces;
+  const inspectedEvent = vi.spyOn(events, "projectInspected");
+  const executor = new OperationExecutor(journal, managed, events);
+  await executor.initialize();
+  const accepted = await journal.accept(operation1, name, request);
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(calls).toEqual([method]);
+  expect(snapshotResources).toHaveBeenCalledOnce();
+  expect(inspectGit).toHaveBeenCalledOnce();
+  expect(journal.get(operation1)).toMatchObject({ state: "succeeded", failure: null });
+  expect(inspectedEvent).toHaveBeenCalledWith(project, targetWorkspace, inspected);
+  const projectResource = executor.snapshotResources().find((resource) => resource.type === "project");
+  expect(projectResource?.type).toBe("project");
+  if (projectResource?.type !== "project") throw new Error("project resource missing");
+  expect(projectResource.gitInspections).toEqual(expect.arrayContaining([
+    expect.objectContaining({ scope: { kind: "workspace", workspaceId: targetWorkspace }, inspection: inspected }),
+    expect.objectContaining({ scope: { kind: "workspace", workspaceId: unrelatedWorkspace }, inspection: workspaceInspection(unrelatedWorkspace, "b".repeat(40)) })
+  ]));
+});
+
+test("restores executor observation health after a later successful targeted Git inspection", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-target-observation-health-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  let failTargetInspection = true;
+  const inspectGit = vi.fn(async () => {
+    if (failTargetInspection) {
+      failTargetInspection = false;
+      throw new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: "target status unavailable", retryable: false, details: { action: "inspect" }
+      });
+    }
+    return workspaceInspection(targetWorkspace, "c".repeat(40), true);
+  });
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    inspectGit,
+    stageWorkspaceFile: async () => undefined,
+    unstageWorkspaceFile: async () => undefined
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  await executor.initialize();
+  const stage = await journal.accept(operation1, "project.git.stage", {
+    projectId: project, workspaceId: targetWorkspace, path: "README.md"
+  });
+  executor.schedule(stage); await executor.drain();
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(executor.isHealthy).toBe(false);
+
+  const unstage = await journal.accept(operation2, "project.git.unstage", {
+    projectId: project, workspaceId: targetWorkspace, path: "README.md"
+  });
+  executor.schedule(unstage); await executor.drain();
+  expect(journal.get(operation2)).toMatchObject({ state: "succeeded", failure: null });
+  expect(executor.isHealthy).toBe(true);
+  expect(inspectGit).toHaveBeenCalledTimes(2);
+});
+
+test("fails closed when interrupted local Git uncertainty cannot be durably terminalized", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-git-uncertainty-write-failure-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const firstJournal = new OperationJournal(journalRoot, () => new Date(timestamp)); await firstJournal.initialize();
+  await firstJournal.accept(operation1, "project.git.stage", { projectId: project, workspaceId: targetWorkspace, path: "README.md" });
+  await firstJournal.markRunning(operation1);
+  const restarted = new OperationJournal(journalRoot, () => new Date(timestamp), {
+    async write() { throw new Error("uncertainty-write-failed"); }
+  });
+  await restarted.initialize();
+  const stageWorkspaceFile = vi.fn(async () => undefined);
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    stageWorkspaceFile
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(restarted, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+
+  expect(restarted.isHealthy).toBe(false);
+  expect(() => executor.resumeAccepted()).toThrow(/corrupt/u);
+  expect(executor.isRunning(operation1)).toBe(false);
+  expect(stageWorkspaceFile).not.toHaveBeenCalled();
+});
+
+test.each([
+  { operationName: "project.git.stage" as const, method: "stageWorkspaceFile" as const, action: "stage" as const,
+    request: { projectId: project, workspaceId: targetWorkspace, path: "README.md" } },
+  { operationName: "project.git.unstage" as const, method: "unstageWorkspaceFile" as const, action: "unstage" as const,
+    request: { projectId: project, workspaceId: targetWorkspace, path: "README.md" } },
+  { operationName: "project.git.commit" as const, method: "commitWorkspace" as const, action: "commit" as const,
+    request: { projectId: project, workspaceId: targetWorkspace, message: "fixture commit" } }
+] as const)("does not complete a local Git operation when Git returns a classified failure: %s", async ({ operationName, method, action, request }) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-git-mutation-failure-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failedEvent = vi.spyOn(events, "failed");
+  const inspectGit = vi.fn();
+  let localStateChanged = false;
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    inspectGit,
+    stageWorkspaceFile: async () => {
+      if (method !== "stageWorkspaceFile") return;
+      localStateChanged = true;
+      const failure = new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: `${action} failed`, retryable: false, details: { action }
+      });
+      throw failure;
+    },
+    unstageWorkspaceFile: async () => {
+      if (method !== "unstageWorkspaceFile") return;
+      localStateChanged = true;
+      throw new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: `${action} failed`, retryable: false, details: { action }
+      });
+    },
+    commitWorkspace: async () => {
+      if (method !== "commitWorkspace") return;
+      localStateChanged = true;
+      throw new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: `${action} failed`, retryable: false, details: { action }
+      });
+    }
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, operationName, request);
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(localStateChanged).toBe(true);
+  expect(journal.get(operation1)).toMatchObject({ state: "failed", failure: { code: "GIT_OPERATION_FAILED" } });
+  expect(inspectGit).not.toHaveBeenCalled();
+  expect(failedEvent).toHaveBeenCalledOnce();
+});
+
+test.each([
+  { label: "target observation", configure: (managed: Record<string, unknown>) => {
+    managed.inspectGit = async () => { throw new AgentExecutionError({
+      code: "GIT_OPERATION_FAILED", message: "target status unavailable", retryable: false, details: { action: "inspect" }
+    }); };
+  } },
+  { label: "journal settlement", configure: (_managed: Record<string, unknown>, journal: OperationJournal) => {
+    vi.spyOn(journal, "succeed").mockRejectedValue(new Error("journal-success-write-failed"));
+  } }
+])("leaves a completed local Git operation resumable after %s failure", async ({ configure }) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-git-mutation-recovery-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failedEvent = vi.spyOn(events, "failed");
+  const journalFail = vi.spyOn(journal, "fail");
+  const managed: Record<string, unknown> = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    inspectGit: async () => workspaceInspection(targetWorkspace, "c".repeat(40), true),
+    stageWorkspaceFile: async () => undefined
+  };
+  configure(managed, journal);
+  const executor = new OperationExecutor(journal, managed as unknown as ManagedWorkspaces, events);
+  await executor.initialize();
+  const accepted = await journal.accept(operation1, "project.git.stage", { projectId: project, workspaceId: targetWorkspace, path: "README.md" });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(journalFail).not.toHaveBeenCalled();
+  expect(failedEvent).not.toHaveBeenCalled();
+});
+
+test("does not rewrite a durably succeeded local Git operation when success event emission fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-git-event-recovery-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failedEvent = vi.spyOn(events, "failed");
+  vi.spyOn(events, "succeeded").mockImplementation(() => { throw new Error("success-event-write-failed"); });
+  const journalFail = vi.spyOn(journal, "fail");
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    inspectGit: async () => workspaceInspection(targetWorkspace, "c".repeat(40), true),
+    stageWorkspaceFile: async () => undefined
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  await executor.initialize();
+  const accepted = await journal.accept(operation1, "project.git.stage", { projectId: project, workspaceId: targetWorkspace, path: "README.md" });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "succeeded", failure: null });
+  expect(journalFail).not.toHaveBeenCalled();
+  expect(failedEvent).not.toHaveBeenCalled();
+});
+
+test("does not rewrite a completed Fetch as failed when journal settlement fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-fetch-journal-settlement-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failed = vi.spyOn(events, "failed");
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    fetch: async () => undefined,
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  vi.spyOn(journal, "succeed").mockRejectedValue(new Error("journal-success-write-failed"));
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, "project.fetch", { projectId: project });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(failed).not.toHaveBeenCalled();
+});
+
+test("keeps a Fetch resumable when ManagedWorkspaces reports completed-mutation recovery", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-fetch-recovery-signal-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failed = vi.spyOn(events, "failed");
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    fetch: async () => { throw new FetchMutationRecoveryRequiredError(); },
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, "project.fetch", { projectId: project });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(failed).not.toHaveBeenCalled();
+});
+
+test("does not rewrite a durably succeeded Fetch when success event emission fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-fetch-event-settlement-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const succeeded = vi.spyOn(events, "succeeded");
+  const failed = vi.spyOn(events, "failed");
+  succeeded.mockImplementation(() => { throw new Error("success-event-write-failed"); });
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    fetch: async () => undefined,
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  const accepted = await journal.accept(operation1, "project.fetch", { projectId: project });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operation1)).toMatchObject({ state: "succeeded", failure: null });
+  expect(succeeded).toHaveBeenCalledOnce();
+  expect(failed).not.toHaveBeenCalled();
+});
+
+test("recovers executor observation health after a later successful refresh", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-observation-health-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  let fail = true;
+  const managed = {
+    snapshotResources: async () => {
+      if (fail) throw new Error("observation unavailable");
+      return await projectResources();
+    }
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+
+  await executor.initialize();
+  expect(executor.isHealthy).toBe(false);
+  fail = false;
+  await executor.initialize();
+  expect(executor.isHealthy).toBe(true);
+  expect(executor.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "project", projectId: project })
+  ]));
 });
 
 test("an exact task.start replay after Agent restart reuses the accepted execution", async () => {

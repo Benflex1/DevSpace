@@ -14,6 +14,69 @@ afterEach(async () => { await Promise.all(directories.splice(0).map((directory) 
 
 async function root(): Promise<string> { const value = await mkdtemp(path.join(tmpdir(), "devspace-journal-test-")); directories.push(value); return value; }
 const request = { projectId };
+const localGitMutations = [
+  { operationId: "018f0f00-0000-7000-8000-000000000003", operationName: "project.git.stage" as const,
+    request: { projectId, workspaceId: otherOperationId, path: "README.md" } },
+  { operationId: "018f0f00-0000-7000-8000-000000000004", operationName: "project.git.unstage" as const,
+    request: { projectId, workspaceId: otherOperationId, path: "README.md" } },
+  { operationId: "018f0f00-0000-7000-8000-000000000005", operationName: "project.git.commit" as const,
+    request: { projectId, workspaceId: otherOperationId, message: "fixture commit" } }
+] as const;
+
+test.each(localGitMutations)("startup terminalizes interrupted running $operationName as uncertain", async ({ operationId, operationName, request }) => {
+  const directory = await root();
+  const journal = new OperationJournal(directory, () => new Date(timestamp)); await journal.initialize();
+  await journal.accept(operationId, operationName, request);
+  await journal.markRunning(operationId);
+
+  const restarted = new OperationJournal(directory, () => new Date("2026-07-17T12:00:01.000Z")); await restarted.initialize();
+  expect(restarted.get(operationId)).toMatchObject({
+    state: "failed",
+    request,
+    failure: {
+      code: "GIT_MUTATION_OUTCOME_UNCERTAIN",
+      message: "The Git mutation outcome is uncertain after Agent interruption. Inspect the repository state before explicitly continuing.",
+      retryable: false,
+      details: {}
+    }
+  });
+  expect(restarted.resumable()).toEqual([]);
+
+  const reloaded = new OperationJournal(directory, () => new Date(timestamp)); await reloaded.initialize();
+  expect(reloaded.get(operationId)).toMatchObject({
+    state: "failed", failure: { code: "GIT_MUTATION_OUTCOME_UNCERTAIN", retryable: false }
+  });
+  expect(reloaded.resumable()).toEqual([]);
+});
+
+test.each(localGitMutations)("startup preserves accepted $operationName for resumption", async ({ operationId, operationName, request }) => {
+  const directory = await root();
+  const journal = new OperationJournal(directory, () => new Date(timestamp)); await journal.initialize();
+  await journal.accept(operationId, operationName, request);
+
+  const restarted = new OperationJournal(directory, () => new Date(timestamp)); await restarted.initialize();
+  expect(restarted.get(operationId)).toMatchObject({ state: "accepted", request });
+  expect(restarted.resumable()).toEqual([expect.objectContaining({ operationId, operationName, state: "accepted" })]);
+});
+
+test("failed local Git uncertainty terminalization makes journal recovery fail closed when its durable write fails", async () => {
+  const directory = await root();
+  const journal = new OperationJournal(directory, () => new Date(timestamp)); await journal.initialize();
+  await journal.accept(localGitMutations[0].operationId, localGitMutations[0].operationName, localGitMutations[0].request);
+  await journal.markRunning(localGitMutations[0].operationId);
+  const writer: AtomicJsonWriter = {
+    async write(file, value) {
+      const failure = (value as { failure?: { code?: string } }).failure;
+      if (failure?.code === "GIT_MUTATION_OUTCOME_UNCERTAIN") throw new Error("uncertainty-write-failed");
+      await durableJsonWriter.write(file, value);
+    }
+  };
+
+  const restarted = new OperationJournal(directory, () => new Date(timestamp), writer); await restarted.initialize();
+  expect(restarted.isHealthy).toBe(false);
+  expect(restarted.corruptionReason).toMatch(/terminalization failed/u);
+  expect(() => restarted.resumable()).toThrow(/corrupt/u);
+});
 
 test("first acceptance, exact replay, conflicts, terminal reload, and restart recovery are durable", async () => {
   const directory = await root();
