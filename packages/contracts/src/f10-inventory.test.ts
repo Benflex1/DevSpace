@@ -67,10 +67,10 @@ describe("F09, F10, and complete Agent API v1 inventory composition", () => {
   });
 
   test("keeps error registry views exactly separated", () => {
-    expect(executableAgentErrorCodes).toHaveLength(50);
+    expect(executableAgentErrorCodes).toHaveLength(51);
     expect(f10ExecutableAgentErrorCodes).toEqual(["EVENT_CURSOR_INVALID", "EVENT_SNAPSHOT_REQUIRED"]);
-    expect(completeAgentApiV1ErrorCodes).toHaveLength(52);
-    expect(new Set(completeAgentApiV1ErrorCodes).size).toBe(52);
+    expect(completeAgentApiV1ErrorCodes).toHaveLength(53);
+    expect(new Set(completeAgentApiV1ErrorCodes).size).toBe(53);
     expect(executableAgentErrorCodes).not.toContain("EVENT_CURSOR_INVALID");
     expect(executableAgentErrorCodes).not.toContain("EVENT_SNAPSHOT_REQUIRED");
   });

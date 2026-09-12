@@ -139,6 +139,7 @@ export class OperationJournal {
       }
     }
     if (this.corruption === null) await this.terminalizeInterruptedPushes();
+    if (this.corruption === null) await this.terminalizeInterruptedLocalGitMutations();
   }
 
   private async terminalizeInterruptedPushes(): Promise<void> {
@@ -154,6 +155,30 @@ export class OperationJournal {
         await this.writer.write(this.file(record.operationId), next);
       } catch {
         this.corruption ??= new PrivateStateCorruptionError(this.file(record.operationId), "push uncertainty terminalization failed");
+        return;
+      }
+      this.records.set(record.operationId, next);
+    }
+  }
+
+  private async terminalizeInterruptedLocalGitMutations(): Promise<void> {
+    const localGitMutationNames: ReadonlySet<string> = new Set([
+      "project.git.stage",
+      "project.git.unstage",
+      "project.git.commit"
+    ] as const);
+    for (const record of [...this.records.values()]) {
+      if (!localGitMutationNames.has(record.operationName) || record.state !== "running") continue;
+      const next = journalRecordSchema.parse({ ...record, state: "failed", updatedAt: this.now().toISOString(), failure: {
+        code: "GIT_MUTATION_OUTCOME_UNCERTAIN",
+        message: "The Git mutation outcome is uncertain after Agent interruption. Inspect the repository state before explicitly continuing.",
+        retryable: false,
+        details: {}
+      }});
+      try {
+        await this.writer.write(this.file(record.operationId), next);
+      } catch {
+        this.corruption ??= new PrivateStateCorruptionError(this.file(record.operationId), "local Git mutation uncertainty terminalization failed");
         return;
       }
       this.records.set(record.operationId, next);

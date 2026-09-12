@@ -825,6 +825,7 @@ document are not members of this registry, F09 runtime schemas, exports, or fixt
 | `GIT_COMMIT_MESSAGE_INVALID` | The commit message is empty/whitespace-only or exceeds the bounded size. | `422` | false | `{ reason: "empty" | "too-large" }` | Workbench Git commit |
 | `GIT_IDENTITY_REQUIRED` | Neither usable local identity nor bounded per-commit name/email input is available. | `422` | false | `{}` | Workbench Git commit |
 | `GIT_OPERATION_FAILED` | A bounded managed-workspace Git operation could not complete safely. | `409` or `503` | false | `{ action: "inspect" | "diff" | "stage" | "unstage" | "commit" }` | Workbench Git routes |
+| `GIT_MUTATION_OUTCOME_UNCERTAIN` | The Agent cannot prove whether a local Git mutation completed before interruption; inspect the repository state before explicitly continuing. | `503` | false | `{}` | Workbench Git mutations |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | The dedicated rootless runtime required by the route is unavailable. | `503` | true | `{ component: "docker" }` | route-specific |
 | `AGENT_INTERNAL_ERROR` | An unexpected redacted Agent failure occurred. | `500` | true | `{ incidentId: UuidV7 }` | global |
 
@@ -867,9 +868,9 @@ except the already-exact `G` protocol-version mapping.
 | `github.repositories.resolve` | `G`; `GITHUB_CONNECTION_NOT_FOUND (404)`; `GITHUB_AUTHORITY_INVALID (409/422/503)`; `H`; `GITHUB_INSTALLATION_UNAVAILABLE (503)`; `GITHUB_REPOSITORY_NOT_AUTHORIZED (403/404)`; `GITHUB_CONTENTS_PERMISSION_REQUIRED (403/422)`; `GITHUB_TOKEN_LEASE_ACTIVE (503)` |
 | `project.git.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `SOURCE_UNAVAILABLE (503)`; `GIT_OPERATION_FAILED (409/503)` |
 | `project.git.diff` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `GIT_OPERATION_FAILED (409/503)` |
-| `project.git.stage` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `WORKSPACE_FILE_UNSUPPORTED (422)`; `GIT_OPERATION_FAILED (409/503)` |
-| `project.git.unstage` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `GIT_OPERATION_FAILED (409/503)` |
-| `project.git.commit` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `GIT_NOTHING_TO_COMMIT (409)`; `GIT_COMMIT_MESSAGE_INVALID (422)`; `GIT_IDENTITY_REQUIRED (422)`; `GIT_OPERATION_FAILED (409/503)` |
+| `project.git.stage` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `WORKSPACE_FILE_UNSUPPORTED (422)`; `GIT_OPERATION_FAILED (409/503)`; `GIT_MUTATION_OUTCOME_UNCERTAIN (503)` |
+| `project.git.unstage` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `WORKSPACE_PATH_INVALID (422)`; `WORKSPACE_FILE_NOT_FOUND (404)`; `GIT_OPERATION_FAILED (409/503)`; `GIT_MUTATION_OUTCOME_UNCERTAIN (503)` |
+| `project.git.commit` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `GIT_NOTHING_TO_COMMIT (409)`; `GIT_COMMIT_MESSAGE_INVALID (422)`; `GIT_IDENTITY_REQUIRED (422)`; `GIT_OPERATION_FAILED (409/503)`; `GIT_MUTATION_OUTCOME_UNCERTAIN (503)` |
 | `workspace.create` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `CONFIGURATION_NOT_REGISTERED (422)`; `WORKSPACE_STATE_CONFLICT (409)`; `RUNTIME_POLICY_VIOLATION (422)`; `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
 | `workspace.inspect` | `G`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
 | `workspace.start` | `G`; `M`; `PROJECT_NOT_FOUND (404)`; `RESOURCE_NOT_FOUND` (404; type `workspace`); `CONFIGURATION_NOT_REGISTERED (422)`; `WORKSPACE_STATE_CONFLICT (409)`; `RUNTIME_POLICY_VIOLATION (422)`; `ROOTLESS_RUNTIME_UNAVAILABLE (503)` |
@@ -1282,6 +1283,7 @@ The classification of all 30 executable codes is exhaustive:
 | `AI_NOT_CONFIGURED` | potentially post-acceptance | the workspace's effective revision may change to one with no AI profile |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | potentially post-acceptance | approved-domain policy may change before gateway application |
 | `GATEWAY_UPDATE_FAILED` | potentially post-acceptance | accepted preview execution may fail while applying the gateway update |
+| `GIT_MUTATION_OUTCOME_UNCERTAIN` | potentially post-acceptance | an interrupted local Git mutation has no provable completion outcome and requires repository inspection before explicit continuation |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | potentially post-acceptance | the runtime may become unavailable while accepted work executes |
 | `AGENT_INTERNAL_ERROR` | potentially post-acceptance | an unexpected redacted Agent failure may occur during accepted execution |
 
@@ -1295,9 +1297,9 @@ wire failure does not duplicate the operation name.
 | `configuration-runtime-plan.register` | `CONFIGURATION_NOT_REGISTERED`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
 | `project.managed-store.create` | `RESOURCE_STATE_CONFLICT`; `SOURCE_NOT_FOUND`; `SOURCE_INVALID`; `SOURCE_UNAVAILABLE`; `GITHUB_CONTENTS_PERMISSION_REQUIRED`; `GITHUB_INSTALLATION_UNAVAILABLE`; `GITHUB_REPOSITORY_NOT_AUTHORIZED`; `GITHUB_GIT_AUTHENTICATION_FAILED`; `GITHUB_TOKEN_LEASE_ACTIVE`; `RUNTIME_POLICY_VIOLATION`; `AGENT_INTERNAL_ERROR` |
 | `project.fetch` | `PROJECT_NOT_FOUND`; `SOURCE_UNAVAILABLE`; `GITHUB_CONTENTS_PERMISSION_REQUIRED`; `GITHUB_INSTALLATION_UNAVAILABLE`; `GITHUB_REPOSITORY_NOT_AUTHORIZED`; `GITHUB_GIT_AUTHENTICATION_FAILED`; `GITHUB_TOKEN_LEASE_ACTIVE`; `AGENT_INTERNAL_ERROR` |
-| `project.git.stage` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_PATH_INVALID`; `WORKSPACE_FILE_NOT_FOUND`; `WORKSPACE_FILE_UNSUPPORTED`; `GIT_OPERATION_FAILED`; `AGENT_INTERNAL_ERROR` |
-| `project.git.unstage` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_PATH_INVALID`; `WORKSPACE_FILE_NOT_FOUND`; `GIT_OPERATION_FAILED`; `AGENT_INTERNAL_ERROR` |
-| `project.git.commit` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `GIT_NOTHING_TO_COMMIT`; `GIT_COMMIT_MESSAGE_INVALID`; `GIT_IDENTITY_REQUIRED`; `GIT_OPERATION_FAILED`; `AGENT_INTERNAL_ERROR` |
+| `project.git.stage` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_PATH_INVALID`; `WORKSPACE_FILE_NOT_FOUND`; `WORKSPACE_FILE_UNSUPPORTED`; `GIT_OPERATION_FAILED`; `GIT_MUTATION_OUTCOME_UNCERTAIN`; `AGENT_INTERNAL_ERROR` |
+| `project.git.unstage` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_PATH_INVALID`; `WORKSPACE_FILE_NOT_FOUND`; `GIT_OPERATION_FAILED`; `GIT_MUTATION_OUTCOME_UNCERTAIN`; `AGENT_INTERNAL_ERROR` |
+| `project.git.commit` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `GIT_NOTHING_TO_COMMIT`; `GIT_COMMIT_MESSAGE_INVALID`; `GIT_IDENTITY_REQUIRED`; `GIT_OPERATION_FAILED`; `GIT_MUTATION_OUTCOME_UNCERTAIN`; `AGENT_INTERNAL_ERROR` |
 | `workspace.create` | `PROJECT_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.start` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `CONFIGURATION_NOT_REGISTERED`; `WORKSPACE_STATE_CONFLICT`; `RUNTIME_POLICY_VIOLATION`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |
 | `workspace.stop` | `PROJECT_NOT_FOUND`; `RESOURCE_NOT_FOUND`; `WORKSPACE_STATE_CONFLICT`; `ROOTLESS_RUNTIME_UNAVAILABLE`; `AGENT_INTERNAL_ERROR` |

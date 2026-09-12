@@ -51,6 +51,7 @@ export const agentFailureUserMessageByCode = Object.freeze({
   GITHUB_PUSH_INTENT_STALE: "The workspace branch or commit changed. Prepare the push again.",
   GITHUB_PUSH_NON_FAST_FORWARD: "Push was rejected because the remote branch moved. Fetch first, integrate the remote changes using Git or the terminal, then explicitly Push again.",
   GITHUB_PUSH_OUTCOME_UNCERTAIN: "The push outcome is uncertain. Inspect the remote branch before explicitly retrying.",
+  GIT_MUTATION_OUTCOME_UNCERTAIN: "The Git mutation outcome is uncertain after Agent interruption. Inspect the repository state before explicitly continuing.",
   GITHUB_TOKEN_LEASE_ACTIVE: "GitHub authority cleanup is still in progress.",
   GIT_NOTHING_TO_COMMIT: "There are no staged changes to commit.",
   GIT_COMMIT_MESSAGE_INVALID: "Enter a non-empty commit message within the allowed size.",

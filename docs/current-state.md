@@ -77,8 +77,13 @@ the existing explicit Fetch and Push actions. Persistent Git mutation failures r
 dismissal; non-fast-forward Push failures direct the user to Fetch, integrate, and explicitly Push
 again without automatic retry. Snapshot observation now isolates bounded Git-state failures to the
 affected workspace, preserves successful mutations when a later refresh is stale, and recovers Agent
-observation health after a later successful refresh. Project creation from scratch, persistent
-terminals, and later Workbench polish remain deferred product work.
+observation health after a later successful refresh. On Agent startup, interrupted `running`
+`project.git.stage`, `project.git.unstage`, and `project.git.commit` records are durably
+terminalized as non-retryable `GIT_MUTATION_OUTCOME_UNCERTAIN` failures and are never replayed;
+`accepted` local Git mutations remain resumable because they may not have started. A live-process
+mutation that is known to have completed but cannot settle observation or its journal remains
+recoverable, preserving mutation truthfulness until restart reconciliation. Project creation from
+scratch, persistent terminals, and later Workbench polish remain deferred product work.
 
 ## Private GitHub Repository Access status
 

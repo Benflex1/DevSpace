@@ -15,8 +15,8 @@ const envelope = (code: string, retryable: boolean, details: object) => ({
 
 describe("executable Agent error registry", () => {
   test("contains exactly the accepted executable errors", () => {
-    expect(executableAgentErrorCodes).toHaveLength(50);
-    expect(new Set(executableAgentErrorCodes).size).toBe(50);
+    expect(executableAgentErrorCodes).toHaveLength(51);
+    expect(new Set(executableAgentErrorCodes).size).toBe(51);
     expect(executableAgentErrorCodes).not.toContain("EVENT_SNAPSHOT_REQUIRED");
     expect(executableAgentErrorCodes).not.toContain("EVENT_CURSOR_INVALID");
     expect(executableAgentErrorCodes.join(" ")).not.toMatch(/RUNTIME_PLAN|ATTACHMENT_GRANT|REQUEST_HASH/u);
@@ -27,7 +27,8 @@ describe("executable Agent error registry", () => {
     ["ROOTLESS_RUNTIME_UNAVAILABLE", true],
     ["AGENT_INTERNAL_ERROR", true],
     ["AI_NOT_CONFIGURED", false],
-    ["REQUEST_INVALID", false]
+    ["REQUEST_INVALID", false],
+    ["GIT_MUTATION_OUTCOME_UNCERTAIN", false]
   ] as const)("fixes %s retryability to %s", (code, retryable) => {
     expect(executableAgentErrorRegistry[code].retryable).toBe(retryable);
   });
@@ -59,6 +60,14 @@ describe("executable Agent error registry", () => {
     expect(gitInspect.errorSchema.safeParse(envelope(
       "ROOTLESS_RUNTIME_UNAVAILABLE", true, { component: "docker" }
     )).success).toBe(false);
+    expect(gitInspect.errorSchema.safeParse(envelope(
+      "GIT_MUTATION_OUTCOME_UNCERTAIN", false, {}
+    )).success).toBe(false);
+    for (const operation of ["project.git.stage", "project.git.unstage", "project.git.commit"] as const) {
+      expect(agentApiV1EndpointByOperation[operation].errorSchema.safeParse(
+        envelope("GIT_MUTATION_OUTCOME_UNCERTAIN", false, {})
+      ).success).toBe(true);
+    }
   });
 
   test("route-specific detail discriminators remain narrow", () => {

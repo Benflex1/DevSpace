@@ -197,7 +197,78 @@ test.each([
   ]));
 });
 
-test("does not complete a local Git operation when Git returns a classified failure", async () => {
+test("restores executor observation health after a later successful targeted Git inspection", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-target-observation-health-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  let failTargetInspection = true;
+  const inspectGit = vi.fn(async () => {
+    if (failTargetInspection) {
+      failTargetInspection = false;
+      throw new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: "target status unavailable", retryable: false, details: { action: "inspect" }
+      });
+    }
+    return workspaceInspection(targetWorkspace, "c".repeat(40), true);
+  });
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    inspectGit,
+    stageWorkspaceFile: async () => undefined,
+    unstageWorkspaceFile: async () => undefined
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(journal, managed, events);
+  await executor.initialize();
+  const stage = await journal.accept(operation1, "project.git.stage", {
+    projectId: project, workspaceId: targetWorkspace, path: "README.md"
+  });
+  executor.schedule(stage); await executor.drain();
+  expect(journal.get(operation1)).toMatchObject({ state: "running", failure: null });
+  expect(executor.isHealthy).toBe(false);
+
+  const unstage = await journal.accept(operation2, "project.git.unstage", {
+    projectId: project, workspaceId: targetWorkspace, path: "README.md"
+  });
+  executor.schedule(unstage); await executor.drain();
+  expect(journal.get(operation2)).toMatchObject({ state: "succeeded", failure: null });
+  expect(executor.isHealthy).toBe(true);
+  expect(inspectGit).toHaveBeenCalledTimes(2);
+});
+
+test("fails closed when interrupted local Git uncertainty cannot be durably terminalized", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-git-uncertainty-write-failure-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const firstJournal = new OperationJournal(journalRoot, () => new Date(timestamp)); await firstJournal.initialize();
+  await firstJournal.accept(operation1, "project.git.stage", { projectId: project, workspaceId: targetWorkspace, path: "README.md" });
+  await firstJournal.markRunning(operation1);
+  const restarted = new OperationJournal(journalRoot, () => new Date(timestamp), {
+    async write() { throw new Error("uncertainty-write-failed"); }
+  });
+  await restarted.initialize();
+  const stageWorkspaceFile = vi.fn(async () => undefined);
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    snapshotResources: () => projectResourcesWithWorkspaces(),
+    stageWorkspaceFile
+  } as unknown as ManagedWorkspaces;
+  const executor = new OperationExecutor(restarted, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+
+  expect(restarted.isHealthy).toBe(false);
+  expect(() => executor.resumeAccepted()).toThrow(/corrupt/u);
+  expect(executor.isRunning(operation1)).toBe(false);
+  expect(stageWorkspaceFile).not.toHaveBeenCalled();
+});
+
+test.each([
+  { operationName: "project.git.stage" as const, method: "stageWorkspaceFile" as const, action: "stage" as const,
+    request: { projectId: project, workspaceId: targetWorkspace, path: "README.md" } },
+  { operationName: "project.git.unstage" as const, method: "unstageWorkspaceFile" as const, action: "unstage" as const,
+    request: { projectId: project, workspaceId: targetWorkspace, path: "README.md" } },
+  { operationName: "project.git.commit" as const, method: "commitWorkspace" as const, action: "commit" as const,
+    request: { projectId: project, workspaceId: targetWorkspace, message: "fixture commit" } }
+] as const)("does not complete a local Git operation when Git returns a classified failure: %s", async ({ operationName, method, action, request }) => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-git-mutation-failure-")); roots.push(root);
   const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
   const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
@@ -210,15 +281,30 @@ test("does not complete a local Git operation when Git returns a classified fail
     snapshotResources: () => projectResourcesWithWorkspaces(),
     inspectGit,
     stageWorkspaceFile: async () => {
+      if (method !== "stageWorkspaceFile") return;
       localStateChanged = true;
       const failure = new AgentExecutionError({
-        code: "GIT_OPERATION_FAILED", message: "stage failed", retryable: false, details: { action: "stage" }
+        code: "GIT_OPERATION_FAILED", message: `${action} failed`, retryable: false, details: { action }
       });
       throw failure;
+    },
+    unstageWorkspaceFile: async () => {
+      if (method !== "unstageWorkspaceFile") return;
+      localStateChanged = true;
+      throw new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: `${action} failed`, retryable: false, details: { action }
+      });
+    },
+    commitWorkspace: async () => {
+      if (method !== "commitWorkspace") return;
+      localStateChanged = true;
+      throw new AgentExecutionError({
+        code: "GIT_OPERATION_FAILED", message: `${action} failed`, retryable: false, details: { action }
+      });
     }
   } as unknown as ManagedWorkspaces;
   const executor = new OperationExecutor(journal, managed, events);
-  const accepted = await journal.accept(operation1, "project.git.stage", { projectId: project, workspaceId: targetWorkspace, path: "README.md" });
+  const accepted = await journal.accept(operation1, operationName, request);
 
   executor.schedule(accepted);
   await executor.drain();

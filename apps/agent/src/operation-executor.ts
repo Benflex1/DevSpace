@@ -104,6 +104,7 @@ export class OperationExecutor {
         : projectResource.gitInspections.map((item, index) => index === inspectionIndex ? target : item);
       this.resources = this.resources.map((resource, index) => index === projectIndex ? { ...projectResource, gitInspections } : resource);
     }
+    this.observationHealthy = true;
     this.events.projectInspected(projectId, workspaceId, inspection);
   }
 

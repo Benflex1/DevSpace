@@ -47,6 +47,7 @@ describe("structured diagnostics logging", () => {
       classifyFailureCode("INVALID_RESPONSE_CONTRACT"),
       classifyFailureCode("UNKNOWN_PRIVATE_FAILURE")
     ]).toEqual(failureCategories);
+    expect(classifyFailureCode("GIT_MUTATION_OUTCOME_UNCERTAIN")).toBe("state-conflict");
     expect(sanitizeLogFields({ failureCategory: "not-a-category" as never, errorCode: "SAFE" }))
       .toEqual({ errorCode: "SAFE" });
   });

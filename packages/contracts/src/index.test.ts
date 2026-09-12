@@ -17,11 +17,11 @@ test("@devspace/contracts is consumable from its package root without prior buil
   expect(packageEntry.completeAgentApiV1Endpoints).toHaveLength(54);
   expect(packageEntry.githubAgentApiV1Endpoints).toHaveLength(8);
   expect(packageEntry.f11AiAgentApiV1Endpoints).toHaveLength(10);
-  expect(packageEntry.executableAgentErrorCodes).toHaveLength(50);
+  expect(packageEntry.executableAgentErrorCodes).toHaveLength(51);
   expect(packageEntry.f10ExecutableAgentErrorCodes).toHaveLength(2);
-  expect(packageEntry.completeAgentApiV1ErrorCodes).toHaveLength(52);
+  expect(packageEntry.completeAgentApiV1ErrorCodes).toHaveLength(53);
   expect(packageEntry.agentEventTypes).toHaveLength(11);
-  expect(packageEntry.agentExecutionFailureCodes).toHaveLength(44);
+  expect(packageEntry.agentExecutionFailureCodes).toHaveLength(45);
   expect(packageEntry.agentSnapshotDataSchema).toBeDefined();
   expect(packageEntry.eventCursorSchema).toBeDefined();
   expect(packageEntry.TERMINAL_SUBPROTOCOL).toBe("devspace.terminal.v1");
