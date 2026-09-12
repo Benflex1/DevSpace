@@ -352,7 +352,6 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         window.setTimeout(() => { refreshGitStatus().catch(() => undefined); }, 700);
       } else {
         showNotice(input.action === "commit" ? `Committed ${result.commitOid ?? result.status?.headCommit ?? "staged changes"}.` : input.action === "stage" ? "File staged." : "File unstaged.", "success");
-        await refreshGitStatus();
       }
       return true;
     } catch {

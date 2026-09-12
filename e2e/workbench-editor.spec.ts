@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Request as PlaywrightRequest } from "@playwright/test";
 
 type MonacoRuntimeDiagnostic = {
   readonly status: string;
@@ -36,6 +36,17 @@ type EditorGeometry = {
   readonly content: GeometryNode;
   readonly editor: GeometryNode;
 };
+
+function requestAction(request: PlaywrightRequest): unknown {
+  const postData = request.postData();
+  if (postData === null) return undefined;
+  try {
+    const body = JSON.parse(postData) as unknown;
+    return typeof body === "object" && body !== null && "action" in body ? body.action : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 test.describe.configure({ timeout: 300_000 });
 
@@ -304,4 +315,28 @@ test("resolves local Monaco before the Workbench editor starts and never request
     status: "ready", expectedRuntime: "local", resolvedRuntime: "local", identityMatches: true
   });
   expect(cdnRequests).toEqual([]);
+});
+
+test("uses authoritative Git mutation status without a redundant refresh", async ({ page }) => {
+  const { projectId } = await createReadyProject(page, "Git Mutation Status");
+  const surface = await openReadme(page);
+  await replaceEditorText(page, "authoritative mutation status regression\n");
+  await surface.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(surface.getByText("Saved", { exact: true })).toBeVisible({ timeout: 15_000 });
+
+  let stagePostSeen = false;
+  let changesGetsAfterStage = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname !== `/api/projects/${projectId}/changes`) return;
+    if (request.method() === "POST" && requestAction(request) === "stage") stagePostSeen = true;
+    else if (request.method() === "GET" && stagePostSeen) changesGetsAfterStage += 1;
+  });
+
+  const changesGroup = page.locator(".git-change-group").filter({ hasText: "Changes" });
+  const changedFile = changesGroup.locator(".git-change-file", { hasText: "README.md" }).first();
+  await expect(changedFile).toBeVisible({ timeout: 30_000 });
+  await changesGroup.getByRole("button", { name: "Stage", exact: true }).click();
+  await expect(page.locator(".git-change-group").filter({ hasText: "Staged Changes" }).locator(".git-change-file")).toHaveCount(1, { timeout: 30_000 });
+  expect(changesGetsAfterStage).toBe(0);
 });

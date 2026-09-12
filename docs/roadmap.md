@@ -492,6 +492,13 @@ Sequencing decision:
 - Complete it before broad Workbench polish because onboarding must support both existing and new
   projects for the beta to feel coherent.
 
+### Persistent Git identity
+
+**Status: 🧊 Deferred P1 UX**
+
+- 🧊 Add User Settings for a default Git author name and email used explicitly for DevSpace-created
+  commits; keep the current temporary identity behavior until this item is implemented.
+
 ### Persistent terminals
 
 **Status: ❌ Not started**
