@@ -1215,7 +1215,7 @@ that can arise after a mutation has already been durably accepted and returned H
 not the F09 route-error union and has no response `meta` wrapper.
 
 Every variant is the strict object `{ code, message: ErrorMessage, retryable, details }`.
-`code` discriminates the exact 30-member union below. Retryability and details reuse the existing
+`code` discriminates the exact 31-member union below. Retryability and details reuse the existing
 F09 contracts exactly:
 
 | Allowed code | Retryable | Exact strict details |
@@ -1248,6 +1248,7 @@ F09 contracts exactly:
 | `AI_NOT_CONFIGURED` | false | `{ workspaceId: UuidV7, revisionId: UuidV7 }` |
 | `PREVIEW_DOMAIN_NOT_APPROVED` | false | `{ previewId: UuidV7 }` |
 | `GATEWAY_UPDATE_FAILED` | true | `{ previewId: UuidV7 }` |
+| `GIT_MUTATION_OUTCOME_UNCERTAIN` | false | `{}` |
 | `ROOTLESS_RUNTIME_UNAVAILABLE` | true | `{ component: "docker" }` |
 | `AGENT_INTERNAL_ERROR` | true | `{ incidentId: UuidV7 }` |
 
@@ -1258,7 +1259,7 @@ with a new operation ID after the transient condition changes or is addressed. I
 replay of the same operation ID to execute again; same-ID replay remains governed by F09 durable
 idempotency and returns the retained outcome without retrying execution.
 
-The classification of all 30 executable codes is exhaustive:
+The classification of all 31 executable codes is exhaustive:
 
 | F09 code | Classification for asynchronous execution | Accepted semantic reason |
 | --- | --- | --- |
