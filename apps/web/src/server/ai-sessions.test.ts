@@ -312,7 +312,7 @@ test("returns only the durable session identity when initial start and replay ar
   };
 
   await expect(createAiSession(projectId, workspaceId, "owner", { database, agent } as never))
-    .resolves.toEqual({ sessionId: sessionAId });
+    .resolves.toEqual({ sessionId: sessionAId, operationId: null });
   expect(database.createInitialAiSession).toHaveBeenCalledTimes(1);
 });
 
@@ -351,7 +351,8 @@ test("commits and acknowledges canonical startup history after a lost start resp
 
 test("does not silently retry a zero-sequence session under a changed binding", async () => {
   const agent = fakeAgent();
-  const creating = { ...session(sessionAId), state: "creating", profileKey: "codex", updatedAt: timestamp };
+  const creating = { ...session(sessionAId), state: "creating", profileKey: "codex",
+    profileRevision: `sha256-ai-profile-v1:${"c".repeat(64)}`, updatedAt: timestamp };
   const database = {
     createInitialAiSession: vi.fn(() => ({ session: creating, created: false })),
     prepareInitialAiSessionRetry: vi.fn(() => {
@@ -361,8 +362,9 @@ test("does not silently retry a zero-sequence session under a changed binding", 
   };
 
   await expect(createAiSession(projectId, workspaceId, "owner", { database, agent } as never))
-    .rejects.toThrow("changed-runtime-binding");
+    .resolves.toEqual({ sessionId: sessionAId, operationId: null });
   expect(agent.startAiSession).not.toHaveBeenCalled();
+  expect(database.prepareInitialAiSessionRetry).not.toHaveBeenCalled();
 });
 
 test("a rejected first start remains retryable under the exact session identity", async () => {
@@ -695,6 +697,82 @@ function sessionEvent(sessionId: string, sequence: number, eventType: "session.s
   } as CanonicalAiEvent;
 }
 
+function approvalRequestedEvent(sessionId: string, sequence: number, turnIdValue: string, requestId: string): CanonicalAiEvent {
+  return {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f0f00-0000-7000-8000-${(50_000 + sequence).toString(16).padStart(12, "0")}`,
+    sessionId,
+    turnId: turnIdValue,
+    sequence,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.approval.requested",
+    payload: {
+      requestId,
+      presentation: {
+        kind: "command",
+        summary: "Run the bounded test command.",
+        commandText: "pnpm test",
+        workingDirectory: ".",
+        risk: "read",
+        redacted: true
+      }
+    }
+  };
+}
+
+function inputRequestedEvent(sessionId: string, sequence: number, turnIdValue: string, requestId: string): CanonicalAiEvent {
+  return {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f0f00-0000-7000-8000-${(51_000 + sequence).toString(16).padStart(12, "0")}`,
+    sessionId,
+    turnId: turnIdValue,
+    sequence,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.input.requested",
+    payload: {
+      requestId,
+      questions: [{
+        questionId: "question-1", header: "Mode", question: "Choose a mode", responseKind: "single-select", secret: false,
+        options: [{ optionId: "option-1", label: "Safe", description: "Use the safe mode" }]
+      }]
+    }
+  };
+}
+
+function turnLostEvent(sessionId: string, sequence: number, turnIdValue: string): CanonicalAiEvent {
+  return {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f0f00-0000-7000-8000-${(52_000 + sequence).toString(16).padStart(12, "0")}`,
+    sessionId,
+    turnId: turnIdValue,
+    sequence,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision, provider: "codex" },
+    processGeneration: 1,
+    eventType: "turn.lost",
+    payload: { code: "AGENT_RESTART" }
+  };
+}
+
+function sessionLostEvent(sessionId: string, sequence: number): CanonicalAiEvent {
+  return {
+    schemaVersion: "devspace.ai-event/v1",
+    eventId: `018f0f00-0000-7000-8000-${(53_000 + sequence).toString(16).padStart(12, "0")}`,
+    sessionId,
+    turnId: null,
+    sequence,
+    observedAt: timestamp,
+    profile: { profileId: "codex", profileRevision, provider: "codex" },
+    processGeneration: 1,
+    eventType: "session.lost",
+    payload: { code: "AGENT_RESTART" }
+  };
+}
+
 async function historyFixture(canonicalAcceptance = true) {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-ai-history-fixture-"));
   directories.push(directory);
@@ -770,6 +848,100 @@ describe("SQLite canonical turn acceptance convergence", () => {
     raw.prepare("update ai_turns set state = 'completed', completed_at = ? where id = ?").run(timestamp, fixture.turnId);
     raw.close();
   }
+
+  test("creates a current-revision session after terminal historical Codex rows while reusing a live row", async () => {
+    const fixture = await historyFixture(false);
+    const initial = fixture.database.createInitialAiSession({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, profileId: "codex", profileRevision
+    });
+    expect(initial).toMatchObject({ session: { id: fixture.sessionId }, created: false });
+    const raw = new BetterSqlite3(fixture.databasePath);
+    raw.prepare("update ai_sessions set state = 'stopped', profile_revision = ? where id = ?")
+      .run(`sha256-ai-profile-v1:${"c".repeat(64)}`, fixture.sessionId);
+    raw.close();
+    const created = fixture.database.createInitialAiSession({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, profileId: "codex", profileRevision
+    });
+    expect(created.created).toBe(true);
+    expect(created.session.id).not.toBe(fixture.sessionId);
+    expect(created.session.profileRevision).toBe(profileRevision);
+    const repeated = fixture.database.createInitialAiSession({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, profileId: "codex", profileRevision
+    });
+    expect(repeated).toMatchObject({ session: { id: created.session.id }, created: false });
+  });
+
+  test("projects requested and responded interactions atomically and idempotently", async () => {
+    const fixture = await historyFixture();
+    const approvalRequestId = "018f0f00-0000-7000-8000-000000000020";
+    const inputRequestId = "018f0f00-0000-7000-8000-000000000021";
+    fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: approvalRequestedEvent(fixture.sessionId, 2, fixture.turnId, approvalRequestId)
+    });
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: approvalRequestedEvent(fixture.sessionId, 2, fixture.turnId, approvalRequestId)
+    })).toBe("duplicate");
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.interactions)
+      .toEqual([expect.objectContaining({ id: approvalRequestId, state: "pending", response: null })]);
+
+    const approvalResponded = {
+      ...approvalRequestedEvent(fixture.sessionId, 3, fixture.turnId, approvalRequestId),
+      eventId: "018f0f00-0000-7000-8000-000000000022",
+      eventType: "turn.approval.responded",
+      payload: { requestId: approvalRequestId, decision: "approve-once" }
+    } as CanonicalAiEvent;
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: approvalResponded
+    })).toBe("appended");
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: approvalResponded
+    })).toBe("duplicate");
+
+    fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: inputRequestedEvent(fixture.sessionId, 4, fixture.turnId, inputRequestId)
+    });
+    const inputResponded = {
+      ...inputRequestedEvent(fixture.sessionId, 5, fixture.turnId, inputRequestId),
+      eventId: "018f0f00-0000-7000-8000-000000000023",
+      eventType: "turn.input.responded",
+      payload: {
+        requestId: inputRequestId,
+        answers: [{ questionId: "question-1", kind: "selected", optionId: "option-1" }]
+      }
+    } as CanonicalAiEvent;
+    fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: inputResponded });
+    const interactions = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.interactions;
+    expect(interactions).toEqual([
+      expect.objectContaining({ id: approvalRequestId, state: "responded", response: { decision: "approve-once" } }),
+      expect.objectContaining({ id: inputRequestId, state: "responded", response: { answers: [{ questionId: "question-1", kind: "selected", optionId: "option-1" }] } })
+    ]);
+    expect(() => fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: {
+        ...inputResponded,
+        eventId: "018f0f00-0000-7000-8000-000000000024",
+        sequence: 6
+      }
+    })).toThrow();
+  });
+
+  test.each(["turn", "session"] as const)("retires pending interactions when the owning %s becomes terminal", async (cause) => {
+    const fixture = await historyFixture();
+    const requestId = "018f0f00-0000-7000-8000-000000000025";
+    fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: approvalRequestedEvent(fixture.sessionId, 2, fixture.turnId, requestId)
+    });
+    fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: cause === "turn" ? turnLostEvent(fixture.sessionId, 3, fixture.turnId) : sessionLostEvent(fixture.sessionId, 3)
+    });
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.interactions)
+      .toEqual([expect.objectContaining({ id: requestId, state: "lost", response: null })]);
+  });
 
   test("stream-first and POST-first each converge to one exact turn row", async () => {
     const streamFirst = await historyFixture(false);

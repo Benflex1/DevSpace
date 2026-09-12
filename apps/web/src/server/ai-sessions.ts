@@ -198,6 +198,9 @@ export async function createAiSession(projectId: string, workspaceId: string, ac
   if (created.state !== "creating" || created.lastSequence !== 0 || created.processGeneration !== 1) {
     return { sessionId: created.id, operationId: null };
   }
+  if (!initial.created && (created.profileKey !== profile.profileId || created.profileRevision !== profile.profileRevision)) {
+    return { sessionId: created.id, operationId: null };
+  }
   const active = initialSessionAttempts.get(created.id);
   if (active !== undefined) return await active;
   const attempt = (async (): Promise<{ sessionId: string; operationId?: string | null }> => {

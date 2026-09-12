@@ -797,6 +797,68 @@ export function openProjectDatabase(path: string, options: {
       }
     }
   };
+  const projectAiInteractionEvent = (event: CanonicalAiEvent, timestamp: string): void => {
+    if (event.eventType === "turn.approval.requested" || event.eventType === "turn.input.requested") {
+      const requestId = event.payload.requestId;
+      const kind = event.eventType === "turn.approval.requested" ? "approval" : "input";
+      const requestJson = JSON.stringify(event.payload);
+      const existing = client.prepare(`
+        select session_id as sessionId, turn_id as turnId, kind, state, request_json as requestJson
+        from ai_interaction_requests where id = ?
+      `).get(requestId) as { sessionId: string; turnId: string | null; kind: string; state: string; requestJson: string } | undefined;
+      if (existing !== undefined) {
+        if (existing.sessionId !== event.sessionId || existing.turnId !== event.turnId || existing.kind !== kind
+          || existing.state !== "pending" || existing.requestJson !== requestJson) {
+          throw new ProjectSetupConflictError("The canonical AI interaction request identity conflicts with retained state.");
+        }
+        return;
+      }
+      client.prepare(`
+        insert into ai_interaction_requests
+          (id, session_id, turn_id, kind, state, request_json, response_json, created_at, updated_at)
+        values (?, ?, ?, ?, 'pending', ?, null, ?, ?)
+      `).run(requestId, event.sessionId, event.turnId, kind, requestJson, timestamp, timestamp);
+      return;
+    }
+    if (event.eventType !== "turn.approval.responded" && event.eventType !== "turn.input.responded") return;
+    const requestId = event.payload.requestId;
+    const expectedKind = event.eventType === "turn.approval.responded" ? "approval" : "input";
+    const response = event.eventType === "turn.approval.responded"
+      ? { decision: event.payload.decision }
+      : { answers: event.payload.answers };
+    const existing = client.prepare(`
+      select session_id as sessionId, turn_id as turnId, kind, state
+      from ai_interaction_requests where id = ?
+    `).get(requestId) as { sessionId: string; turnId: string | null; kind: string; state: string } | undefined;
+    if (existing === undefined || existing.sessionId !== event.sessionId || existing.turnId !== event.turnId
+      || existing.kind !== expectedKind || existing.state !== "pending") {
+      throw new ProjectSetupConflictError("The canonical AI interaction response has no exact pending request.");
+    }
+    const result = client.prepare(`
+      update ai_interaction_requests
+      set state = 'responded', response_json = ?, updated_at = ?
+      where id = ? and session_id = ? and turn_id = ? and kind = ? and state = 'pending'
+    `).run(JSON.stringify(response), timestamp, requestId, event.sessionId, event.turnId, expectedKind);
+    if (result.changes !== 1) throw new ProjectSetupConflictError("The canonical AI interaction response changed concurrently.");
+  };
+  const retireAiInteractions = (input: {
+    readonly sessionId: string;
+    readonly turnId?: string | null;
+    readonly state: "cancelled" | "expired" | "lost";
+    readonly timestamp: string;
+  }): void => {
+    if (input.turnId === undefined) {
+      client.prepare(`
+        update ai_interaction_requests set state = ?, updated_at = ?
+        where session_id = ? and state = 'pending'
+      `).run(input.state, input.timestamp, input.sessionId);
+      return;
+    }
+    client.prepare(`
+      update ai_interaction_requests set state = ?, updated_at = ?
+      where session_id = ? and turn_id = ? and state = 'pending'
+    `).run(input.state, input.timestamp, input.sessionId, input.turnId);
+  };
   const getOwnedGithubConnection = (actor: string, connectionId: string) => db.select({
     connection: githubConnections,
     attempt: githubConnectionAttempts
@@ -1327,7 +1389,11 @@ export function openProjectDatabase(path: string, options: {
       return client.transaction(() => {
         const context = this.getRuntimeContext(input.projectId);
         if (context.workspace.id !== input.workspaceId) throw new ProjectSetupConflictError("The AI session workspace is not owned by this project.");
-        const existing = db.select().from(aiSessions).where(and(eq(aiSessions.workspaceId, input.workspaceId), eq(aiSessions.providerKey, "codex")))
+        const existing = db.select().from(aiSessions).where(and(
+          eq(aiSessions.workspaceId, input.workspaceId), eq(aiSessions.providerKey, "codex"),
+          or(eq(aiSessions.state, "creating"), eq(aiSessions.state, "active"),
+            eq(aiSessions.state, "waiting_for_input"), eq(aiSessions.state, "interrupted"))
+        ))
           .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).get();
         if (existing !== undefined) return existing;
         if (input.profileId !== "codex" || context.revision.runtimePlanHash === null) throw new ProjectSetupConflictError("AI is not configured for this workspace.");
@@ -1348,7 +1414,11 @@ export function openProjectDatabase(path: string, options: {
       return client.transaction(() => {
         const context = this.getRuntimeContext(input.projectId);
         if (context.workspace.id !== input.workspaceId) throw new ProjectSetupConflictError("The AI session workspace is not owned by this project.");
-        const existing = db.select().from(aiSessions).where(and(eq(aiSessions.workspaceId, input.workspaceId), eq(aiSessions.providerKey, "codex")))
+        const existing = db.select().from(aiSessions).where(and(
+          eq(aiSessions.workspaceId, input.workspaceId), eq(aiSessions.providerKey, "codex"),
+          or(eq(aiSessions.state, "creating"), eq(aiSessions.state, "active"),
+            eq(aiSessions.state, "waiting_for_input"), eq(aiSessions.state, "interrupted"))
+        ))
           .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).get();
         if (existing !== undefined) return { session: existing, created: false as const };
         if (input.profileId !== "codex" || context.revision.runtimePlanHash === null) throw new ProjectSetupConflictError("AI is not configured for this workspace.");
@@ -1581,6 +1651,22 @@ export function openProjectDatabase(path: string, options: {
         if (outputBounds.bytes > AI_SESSION_OUTPUT_MAX_BYTES || outputBounds.maxBytes > AI_TURN_OUTPUT_MAX_BYTES) {
           compactAiOutputs(event.sessionId);
         }
+        projectAiInteractionEvent(event, timestamp);
+        if (event.eventType === "turn.interrupted") retireAiInteractions({
+          sessionId: event.sessionId, turnId: event.turnId, state: "cancelled", timestamp
+        });
+        else if (event.eventType === "turn.failed" || event.eventType === "turn.lost") retireAiInteractions({
+          sessionId: event.sessionId, turnId: event.turnId, state: "lost", timestamp
+        });
+        else if (event.eventType === "turn.quiesced") retireAiInteractions({
+          sessionId: event.sessionId, turnId: event.turnId, state: "expired", timestamp
+        });
+        else if (event.eventType === "session.stopped") retireAiInteractions({
+          sessionId: event.sessionId, state: "cancelled", timestamp
+        });
+        else if (event.eventType === "session.lost") retireAiInteractions({
+          sessionId: event.sessionId, state: "lost", timestamp
+        });
         const interactionsCompacted = compactAiInteractions(event.sessionId);
         db.insert(aiEvents).values({ eventId: event.eventId, sessionId: event.sessionId, turnId: event.turnId, sequence: event.sequence,
           eventType: event.eventType, eventJson: JSON.stringify(event), observedAt: event.observedAt }).run();
