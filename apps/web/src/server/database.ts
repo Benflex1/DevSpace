@@ -674,7 +674,8 @@ export function openProjectDatabase(path: string, options: {
       throw new ProjectSetupConflictError("The exact active AI session generation is not accepting this turn.");
     }
     const activeTurn = db.select({ id: aiTurns.id }).from(aiTurns).where(and(
-      eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"))
+      eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"),
+        eq(aiTurns.state, "waiting-for-approval"), eq(aiTurns.state, "waiting-for-input"))
     )).get();
     if (activeTurn !== undefined) throw new ProjectSetupConflictError("The AI session already has an active turn.");
     const timestamp = now().toISOString();
@@ -729,7 +730,8 @@ export function openProjectDatabase(path: string, options: {
     const has = (eventType: CanonicalAiEvent["eventType"]) => types.includes(eventType);
     const hasTerminal = has("turn.failed") || has("turn.lost") || has("turn.quiesced");
     if (hasTerminal) throw new ProjectSetupConflictError("The canonical AI turn is already terminal.");
-    const active = context.turn.state === "accepted" || context.turn.state === "running";
+    const active = context.turn.state === "accepted" || context.turn.state === "running"
+      || context.turn.state === "waiting-for-approval" || context.turn.state === "waiting-for-input";
     const providerCompleted = context.prior.find((candidate) => candidate.eventType === "turn.provider-completed");
     if (event.eventType === "turn.started") {
       if (!active || has("turn.started") || has("turn.interrupted") || providerCompleted !== undefined) {
@@ -1385,6 +1387,24 @@ export function openProjectDatabase(path: string, options: {
     getAiTurn(projectId: string, workspaceId: string, sessionId: string, turnId: string) {
       return readAiTurnIdentity(projectId, workspaceId, sessionId, turnId);
     },
+    retireAiInteraction(input: {
+      projectId: string; workspaceId: string; sessionId: string; turnId: string; requestId: string;
+      state: "lost";
+    }): boolean {
+      return client.transaction(() => {
+        assertAiWorkspace(input.projectId, input.workspaceId);
+        const session = db.select({ id: aiSessions.id, workspaceId: aiSessions.workspaceId }).from(aiSessions).where(and(
+          eq(aiSessions.id, input.sessionId), eq(aiSessions.workspaceId, input.workspaceId), eq(aiSessions.providerKey, "codex")
+        )).get();
+        if (session === undefined) throw new ProjectSetupConflictError("The AI session is no longer available.");
+        const result = client.prepare(`
+          update ai_interaction_requests
+          set state = ?, updated_at = ?
+          where id = ? and session_id = ? and turn_id = ? and state = 'pending'
+        `).run(input.state, now().toISOString(), input.requestId, input.sessionId, input.turnId);
+        return result.changes === 1;
+      }).immediate();
+    },
     createAiSession(input: { projectId: string; workspaceId: string; profileId: string; profileRevision: string; title?: string }) {
       return client.transaction(() => {
         const context = this.getRuntimeContext(input.projectId);
@@ -1520,7 +1540,8 @@ export function openProjectDatabase(path: string, options: {
           }), timestamp, timestamp, input.sessionId);
         }
         const activeTurn = db.select({ id: aiTurns.id }).from(aiTurns).where(and(
-          eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"))
+          eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"),
+            eq(aiTurns.state, "waiting-for-approval"), eq(aiTurns.state, "waiting-for-input"))
         )).get();
         if (context.workspace.id !== input.workspaceId || session === undefined || session.state !== "stopped"
           || activeTurn !== undefined
@@ -1566,7 +1587,8 @@ export function openProjectDatabase(path: string, options: {
         const existing = db.select().from(aiTurns).where(and(eq(aiTurns.id, input.turnId), eq(aiTurns.sessionId, input.sessionId))).get();
         if (existing !== undefined) return existing;
         const activeTurn = db.select({ id: aiTurns.id }).from(aiTurns).where(and(
-          eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"))
+          eq(aiTurns.sessionId, input.sessionId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "running"),
+            eq(aiTurns.state, "waiting-for-approval"), eq(aiTurns.state, "waiting-for-input"))
         )).get();
         if (activeTurn !== undefined) throw new ProjectSetupConflictError("The AI session already has an active turn.");
         const timestamp = now().toISOString();
@@ -1686,6 +1708,9 @@ export function openProjectDatabase(path: string, options: {
             let state = turn.state; let outputText: string | undefined; let outputWasTruncated = turn.outputTruncated;
             let changedFilesJson = turn.changedFilesJson; let failureJson = turn.failureJson; let completedAt = turn.completedAt;
             if (event.eventType === "turn.started") state = "running";
+            if (event.eventType === "turn.approval.requested") state = "waiting-for-approval";
+            if (event.eventType === "turn.input.requested") state = "waiting-for-input";
+            if (event.eventType === "turn.approval.responded" || event.eventType === "turn.input.responded") state = "running";
             if (event.eventType === "turn.output.delta") {
               const current = client.prepare(`
                 select length(cast(output_text as blob)) as outputBytes,

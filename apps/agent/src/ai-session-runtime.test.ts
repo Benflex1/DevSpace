@@ -738,7 +738,7 @@ describe("AI session runtime", () => {
     expect((await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).availability.state).toBe("available");
     await runtime.start(binding);
     await runtime.sendTurn({ ...binding, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-    const first = await runtime.collect(sessionId, 0, 30);
+    const first = await runtime.collect(sessionId, 0, 100);
     expect(first.map((event) => event.eventType)).toEqual(expect.arrayContaining([
       "session.started", "session.ready", "turn.accepted", "turn.started", "turn.output.delta",
       "turn.provider-completed", "turn.files.changed", "turn.quiesced"
@@ -1288,11 +1288,15 @@ describe("AI session runtime", () => {
       expect(synchronized.pendingInteractionIds).toEqual([requested.payload.requestId]);
       await runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
         requestId: requested.payload.requestId, decision: "approve-once" });
+      await expect(runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        requestId: requested.payload.requestId, decision: "approve-once" })).rejects.toThrow("ai-interaction-state-conflict");
       const response = captured.find((entry) => {
         const rpc = entry.jsonRpc as { id?: unknown; result?: unknown } | undefined;
         return rpc?.id === 501 && rpc.result !== undefined;
       });
       expect(response?.jsonRpc).toEqual({ id: 501, result: { decision: "accept" } });
+      expect(captured.filter((entry) => (entry.jsonRpc as { id?: unknown; result?: unknown } | undefined)?.id === 501
+        && (entry.jsonRpc as { result?: unknown } | undefined)?.result !== undefined)).toHaveLength(1);
       expect((await runtime.synchronized(sessionId)).pendingInteractionIds).toEqual([]);
       const responded = (await runtime.collect(sessionId, 0, 1)).find((event) => event.eventType === "turn.approval.responded");
       expect(responded?.eventType).toBe("turn.approval.responded");

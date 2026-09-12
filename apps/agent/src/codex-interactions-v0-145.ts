@@ -3,7 +3,6 @@ import {
   AI_MAX_STRUCTURED_INPUT_OPTIONS,
   AI_MAX_STRUCTURED_INPUT_QUESTIONS,
   AI_PRESENTATION_TEXT_MAX_BYTES,
-  AI_USER_CONTENT_MAX_BYTES,
   aiApprovalDecisionSchema,
   aiApprovalPresentationSchema,
   aiStructuredInputAnswersSchema,
@@ -273,24 +272,25 @@ function inputQuestions(params: NativeParams): {
   questions: StructuredInputQuestions;
   mapping: ReadonlyArray<CodexInputQuestionMapping>;
 } | null {
-  if (!Array.isArray(params.questions) || params.questions.length === 0
-    || params.questions.length > AI_MAX_STRUCTURED_INPUT_QUESTIONS) return null;
+  const rawQuestions = Array.isArray(params.questions) ? params.questions as unknown[] : null;
+  if (rawQuestions === null || rawQuestions.length === 0
+    || rawQuestions.length > AI_MAX_STRUCTURED_INPUT_QUESTIONS) return null;
   const questions: StructuredInputQuestions = [];
   const mapping: CodexInputQuestionMapping[] = [];
-  for (let questionIndex = 0; questionIndex < params.questions.length; questionIndex += 1) {
-    const rawQuestion = params.questions[questionIndex];
+  for (let questionIndex = 0; questionIndex < rawQuestions.length; questionIndex += 1) {
+    const rawQuestion: unknown = rawQuestions[questionIndex];
     if (!isRecord(rawQuestion) || rawQuestion.isSecret === true) return null;
     const nativeQuestionId = stringValue(rawQuestion.id);
     if (nativeQuestionId === null || nativeQuestionId.length === 0) return null;
     const rawOptions = rawQuestion.options;
     if (rawOptions !== null && rawOptions !== undefined && !Array.isArray(rawOptions)) return null;
-    const optionValues = Array.isArray(rawOptions) ? rawOptions : [];
+    const optionValues = Array.isArray(rawOptions) ? rawOptions as unknown[] : [];
     if (optionValues.length > AI_MAX_STRUCTURED_INPUT_OPTIONS) return null;
     const questionId = `question-${questionIndex + 1}`;
     const options: Array<{ optionId: string; label: string; description: string }> = [];
     const optionMapping: Array<{ publicOptionId: string; nativeOptionLabel: string }> = [];
     for (let optionIndex = 0; optionIndex < optionValues.length; optionIndex += 1) {
-      const rawOption = optionValues[optionIndex];
+      const rawOption: unknown = optionValues[optionIndex];
       if (!isRecord(rawOption)) return null;
       const label = safeText(rawOption.label, `Option ${optionIndex + 1}`, 256);
       const description = safeText(rawOption.description, "", 2_048, true);

@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated September 6, 2026.
+> Updated September 12, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -68,11 +68,12 @@ complete and merged. PR #44 merged Private GitHub Checkpoint 1 at
 `ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`, and the accepted snapshots were proven
 tree-equivalent. Real CP1 local/dev GitHub App acceptance is complete. CP2 real-provider acceptance
 completed successfully with PR #45, and CP3A/CP3B are complete. The current objective is the
-finished owner-controlled MVP, with Workbench 1B Changes + Commit active on
-`feat/workbench-git-changes-commit`. Production deployment remains explicitly pending. The remaining
+finished owner-controlled MVP, with Workbench 1B Changes + Commit merged by PR #49 at
+`47bf2d8c70dcab7b2ff278eb241e927db02a6dd0` and AI Session Beta Checkpoint 2 implemented on its
+feature branch. Production deployment remains explicitly pending. The remaining
 path prioritizes:
 
-1. the remaining browser-usable Codex approvals and structured-question flow;
+1. real Codex/browser acceptance of the implemented approval and structured-question flow;
 2. project creation from scratch;
 3. essential task, Project Options, and Workbench UX;
 4. focused stabilization and visual polish based on real use.
@@ -400,7 +401,8 @@ Stop rule:
    - ✅ cooperatively interrupt and send another turn;
    - ✅ show bounded changed-files summaries and retain history after refresh;
    - ✅ stop the live session and verify post-fix ephemeral staging cleanup;
-   - 🟡 approvals and structured questions remain Checkpoint 2;
+   - ✅ Checkpoint 2 browser slice adds approvals, structured questions, durable interaction replay,
+     profile-pinned session navigation, and Workbench changed-file opening;
    - ✅ use T3 Code-informed UX patterns with attribution; no host/process/persistence assumptions
      were copied;
    - ✅ failed-turn/Unauthorized finalization now requires provider exit, staging cleanup, and lease
@@ -432,7 +434,7 @@ Stop rule:
 
 4. 🟡 **Workbench beta completion**
    - ✅ basic file tree/editing;
-   - 🟡 Workbench 1B practical Git status/diff/stage/commit with existing explicit push;
+   - ✅ Workbench 1B practical Git status/diff/stage/commit with existing explicit push;
    - better task/process output and controls;
    - essential Project Options editing;
    - cohesive T3 Code-inspired Workbench navigation and visual polish.
@@ -450,7 +452,7 @@ Stop rule:
 
 ### Private GitHub repository access
 
-**Status: ✅ Checkpoint 3A/3B private GitHub access complete; Workbench 1B is the active product slice**
+**Status: ✅ Checkpoint 3A/3B private GitHub access and Workbench 1B are complete; AI Session Checkpoint 2 is the current slice**
 
 - ✅ Authenticate the administrator-configured owner account/installation through a GitHub App
 - ✅ List authorized repositories outside project onboarding and refresh live installation authority
@@ -573,12 +575,12 @@ Remaining delivery order:
 
 ## Git experience
 
-- 🟡 Better status view — Workbench 1B Changes + Commit active on the current feature branch
-- 🟡 Diff UI — Workbench 1B Changes + Commit active on the current feature branch
-- 🟡 Staging — Workbench 1B Changes + Commit active on the current feature branch
-- 🟡 Commit workflow — Workbench 1B Changes + Commit active on the current feature branch
+- ✅ Better status view — Workbench 1B Changes + Commit merged by PR #49
+- ✅ Diff UI — Workbench 1B Changes + Commit merged by PR #49
+- ✅ Staging — Workbench 1B Changes + Commit merged by PR #49
+- ✅ Commit workflow — Workbench 1B Changes + Commit merged by PR #49
 - ✅ Push workflow
-- 🟡 Branch awareness — Workbench 1B Changes + Commit active on the current feature branch
+- ✅ Branch awareness — Workbench 1B Changes + Commit merged by PR #49
 
 ## AI sessions
 
@@ -596,7 +598,11 @@ AI Session Beta Slice B — Checkpoint 1:
 - ✅ Create, prompt, stream, interrupt, stop, and new-turn controls
 - ✅ Persistent public session/turn metadata and refresh recovery
 - ✅ Streaming assistant text and useful activity events
-- 🟡 Approvals and structured questions — Checkpoint 2
+- ✅ Approvals and structured questions — Checkpoint 2 implementation on
+  `feat/ai-workbench-checkpoint-2`
+- ✅ Durable interaction projection, terminal retirement, canonical response reconciliation, and
+  profile-pinned session navigation
+- ✅ AI changed-file links open the existing Workbench Edit/Changes representation
 - ✅ Bounded changed-files summary after terminal turns
 - ✅ Clear degraded-session and restart-workspace fallback
 - ✅ Exact stopped-session restart with one durable history/event chain and monotonically increasing
@@ -605,7 +611,7 @@ AI Session Beta Slice B — Checkpoint 1:
 - ✅ Checkpoint 1 passed: private Probe A, private Probe B, and the real browser first-write/read-
   only/interrupt/replay/Stop flow all used the Agent-owned Codex provider; provider exit, staging,
   synchronization, lease, authority, and container cleanup were verified
-- 🟡 Checkpoint 2 remains approvals and structured questions
+- 🟡 Checkpoint 2 real Codex/browser dogfood remains to be completed on the implementation branch
 
 Deferred until later:
 
@@ -632,7 +638,7 @@ Deferred until later:
 
 ## Workbench lifecycle and visual design
 
-- 🟡 Functional tabbed Workbench exists
+- ✅ Functional tabbed Workbench exists
 - ❌ Full visual redesign/polish
 - ❌ Better tab lifecycle
 - ❌ First-class Terminal / Editor / Preview / AI / Git / Task tabs

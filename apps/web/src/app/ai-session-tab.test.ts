@@ -29,4 +29,12 @@ describe("AI session browser hydration", () => {
     expect(source).toContain("initialRetryCoordinator.retry(selected)");
     expect(source).toContain("aiSessionMutationControls(");
   });
+
+  test("keeps historical sessions inspectable without offering a cross-revision restart", async () => {
+    const source = await readFile(new URL("./ai-session-tab.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("profile.profileRevision === session.profileRevision");
+    expect(source).toContain("historical-only");
+    expect(source).toContain('disabled={liveSessionExists}');
+  });
 });

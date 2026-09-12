@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { aiTurnContentSchema, uuidV7Schema } from "@devspace/contracts";
+import { aiApprovalDecisionSchema, aiStructuredInputAnswersSchema, aiTurnContentSchema, uuidV7Schema } from "@devspace/contracts";
 import { createAgentClient } from "../../../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../../../server/config.js";
@@ -10,6 +10,8 @@ import {
   createAiSession,
   inspectAiWorkbench,
   interruptAiTurn,
+  respondToAiApproval,
+  respondToAiStructuredInput,
   restartAiSession,
   sendAiTurn,
   stopAiSession,
@@ -20,6 +22,8 @@ import { readBoundedJsonBody } from "../../../../../server/request-body.js";
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 type AiAction = { action: "create"; workspaceId: string } | { action: "send"; workspaceId: string; sessionId: string; content: { kind: "text"; text: string } }
   | { action: "interrupt"; workspaceId: string; sessionId: string; turnId: string }
+  | { action: "respond-approval"; workspaceId: string; sessionId: string; turnId: string; requestId: string; decision: "approve-once" | "approve-for-session" | "deny" | "cancel" }
+  | { action: "respond-input"; workspaceId: string; sessionId: string; turnId: string; requestId: string; answers: unknown[] }
   | { action: "stop" | "restart"; workspaceId: string; sessionId: string };
 function parseAction(input: unknown): AiAction | null {
   if (input === null || typeof input !== "object" || Array.isArray(input)) return null;
@@ -30,6 +34,20 @@ function parseAction(input: unknown): AiAction | null {
     && uuidV7Schema.safeParse(value.sessionId).success) return { action, workspaceId, sessionId: value.sessionId };
   if (action === "interrupt" && typeof value.sessionId === "string" && typeof value.turnId === "string" && Object.keys(value).length === 4
     && uuidV7Schema.safeParse(value.sessionId).success && uuidV7Schema.safeParse(value.turnId).success) return { action, workspaceId, sessionId: value.sessionId, turnId: value.turnId };
+  if (action === "respond-approval" && typeof value.sessionId === "string" && typeof value.turnId === "string"
+    && typeof value.requestId === "string" && Object.keys(value).length === 6
+    && uuidV7Schema.safeParse(value.sessionId).success && uuidV7Schema.safeParse(value.turnId).success
+    && uuidV7Schema.safeParse(value.requestId).success && aiApprovalDecisionSchema.safeParse(value.decision).success) {
+    return { action, workspaceId, sessionId: value.sessionId, turnId: value.turnId, requestId: value.requestId,
+      decision: value.decision as "approve-once" | "approve-for-session" | "deny" | "cancel" };
+  }
+  if (action === "respond-input" && typeof value.sessionId === "string" && typeof value.turnId === "string"
+    && typeof value.requestId === "string" && Object.keys(value).length === 6
+    && uuidV7Schema.safeParse(value.sessionId).success && uuidV7Schema.safeParse(value.turnId).success
+    && uuidV7Schema.safeParse(value.requestId).success && aiStructuredInputAnswersSchema.safeParse(value.answers).success) {
+    return { action, workspaceId, sessionId: value.sessionId, turnId: value.turnId, requestId: value.requestId,
+      answers: value.answers as unknown[] };
+  }
   if (action === "send" && Object.keys(value).length === 4
     && typeof value.sessionId === "string" && uuidV7Schema.safeParse(value.sessionId).success
     && aiTurnContentSchema.safeParse(value.content).success) {
@@ -66,6 +84,10 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     if (parsed.action === "create") return json(await createAiSession(projectId, parsed.workspaceId, actor.identity, dependencies));
     if (parsed.action === "send") return json(await sendAiTurn(projectId, parsed.workspaceId, parsed.sessionId, parsed.content.text, dependencies));
     if (parsed.action === "interrupt") return json(await interruptAiTurn(projectId, parsed.workspaceId, parsed.sessionId, parsed.turnId, dependencies));
+    if (parsed.action === "respond-approval") return json(await respondToAiApproval(projectId, parsed.workspaceId, parsed.sessionId,
+      parsed.turnId, parsed.requestId, parsed.decision, dependencies));
+    if (parsed.action === "respond-input") return json(await respondToAiStructuredInput(projectId, parsed.workspaceId, parsed.sessionId,
+      parsed.turnId, parsed.requestId, parsed.answers as never, dependencies));
     if (parsed.action === "restart") return json(await restartAiSession(projectId, parsed.workspaceId, parsed.sessionId, dependencies));
     return json(await stopAiSession(projectId, parsed.workspaceId, parsed.sessionId, dependencies));
   } catch (error) {
@@ -76,6 +98,6 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       message: safe.message,
       code: safe.code,
       ...(error instanceof AiTurnOutcomeAmbiguousError ? { turnId: error.turnId, outcome: "ambiguous" as const } : {})
-    }, safe.code === "AI_PROFILE_UNAVAILABLE" ? 503 : 409);
+    }, safe.code === "AI_PROFILE_UNAVAILABLE" ? 503 : safe.code === "AI_CAPABILITY_UNSUPPORTED" ? 422 : 409);
   }
 }

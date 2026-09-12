@@ -1,4 +1,4 @@
-import { boundAiSessionTurns, type BrowserAiTurn } from "./ai-session-projection.js";
+import { applyAiInteractionEvent, boundAiSessionTurns, projectAiInteractions, type BrowserAiInteraction, type BrowserAiTurn } from "./ai-session-projection.js";
 
 export type { BrowserAiTurn } from "./ai-session-projection.js";
 
@@ -7,8 +7,13 @@ export type AiSessionReplayTurn = BrowserAiTurn;
 export type AiSessionReplayEvent = {
   eventType: string;
   turnId: string | null;
+  observedAt?: string;
   payload: Record<string, unknown>;
 };
+
+export function replayAiInteractions(initial: readonly unknown[], events: readonly AiSessionReplayEvent[]): BrowserAiInteraction[] {
+  return events.reduce((current, event) => applyAiInteractionEvent(current, event), projectAiInteractions(initial));
+}
 
 export function replayAiEvents(initial: readonly AiSessionReplayTurn[], events: readonly AiSessionReplayEvent[]): AiSessionReplayTurn[] {
   const replayed = events.reduce((current, event) => {

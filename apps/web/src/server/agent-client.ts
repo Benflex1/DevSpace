@@ -438,6 +438,8 @@ export function createAgentClient(socketPath: string, options: {
     startAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.start", data, operationId) as MutationReceipt,
     sendAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.send", data, operationId) as MutationReceipt,
     interruptAiTurn: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.turn.interrupt", data, operationId) as MutationReceipt,
+    respondToAiApproval: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.approval.respond", data, operationId) as MutationReceipt,
+    respondToAiStructuredInput: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.input.respond", data, operationId) as MutationReceipt,
     stopAiSession: async (operationId: string, data: unknown): Promise<MutationReceipt> => await call("ai-session.stop", data, operationId) as MutationReceipt,
     acknowledgeAiEvents: async (data: AcknowledgeAiEventsData): Promise<AcknowledgeAiEventsData> => await call("ai-session.events.acknowledge", data) as AcknowledgeAiEventsData,
     streamAiEvents: async function* (

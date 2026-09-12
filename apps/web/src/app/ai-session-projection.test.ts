@@ -3,7 +3,9 @@ import {
   AI_SESSION_OUTPUT_MAX_BYTES,
   AI_TURN_OUTPUT_MAX_BYTES,
   appendAiTurnOutput,
+  applyAiInteractionEvent,
   boundAiSessionTurns,
+  projectAiInteractions,
   type BrowserAiTurn
 } from "./ai-session-projection.js";
 
@@ -101,5 +103,60 @@ describe("bounded browser AI projection", () => {
     expect(result[0]?.outputTruncated).toBe(true);
     expect(result[0]?.outputText.includes("�")).toBe(false);
     expect(boundAiSessionTurns(JSON.parse(JSON.stringify(result)) as BrowserAiTurn[])).toEqual(result);
+  });
+});
+
+describe("durable AI interaction projection", () => {
+  const requestId = "018f0f00-0000-7000-8000-000000000101";
+  const turnId = "018f0f00-0000-7000-8000-000000000102";
+  const requested = {
+    eventType: "turn.approval.requested", turnId, observedAt: "2026-09-12T00:00:00.000Z",
+    payload: { requestId, presentation: { kind: "command" as const, summary: "Run tests", commandText: "pnpm test",
+      workingDirectory: ".", risk: "read", redacted: true as const } }
+  };
+  test("requested then responded updates one actionable card into one resolved card", () => {
+    const pending = applyAiInteractionEvent([], requested);
+    const responded = applyAiInteractionEvent(pending, {
+      eventType: "turn.approval.responded", turnId, observedAt: "2026-09-12T00:00:01.000Z",
+      payload: { requestId, decision: "approve-once" }
+    });
+    expect(responded).toHaveLength(1);
+    expect(responded[0]).toMatchObject({ id: requestId, state: "responded", response: { decision: "approve-once" } });
+    expect(applyAiInteractionEvent(responded, requested)).toEqual(responded);
+    expect(applyAiInteractionEvent(responded, responded[0] === undefined ? requested : {
+      eventType: "turn.approval.responded", turnId, payload: { requestId, decision: "approve-once" }
+    })).toEqual(responded);
+  });
+
+  test("projects all structured questions and retires pending input on terminal turn", () => {
+    const inputId = "018f0f00-0000-7000-8000-000000000103";
+    const input = applyAiInteractionEvent([], {
+      eventType: "turn.input.requested", turnId, observedAt: "2026-09-12T00:00:00.000Z", payload: {
+        requestId: inputId,
+        questions: [
+          { questionId: "mode", header: "Mode", question: "Choose", responseKind: "single-select", secret: false,
+            options: [{ optionId: "safe", label: "Safe", description: "Bounded" }] },
+          { questionId: "reason", header: "Reason", question: "Why?", responseKind: "text", secret: false, options: [] }
+        ]
+      }
+    });
+    const request = input[0]?.request;
+    expect(request !== null && request !== undefined && "questions" in request ? request.questions : []).toHaveLength(2);
+    const retired = applyAiInteractionEvent(input, { eventType: "turn.lost", turnId, payload: { code: "AGENT_RESTART" } });
+    expect(retired[0]?.state).toBe("lost");
+    expect(projectAiInteractions(retired)).toEqual(retired);
+  });
+
+  test("response-first replay stays resolved when the request arrives later", () => {
+    const resolved = applyAiInteractionEvent([], {
+      eventType: "turn.input.responded", turnId, payload: { requestId, answers: [{ questionId: "q", kind: "text", text: "answer" }] }
+    });
+    const later = applyAiInteractionEvent(resolved, {
+      eventType: "turn.input.requested", turnId, payload: { requestId, questions: [
+        { questionId: "q", header: "Q", question: "Question", responseKind: "text", secret: false, options: [] }
+      ] }
+    });
+    expect(later).toHaveLength(1);
+    expect(later[0]).toMatchObject({ state: "responded", response: { answers: [{ questionId: "q" }] } });
   });
 });

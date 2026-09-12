@@ -11,6 +11,7 @@ import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./previ
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import { AiSessionTab } from "./ai-session-tab.js";
+import { resolveAiChangedFileOpenTarget } from "./ai-changed-file-open.js";
 import { EditorTab } from "./editor-tab.js";
 import { WorkspaceChanges, type GitCommitFormInput } from "./workspace-changes.js";
 import { WorkspaceFileTree } from "./workspace-file-tree.js";
@@ -20,6 +21,7 @@ import {
   activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 import { editorDocumentKey, WorkbenchEditorDocuments } from "./workbench-editor-documents.js";
+import type { BrowserAiTurn } from "./ai-session-projection.js";
 
 type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
@@ -77,7 +79,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [gitError, setGitError] = useState<string | null>(null);
   const [gitBusyAction, setGitBusyAction] = useState<string | null>(null);
   const [persistentGitFailure, setPersistentGitFailure] = useState<GitFailure | null>(null);
-  const [editorViews, setEditorViews] = useState<Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged" }>>>({});
+  const [editorViews, setEditorViews] = useState<Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged"; readFile: boolean }>>>({});
   const currentPreviews = useRef(initialPreviews);
   const previewLivenessPoller = useRef<PreviewLivenessPoller | null>(null);
   const { notice, show: showNotice, clear: clearNotice } = useTransientNotice(initialMessage);
@@ -164,7 +166,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [projectId, pushAvailable]);
-  const refreshGitStatus = useCallback(async () => {
+  const refreshGitStatus = useCallback(async (): Promise<GitInspectionData | null> => {
     setGitLoading(true);
     try {
       const response = await fetch(`/api/projects/${projectId}/changes`, { cache: "no-store" });
@@ -172,8 +174,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       if (!response.ok || typeof body.branchName !== "string" && body.branchName !== null) throw new Error(body.message ?? "Git status could not be loaded.");
       setGitStatus(body);
       setGitError(null);
+      return body;
     } catch (error) {
       setGitError(error instanceof Error ? error.message : "Git status could not be loaded.");
+      return null;
     } finally {
       setGitLoading(false);
     }
@@ -311,14 +315,22 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const openAiTab = useCallback(() => {
     setTabs((current) => openWorkbenchTab(current, { id: aiTabId(workspaceId), kind: "ai", sessionId: workspaceId }));
   }, [workspaceId]);
-  const openEditorTab = useCallback((relativePath: string, mode: "edit" | "changes" = "edit", diffKind: "staged" | "unstaged" = "unstaged") => {
+  const openEditorTab = useCallback((relativePath: string, mode: "edit" | "changes" = "edit", diffKind: "staged" | "unstaged" = "unstaged", readFile = true) => {
     const tabId = editorTab(relativePath).id;
     editorDocuments.ensure(editorDocumentKey(workspaceId, relativePath), relativePath);
-    setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind } }));
+    setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind, readFile } }));
     setTabs((current) => openWorkbenchTab(current, editorTab(relativePath)));
   }, [editorDocuments, workspaceId]);
+  const openAiChangedFile = useCallback(async (file: BrowserAiTurn["changedFiles"]["files"][number]) => {
+    const target = resolveAiChangedFileOpenTarget(file, await refreshGitStatus() ?? gitStatus);
+    if (target.kind === "unavailable") {
+      showNotice(target.reason, "info");
+      return;
+    }
+    openEditorTab(target.path, target.kind === "changes" ? "changes" : "edit", target.kind === "changes" ? target.diffKind : "unstaged", file.change !== "deleted");
+  }, [gitStatus, openEditorTab, refreshGitStatus, showNotice]);
   const updateEditorMode = useCallback((tabId: string, mode: "edit" | "changes") => {
-    setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind: current[tabId]?.diffKind ?? "unstaged" } }));
+    setEditorViews((current) => ({ ...current, [tabId]: { mode, diffKind: current[tabId]?.diffKind ?? "unstaged", readFile: current[tabId]?.readFile ?? true } }));
   }, []);
   const updateEditorDirty = useCallback((tabId: string, dirty: boolean) => {
     setDirtyEditorIds((current) => {
@@ -521,7 +533,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           editorDocuments={editorDocuments} editorPresentationGeneration={editorPresentationGeneration}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
           onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }}
-          onDiffNoLongerPresent={handleDiffNoLongerPresent} />
+          onDiffNoLongerPresent={handleDiffNoLongerPresent} onOpenAiChangedFile={openAiChangedFile} />
         {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">
           <span>{notice.message}</span>
           <IncidentReference incidentId={notice.referenceId} />
@@ -655,14 +667,15 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent, onOpenAiChangedFile }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
-  projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged" }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
+  projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged"; readFile: boolean }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   editorDocuments: WorkbenchEditorDocuments; editorPresentationGeneration: number;
   onReloadPreview: (previewId: string) => Promise<void>;
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   onEditorDirtyChange: (tabId: string, dirty: boolean) => void; onEditorModeChange: (tabId: string, mode: "edit" | "changes") => void; onEditorSaved: () => void;
   onDiffNoLongerPresent: (path: string) => void;
+  onOpenAiChangedFile: (file: BrowserAiTurn["changedFiles"]["files"][number]) => void | Promise<void>;
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a file or terminal to start working in this project.</p></div>}
@@ -673,9 +686,10 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
-      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} />
+      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} onOpenChangedFile={onOpenAiChangedFile} />
         : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
           mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
+          readFile={editorViews[tab.id]?.readFile ?? true}
           documents={editorDocuments} remountCount={editorPresentationGeneration + 1}
           active={tab.id === tabs.activeTabId} onModeChange={(mode) => onEditorModeChange(tab.id, mode)} onDirtyChange={onEditorDirtyChange}
           onDiffNoLongerPresent={onDiffNoLongerPresent} onSaved={onEditorSaved} /> : null)}

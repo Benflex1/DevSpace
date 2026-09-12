@@ -34,7 +34,9 @@ const synchronizedFrame = {
   schemaVersion: "devspace.ai-stream/v1",
   frameType: "stream.synchronized",
   sessionId: streamSessionId,
-  throughSequence: 0
+  throughSequence: 0,
+  processGeneration: 1,
+  pendingInteractionIds: []
 } as const;
 
 const additionalStreamSessionIds = [
@@ -471,7 +473,7 @@ test.each([
     race!();
     abort.abort();
     const result = await pending;
-    expect(result.done === true || result.value === synchronizedFrame).toBe(true);
+    expect(result.done === true || result.value === (synchronizedFrame as unknown)).toBe(true);
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
   } finally {
     abort.abort();
@@ -576,7 +578,8 @@ test("constructs protocol headers and parses valid success envelopes", async () 
 
 test("keeps an established AI event stream alive through the observation timeout", async () => {
   const sessionId = "018f0f00-0000-7000-8000-000000000010";
-  const frame = { schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence: 0 } as const;
+    const frame = { schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence: 0,
+      processGeneration: 1, pendingInteractionIds: [] } as const;
   const service = await listen((_request, response) => {
     response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
     response.flushHeaders();
@@ -815,6 +818,42 @@ test("sends the canonical typed preview activation fields and parses the mutatio
     expect(requestBody).toContain('"hostname":"alpha-primary-web-018f0f00.preview.example.com"');
     expect(requestBody).toContain('"projectSlug":"alpha"');
     expect(requestBody).toContain('"workspaceSlug":"primary"');
+  } finally { await service.close(); }
+});
+
+test("sends bounded AI approval and structured-input responses through the existing Agent operations", async () => {
+  const seen: Array<{ path: string; body: string }> = [];
+  const service = await listen((request, response) => {
+    let body = "";
+    request.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
+    request.on("end", () => {
+      seen.push({ path: request.url ?? "", body });
+      response.statusCode = 202;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp }, data: { operationId: id } }));
+    });
+  });
+  try {
+    const client = createAgentClient(service.socketPath, { createId: () => id, now: () => new Date(timestamp) });
+    const binding = {
+      projectId: id,
+      workspaceId: "018f0f00-0000-7000-8000-000000000002",
+      aiSessionId: "018f0f00-0000-7000-8000-000000000003",
+      profileId: "codex",
+      profileRevision: `sha256-ai-profile-v1:${"a".repeat(64)}`,
+      processGeneration: 1,
+      turnId: "018f0f00-0000-7000-8000-000000000004",
+      requestId: "018f0f00-0000-7000-8000-000000000005"
+    };
+    await expect(client.respondToAiApproval(id, { ...binding, decision: "approve-once" })).resolves.toEqual({ operationId: id });
+    await expect(client.respondToAiStructuredInput(id, { ...binding, answers: [
+      { questionId: "question-1", kind: "selected", optionId: "option-1" }
+    ] })).resolves.toEqual({ operationId: id });
+    expect(seen.map((entry) => entry.path)).toEqual([
+      "/v1/ai-sessions/respond-approval", "/v1/ai-sessions/respond-input"
+    ]);
+    expect(seen[0]?.body).toContain('"decision":"approve-once"');
+    expect(seen[1]?.body).toContain('"questionId":"question-1"');
   } finally { await service.close(); }
 });
 

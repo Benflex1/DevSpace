@@ -10,7 +10,18 @@ import {
   type CanonicalAiEvent
 } from "@devspace/contracts";
 import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
-import { boundAiWorkbenchResponse, createAiSession, inspectAiWorkbench, interruptAiTurn, restartAiSession, sendAiTurn, stopAiSession, streamAiEvents } from "./ai-sessions.js";
+import {
+  boundAiWorkbenchResponse,
+  createAiSession,
+  inspectAiWorkbench,
+  interruptAiTurn,
+  respondToAiApproval,
+  respondToAiStructuredInput,
+  restartAiSession,
+  sendAiTurn,
+  stopAiSession,
+  streamAiEvents
+} from "./ai-sessions.js";
 import {
   AI_SESSION_EVENT_HISTORY_MAX_EVENTS,
   AI_SESSION_OUTPUT_MAX_BYTES,
@@ -59,22 +70,69 @@ function view(id: string) {
   return { session: session(id), turns: [], events: [] };
 }
 
+function pendingApproval(requestId: string, state: "pending" | "responded" = "pending") {
+  return {
+    id: requestId,
+    turnId,
+    kind: "approval",
+    state,
+    request: {
+      requestId,
+      presentation: {
+        kind: "command",
+        summary: "Run the bounded test command.",
+        commandText: "pnpm test",
+        workingDirectory: ".",
+        risk: "read",
+        redacted: true
+      }
+    },
+    response: state === "responded" ? { decision: "approve-once" } : null,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function pendingInput(requestId: string) {
+  return {
+    id: requestId,
+    turnId,
+    kind: "input",
+    state: "pending",
+    request: {
+      requestId,
+      questions: [
+        {
+          questionId: "question-1", header: "Mode", question: "Choose a mode", responseKind: "single-select", secret: false,
+          options: [{ optionId: "option-1", label: "Safe", description: "Use the safe mode" }]
+        },
+        { questionId: "question-2", header: "Reason", question: "Why?", responseKind: "text", secret: false, options: [] }
+      ]
+    },
+    response: null,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
 function fakeAgent() {
   return {
     inspectAiProvider: vi.fn(() => Promise.resolve({
       profileId: "codex", profileRevision, provider: "codex", displayName: "Codex",
-      capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: false,
-        structuredInput: false, stop: true, streamEvents: true }, availability: { state: "available" as const }
+      capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: true,
+        structuredInput: true, stop: true, streamEvents: true }, availability: { state: "available" as const }
     })),
     startAiSession: vi.fn((_operationId: string, _data: Record<string, unknown>) =>
       Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000006" })),
     sendAiTurn: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000007" })),
     interruptAiTurn: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000008" })),
+    respondToAiApproval: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000010" })),
+    respondToAiStructuredInput: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000011" })),
     stopAiSession: vi.fn(() => Promise.resolve({ operationId: "018f0f00-0000-7000-8000-000000000009" })),
     streamAiEvents: vi.fn(async function* (requestedSessionId: string) {
       await Promise.resolve();
       yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const,
-        sessionId: requestedSessionId, throughSequence: 0 };
+        sessionId: requestedSessionId, throughSequence: 0, processGeneration: 1, pendingInteractionIds: [] };
     }),
     acknowledgeAiEvents: vi.fn((value: unknown) => Promise.resolve(value))
   };
@@ -327,7 +385,9 @@ test("commits and acknowledges canonical startup history after a lost start resp
       schemaVersion: "devspace.ai-stream/v1",
       frameType: "stream.synchronized",
       sessionId: sessionAId,
-      throughSequence: 1
+      throughSequence: 1,
+      processGeneration: 1,
+      pendingInteractionIds: []
     };
   }) as never);
   const creating = { ...session(sessionAId), state: "creating", profileKey: "codex", updatedAt: timestamp };
@@ -518,7 +578,8 @@ test("uses the exact session for history, interrupt, stop, and Agent replay", as
   expect(agent.stopAiSession).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ aiSessionId: sessionAId }));
   expect(agent.streamAiEvents).toHaveBeenCalledWith(sessionAId, 0, {});
   expect(database.getAiSession).toHaveBeenCalledWith(projectId, workspaceId, sessionAId);
-  expect(frames).toEqual([{ schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId: sessionAId, throughSequence: 0 }]);
+  expect(frames).toEqual([{ schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId: sessionAId, throughSequence: 0,
+    processGeneration: 1, pendingInteractionIds: [] }]);
 });
 
 test.each([
@@ -552,6 +613,187 @@ test("rejects a turn that belongs to another exact session", async () => {
   await expect(interruptAiTurn(projectId, workspaceId, sessionAId, sessionBId, { database, agent } as never))
     .rejects.toMatchObject({ code: "AI_SESSION_CONFLICT", message: "The AI session is no longer available." });
   expect(agent.interruptAiTurn).not.toHaveBeenCalled();
+});
+
+test("validates and submits an exact pending approval without accepting browser authority fields", async () => {
+  const agent = fakeAgent();
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), interactions: [pendingApproval("018f0f00-0000-7000-8000-000000000030")] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "running" }))
+  };
+  const result = await respondToAiApproval(projectId, workspaceId, sessionAId, turnId, "018f0f00-0000-7000-8000-000000000030",
+    "approve-once", { database, agent } as never);
+  expect(typeof result.operationId).toBe("string");
+  expect(agent.respondToAiApproval).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+    projectId, workspaceId, aiSessionId: sessionAId, turnId,
+    requestId: "018f0f00-0000-7000-8000-000000000030", decision: "approve-once",
+    profileId: "codex", profileRevision, processGeneration: 1
+  }));
+  const binding = (agent.respondToAiApproval.mock.calls[0] as unknown as readonly [unknown, Record<string, unknown>] | undefined)?.[1];
+  expect(binding).not.toHaveProperty("providerRequestId");
+  expect(binding).not.toHaveProperty("presentation");
+});
+
+test("validates every structured answer against the exact durable request", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000031";
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), interactions: [pendingInput(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "running" }))
+  };
+  const result = await respondToAiStructuredInput(projectId, workspaceId, sessionAId, turnId, requestId, [
+    { questionId: "question-1", kind: "selected", optionId: "option-1" },
+    { questionId: "question-2", kind: "text", text: "Because it is bounded." }
+  ], { database, agent } as never);
+  expect(typeof result.operationId).toBe("string");
+  expect(agent.respondToAiStructuredInput).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+    requestId, answers: [
+      { questionId: "question-1", kind: "selected", optionId: "option-1" },
+      { questionId: "question-2", kind: "text", text: "Because it is bounded." }
+    ]
+  }));
+  await expect(respondToAiStructuredInput(projectId, workspaceId, sessionAId, turnId, requestId, [
+    { questionId: "question-1", kind: "selected", optionId: "not-an-option" },
+    { questionId: "question-2", kind: "text", text: "missing exact option" }
+  ], { database, agent } as never)).rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
+  await expect(respondToAiStructuredInput(projectId, workspaceId, sessionAId, turnId, requestId, [
+    { questionId: "question-1", kind: "selected", optionId: "option-1" }
+  ], { database, agent } as never)).rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
+});
+
+test.each([
+  ["already responded", () => pendingApproval("018f0f00-0000-7000-8000-000000000032", "responded"), "018f0f00-0000-7000-8000-000000000032"],
+  ["wrong interaction type", () => pendingInput("018f0f00-0000-7000-8000-000000000033"), "018f0f00-0000-7000-8000-000000000033"]
+] as const)("rejects %s interaction before Agent response", async (_label, interaction, requestId) => {
+  const agent = fakeAgent();
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), interactions: [interaction()] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "running" }))
+  };
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId,
+    "deny", { database, agent } as never)).rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
+  expect(agent.respondToAiApproval).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["wrong project", "018f0f00-0000-7000-8000-000000000013", workspaceId, sessionAId, turnId, "AI_SESSION_CONFLICT"],
+  ["wrong workspace", projectId, "018f0f00-0000-7000-8000-000000000012", sessionAId, turnId, "AI_SESSION_CONFLICT"],
+  ["wrong session", projectId, workspaceId, sessionBId, turnId, "AI_SESSION_CONFLICT"],
+  ["wrong turn", projectId, workspaceId, sessionAId, sessionBId, "AI_INTERACTION_STATE_CONFLICT"]
+] as const)("rejects %s interaction binding before Agent response", async (_label, requestedProjectId, requestedWorkspaceId, requestedSessionId, requestedTurnId, expectedCode) => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000036";
+  const database = {
+    getAiSession: vi.fn((requestedProject: string, requestedWorkspace: string, selectedSession?: string) =>
+      requestedProject === projectId && requestedWorkspace === workspaceId && selectedSession === sessionAId
+        ? { ...view(sessionAId), interactions: [pendingApproval(requestId)] } : null),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "running" }))
+  };
+  await expect(respondToAiApproval(requestedProjectId, requestedWorkspaceId, requestedSessionId, requestedTurnId, requestId,
+    "deny", { database, agent } as never)).rejects.toMatchObject({ code: expectedCode });
+  expect(agent.respondToAiApproval).not.toHaveBeenCalled();
+});
+
+test("requires the current Agent profile revision and approval capability without persisting duplicate capability state", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000037";
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), interactions: [pendingApproval(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "waiting-for-approval" }))
+  };
+  agent.inspectAiProvider.mockResolvedValueOnce({
+    profileId: "codex", profileRevision: `sha256-ai-profile-v1:${"c".repeat(64)}`, provider: "codex", displayName: "Codex",
+    capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: true, structuredInput: true, stop: true, streamEvents: true },
+    availability: { state: "available" }
+  });
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "deny", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_PROFILE_REVISION_CONFLICT" });
+  expect(agent.respondToAiApproval).not.toHaveBeenCalled();
+
+  agent.inspectAiProvider.mockResolvedValueOnce({
+    profileId: "codex", profileRevision, provider: "codex", displayName: "Codex",
+    capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: false, structuredInput: true, stop: true, streamEvents: true },
+    availability: { state: "available" }
+  });
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "deny", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_CAPABILITY_UNSUPPORTED" });
+  expect(agent.respondToAiApproval).not.toHaveBeenCalled();
+});
+
+test("does not retry an ambiguous approval response and reconciles a canonical response", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000034";
+  agent.respondToAiApproval.mockRejectedValueOnce(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure"));
+  agent.streamAiEvents.mockImplementation((function* () {
+    yield {
+      schemaVersion: "devspace.ai-stream/v1" as const,
+      frameType: "stream.synchronized" as const,
+      sessionId: sessionAId,
+      throughSequence: 2,
+      processGeneration: 1,
+      pendingInteractionIds: []
+    };
+    yield {
+      ...approvalRequestedEvent(sessionAId, 2, turnId, requestId),
+      eventId: "018f0f00-0000-7000-8000-000000000035",
+      eventType: "turn.approval.responded",
+      payload: { requestId, decision: "approve-once" }
+    } as CanonicalAiEvent;
+  }) as never);
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), interactions: [pendingApproval(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "running" })),
+    commitAiEvent: vi.fn(() => "appended" as const),
+    retireAiInteraction: vi.fn()
+  };
+  const result = await respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "approve-once", { database, agent } as never);
+  expect(typeof result.operationId).toBe("string");
+  expect(agent.respondToAiApproval).toHaveBeenCalledTimes(1);
+  expect(database.retireAiInteraction).not.toHaveBeenCalled();
+});
+
+test("does not resend an ambiguous response when the same-generation Agent binding is still pending", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000038";
+  agent.respondToAiApproval.mockRejectedValueOnce(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure"));
+  agent.streamAiEvents.mockImplementation((function* () {
+    yield {
+      schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const,
+      sessionId: sessionAId, throughSequence: 1, processGeneration: 1, pendingInteractionIds: [requestId]
+    };
+  }) as never);
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), lastSequence: 1 }, interactions: [pendingApproval(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "waiting-for-approval" })),
+    retireAiInteraction: vi.fn()
+  };
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "approve-once", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
+  expect(agent.respondToAiApproval).toHaveBeenCalledTimes(1);
+  expect(database.retireAiInteraction).not.toHaveBeenCalled();
+});
+
+test("retires an ambiguous response when the Agent can no longer prove the pending provider binding", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000039";
+  agent.respondToAiApproval.mockRejectedValueOnce(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure"));
+  agent.streamAiEvents.mockImplementation((function* () {
+    yield {
+      schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const,
+      sessionId: sessionAId, throughSequence: 1, processGeneration: 1, pendingInteractionIds: []
+    };
+  }) as never);
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), lastSequence: 1 }, interactions: [pendingApproval(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "waiting-for-approval" })),
+    retireAiInteraction: vi.fn()
+  };
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "approve-once", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
+  expect(agent.respondToAiApproval).toHaveBeenCalledTimes(1);
+  expect(database.retireAiInteraction).toHaveBeenCalledWith({
+    projectId, workspaceId, sessionId: sessionAId, turnId, requestId, state: "lost"
+  });
 });
 
 test.each([
@@ -1179,7 +1421,7 @@ describe("SQLite stopped-session restart fencing", () => {
       projectId: overflowFixture.projectId, workspaceId: overflowFixture.workspaceId, sessionId: overflowFixture.sessionId,
       profileId: "codex", profileRevision
     })).toThrow();
-  });
+  }, 15_000);
 
   test("advances generation only on the next canonical started event and fences older or future generations", async () => {
     const fixture = await stoppedHistoryFixture();

@@ -61,7 +61,7 @@ function createRuntime(initialEvents: CanonicalAiEvent[] = []) {
   });
   const runtime = {
     inspect: vi.fn(), start: vi.fn(), sendTurn: vi.fn(), interrupt: vi.fn(), stop: vi.fn(),
-    respondToAiApproval: vi.fn(), respondToAiStructuredInput: vi.fn(), synchronized: vi.fn(async () => ({ processGeneration: 1, pendingInteractionIds: [] })),
+    respondToAiApproval: vi.fn(), respondToAiStructuredInput: vi.fn(), synchronized: vi.fn(() => Promise.resolve({ processGeneration: 1, pendingInteractionIds: [] })),
     replay, subscribe, acknowledge: vi.fn(), collect: vi.fn()
   } as unknown as AiSessionRuntime;
   return {

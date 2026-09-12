@@ -1,12 +1,13 @@
 # T3 Code AI-session attribution
 
 DevSpace inspected `pingdotgg/t3code` at commit
-`887dd6e455bb969c1a0c9659a6bdf2baceac030d` under the MIT license.
+`d1d15c67f4a5fb82fd8d5e01e5e3b288296789c3` under the MIT license.
 
-The implementation adapts interaction and presentation patterns; it does not copy T3 Code’s host
-filesystem, process authority, persistence, transport, or authentication assumptions. Adapted
-patterns are represented in `apps/web/src/app/ai-session-tab.tsx` and the Workbench tab integration
-in `apps/web/src/app/project-workbench.tsx`.
+Checkpoint 2 uses conceptual UX inspiration only: compact AI-session navigation, inline approval
+and structured-question cards, quieter activity presentation, changed-file links, and reconnect /
+loading / empty states. No T3 Code source was copied or substantially adapted, so no additional
+MIT source attribution is required for the implementation. DevSpace retains its own Web/Agent,
+workspace, persistence, transport, and authentication boundaries.
 
 Inspected source paths:
 

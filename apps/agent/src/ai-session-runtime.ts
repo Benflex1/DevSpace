@@ -417,10 +417,13 @@ class FakeProvider implements ProviderAdapter {
   private stopped = false;
   private releaseLongTurn: (() => void) | null = null;
   private longTurnTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly pendingInteractions = new Map<string, { kind: "approval" | "input"; decision?: AiInteractionDecision; answers?: readonly AiStructuredInputAnswer[] }>();
+  private releaseInteraction: (() => void) | null = null;
   constructor(
     private readonly callbacks: AdapterCallbacks,
     private readonly worktreePath: string | null,
-  private readonly testHooks: AiSessionRuntimeOptions["fakeProviderTestHooks"]
+    private readonly testHooks: AiSessionRuntimeOptions["fakeProviderTestHooks"],
+    private readonly createId: () => string
   ) {}
   async start(): Promise<void> { this.testHooks?.onStart?.(); }
   async sendTurn(_turnId: string, text: string): Promise<void> {
@@ -429,6 +432,55 @@ class FakeProvider implements ProviderAdapter {
     this.stopped = false;
     if (text.includes("devspace-ai-beta-check.txt") && this.worktreePath !== null) {
       await writeFile(path.join(this.worktreePath, "devspace-ai-beta-check.txt"), "DevSpace AI beta check", { mode: 0o600 });
+    }
+    if (text.includes("approval") || text.includes("file approval")) {
+      const requestId = this.createId();
+      const fileChange = text.includes("file approval");
+      const projection: CodexInteractionProjection = fileChange ? {
+        requestId, turnId: _turnId, kind: "approval",
+        presentation: { kind: "file-change", summary: "Codex wants to update the beta check file.", paths: ["devspace-ai-beta-check.txt"], truncated: false, redacted: true },
+        public: { requestId, turnId: _turnId, kind: "approval", presentation: { kind: "file-change", summary: "Codex wants to update the beta check file.", paths: ["devspace-ai-beta-check.txt"], truncated: false, redacted: true } },
+        binding: { nativeRequestId: "fake-native-approval", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" }
+      } : {
+        requestId, turnId: _turnId, kind: "approval",
+        presentation: { kind: "command", summary: "Codex wants to run the bounded approval test command.", commandText: "printf 'DevSpace approval'", workingDirectory: ".", risk: "read", redacted: true },
+        public: { requestId, turnId: _turnId, kind: "approval", presentation: { kind: "command", summary: "Codex wants to run the bounded approval test command.", commandText: "printf 'DevSpace approval'", workingDirectory: ".", risk: "read", redacted: true } },
+        binding: { nativeRequestId: "fake-native-approval", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" }
+      };
+      this.pendingInteractions.set(requestId, { kind: "approval" });
+      await this.callbacks.interactionRequested(projection);
+      await this.waitForInteraction();
+      const result = this.pendingInteractions.get(requestId);
+      if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
+      await this.callbacks.outputDelta(result?.decision === "deny" ? "The command was denied." : "The approved command completed.");
+      this.pendingInteractions.delete(requestId);
+      await this.callbacks.completed("completed");
+      return;
+    }
+    if (text.includes("question") || text.includes("structured input")) {
+      const requestId = this.createId();
+      const questions = [
+        { questionId: "question-1", header: "Mode", question: "Choose a safe mode.", responseKind: "single-select" as const, secret: false as const,
+          options: [{ optionId: "option-1", label: "Safe", description: "Use the bounded safe mode." }, { optionId: "option-2", label: "Explain", description: "Explain before continuing." }] },
+        { questionId: "question-2", header: "Reason", question: "Why should Codex continue?", responseKind: "text" as const, secret: false as const, options: [] }
+      ];
+      const projection: CodexInteractionProjection = {
+        requestId, turnId: _turnId, kind: "input", questions,
+        public: { requestId, turnId: _turnId, kind: "input", questions },
+        mapping: { requestId, turnId: _turnId, questions: [
+          { publicQuestionId: "question-1", nativeQuestionId: "fake-question-1", responseKind: "single-select", options: [{ publicOptionId: "option-1", nativeOptionLabel: "Safe" }, { publicOptionId: "option-2", nativeOptionLabel: "Explain" }] },
+          { publicQuestionId: "question-2", nativeQuestionId: "fake-question-2", responseKind: "text", options: [] }
+        ], binding: { nativeRequestId: "fake-native-input", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" } }
+      };
+      this.pendingInteractions.set(requestId, { kind: "input" });
+      await this.callbacks.interactionRequested(projection);
+      await this.waitForInteraction();
+      const result = this.pendingInteractions.get(requestId);
+      if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
+      await this.callbacks.outputDelta(result?.answers === undefined ? "The answer was not received." : "Thanks, I will continue with those answers.");
+      this.pendingInteractions.delete(requestId);
+      await this.callbacks.completed("completed");
+      return;
     }
     if (text === "long") {
       await this.callbacks.activity("Deterministic provider is inspecting the workspace.");
@@ -453,14 +505,31 @@ class FakeProvider implements ProviderAdapter {
     await this.callbacks.completed("completed");
     if (this.testHooks?.closeAfterTurn === true) await this.callbacks.providerClosed();
   }
-  async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); }
-  async respondToApproval(): Promise<void> { throw new Error("ai-interaction-not-pending"); }
-  async respondToStructuredInput(): Promise<void> { throw new Error("ai-interaction-not-pending"); }
-  pendingInteractionIds(): readonly string[] { return []; }
-  retireInteractions(): void { /* deterministic provider has no interactive requests */ }
+  private async waitForInteraction(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      this.releaseInteraction = resolve;
+      if (this.interrupted || this.stopped) resolve();
+    });
+    this.releaseInteraction = null;
+  }
+  async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); this.releaseInteraction?.(); }
+  async respondToApproval(requestId: string, decision: AiInteractionDecision): Promise<void> {
+    const pending = this.pendingInteractions.get(requestId);
+    if (pending?.kind !== "approval") throw new Error("ai-interaction-not-pending");
+    pending.decision = decision;
+    this.releaseInteraction?.();
+  }
+  async respondToStructuredInput(requestId: string, answers: readonly AiStructuredInputAnswer[]): Promise<void> {
+    const pending = this.pendingInteractions.get(requestId);
+    if (pending?.kind !== "input") throw new Error("ai-interaction-not-pending");
+    pending.answers = answers;
+    this.releaseInteraction?.();
+  }
+  pendingInteractionIds(): readonly string[] { return [...this.pendingInteractions.keys()]; }
+  retireInteractions(): void { this.pendingInteractions.clear(); this.releaseInteraction?.(); }
   async stop(): Promise<ProviderFinalizationResult> {
     this.testHooks?.onStop?.();
-    this.stopped = true; this.releaseLongTurn?.();
+    this.stopped = true; this.releaseLongTurn?.(); this.releaseInteraction?.();
     return { state: "finalized", synchronization: "unchanged-valid" };
   }
 }
@@ -1473,7 +1542,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       try {
         if (mode === "fake") {
           const worktreePath = options.managed === undefined ? null : (await options.managed.executionContext(binding.projectId, binding.workspaceId)).ownership.worktreePath;
-          adapter = new FakeProvider(callbacks, worktreePath, options.fakeProviderTestHooks);
+          adapter = new FakeProvider(callbacks, worktreePath, options.fakeProviderTestHooks, createId);
         } else {
           if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
           if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
@@ -1609,12 +1678,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       } catch (error) {
         throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
       }
-      try {
-        await emit(record, input.turnId, "turn.approval.responded", { requestId: input.requestId, decision: input.decision });
-        record.pendingInteractions.delete(input.requestId);
-      } catch (error) {
-        throw error;
-      }
+      await emit(record, input.turnId, "turn.approval.responded", { requestId: input.requestId, decision: input.decision });
+      record.pendingInteractions.delete(input.requestId);
     },
     async respondToAiStructuredInput(input) {
       const record = await recordFor(input);
@@ -1630,12 +1695,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       } catch (error) {
         throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
       }
-      try {
-        await emit(record, input.turnId, "turn.input.responded", { requestId: input.requestId, answers: input.answers });
-        record.pendingInteractions.delete(input.requestId);
-      } catch (error) {
-        throw error;
-      }
+      await emit(record, input.turnId, "turn.input.responded", { requestId: input.requestId, answers: input.answers });
+      record.pendingInteractions.delete(input.requestId);
     },
     async stop(input) {
       const record = await recordFor(input);

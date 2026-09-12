@@ -166,6 +166,7 @@ export const aiApprovalDecisionSchema = z.enum([
   "deny",
   "cancel"
 ]);
+export type AiApprovalDecision = z.infer<typeof aiApprovalDecisionSchema>;
 
 export const aiStructuredInputOptionSchema = z.strictObject({
   optionId: configurationKeySchema,
@@ -216,6 +217,8 @@ export const aiStructuredInputAnswersSchema = z.array(aiStructuredInputAnswerSch
     (answers) => new Set(answers.map((answer) => answer.questionId)).size === answers.length,
     "Answers must bind unique question IDs"
   );
+export type AiStructuredInputAnswer = z.infer<typeof aiStructuredInputAnswerSchema>;
+export type AiStructuredInputAnswers = z.infer<typeof aiStructuredInputAnswersSchema>;
 
 const sessionIdentityFields = {
   projectId: uuidV7Schema,

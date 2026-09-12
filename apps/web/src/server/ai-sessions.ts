@@ -1,5 +1,15 @@
 import { v7 as uuidv7 } from "uuid";
-import { uuidV7Schema, type AiEventStreamFrame, type AiProviderProfileProjection } from "@devspace/contracts";
+import {
+  aiApprovalDecisionSchema,
+  aiApprovalPresentationSchema,
+  aiStructuredInputAnswersSchema,
+  aiStructuredInputQuestionsSchema,
+  uuidV7Schema,
+  type AiApprovalDecision,
+  type AiEventStreamFrame,
+  type AiProviderProfileProjection,
+  type AiStructuredInputAnswers
+} from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
 import { AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { ProjectSetupConflictError, type ProjectDatabase } from "./database.js";
@@ -16,7 +26,8 @@ import {
 } from "./ai-history.js";
 
 export class AiSessionActionError extends Error {
-  constructor(readonly code: "AI_NOT_CONFIGURED" | "AI_PROFILE_UNAVAILABLE" | "AI_SESSION_CONFLICT" | "AI_TURN_CONFLICT", message: string) {
+  constructor(readonly code: "AI_NOT_CONFIGURED" | "AI_PROFILE_UNAVAILABLE" | "AI_PROFILE_REVISION_CONFLICT" | "AI_CAPABILITY_UNSUPPORTED"
+    | "AI_SESSION_CONFLICT" | "AI_TURN_CONFLICT" | "AI_INTERACTION_STATE_CONFLICT", message: string) {
     super(message); this.name = "AiSessionActionError";
   }
 }
@@ -84,6 +95,135 @@ export async function inspectAiWorkbench(projectId: string, workspaceId: string,
 
 type AiWorkbenchProjection = Awaited<ReturnType<typeof inspectAiWorkbench>>;
 type AiSelectedSession = NonNullable<AiWorkbenchProjection["session"]>;
+
+type AiInteractionProjection = {
+  readonly id: string;
+  readonly turnId: string | null;
+  readonly kind: string;
+  readonly state: string;
+  readonly request: unknown;
+};
+
+function interactionStateConflict(message: string): AiSessionActionError {
+  return new AiSessionActionError("AI_INTERACTION_STATE_CONFLICT", message);
+}
+
+async function prepareAiInteraction(
+  projectId: string,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  requestId: string,
+  kind: "approval" | "input",
+  dependencies: Dependencies
+): Promise<{ readonly view: AiSelectedSession; readonly turn: ReturnType<ProjectDatabase["getAiTurn"]>; readonly interaction: AiInteractionProjection; readonly operationId: string; readonly binding: ReturnType<typeof processBinding> }> {
+  const view = exactSession(projectId, workspaceId, sessionId, dependencies.database);
+  if (view.session.state !== "active") {
+    throw new AiSessionActionError("AI_SESSION_CONFLICT", "The AI session is not accepting interaction responses.");
+  }
+  const turn = exactTurn(projectId, workspaceId, sessionId, turnId, dependencies.database);
+  if (turn === null || turn.id !== turnId || turn.sessionId !== sessionId) throw interactionStateConflict("The AI turn binding is no longer valid.");
+  if (turn.state !== "running" && turn.state !== "waiting-for-approval" && turn.state !== "waiting-for-input") {
+    throw new AiSessionActionError("AI_TURN_CONFLICT", "The AI turn is no longer accepting interaction responses.");
+  }
+  const interaction = (view.interactions as unknown as readonly AiInteractionProjection[]).find((candidate) => candidate.id === requestId);
+  if (interaction === undefined || interaction.id !== requestId || interaction.turnId !== turnId
+    || interaction.kind !== kind || interaction.state !== "pending") {
+    throw interactionStateConflict("The AI interaction is stale, already resolved, or not owned by this turn.");
+  }
+  const profile = await dependencies.agent.inspectAiProvider(projectId, workspaceId, "codex");
+  if (profile.availability.state !== "available") {
+    throw new AiSessionActionError("AI_PROFILE_UNAVAILABLE", "Codex is unavailable for this workspace.");
+  }
+  if (profile.profileId !== view.session.profileId || profile.profileRevision !== view.session.profileRevision) {
+    throw new AiSessionActionError("AI_PROFILE_REVISION_CONFLICT", "This AI session is pinned to a different Codex profile revision.");
+  }
+  const capability = kind === "approval" ? profile.capabilities.approvals : profile.capabilities.structuredInput;
+  if (!capability) {
+    throw new AiSessionActionError("AI_CAPABILITY_UNSUPPORTED", `Codex does not support ${kind === "approval" ? "approval" : "structured input"} responses for this profile.`);
+  }
+  return { view, turn, interaction, operationId: uuidv7(), binding: processBinding(projectId, view.session) };
+}
+
+function interactionRequestPayload(interaction: AiInteractionProjection, requestId: string): Record<string, unknown> {
+  if (interaction.request === null || typeof interaction.request !== "object" || Array.isArray(interaction.request)) {
+    throw interactionStateConflict("The retained AI interaction request is malformed.");
+  }
+  const request = interaction.request as Record<string, unknown>;
+  if (request.requestId !== requestId) throw interactionStateConflict("The retained AI interaction request identity is invalid.");
+  return request;
+}
+
+function validateStructuredInputAnswers(request: Record<string, unknown>, answers: unknown): AiStructuredInputAnswers {
+  const questionsResult = aiStructuredInputQuestionsSchema.safeParse(request.questions);
+  const answersResult = aiStructuredInputAnswersSchema.safeParse(answers);
+  if (!questionsResult.success || !answersResult.success || questionsResult.data.length !== answersResult.data.length) {
+    throw interactionStateConflict("Every structured-input question needs exactly one valid answer.");
+  }
+  const answersByQuestion = new Map(answersResult.data.map((answer) => [answer.questionId, answer]));
+  for (const question of questionsResult.data) {
+    const answer = answersByQuestion.get(question.questionId);
+    if (answer === undefined) throw interactionStateConflict("Every structured-input question needs exactly one valid answer.");
+    if (question.responseKind === "single-select") {
+      if (answer.kind !== "selected" || !question.options.some((option) => option.optionId === answer.optionId)) {
+        throw interactionStateConflict("A structured-input option does not belong to its question.");
+      }
+    } else if (answer.kind !== "text") {
+      throw interactionStateConflict("A text structured-input question needs text.");
+    }
+  }
+  return answersResult.data;
+}
+
+async function reconcileAmbiguousAiInteraction(input: {
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly requestId: string;
+  readonly kind: "approval" | "input";
+  readonly view: AiSelectedSession;
+  readonly dependencies: Dependencies;
+}): Promise<"responded" | "pending" | "lost"> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  let synchronized = false;
+  let exactPendingBinding = false;
+  let responded = false;
+  try {
+    for await (const frame of streamAiEvents(input.projectId, input.workspaceId, input.sessionId, input.view.session.lastSequence,
+      input.dependencies, input.view, { signal: controller.signal })) {
+      if ("frameType" in frame) {
+        synchronized = frame.sessionId === input.sessionId
+          && frame.processGeneration === input.view.session.processGeneration
+          && frame.throughSequence >= input.view.session.lastSequence;
+        exactPendingBinding = synchronized && frame.pendingInteractionIds.includes(input.requestId);
+        if (synchronized && responded) return "responded";
+        continue;
+      }
+      if (frame.sessionId !== input.sessionId || frame.turnId !== input.turnId) continue;
+      if (input.kind === "approval" && frame.eventType === "turn.approval.responded" && frame.payload.requestId === input.requestId) responded = true;
+      if (input.kind === "input" && frame.eventType === "turn.input.responded" && frame.payload.requestId === input.requestId) responded = true;
+      if (synchronized && responded) return "responded";
+    }
+  } catch {
+    // A failed reconciliation cannot prove that the provider did not receive the response.
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
+  if (synchronized && responded) return "responded";
+  if (synchronized && exactPendingBinding) return "pending";
+  input.dependencies.database.retireAiInteraction({
+    projectId: input.projectId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    requestId: input.requestId,
+    state: "lost"
+  });
+  return "lost";
+}
 
 function boundResponseTurns(turns: AiSelectedSession["turns"]): AiSelectedSession["turns"] {
   let remaining = AI_SESSION_OUTPUT_MAX_BYTES;
@@ -264,8 +404,10 @@ export async function createAiSession(projectId: string, workspaceId: string, ac
       await dependencies.agent.startAiSession(operationId, startBinding);
       return { sessionId: created.id, operationId };
     } catch {
-      await reconcile();
-      return { sessionId: created.id };
+      const outcome = await reconcile();
+      return outcome === "unavailable"
+        ? { sessionId: created.id, operationId: null }
+        : { sessionId: created.id };
     }
   })();
   initialSessionAttempts.set(created.id, attempt);
@@ -348,6 +490,76 @@ export async function sendAiTurn(projectId: string, workspaceId: string, session
     throw new AiTurnOutcomeAmbiguousError(turnId);
   }
   return { turnId, operationId };
+}
+
+export async function respondToAiApproval(
+  projectId: string,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  requestId: string,
+  decision: AiApprovalDecision,
+  dependencies: Dependencies
+) {
+  uuidV7Schema.parse(requestId);
+  const prepared = await prepareAiInteraction(projectId, workspaceId, sessionId, turnId, requestId, "approval", dependencies);
+  const request = interactionRequestPayload(prepared.interaction, requestId);
+  const presentation = aiApprovalPresentationSchema.safeParse(request.presentation);
+  const parsedDecision = aiApprovalDecisionSchema.safeParse(decision);
+  if (!presentation.success || !parsedDecision.success) {
+    throw interactionStateConflict("The retained approval request or decision is invalid.");
+  }
+  try {
+    await dependencies.agent.respondToAiApproval(prepared.operationId, {
+      ...prepared.binding,
+      turnId,
+      requestId,
+      decision: parsedDecision.data
+    });
+  } catch (error) {
+    if (!(error instanceof AgentUnavailableError)) throw error;
+    const outcome = await reconcileAmbiguousAiInteraction({
+      projectId, workspaceId, sessionId, turnId, requestId, kind: "approval", view: prepared.view, dependencies
+    });
+    if (outcome === "responded") return { operationId: prepared.operationId };
+    throw interactionStateConflict(outcome === "pending"
+      ? "The approval response is still being reconciled; it was not resent."
+      : "The approval response could not be proven safe to complete and was retired.");
+  }
+  return { operationId: prepared.operationId };
+}
+
+export async function respondToAiStructuredInput(
+  projectId: string,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  requestId: string,
+  answers: AiStructuredInputAnswers,
+  dependencies: Dependencies
+) {
+  uuidV7Schema.parse(requestId);
+  const prepared = await prepareAiInteraction(projectId, workspaceId, sessionId, turnId, requestId, "input", dependencies);
+  const request = interactionRequestPayload(prepared.interaction, requestId);
+  const validatedAnswers = validateStructuredInputAnswers(request, answers);
+  try {
+    await dependencies.agent.respondToAiStructuredInput(prepared.operationId, {
+      ...prepared.binding,
+      turnId,
+      requestId,
+      answers: validatedAnswers
+    });
+  } catch (error) {
+    if (!(error instanceof AgentUnavailableError)) throw error;
+    const outcome = await reconcileAmbiguousAiInteraction({
+      projectId, workspaceId, sessionId, turnId, requestId, kind: "input", view: prepared.view, dependencies
+    });
+    if (outcome === "responded") return { operationId: prepared.operationId };
+    throw interactionStateConflict(outcome === "pending"
+      ? "The structured-input response is still being reconciled; it was not resent."
+      : "The structured-input response could not be proven safe to complete and was retired.");
+  }
+  return { operationId: prepared.operationId };
 }
 
 export async function interruptAiTurn(projectId: string, workspaceId: string, sessionId: string, turnId: string, dependencies: Dependencies) {
