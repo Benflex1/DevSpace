@@ -224,6 +224,7 @@ describe("content-plane bounds and safe presentations", () => {
       header: "Scope",
       question: "Which scope?",
       responseKind: "single-select",
+      allowOther: false,
       secret: false,
       options: [{ optionId: "focused", label: "Focused", description: "" }]
     };
@@ -282,6 +283,7 @@ describe("canonical event envelope and append decisions", () => {
         header: "Scope",
         question: "Choose",
         responseKind: "text",
+        allowOther: false,
         secret: false,
         options: []
       }]
@@ -290,6 +292,7 @@ describe("canonical event envelope and append decisions", () => {
       requestId,
       answers: [{ questionId: "scope", kind: "text", text: "focused" }]
     },
+    "turn.interaction.expired": { requestId },
     "turn.interrupt.requested": {},
     "turn.interrupted": { reason: "provider-confirmed" },
     "turn.provider-completed": { outcome: "completed" },
@@ -304,9 +307,9 @@ describe("canonical event envelope and append decisions", () => {
     "turn.lost": { code: "AGENT_RESTART" }
   };
 
-  test("has the exact closed 23-event family with session/turn identity rules", () => {
+  test("has the exact closed 24-event family with session/turn identity rules", () => {
     expect(canonicalAiEventTypes).toEqual(Object.keys(payloadByType));
-    expect(canonicalAiEventTypes).toHaveLength(23);
+    expect(canonicalAiEventTypes).toHaveLength(24);
     for (const eventType of canonicalAiEventTypes) {
       const sessionScoped = eventType.startsWith("session.");
       expect(canonicalAiEventSchema.safeParse({

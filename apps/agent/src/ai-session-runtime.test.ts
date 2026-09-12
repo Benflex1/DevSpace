@@ -1290,6 +1290,9 @@ describe("AI session runtime", () => {
       expect(synchronized.pendingInteractionIds).toEqual([requested.payload.requestId]);
       await runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
         requestId: requested.payload.requestId, decision: "approve-once" });
+      protocol.emit({ method: "serverRequest/resolved", params: { threadId: "native-thread-1", requestId: 501 } });
+      protocol.emit({ method: "serverRequest/resolved", params: { threadId: "native-thread-1", requestId: 501 } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await expect(runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
         requestId: requested.payload.requestId, decision: "approve-once" })).rejects.toThrow("ai-interaction-state-conflict");
       const response = captured.find((entry) => {
@@ -1300,8 +1303,68 @@ describe("AI session runtime", () => {
       expect(captured.filter((entry) => (entry.jsonRpc as { id?: unknown; result?: unknown } | undefined)?.id === 501
         && (entry.jsonRpc as { result?: unknown } | undefined)?.result !== undefined)).toHaveLength(1);
       expect((await runtime.synchronized(sessionId)).pendingInteractionIds).toEqual([]);
-      const responded = (await runtime.collect(sessionId, 0, 1)).find((event) => event.eventType === "turn.approval.responded");
+      const responseEvents = await runtime.collect(sessionId, 0, 1);
+      const responded = responseEvents.find((event) => event.eventType === "turn.approval.responded");
       expect(responded?.eventType).toBe("turn.approval.responded");
+      expect(responseEvents.filter((event) => event.eventType === "turn.interaction.expired")).toHaveLength(0);
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("retires a provider-resolved interaction without fabricating a user response", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-provider-resolved-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      if (request.method === "thread/start") {
+        setImmediate(() => emit({ id: request.id, result: { thread: { id: "thread-1" } } }));
+        return;
+      }
+      if (request.method === "turn/start") {
+        setImmediate(() => {
+          emit({ id: request.id, result: { turn: { id: "turn-1" } } });
+          setImmediate(() => emit({ id: 605, method: "item/commandExecution/requestApproval", params: {
+            itemId: "native-command-item-605", startedAtMs: 1, threadId: "thread-1", turnId: "turn-1",
+            command: "echo safe", cwd: "/workspace", reason: "Safe command"
+          } }));
+        });
+        return;
+      }
+      setImmediate(() => emit({ id: request.id, result: {} }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        content: { kind: "text", text: "request approval" } });
+      await new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)));
+      const requested = (await runtime.collect(sessionId, 0, 50)).find((event) => event.eventType === "turn.approval.requested");
+      if (requested?.eventType !== "turn.approval.requested") throw new Error("Expected approval request");
+
+      protocol.emit({ method: "serverRequest/resolved", params: { threadId: "wrong-thread", requestId: 605 } });
+      protocol.emit({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 999 } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect((await runtime.synchronized(sessionId)).pendingInteractionIds).toEqual([requested.payload.requestId]);
+      expect((await runtime.collect(sessionId, 0, 50)).filter((event) => event.eventType === "turn.interaction.expired")).toHaveLength(0);
+
+      protocol.emit({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 605 } });
+      protocol.emit({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 605 } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const events = await runtime.collect(sessionId, 0, 50);
+      expect(events.filter((event) => event.eventType === "turn.interaction.expired")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "turn.approval.responded")).toHaveLength(0);
+      expect((await runtime.synchronized(sessionId)).pendingInteractionIds).toEqual([]);
+      await expect(runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        requestId: requested.payload.requestId, decision: "approve-once" })).rejects.toThrow("ai-interaction-state-conflict");
+      expect(captured.filter((entry) => {
+        const rpc = entry.jsonRpc as { id?: unknown; result?: unknown } | undefined;
+        return rpc?.id === 605 && rpc.result !== undefined;
+      })).toHaveLength(0);
     } finally {
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
@@ -1349,7 +1412,8 @@ describe("AI session runtime", () => {
         itemId: "native-input-item-1", threadId: "thread-1", turnId: "turn-1",
         questions: [{
           id: "token", header: "Authorization", question: "Authorization: Bearer devspace-super-secret-token",
-          options: [{ label: "Use token", description: "Authorization: Bearer devspace-super-secret-token" }]
+          isOther: true,
+          options: [{ label: "Authorization: Bearer devspace-super-secret-token", description: "Authorization: Bearer devspace-super-secret-token" }]
         }]
       } });
       const events = await fixture.runtime.collect(sessionId, 0, 100);
@@ -1357,7 +1421,7 @@ describe("AI session runtime", () => {
       expect(requested?.eventType).toBe("turn.input.requested");
       if (requested?.eventType !== "turn.input.requested") throw new Error("Expected structured input event");
       expect(JSON.stringify(requested)).not.toContain("devspace-super-secret-token");
-      expect(requested.payload.questions[0]?.options[0]?.label).toBe("Use token");
+      expect(requested.payload.questions[0]?.options[0]?.label).toBe("[REDACTED]");
     } finally {
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });

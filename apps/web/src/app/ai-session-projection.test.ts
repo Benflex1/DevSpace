@@ -135,8 +135,9 @@ describe("durable AI interaction projection", () => {
         requestId: inputId,
         questions: [
           { questionId: "mode", header: "Mode", question: "Choose", responseKind: "single-select", secret: false,
+            allowOther: true,
             options: [{ optionId: "safe", label: "Safe", description: "Bounded" }] },
-          { questionId: "reason", header: "Reason", question: "Why?", responseKind: "text", secret: false, options: [] }
+          { questionId: "reason", header: "Reason", question: "Why?", responseKind: "text", allowOther: false, secret: false, options: [] }
         ]
       }
     });
@@ -158,5 +159,19 @@ describe("durable AI interaction projection", () => {
     });
     expect(later).toHaveLength(1);
     expect(later[0]).toMatchObject({ state: "responded", response: { answers: [{ questionId: "q" }] } });
+  });
+
+  test("provider-side interaction retirement makes the exact pending card non-actionable", () => {
+    const pending = applyAiInteractionEvent([], requested);
+    const expired = applyAiInteractionEvent(pending, {
+      eventType: "turn.interaction.expired", turnId, observedAt: "2026-09-12T00:00:02.000Z",
+      payload: { requestId }
+    });
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({ id: requestId, state: "expired", response: null });
+    expect(applyAiInteractionEvent(expired, {
+      eventType: "turn.interaction.expired", turnId, payload: { requestId }
+    })).toEqual(expired);
+    expect(applyAiInteractionEvent(expired, requested)).toEqual(expired);
   });
 });

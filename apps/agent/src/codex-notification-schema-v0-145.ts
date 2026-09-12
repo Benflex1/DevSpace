@@ -8,7 +8,8 @@ export type CodexNotificationCategory =
 
 const projectedAndHandled = [
   "item/agentMessage/delta",
-  "item/started"
+  "item/started",
+  "serverRequest/resolved"
 ] as const;
 
 const privateLifecycle = [
@@ -47,7 +48,6 @@ const validatedAndIgnored = [
   "item/commandExecution/terminalInteraction",
   "item/fileChange/outputDelta",
   "item/fileChange/patchUpdated",
-  "serverRequest/resolved",
   "item/mcpToolCall/progress",
   "mcpServer/oauthLogin/completed",
   "mcpServer/startupStatus/updated",

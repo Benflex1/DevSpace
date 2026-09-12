@@ -104,7 +104,7 @@ function pendingInput(requestId: string) {
       requestId,
       questions: [
         {
-          questionId: "question-1", header: "Mode", question: "Choose a mode", responseKind: "single-select", secret: false,
+          questionId: "question-1", header: "Mode", question: "Choose a mode", responseKind: "single-select", allowOther: true, secret: false,
           options: [{ optionId: "option-1", label: "Safe", description: "Use the safe mode" }]
         },
         { questionId: "question-2", header: "Reason", question: "Why?", responseKind: "text", secret: false, options: [] }
@@ -653,6 +653,16 @@ test("validates every structured answer against the exact durable request", asyn
       { questionId: "question-2", kind: "text", text: "Because it is bounded." }
     ]
   }));
+  await respondToAiStructuredInput(projectId, workspaceId, sessionAId, turnId, requestId, [
+    { questionId: "question-1", kind: "other", text: "A bounded custom mode." },
+    { questionId: "question-2", kind: "text", text: "Because it is bounded." }
+  ], { database, agent } as never);
+  expect(agent.respondToAiStructuredInput).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({
+    requestId, answers: [
+      { questionId: "question-1", kind: "other", text: "A bounded custom mode." },
+      { questionId: "question-2", kind: "text", text: "Because it is bounded." }
+    ]
+  }));
   await expect(respondToAiStructuredInput(projectId, workspaceId, sessionAId, turnId, requestId, [
     { questionId: "question-1", kind: "selected", optionId: "not-an-option" },
     { questionId: "question-2", kind: "text", text: "missing exact option" }
@@ -664,6 +674,7 @@ test("validates every structured answer against the exact durable request", asyn
 
 test.each([
   ["already responded", () => pendingApproval("018f0f00-0000-7000-8000-000000000032", "responded"), "018f0f00-0000-7000-8000-000000000032"],
+  ["provider-resolved", () => ({ ...pendingApproval("018f0f00-0000-7000-8000-000000000035"), state: "expired" as const }), "018f0f00-0000-7000-8000-000000000035"],
   ["wrong interaction type", () => pendingInput("018f0f00-0000-7000-8000-000000000033"), "018f0f00-0000-7000-8000-000000000033"]
 ] as const)("rejects %s interaction before Agent response", async (_label, interaction, requestId) => {
   const agent = fakeAgent();
@@ -749,6 +760,34 @@ test("does not retry an ambiguous approval response and reconciles a canonical r
   };
   const result = await respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "approve-once", { database, agent } as never);
   expect(typeof result.operationId).toBe("string");
+  expect(agent.respondToAiApproval).toHaveBeenCalledTimes(1);
+  expect(database.retireAiInteraction).not.toHaveBeenCalled();
+});
+
+test("treats a canonical provider-retirement event as authoritative during ambiguity reconciliation", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-7000-7000-8000-000000000040";
+  agent.respondToAiApproval.mockRejectedValueOnce(new AgentUnavailableError("AGENT_REQUEST_TIMEOUT", "transport-failure"));
+  agent.streamAiEvents.mockImplementation((function* () {
+    yield {
+      schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const,
+      sessionId: sessionAId, throughSequence: 3, processGeneration: 1, pendingInteractionIds: []
+    };
+    yield {
+      ...approvalRequestedEvent(sessionAId, 3, turnId, requestId),
+      eventId: "018f0f00-7000-7000-8000-000000000041",
+      eventType: "turn.interaction.expired",
+      payload: { requestId }
+    } as CanonicalAiEvent;
+  }) as never);
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), interactions: [pendingApproval(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "waiting-for-approval" })),
+    commitAiEvent: vi.fn(() => "appended" as const),
+    retireAiInteraction: vi.fn()
+  };
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "approve-once", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
   expect(agent.respondToAiApproval).toHaveBeenCalledTimes(1);
   expect(database.retireAiInteraction).not.toHaveBeenCalled();
 });
@@ -1002,7 +1041,7 @@ function inputRequestedEvent(sessionId: string, sequence: number, turnIdValue: s
     payload: {
       requestId,
       questions: [{
-        questionId: "question-1", header: "Mode", question: "Choose a mode", responseKind: "single-select", secret: false,
+        questionId: "question-1", header: "Mode", question: "Choose a mode", responseKind: "single-select", allowOther: true, secret: false,
         options: [{ optionId: "option-1", label: "Safe", description: "Use the safe mode" }]
       }]
     }
@@ -1194,6 +1233,29 @@ describe("SQLite canonical turn acceptance convergence", () => {
     })).toThrow();
   });
 
+  test("atomically retires a provider-resolved interaction without a user response", async () => {
+    const fixture = await historyFixture();
+    const requestId = "018f0f00-7000-7000-8000-000000000028";
+    fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId,
+      event: approvalRequestedEvent(fixture.sessionId, 2, fixture.turnId, requestId)
+    });
+    const expired = {
+      ...approvalRequestedEvent(fixture.sessionId, 3, fixture.turnId, requestId),
+      eventId: "018f0f00-7000-7000-8000-000000000029",
+      eventType: "turn.interaction.expired",
+      payload: { requestId }
+    } as CanonicalAiEvent;
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: expired
+    })).toBe("appended");
+    expect(fixture.database.commitAiEvent({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: expired
+    })).toBe("duplicate");
+    expect(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)?.interactions)
+      .toEqual([expect.objectContaining({ id: requestId, state: "expired", response: null })]);
+  });
+
   test("keeps Agent-safe interaction presentations free of provider secret literals through SQLite and browser projection", async () => {
     const fixture = await historyFixture();
     const secret = "devspace-super-secret-token";
@@ -1217,8 +1279,8 @@ describe("SQLite canonical turn acceptance convergence", () => {
         requestId: "018f0f00-0000-7000-8000-000000000027",
         questions: [{
           questionId: "question-1", header: "Authorization", question: redactSensitiveText(`Authorization: Bearer ${secret}`),
-          responseKind: "single-select" as const, secret: false as const,
-          options: [{ optionId: "option-1", label: "Use token", description: redactSensitiveText(`Authorization: Bearer ${secret}`) }]
+          responseKind: "single-select" as const, allowOther: true, secret: false as const,
+          options: [{ optionId: "option-1", label: redactSensitiveText(`Authorization: Bearer ${secret}`), description: redactSensitiveText(`Authorization: Bearer ${secret}`) }]
         }]
       }
     } as CanonicalAiEvent;

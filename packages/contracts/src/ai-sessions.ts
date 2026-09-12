@@ -178,6 +178,7 @@ export const aiStructuredInputQuestionSchema = z.strictObject({
   header: boundedContent(256),
   question: boundedContent(4_096),
   responseKind: z.enum(["single-select", "text"]),
+  allowOther: z.boolean().default(false),
   secret: z.literal(false),
   options: z.array(aiStructuredInputOptionSchema).max(AI_MAX_STRUCTURED_INPUT_OPTIONS)
 }).superRefine((question, context) => {
@@ -186,6 +187,9 @@ export const aiStructuredInputQuestionSchema = z.strictObject({
   }
   if (question.responseKind === "text" && question.options.length !== 0) {
     context.addIssue({ code: "custom", path: ["options"], message: "A text question cannot have options" });
+  }
+  if (question.responseKind === "text" && question.allowOther) {
+    context.addIssue({ code: "custom", path: ["allowOther"], message: "A text question cannot allow Other" });
   }
   if (new Set(question.options.map((option) => option.optionId)).size !== question.options.length) {
     context.addIssue({ code: "custom", path: ["options"], message: "Option IDs must be unique" });
@@ -201,6 +205,11 @@ export const aiStructuredInputAnswerSchema = z.discriminatedUnion("kind", [
     questionId: configurationKeySchema,
     kind: z.literal("text"),
     text: boundedContent(AI_USER_CONTENT_MAX_BYTES, true)
+  }),
+  z.strictObject({
+    questionId: configurationKeySchema,
+    kind: z.literal("other"),
+    text: boundedContent(AI_USER_CONTENT_MAX_BYTES)
   })
 ]);
 export const aiStructuredInputQuestionsSchema = z.array(aiStructuredInputQuestionSchema)
@@ -477,6 +486,9 @@ const canonicalAiEventSchemas = [
   turnEvent("turn.input.responded", z.strictObject({
     requestId: uuidV7Schema,
     answers: aiStructuredInputAnswersSchema
+  })),
+  turnEvent("turn.interaction.expired", z.strictObject({
+    requestId: uuidV7Schema
   })),
   turnEvent("turn.interrupt.requested", emptyPayload),
   turnEvent("turn.interrupted", z.strictObject({

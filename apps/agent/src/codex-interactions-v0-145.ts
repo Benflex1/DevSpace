@@ -71,6 +71,7 @@ export type CodexInputQuestionMapping = Readonly<{
   publicQuestionId: string;
   nativeQuestionId: string;
   responseKind: "single-select" | "text";
+  allowOther: boolean;
   options: ReadonlyArray<Readonly<{
     publicOptionId: string;
     nativeOptionLabel: string;
@@ -217,7 +218,7 @@ function approvalSummary(params: NativeParams): string {
 function filePaths(item: CodexFileChangeItem): { paths: string[]; truncated: boolean } {
   const candidates = item.paths;
   const paths: string[] = [];
-  let truncated = candidates.length > AI_MAX_PRESENTATION_PATHS;
+  let truncated = item.truncated || candidates.length > AI_MAX_PRESENTATION_PATHS;
   for (const candidate of candidates.slice(0, AI_MAX_PRESENTATION_PATHS)) {
     const path = workspacePath(candidate);
     if (path === null) {
@@ -318,40 +319,49 @@ function inputQuestions(params: NativeParams): {
   const rawQuestions = Array.isArray(params.questions) ? params.questions as unknown[] : null;
   if (rawQuestions === null || rawQuestions.length === 0
     || rawQuestions.length > AI_MAX_STRUCTURED_INPUT_QUESTIONS) return null;
+  const autoResolutionMs = params.autoResolutionMs;
+  if (autoResolutionMs !== undefined && autoResolutionMs !== null
+    && (typeof autoResolutionMs !== "number" || !Number.isSafeInteger(autoResolutionMs) || autoResolutionMs < 0)) return null;
   const questions: StructuredInputQuestions = [];
   const mapping: CodexInputQuestionMapping[] = [];
   for (let questionIndex = 0; questionIndex < rawQuestions.length; questionIndex += 1) {
     const rawQuestion: unknown = rawQuestions[questionIndex];
-    if (!isRecord(rawQuestion) || rawQuestion.isSecret === true) return null;
+    if (!isRecord(rawQuestion) || rawQuestion.isSecret === true
+      || (rawQuestion.isSecret !== undefined && typeof rawQuestion.isSecret !== "boolean")
+      || rawQuestion.isOther !== true) return null;
     const nativeQuestionId = stringValue(rawQuestion.id);
-    if (nativeQuestionId === null || nativeQuestionId.length === 0) return null;
+    const nativeHeader = stringValue(rawQuestion.header);
+    const nativeQuestion = stringValue(rawQuestion.question);
+    if (nativeQuestionId === null || nativeQuestionId.length === 0 || nativeHeader === null || nativeQuestion === null) return null;
     const rawOptions = rawQuestion.options;
-    if (rawOptions !== null && rawOptions !== undefined && !Array.isArray(rawOptions)) return null;
-    const optionValues = Array.isArray(rawOptions) ? rawOptions as unknown[] : [];
-    if (optionValues.length > AI_MAX_STRUCTURED_INPUT_OPTIONS) return null;
+    if (!Array.isArray(rawOptions) || rawOptions.length === 0 || rawOptions.length > AI_MAX_STRUCTURED_INPUT_OPTIONS) return null;
+    const optionValues = rawOptions as unknown[];
     const questionId = `question-${questionIndex + 1}`;
     const options: Array<{ optionId: string; label: string; description: string }> = [];
     const optionMapping: Array<{ publicOptionId: string; nativeOptionLabel: string }> = [];
     for (let optionIndex = 0; optionIndex < optionValues.length; optionIndex += 1) {
       const rawOption: unknown = optionValues[optionIndex];
       if (!isRecord(rawOption)) return null;
-      const label = safeText(rawOption.label, `Option ${optionIndex + 1}`, 256);
-      const description = safeText(rawOption.description, "", 2_048, true);
+      const nativeOptionLabel = stringValue(rawOption.label);
+      const nativeOptionDescription = stringValue(rawOption.description);
+      if (nativeOptionLabel === null || nativeOptionDescription === null) return null;
+      const label = safeText(nativeOptionLabel, `Option ${optionIndex + 1}`, 256);
+      const description = safeText(nativeOptionDescription, "", 2_048, true);
       const optionId = `option-${optionIndex + 1}`;
       options.push({ optionId, label, description });
-      optionMapping.push({ publicOptionId: optionId, nativeOptionLabel: label });
+      optionMapping.push({ publicOptionId: optionId, nativeOptionLabel });
     }
-    const responseKind: "single-select" | "text" = options.length > 0 ? "single-select" : "text";
     const question = {
       questionId,
-      header: safeText(rawQuestion.header, FALLBACK_HEADER, 256),
-      question: safeText(rawQuestion.question, FALLBACK_QUESTION, 4_096),
-      responseKind,
+      header: safeText(nativeHeader, FALLBACK_HEADER, 256),
+      question: safeText(nativeQuestion, FALLBACK_QUESTION, 4_096),
+      responseKind: "single-select" as const,
+      allowOther: true,
       secret: false as const,
       options
     };
     questions.push(question);
-    mapping.push({ publicQuestionId: questionId, nativeQuestionId, responseKind, options: optionMapping });
+    mapping.push({ publicQuestionId: questionId, nativeQuestionId, responseKind: "single-select", allowOther: true, options: optionMapping });
   }
   const parsed = aiStructuredInputQuestionsSchema.safeParse(questions);
   return parsed.success ? { questions: parsed.data, mapping } : null;
@@ -428,10 +438,15 @@ export function encodeCodexInputResponse(
     const answer = byQuestion.get(question.publicQuestionId);
     if (answer === undefined) throw new Error("Every question needs an answer");
     if (question.responseKind === "single-select") {
-      if (answer.kind !== "selected") throw new Error("Select question needs an option");
-      const option = question.options.find((candidate) => candidate.publicOptionId === answer.optionId);
-      if (option === undefined) throw new Error("Option does not belong to question");
-      encoded[question.nativeQuestionId] = { answers: [option.nativeOptionLabel] };
+      if (answer.kind === "selected") {
+        const option = question.options.find((candidate) => candidate.publicOptionId === answer.optionId);
+        if (option === undefined) throw new Error("Option does not belong to question");
+        encoded[question.nativeQuestionId] = { answers: [option.nativeOptionLabel] };
+      } else if (answer.kind === "other" && question.allowOther) {
+        encoded[question.nativeQuestionId] = { answers: [`user_note: ${answer.text}`] };
+      } else {
+        throw new Error("Select question needs an option or Other answer");
+      }
     } else {
       if (answer.kind !== "text") throw new Error("Text question needs text");
       encoded[question.nativeQuestionId] = { answers: [answer.text] };

@@ -47,10 +47,12 @@ test("runs the fake-provider AI session through interactions, navigation, refres
   await ai.getByLabel("AI prompt").fill("question");
   await ai.getByRole("button", { name: "Send", exact: true }).click();
   await expect(ai.getByText("Codex has questions", { exact: true })).toBeVisible();
-  await ai.getByRole("radio", { name: /Safe/u }).check();
-  await ai.getByRole("textbox", { name: "Reason" }).fill("The bounded fixture is safe.");
+  await ai.getByRole("group", { name: /Mode Choose a safe mode\./u }).getByRole("radio", { name: /Safe/u }).check();
+  await ai.getByRole("group", { name: /Reason Why should Codex continue\?/u }).getByRole("radio", { name: /Other/u }).check();
+  await ai.getByRole("textbox", { name: "Reason other" }).fill("The bounded fixture is safe.");
   await ai.getByRole("button", { name: "Submit answers" }).click();
-  await expect(ai.getByText("Thanks, I will continue with those answers.", { exact: true })).toBeVisible();
+  await expect(ai.getByText("Thanks, I will continue with the Other answer.", { exact: true })).toBeVisible();
+  await expect(ai.getByRole("button", { name: "Submit answers" })).toHaveCount(0);
 
   await ai.getByLabel("AI prompt").fill("Create a file named devspace-ai-beta-check.txt containing exactly: DevSpace AI beta check");
   await ai.getByRole("button", { name: "Send", exact: true }).click();

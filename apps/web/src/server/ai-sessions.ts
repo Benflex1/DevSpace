@@ -170,7 +170,9 @@ function validateStructuredInputAnswers(request: Record<string, unknown>, answer
     const answer = answersByQuestion.get(question.questionId);
     if (answer === undefined) throw interactionStateConflict("Every structured-input question needs exactly one valid answer.");
     if (question.responseKind === "single-select") {
-      if (answer.kind !== "selected" || !question.options.some((option) => option.optionId === answer.optionId)) {
+      if (answer.kind === "other") {
+        if (!question.allowOther) throw interactionStateConflict("This structured-input question does not allow an Other answer.");
+      } else if (answer.kind !== "selected" || !question.options.some((option) => option.optionId === answer.optionId)) {
         throw interactionStateConflict("A structured-input option does not belong to its question.");
       }
     } else if (answer.kind !== "text") {
@@ -195,6 +197,7 @@ async function reconcileAmbiguousAiInteraction(input: {
   let synchronized = false;
   let exactPendingBinding = false;
   let responded = false;
+  let providerRetired = false;
   try {
     for await (const frame of streamAiEvents(input.projectId, input.workspaceId, input.sessionId, input.view.session.lastSequence,
       input.dependencies, input.view, { signal: controller.signal })) {
@@ -209,6 +212,7 @@ async function reconcileAmbiguousAiInteraction(input: {
       if (frame.sessionId !== input.sessionId || frame.turnId !== input.turnId) continue;
       if (input.kind === "approval" && frame.eventType === "turn.approval.responded" && frame.payload.requestId === input.requestId) responded = true;
       if (input.kind === "input" && frame.eventType === "turn.input.responded" && frame.payload.requestId === input.requestId) responded = true;
+      if (frame.eventType === "turn.interaction.expired" && frame.payload.requestId === input.requestId) providerRetired = true;
       if (synchronized && responded) return "responded";
     }
   } catch {
@@ -218,6 +222,7 @@ async function reconcileAmbiguousAiInteraction(input: {
     controller.abort();
   }
   if (synchronized && responded) return "responded";
+  if (synchronized && providerRetired) return "lost";
   if (synchronized && exactPendingBinding) return "pending";
   input.dependencies.database.retireAiInteraction({
     projectId: input.projectId,

@@ -764,6 +764,16 @@ export function openProjectDatabase(path: string, options: {
       }
       return;
     }
+    if (event.eventType === "turn.interaction.expired") {
+      const matchingRequest = context.prior.some((candidate) =>
+        (candidate.eventType === "turn.approval.requested" || candidate.eventType === "turn.input.requested")
+        && candidate.payload.requestId === event.payload.requestId
+      );
+      if (!active || !matchingRequest || has("turn.interrupted") || providerCompleted !== undefined) {
+        throw new ProjectSetupConflictError("The canonical AI interaction retirement has no active canonical request.");
+      }
+      return;
+    }
     if (event.eventType === "turn.interrupted") {
       if (!active || has("turn.interrupted") || providerCompleted !== undefined) {
         throw new ProjectSetupConflictError("The AI turn interruption conflicts with retained history.");
@@ -820,6 +830,22 @@ export function openProjectDatabase(path: string, options: {
           (id, session_id, turn_id, kind, state, request_json, response_json, created_at, updated_at)
         values (?, ?, ?, ?, 'pending', ?, null, ?, ?)
       `).run(requestId, event.sessionId, event.turnId, kind, requestJson, timestamp, timestamp);
+      return;
+    }
+    if (event.eventType === "turn.interaction.expired") {
+      const existing = client.prepare(`
+        select session_id as sessionId, turn_id as turnId, state
+        from ai_interaction_requests where id = ?
+      `).get(event.payload.requestId) as { sessionId: string; turnId: string | null; state: string } | undefined;
+      if (existing === undefined || existing.sessionId !== event.sessionId || existing.turnId !== event.turnId || existing.state !== "pending") {
+        throw new ProjectSetupConflictError("The canonical AI interaction retirement has no exact pending request.");
+      }
+      const result = client.prepare(`
+        update ai_interaction_requests
+        set state = 'expired', updated_at = ?
+        where id = ? and session_id = ? and turn_id = ? and state = 'pending'
+      `).run(timestamp, event.payload.requestId, event.sessionId, event.turnId);
+      if (result.changes !== 1) throw new ProjectSetupConflictError("The canonical AI interaction retirement changed concurrently.");
       return;
     }
     if (event.eventType !== "turn.approval.responded" && event.eventType !== "turn.input.responded") return;
@@ -1711,6 +1737,7 @@ export function openProjectDatabase(path: string, options: {
             if (event.eventType === "turn.approval.requested") state = "waiting-for-approval";
             if (event.eventType === "turn.input.requested") state = "waiting-for-input";
             if (event.eventType === "turn.approval.responded" || event.eventType === "turn.input.responded") state = "running";
+            if (event.eventType === "turn.interaction.expired") state = "running";
             if (event.eventType === "turn.output.delta") {
               const current = client.prepare(`
                 select length(cast(output_text as blob)) as outputBytes,

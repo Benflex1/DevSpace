@@ -218,7 +218,7 @@ interface ProviderAdapter {
   respondToApproval(requestId: string, decision: "approve-once" | "approve-for-session" | "deny" | "cancel"): Promise<void>;
   respondToStructuredInput(requestId: string, answers: readonly {
     readonly questionId: string;
-    readonly kind: "selected" | "text";
+    readonly kind: "selected" | "text" | "other";
     readonly optionId?: string;
     readonly text?: string;
   }[]): Promise<void>;
@@ -229,7 +229,8 @@ interface ProviderAdapter {
 
 type AiStructuredInputAnswer =
   | Readonly<{ questionId: string; kind: "selected"; optionId: string }>
-  | Readonly<{ questionId: string; kind: "text"; text: string }>;
+  | Readonly<{ questionId: string; kind: "text"; text: string }>
+  | Readonly<{ questionId: string; kind: "other"; text: string }>;
 type AiInteractionDecision = "approve-once" | "approve-for-session" | "deny" | "cancel";
 type PendingAgentInteraction = {
   readonly projection: CodexInteractionProjection;
@@ -242,6 +243,7 @@ interface AdapterCallbacks {
   readonly outputDelta: (text: string) => Promise<void>;
   readonly activity: (summary: string) => Promise<void>;
   readonly interactionRequested: (projection: CodexInteractionProjection) => Promise<void>;
+  readonly interactionResolved: (requestId: string) => Promise<void>;
   readonly completed: (outcome: "completed" | "interrupted" | "failed") => Promise<void>;
   readonly privateFailure: (observation: CodexPrivateFailureObservation) => void;
   readonly failed: (observation: CodexPrivateFailureObservation) => Promise<void>;
@@ -469,16 +471,17 @@ class FakeProvider implements ProviderAdapter {
     if (text.includes("question") || text.includes("structured input")) {
       const requestId = this.createId();
       const questions = [
-        { questionId: "question-1", header: "Mode", question: "Choose a safe mode.", responseKind: "single-select" as const, secret: false as const,
+        { questionId: "question-1", header: "Mode", question: "Choose a safe mode.", responseKind: "single-select" as const, allowOther: true, secret: false as const,
           options: [{ optionId: "option-1", label: "Safe", description: "Use the bounded safe mode." }, { optionId: "option-2", label: "Explain", description: "Explain before continuing." }] },
-        { questionId: "question-2", header: "Reason", question: "Why should Codex continue?", responseKind: "text" as const, secret: false as const, options: [] }
+        { questionId: "question-2", header: "Reason", question: "Why should Codex continue?", responseKind: "single-select" as const, allowOther: true, secret: false as const,
+          options: [{ optionId: "option-1", label: "Continue", description: "Continue with the bounded task." }] }
       ];
       const projection: CodexInteractionProjection = {
         requestId, turnId: _turnId, kind: "input", questions,
         public: { requestId, turnId: _turnId, kind: "input", questions },
         mapping: { requestId, turnId: _turnId, questions: [
-          { publicQuestionId: "question-1", nativeQuestionId: "fake-question-1", responseKind: "single-select", options: [{ publicOptionId: "option-1", nativeOptionLabel: "Safe" }, { publicOptionId: "option-2", nativeOptionLabel: "Explain" }] },
-          { publicQuestionId: "question-2", nativeQuestionId: "fake-question-2", responseKind: "text", options: [] }
+          { publicQuestionId: "question-1", nativeQuestionId: "fake-question-1", responseKind: "single-select", allowOther: true, options: [{ publicOptionId: "option-1", nativeOptionLabel: "Safe" }, { publicOptionId: "option-2", nativeOptionLabel: "Explain" }] },
+          { publicQuestionId: "question-2", nativeQuestionId: "fake-question-2", responseKind: "single-select", allowOther: true, options: [{ publicOptionId: "option-1", nativeOptionLabel: "Continue" }] }
         ], binding: { nativeRequestId: "fake-native-input", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" } }
       };
       this.pendingInteractions.set(requestId, { kind: "input" });
@@ -486,7 +489,9 @@ class FakeProvider implements ProviderAdapter {
       await this.waitForInteraction();
       const result = this.pendingInteractions.get(requestId);
       if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
-      await this.callbacks.outputDelta(result?.answers === undefined ? "The answer was not received." : "Thanks, I will continue with those answers.");
+      await this.callbacks.outputDelta(result?.answers === undefined ? "The answer was not received." : result.answers.some((answer) => answer.kind === "other")
+        ? "Thanks, I will continue with the Other answer."
+        : "Thanks, I will continue with those answers.");
       this.pendingInteractions.delete(requestId);
       await this.callbacks.completed("completed");
       return;
@@ -716,7 +721,6 @@ class CodexProvider implements ProviderAdapter {
       const request = pending.request;
       if (request === null) throw new Error("ai-interaction-state-conflict");
       this.write({ id: request.nativeRequestId, result: encodeCodexApprovalResponse(request, decision) });
-      this.pendingInteractions.delete(requestId);
     } catch (error) {
       throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
     }
@@ -729,7 +733,6 @@ class CodexProvider implements ProviderAdapter {
     pending.state = "response-attempted";
     try {
       this.write({ id: pending.projection.mapping.binding.nativeRequestId, result: encodeCodexInputResponse(pending.projection.mapping, answers) });
-      this.pendingInteractions.delete(requestId);
     } catch (error) {
       throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
     }
@@ -1114,6 +1117,18 @@ class CodexProvider implements ProviderAdapter {
       }
       this.nativeTurnState = "terminal-delivered";
       this.turnFailure = null;
+      return;
+    }
+    if (method === "serverRequest/resolved") {
+      if (typeof params.threadId !== "string" || params.threadId !== this.threadId) return;
+      const resolved = [...this.pendingInteractions.entries()].find(([, pending]) => {
+        const request = pending.request;
+        return request !== null && request.params.threadId === params.threadId && request.nativeRequestId === params.requestId;
+      });
+      if (resolved === undefined) return;
+      const [requestId] = resolved;
+      this.pendingInteractions.delete(requestId);
+      await this.input.callbacks.interactionResolved(requestId);
       return;
     }
     if (category === "validated-and-ignored") return;
@@ -1537,6 +1552,15 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
             record.pendingInteractions.delete(projection.requestId);
             throw error;
           }
+        },
+        interactionResolved: async (requestId) => {
+          if (!currentGeneration()) return;
+          const pending = record.pendingInteractions.get(requestId);
+          if (pending === undefined) return;
+          if (pending.state === "pending") {
+            await emit(record, pending.projection.turnId, "turn.interaction.expired", { requestId });
+          }
+          record.pendingInteractions.delete(requestId);
         },
         completed: async (outcome) => {
           if (!currentGeneration() || record.activeTurnId === null) return;

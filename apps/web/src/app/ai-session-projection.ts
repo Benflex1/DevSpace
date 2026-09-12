@@ -31,6 +31,7 @@ export type BrowserAiInputQuestion = {
   header: string;
   question: string;
   responseKind: "single-select" | "text";
+  allowOther: boolean;
   secret: false;
   options: Array<{ optionId: string; label: string; description: string }>;
 };
@@ -72,6 +73,7 @@ function isApprovalPresentation(value: unknown): value is BrowserAiApprovalPrese
 function isInputQuestion(value: unknown): value is BrowserAiInputQuestion {
   if (!isRecord(value) || typeof value.questionId !== "string" || typeof value.header !== "string"
     || typeof value.question !== "string" || (value.responseKind !== "single-select" && value.responseKind !== "text")
+    || (value.allowOther !== undefined && typeof value.allowOther !== "boolean")
     || value.secret !== false || !Array.isArray(value.options)) return false;
   return value.options.every((option) => isRecord(option) && typeof option.optionId === "string"
     && typeof option.label === "string" && typeof option.description === "string");
@@ -100,7 +102,8 @@ function copyInteraction(interaction: BrowserAiInteraction): BrowserAiInteractio
     ...interaction,
     request: interaction.request === null ? null : "presentation" in interaction.request
       ? { ...interaction.request, presentation: { ...interaction.request.presentation, ...(interaction.request.presentation.kind === "file-change" ? { paths: [...interaction.request.presentation.paths] } : {}) } }
-      : { ...interaction.request, questions: interaction.request.questions.map((question) => ({ ...question, options: question.options.map((option) => ({ ...option })) })) },
+      : { ...interaction.request, questions: interaction.request.questions.map((question) => ({ ...question,
+        allowOther: question.allowOther === true, options: question.options.map((option) => ({ ...option })) })) },
     response: interaction.response === null ? null : "decision" in interaction.response
       ? { ...interaction.response } : { ...interaction.response, answers: [...interaction.response.answers] }
   };
@@ -157,6 +160,14 @@ export function applyAiInteractionEvent(
       if (existing.turnId !== event.turnId || existing.kind !== respondedKind || existing.state !== "pending") return next;
       next[index] = { ...existing, state: "responded", response, updatedAt: timestamp };
     }
+    return next;
+  }
+  if (event.eventType === "turn.interaction.expired" && requestId !== null && event.turnId !== null) {
+    const index = next.findIndex((interaction) => interaction.id === requestId);
+    if (index < 0) return next;
+    const existing = next[index]!;
+    if (existing.turnId !== event.turnId || existing.state !== "pending") return next;
+    next[index] = { ...existing, state: "expired", updatedAt: timestamp };
     return next;
   }
   let retirement: BrowserAiInteractionState | null = null;

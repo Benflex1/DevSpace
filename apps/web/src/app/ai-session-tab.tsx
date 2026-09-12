@@ -101,7 +101,8 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
       if (event.eventType === "turn.started") next.state = "running";
       if (event.eventType === "turn.approval.requested") next.state = "waiting-for-approval";
       if (event.eventType === "turn.input.requested") next.state = "waiting-for-input";
-      if (event.eventType === "turn.approval.responded" || event.eventType === "turn.input.responded") next.state = "running";
+      if (event.eventType === "turn.approval.responded" || event.eventType === "turn.input.responded"
+        || event.eventType === "turn.interaction.expired") next.state = "running";
       if (event.eventType === "turn.activity.started" || event.eventType === "turn.output.delta") next.state = "running";
       if (event.eventType === "turn.activity.started") next.activities = [...next.activities, String((event.payload.presentation as { summary?: unknown })?.summary ?? "Activity")];
       if (event.eventType === "turn.files.changed") next.changedFiles = event.payload as unknown as FileSummary;
