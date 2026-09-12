@@ -37,6 +37,14 @@ import {
   CODEX_NOTIFICATION_CATEGORY_REGISTRY,
   validatePinnedCodexNotification
 } from "./codex-notification-schema-v0-145.js";
+import {
+  encodeCodexApprovalResponse,
+  encodeCodexInputResponse,
+  parseCodexServerInteractionRequest,
+  projectCodexApprovalRequest,
+  projectCodexInputRequest,
+  type CodexInteractionProjection
+} from "./codex-interactions-v0-145.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
@@ -56,13 +64,13 @@ const CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES = CODEX_MAX_NATIVE_JSON_MESSAGE_BYTES
 const CODEX_MAX_DOCKER_PARTIAL_BUFFER_BYTES = 8 + CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES;
 const CODEX_MAX_NATIVE_NOTIFICATIONS = 256;
 const CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS = 1_000;
-const CODEX_APPROVAL_POLICY = "never" as const;
+const CODEX_APPROVAL_POLICY = "on-request" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
 const CODEX_NETWORK_ACCESS = "enabled" as const;
 const CODEX_CAPABILITIES = Object.freeze({
   inspect: true, start: true, resume: false, sendTurn: true, interrupt: true,
-  approvals: false, structuredInput: false, stop: true, streamEvents: true
+  approvals: true, structuredInput: true, stop: true, streamEvents: true
 });
 
 export interface AiSessionBinding {
@@ -137,7 +145,10 @@ export interface AiSessionRuntime {
   start(input: AiSessionBinding): Promise<void>;
   sendTurn(input: AiProcessBinding & { turnId: string; content: { kind: "text"; text: string } }): Promise<void>;
   interrupt(input: AiProcessBinding & { turnId: string }): Promise<void>;
+  respondToAiApproval(input: AiProcessBinding & { turnId: string; requestId: string; decision: AiInteractionDecision }): Promise<void>;
+  respondToAiStructuredInput(input: AiProcessBinding & { turnId: string; requestId: string; answers: readonly AiStructuredInputAnswer[] }): Promise<void>;
   stop(input: AiProcessBinding): Promise<void>;
+  synchronized(sessionId: string): Promise<{ processGeneration: number; pendingInteractionIds: readonly string[] }>;
   replay(sessionId: string, afterSequence: number): Promise<CanonicalAiEvent[]>;
   subscribe(sessionId: string, afterSequence: number, listener: (event: CanonicalAiEvent) => unknown): Promise<() => void>;
   acknowledge(input: AiEventAcknowledgement): Promise<AiEventAcknowledgement>;
@@ -150,6 +161,7 @@ interface SessionRecord {
   readonly outbox: AiSessionOutbox;
   readonly turnBaselines: Map<string, Set<string>>;
   readonly privateFailures: Map<string, CodexPrivateFailureObservation>;
+  readonly pendingInteractions: Map<string, PendingAgentInteraction>;
   adapter: ProviderAdapter | null;
   ready: boolean;
   activeTurnId: string | null;
@@ -199,12 +211,33 @@ interface ProviderAdapter {
   start(): Promise<void>;
   sendTurn(turnId: string, text: string): Promise<void>;
   interrupt(): Promise<void>;
+  respondToApproval(requestId: string, decision: "approve-once" | "approve-for-session" | "deny" | "cancel"): Promise<void>;
+  respondToStructuredInput(requestId: string, answers: readonly {
+    readonly questionId: string;
+    readonly kind: "selected" | "text";
+    readonly optionId?: string;
+    readonly text?: string;
+  }[]): Promise<void>;
+  pendingInteractionIds(): readonly string[];
+  retireInteractions(turnId: string): void;
   stop(): Promise<ProviderFinalizationResult>;
 }
+
+type AiStructuredInputAnswer =
+  | Readonly<{ questionId: string; kind: "selected"; optionId: string }>
+  | Readonly<{ questionId: string; kind: "text"; text: string }>;
+type AiInteractionDecision = "approve-once" | "approve-for-session" | "deny" | "cancel";
+type PendingAgentInteraction = {
+  readonly projection: CodexInteractionProjection;
+  readonly adapter: ProviderAdapter;
+  readonly processGeneration: number;
+  state: "pending" | "response-attempted";
+};
 
 interface AdapterCallbacks {
   readonly outputDelta: (text: string) => Promise<void>;
   readonly activity: (summary: string) => Promise<void>;
+  readonly interactionRequested: (projection: CodexInteractionProjection) => Promise<void>;
   readonly completed: (outcome: "completed" | "interrupted" | "failed") => Promise<void>;
   readonly privateFailure: (observation: CodexPrivateFailureObservation) => void;
   readonly failed: (observation: CodexPrivateFailureObservation) => Promise<void>;
@@ -387,7 +420,7 @@ class FakeProvider implements ProviderAdapter {
   constructor(
     private readonly callbacks: AdapterCallbacks,
     private readonly worktreePath: string | null,
-    private readonly testHooks: AiSessionRuntimeOptions["fakeProviderTestHooks"]
+  private readonly testHooks: AiSessionRuntimeOptions["fakeProviderTestHooks"]
   ) {}
   async start(): Promise<void> { this.testHooks?.onStart?.(); }
   async sendTurn(_turnId: string, text: string): Promise<void> {
@@ -421,6 +454,10 @@ class FakeProvider implements ProviderAdapter {
     if (this.testHooks?.closeAfterTurn === true) await this.callbacks.providerClosed();
   }
   async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); }
+  async respondToApproval(): Promise<void> { throw new Error("ai-interaction-not-pending"); }
+  async respondToStructuredInput(): Promise<void> { throw new Error("ai-interaction-not-pending"); }
+  pendingInteractionIds(): readonly string[] { return []; }
+  retireInteractions(): void { /* deterministic provider has no interactive requests */ }
   async stop(): Promise<ProviderFinalizationResult> {
     this.testHooks?.onStop?.();
     this.stopped = true; this.releaseLongTurn?.();
@@ -474,7 +511,13 @@ class CodexProvider implements ProviderAdapter {
   private requestId = 0;
   private threadId: string | null = null;
   private turnId: string | null = null;
+  private devspaceTurnId: string | null = null;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }>();
+  private pendingInteractions = new Map<string, {
+    readonly projection: CodexInteractionProjection;
+    readonly request: ReturnType<typeof parseCodexServerInteractionRequest>;
+    state: "pending" | "response-attempted";
+  }>();
   private containerDir: string | null = null;
   private dockerHeader = Buffer.alloc(0);
   private dockerPayload = Buffer.alloc(0);
@@ -510,6 +553,7 @@ class CodexProvider implements ProviderAdapter {
     readonly readbackHelperBytes: Buffer;
     readonly callbacks: AdapterCallbacks;
     readonly authority: CodexCredentialAuthority;
+    readonly createId: () => string;
   }) {}
   async start(): Promise<void> {
     try {
@@ -570,12 +614,51 @@ class CodexProvider implements ProviderAdapter {
       throw new CodexRequestFailure(this.protocolFailureObservation ?? this.protocolObservation("request"));
     }
     this.turnId = nativeTurnId;
+    this.devspaceTurnId = _turnId;
     this.nativeTurnState = "active";
     this.terminalFingerprint = null;
   }
   async interrupt(): Promise<void> {
     if (this.threadId !== null && this.turnId !== null && this.nativeTurnState === "active") {
       await this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+    }
+  }
+  async respondToApproval(requestId: string, decision: AiInteractionDecision): Promise<void> {
+    const pending = this.pendingInteractions.get(requestId);
+    if (pending === undefined || pending.state !== "pending" || pending.projection.kind !== "approval") {
+      throw new Error("ai-interaction-state-conflict");
+    }
+    pending.state = "response-attempted";
+    try {
+      const request = pending.request;
+      if (request === null) throw new Error("ai-interaction-state-conflict");
+      this.write({ id: request.nativeRequestId, result: encodeCodexApprovalResponse(request, decision) });
+      this.pendingInteractions.delete(requestId);
+    } catch (error) {
+      throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
+    }
+  }
+  async respondToStructuredInput(requestId: string, answers: ReadonlyArray<AiStructuredInputAnswer>): Promise<void> {
+    const pending = this.pendingInteractions.get(requestId);
+    if (pending === undefined || pending.state !== "pending" || pending.projection.kind !== "input") {
+      throw new Error("ai-interaction-state-conflict");
+    }
+    pending.state = "response-attempted";
+    try {
+      this.write({ id: pending.projection.mapping.binding.nativeRequestId, result: encodeCodexInputResponse(pending.projection.mapping, answers) });
+      this.pendingInteractions.delete(requestId);
+    } catch (error) {
+      throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
+    }
+  }
+  pendingInteractionIds(): readonly string[] {
+    return [...this.pendingInteractions.entries()]
+      .filter(([, pending]) => pending.state === "pending")
+      .map(([requestId]) => requestId);
+  }
+  retireInteractions(turnId: string): void {
+    for (const [requestId, pending] of this.pendingInteractions.entries()) {
+      if (pending.projection.turnId === turnId) this.pendingInteractions.delete(requestId);
     }
   }
   async stop(): Promise<ProviderFinalizationResult> {
@@ -832,7 +915,50 @@ class CodexProvider implements ProviderAdapter {
     if (typeof message.method !== "string" || !Object.prototype.hasOwnProperty.call(message, "params")) { this.failProtocolOnce(); return; }
     const params = this.objectRecord(message.params);
     if (params === null) { this.failProtocolOnce(); return; }
+    if (hasId) {
+      this.enqueueServerRequest(message, params);
+      return;
+    }
     this.enqueueNotification(message, message.method, params);
+  }
+  private enqueueServerRequest(message: Record<string, unknown>, params: Record<string, unknown>): void {
+    const previous = this.notificationChain;
+    const current = previous.then(async () => {
+      if (!this.protocolFailureClaimed) await this.dispatchServerRequest(message, params);
+    });
+    this.notificationChain = current.then(() => undefined, () => undefined);
+    void current.catch(() => { this.failProtocolOnce(); });
+  }
+  private async dispatchServerRequest(message: Record<string, unknown>, params: Record<string, unknown>): Promise<void> {
+    const nativeRequest = parseCodexServerInteractionRequest({ id: message.id, method: message.method, params });
+    if (nativeRequest === null || this.nativeTurnState !== "active" || this.devspaceTurnId === null
+      || nativeRequest.params.threadId !== this.threadId || nativeRequest.params.turnId !== this.turnId) {
+      this.failProtocolOnce();
+      return;
+    }
+    if ([...this.pendingInteractions.values()].some((pending) => {
+      const nativeId = pending.projection.kind === "input"
+        ? pending.projection.mapping.binding.nativeRequestId
+        : pending.projection.binding.nativeRequestId;
+      return nativeId === nativeRequest.nativeRequestId;
+    })) {
+      this.failProtocolOnce();
+      return;
+    }
+    const projection = nativeRequest.method === "item/tool/requestUserInput"
+      ? projectCodexInputRequest(nativeRequest, this.devspaceTurnId, this.input.createId)
+      : projectCodexApprovalRequest(nativeRequest, this.devspaceTurnId, this.input.createId);
+    if (projection === null) {
+      this.failProtocolOnce();
+      return;
+    }
+    this.pendingInteractions.set(projection.requestId, { projection, request: nativeRequest, state: "pending" });
+    try {
+      await this.input.callbacks.interactionRequested(projection);
+    } catch {
+      this.pendingInteractions.delete(projection.requestId);
+      this.failProtocolOnce();
+    }
   }
   private enqueueNotification(notification: Record<string, unknown>, method: string, params: Record<string, unknown>): void {
     if (this.notificationQueueLength >= CODEX_MAX_NATIVE_NOTIFICATIONS) { this.failProtocolOnce(); return; }
@@ -1029,7 +1155,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const outbox = await outboxFor(binding.aiSessionId, binding);
     const previousGeneration = outbox.events.length === 0 ? 1 : validateStoppedOutbox(outbox, binding);
     const record: SessionRecord = {
-      binding, processGeneration: previousGeneration, outbox, turnBaselines: new Map(), privateFailures: new Map(), adapter: null, ready: false, activeTurnId: null,
+      binding, processGeneration: previousGeneration, outbox, turnBaselines: new Map(), privateFailures: new Map(), pendingInteractions: new Map(), adapter: null, ready: false, activeTurnId: null,
       activeTurnToken: null, activeTurnPromise: null, admissionPromise: null, finalizationPromise: null,
       finalizationState: outbox.events.length === 0 ? "active" : "finalized", finalizationReason: null,
       cleanupProven: outbox.events.length > 0, stoppingEmitted: outbox.events.length > 0,
@@ -1187,6 +1313,10 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       claim.stage = inspectTerminalClaim(record, claim);
       if (claim.stage !== claim.steps.length) throw new Error("ai-turn-terminal-suffix-incomplete");
       if (record.activeTurnId !== claim.turnId) throw new Error("ai-turn-terminal-owner-conflict");
+      record.adapter?.retireInteractions(claim.turnId);
+      for (const [requestId, pending] of record.pendingInteractions.entries()) {
+        if (pending.projection.turnId === claim.turnId) record.pendingInteractions.delete(requestId);
+      }
       record.activeTurnId = null;
       record.turnBaselines.delete(claim.turnId);
       record.privateFailures.delete(claim.turnId);
@@ -1304,6 +1434,20 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         outputDelta: async (text) => { if (currentGeneration()) await emit(record, record.activeTurnId, "turn.output.delta", { stream: "assistant", text }); },
         activity: async (summary) => { if (!currentGeneration()) return; const activityId = createId(); await emit(record, record.activeTurnId, "turn.activity.started", { activityId, presentation: { kind: "analysis", summary } });
           await emit(record, record.activeTurnId, "turn.activity.completed", { activityId, outcome: "succeeded" }); },
+        interactionRequested: async (projection) => {
+          if (!currentGeneration() || record.activeTurnId !== projection.turnId) throw new Error("ai-interaction-state-conflict");
+          if (record.pendingInteractions.has(projection.requestId)) throw new Error("ai-interaction-state-conflict");
+          const pending: PendingAgentInteraction = { projection, adapter: generationAdapter!, processGeneration: adapterGeneration, state: "pending" };
+          record.pendingInteractions.set(projection.requestId, pending);
+          try {
+            await emit(record, projection.turnId, projection.kind === "approval" ? "turn.approval.requested" : "turn.input.requested",
+              projection.kind === "approval" ? { requestId: projection.requestId, presentation: projection.presentation }
+                : { requestId: projection.requestId, questions: projection.questions });
+          } catch (error) {
+            record.pendingInteractions.delete(projection.requestId);
+            throw error;
+          }
+        },
         completed: async (outcome) => {
           if (!currentGeneration() || record.activeTurnId === null) return;
           await establishTerminalClaim(
@@ -1336,7 +1480,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           const readbackHelperBytes = await readCodexReadbackHelper(options);
           const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
           adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
-            authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot) });
+            authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot), createId });
         }
       } catch (error) {
         await record.outbox.cancelProviderGenerationReservation().catch(() => undefined);
@@ -1357,6 +1501,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       record.terminalClaim = null;
       record.terminalClaimPromise = null;
       record.terminalDrivePromise = null;
+      record.pendingInteractions.clear();
       record.adapter = adapter;
       try {
         await emit(record, null, "session.started", { processGeneration: record.processGeneration });
@@ -1450,10 +1595,64 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       }
       await emit(record, input.turnId, "turn.interrupt.requested", {}); await record.adapter.interrupt();
     },
+    async respondToAiApproval(input) {
+      const record = await recordFor(input);
+      const pending = record.pendingInteractions.get(input.requestId);
+      if (record.adapter === null || !record.ready || record.finalizationState !== "active"
+        || record.activeTurnId !== input.turnId || pending === undefined
+        || pending.processGeneration !== input.processGeneration || pending.adapter !== record.adapter
+        || pending.projection.turnId !== input.turnId || pending.projection.kind !== "approval"
+        || pending.state !== "pending") throw new Error("ai-interaction-state-conflict");
+      pending.state = "response-attempted";
+      try {
+        await record.adapter.respondToApproval(input.requestId, input.decision);
+      } catch (error) {
+        throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
+      }
+      try {
+        await emit(record, input.turnId, "turn.approval.responded", { requestId: input.requestId, decision: input.decision });
+        record.pendingInteractions.delete(input.requestId);
+      } catch (error) {
+        throw error;
+      }
+    },
+    async respondToAiStructuredInput(input) {
+      const record = await recordFor(input);
+      const pending = record.pendingInteractions.get(input.requestId);
+      if (record.adapter === null || !record.ready || record.finalizationState !== "active"
+        || record.activeTurnId !== input.turnId || pending === undefined
+        || pending.processGeneration !== input.processGeneration || pending.adapter !== record.adapter
+        || pending.projection.turnId !== input.turnId || pending.projection.kind !== "input"
+        || pending.state !== "pending") throw new Error("ai-interaction-state-conflict");
+      pending.state = "response-attempted";
+      try {
+        await record.adapter.respondToStructuredInput(input.requestId, input.answers);
+      } catch (error) {
+        throw error instanceof Error ? error : new Error("ai-interaction-response-ambiguous");
+      }
+      try {
+        await emit(record, input.turnId, "turn.input.responded", { requestId: input.requestId, answers: input.answers });
+        record.pendingInteractions.delete(input.requestId);
+      } catch (error) {
+        throw error;
+      }
+    },
     async stop(input) {
       const record = await recordFor(input);
       await record.admissionPromise?.catch(() => undefined);
       await finalizeRecord(record, "user-request");
+    },
+    async synchronized(sessionId) {
+      const record = sessions.get(sessionId);
+      const outbox = record?.outbox ?? await outboxFor(sessionId);
+      const processGeneration = record?.processGeneration ?? outbox.events.at(-1)?.processGeneration ?? 1;
+      if (record === undefined || record.adapter === null) return { processGeneration, pendingInteractionIds: [] };
+      const adapterPending = new Set(record.adapter.pendingInteractionIds());
+      const pendingInteractionIds = [...record.pendingInteractions.entries()]
+        .filter(([, pending]) => pending.state === "pending" && pending.processGeneration === processGeneration
+          && pending.adapter === record.adapter && adapterPending.has(pending.projection.requestId))
+        .map(([requestId]) => requestId);
+      return { processGeneration, pendingInteractionIds };
     },
     async replay(sessionId, afterSequence) {
       aiAfterSequenceSchema.parse(afterSequence);

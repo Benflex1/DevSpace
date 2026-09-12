@@ -361,7 +361,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const server = http.createServer(async (request, response) => {
     const fallbackRequestId = createId();
     const url = new URL(request.url ?? "/", "http://agent.local");
-    const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const)
+    const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.approval.respond", "ai-session.input.respond", "ai-session.stop"] as const)
       .map((operation) => f11AiAgentApiV1EndpointByOperation[operation]!)
       .find((endpoint) => url.pathname === endpoint.path);
     const githubEndpoint = (["github.app.inspect", "github.installation.verify", "github.installation.inspect", "github.installation.refresh", "github.installation.disconnect", "github.installation.reconnect.prepare", "github.repositories.list", "github.repositories.resolve"] as const)
@@ -562,11 +562,14 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           if (!await delivery.writeFrame(event)) return;
         }
         const throughSequence = replay.at(-1)?.sequence ?? afterSequence;
+        const synchronization = await aiRuntime.synchronized(sessionId);
         const synchronized = aiEventStreamFrameSchema.parse({
           schemaVersion: "devspace.ai-stream/v1",
           frameType: "stream.synchronized",
           sessionId,
-          throughSequence
+          throughSequence,
+          processGeneration: synchronization.processGeneration,
+          pendingInteractionIds: synchronization.pendingInteractionIds
         });
         if (!await delivery.writeFrame(synchronized)) return;
         const unsubscribe = await aiRuntime.subscribe(
@@ -581,7 +584,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return;
     }
 
-    const aiMutationOperations = ["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.stop"] as const;
+    const aiMutationOperations = ["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.approval.respond", "ai-session.input.respond", "ai-session.stop"] as const;
     for (const operation of aiMutationOperations) {
       const endpoint = f11AiAgentApiV1EndpointByOperation[operation]!;
       if (request.method !== endpoint.method || url.pathname !== endpoint.path) continue;
@@ -595,6 +598,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         else if (operation === "ai-session.resume") throw new Error("ai-capability-unsupported");
         else if (operation === "ai-session.turn.send") await aiRuntime.sendTurn(body.data as Parameters<AiSessionRuntime["sendTurn"]>[0]);
         else if (operation === "ai-session.turn.interrupt") await aiRuntime.interrupt(body.data as Parameters<AiSessionRuntime["interrupt"]>[0]);
+        else if (operation === "ai-session.approval.respond") await aiRuntime.respondToAiApproval(body.data as Parameters<AiSessionRuntime["respondToAiApproval"]>[0]);
+        else if (operation === "ai-session.input.respond") await aiRuntime.respondToAiStructuredInput(body.data as Parameters<AiSessionRuntime["respondToAiStructuredInput"]>[0]);
         else await aiRuntime.stop(body.data as Parameters<AiSessionRuntime["stop"]>[0]);
         return sendJson(response, endpoint.successStatus, endpoint.successBodySchema.parse({ meta: meta(requestId, now), data: { operationId } }));
       } catch (error) {
@@ -604,12 +609,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           : message === "ai-profile-not-found" ? "AI_PROFILE_NOT_FOUND"
             : message === "ai-capability-unsupported" ? "AI_CAPABILITY_UNSUPPORTED"
               : message === "ai-turn-state-conflict" ? "AI_TURN_STATE_CONFLICT"
+                : message === "ai-interaction-state-conflict" || message === "ai-interaction-response-ambiguous" ? "AI_INTERACTION_STATE_CONFLICT"
+                  : message === "ai-profile-revision-mismatch" ? "AI_PROFILE_REVISION_CONFLICT"
                 : message === "ai-identity-mismatch" ? "AI_IDENTITY_MISMATCH" : fallbackCode;
         const policy: Record<string, { status: number; retryable: boolean; category: string; incident: boolean }> = {
           AI_PROFILE_UNAVAILABLE: { status: 503, retryable: true, category: "dependency-unavailable", incident: false },
           AI_PROFILE_NOT_FOUND: { status: 404, retryable: false, category: "user-error", incident: false },
           AI_CAPABILITY_UNSUPPORTED: { status: 422, retryable: false, category: "user-error", incident: false },
           AI_TURN_STATE_CONFLICT: { status: 409, retryable: false, category: "state-conflict", incident: false },
+          AI_INTERACTION_STATE_CONFLICT: { status: 409, retryable: false, category: "state-conflict", incident: false },
+          AI_PROFILE_REVISION_CONFLICT: { status: 409, retryable: false, category: "state-conflict", incident: false },
           AI_IDENTITY_MISMATCH: { status: 409, retryable: false, category: "internal-failure", incident: true },
           AI_OUTBOX_UNAVAILABLE: { status: 503, retryable: true, category: "dependency-unavailable", incident: true },
           AI_PROVIDER_TRANSPORT_FAILURE: { status: 502, retryable: true, category: "transport-failure", incident: true }

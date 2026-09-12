@@ -512,7 +512,9 @@ export const aiStreamSynchronizedFrameSchema = z.strictObject({
   schemaVersion: z.literal(AI_STREAM_SCHEMA_VERSION),
   frameType: z.literal("stream.synchronized"),
   sessionId: uuidV7Schema,
-  throughSequence: aiAfterSequenceSchema
+  throughSequence: aiAfterSequenceSchema,
+  processGeneration: aiProcessGenerationSchema,
+  pendingInteractionIds: z.array(uuidV7Schema).max(AI_MAX_PRESENTATION_PATHS)
 });
 export const aiEventStreamFrameSchema = z.union([
   canonicalAiEventSchema,

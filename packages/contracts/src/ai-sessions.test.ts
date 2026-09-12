@@ -454,7 +454,9 @@ describe("canonical event envelope and append decisions", () => {
       schemaVersion: "devspace.ai-stream/v1",
       frameType: "stream.synchronized",
       sessionId,
-      throughSequence: 0
+      throughSequence: 0,
+      processGeneration: 1,
+      pendingInteractionIds: [requestId]
     })).toBeDefined();
     expect(acknowledgeAiEventsDataSchema.parse({
       projectId,

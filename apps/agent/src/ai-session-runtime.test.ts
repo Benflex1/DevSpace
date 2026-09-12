@@ -1222,7 +1222,7 @@ describe("AI session runtime", () => {
       const schema = JSON.parse(await readFile(new URL("../../../packages/contracts/fixtures/codex-app-server/0.145.0/stable/ClientRequest.json", import.meta.url), "utf8")) as JsonSchema;
       validateFixture({ id: 1, method: threadStart!.method, params: threadStart!.params }, schema, schema);
       validateFixture({ id: 2, method: turnStart!.method, params: turnStart!.params }, schema, schema);
-      expect(threadStart?.params).toMatchObject({ approvalPolicy: "never", sandbox: "danger-full-access" });
+      expect(threadStart?.params).toMatchObject({ approvalPolicy: "on-request", sandbox: "danger-full-access" });
       expect(turnStart?.params).toMatchObject({ sandboxPolicy: { type: "externalSandbox", networkAccess: "enabled" } });
       expect(requests.every((request) => request.method !== "thread/start" || request.params !== undefined)).toBe(true);
       expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);
@@ -1239,6 +1239,65 @@ describe("AI session runtime", () => {
     } finally {
       await restartedRuntime?.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 2 });
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps Codex interaction identity private while projecting and answering a DevSpace approval", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-interaction-runtime-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      if (request.method === "thread/start") {
+        setImmediate(() => emit({ id: request.id, result: { thread: { id: "native-thread-1" } } }));
+        return;
+      }
+      if (request.method === "turn/start") {
+        setImmediate(() => {
+          emit({ id: request.id, result: { turn: { id: "native-turn-1" } } });
+          setImmediate(() => emit({
+            id: 501,
+            method: "item/commandExecution/requestApproval",
+            params: {
+              itemId: "native-item-1", startedAtMs: 1, threadId: "native-thread-1", turnId: "native-turn-1",
+              command: "echo safe", cwd: "/workspace", reason: "A safe command needs confirmation."
+            }
+          }));
+        });
+        return;
+      }
+      setImmediate(() => emit({ id: request.id, result: {} }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        content: { kind: "text", text: "request approval" } });
+      await new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)));
+      const events = await runtime.collect(sessionId, 0, 25);
+      const requested = events.find((event) => event.eventType === "turn.approval.requested");
+      expect(requested?.eventType).toBe("turn.approval.requested");
+      if (requested?.eventType !== "turn.approval.requested") throw new Error("Expected approval event");
+      expect(requested.payload.requestId).not.toBe("501");
+      expect(JSON.stringify(requested)).not.toContain("native-thread-1");
+      expect(JSON.stringify(requested)).not.toContain("native-turn-1");
+      const synchronized = await runtime.synchronized(sessionId);
+      expect(synchronized.pendingInteractionIds).toEqual([requested.payload.requestId]);
+      await runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        requestId: requested.payload.requestId, decision: "approve-once" });
+      const response = captured.find((entry) => {
+        const rpc = entry.jsonRpc as { id?: unknown; result?: unknown } | undefined;
+        return rpc?.id === 501 && rpc.result !== undefined;
+      });
+      expect(response?.jsonRpc).toEqual({ id: 501, result: { decision: "accept" } });
+      expect((await runtime.synchronized(sessionId)).pendingInteractionIds).toEqual([]);
+      const responded = (await runtime.collect(sessionId, 0, 1)).find((event) => event.eventType === "turn.approval.responded");
+      expect(responded?.eventType).toBe("turn.approval.responded");
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
