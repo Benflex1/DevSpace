@@ -204,11 +204,13 @@ test("does not complete a local Git operation when Git returns a classified fail
   const events = new AgentEventLog(boot, () => new Date(timestamp));
   const failedEvent = vi.spyOn(events, "failed");
   const inspectGit = vi.fn();
+  let localStateChanged = false;
   const managed = {
     awaitProjectExecutionFence: async () => undefined,
     snapshotResources: () => projectResourcesWithWorkspaces(),
     inspectGit,
     stageWorkspaceFile: async () => {
+      localStateChanged = true;
       const failure = new AgentExecutionError({
         code: "GIT_OPERATION_FAILED", message: "stage failed", retryable: false, details: { action: "stage" }
       });
@@ -221,6 +223,7 @@ test("does not complete a local Git operation when Git returns a classified fail
   executor.schedule(accepted);
   await executor.drain();
 
+  expect(localStateChanged).toBe(true);
   expect(journal.get(operation1)).toMatchObject({ state: "failed", failure: { code: "GIT_OPERATION_FAILED" } });
   expect(inspectGit).not.toHaveBeenCalled();
   expect(failedEvent).toHaveBeenCalledOnce();
