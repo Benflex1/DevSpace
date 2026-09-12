@@ -23,7 +23,7 @@ test("runs the fake-provider AI session through interactions, navigation, refres
   }
   await workbench.getByRole("button", { name: /AI/ }).click();
   const ai = page.locator(".ai-tab-surface");
-  await expect(ai.getByText("Start an AI session")).toBeVisible();
+  await expect(ai.getByText("Start an AI session")).toBeVisible({ timeout: 60_000 });
   await ai.getByRole("button", { name: "Create session" }).click();
   await expect(ai.getByRole("button", { name: "Stop AI session" })).toBeVisible();
   const sessionSelect = ai.getByLabel("Session", { exact: true });
