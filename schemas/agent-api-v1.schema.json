@@ -17693,13 +17693,28 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 9007199254740991
+            },
+            "processGeneration": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "pendingInteractionIds": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              }
             }
           },
           "required": [
             "schemaVersion",
             "frameType",
             "sessionId",
-            "throughSequence"
+            "throughSequence",
+            "processGeneration",
+            "pendingInteractionIds"
           ],
           "additionalProperties": false
         }
