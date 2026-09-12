@@ -857,11 +857,12 @@ is:
 | `item/tool/requestUserInput` | optional experimental structured-input capability |
 | `turn/completed` | `turn.provider-completed`, then Web quiescence |
 
-The adapter sends `initialize` first, responds with `initialized`, and does not set
-`experimentalApi: true` for the foundation profile. Stable APIs are required by default. The
-structured-input method is explicitly experimental in this pin and therefore optional; its
-absence cannot disable the required profile. Other experimental methods/fields are ignored unless
-a later profile revision and contract explicitly adopt them.
+The adapter sends `initialize` first with the bounded
+`capabilities.experimentalApi: true` opt-in required by the pinned structured-input surface, then
+responds with `initialized`. The owner/browser is the explicit `approvalsReviewer: "user"` at
+`thread/start`; neither setting is ambient host Codex configuration. Both values are part of the
+Agent profile-revision authority, so changing either fences existing sessions. Other experimental
+methods/fields are ignored unless a later profile revision and contract explicitly adopt them.
 
 The adapter fixes the exact managed `/workspace` cwd and approved sandbox/approval policy from the
 deployment profile and runtime authorization. It does not forward browser-supplied Codex model,

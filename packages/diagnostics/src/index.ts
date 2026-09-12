@@ -140,10 +140,15 @@ const safeKeys = new Set([
   "failureCategory", "incidentId", "detailKeys"
 ]);
 const sensitiveKey = /(?:authorization|cookie|credential|environment|password|secret|token|body|header|content|file|path|url|command|output)/iu;
-const sensitiveText = /(?:bearer\s+|(?:authorization|cookie|password|secret|token|credential|api[_-]?key)\s*[:=]\s*)[^\s,;]+/giu;
+const sensitiveText = /(?:(?:authorization|cookie|password|secret|token|credential|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?|bearer\s+)[^\s,;]+/giu;
+
+/** Redacts secret-shaped values from bounded user/provider text before public or diagnostic use. */
+export function redactSensitiveText(value: string): string {
+  return value.replace(sensitiveText, "[REDACTED]");
+}
 
 function safeText(value: string): string {
-  return value.replace(sensitiveText, "[REDACTED]");
+  return redactSensitiveText(value);
 }
 
 function safeValue(key: string, value: unknown): unknown {

@@ -64,15 +64,42 @@ describe("pinned Codex interaction projection", () => {
         reason: "Codex needs to update the contract fixture."
       }
     });
+    expect(request?.params).not.toHaveProperty("paths");
     const projected = projectCodexApprovalRequest(request!, devspaceTurnId, () => "0190c6f0-0000-7000-8000-000000000002");
-    expect(projected).not.toBeNull();
-    expect(projected?.public.presentation).toEqual({
-      kind: "file-change",
-      summary: "Codex needs to update the contract fixture.",
-      paths: ["packages/contracts"],
-      truncated: false,
-      redacted: true
+    expect(projected).toBeNull();
+  });
+
+  test("redacts secret-like provider text before public projection while retaining safe context", () => {
+    const secret = "devspace-super-secret-token";
+    const command = parseCodexServerInteractionRequest(commandRequest({
+      command: "pnpm test && curl -H 'Authorization: Bearer devspace-super-secret-token' https://example.invalid",
+      reason: `Authorization: Bearer ${secret}`
+    }));
+    const commandProjection = projectCodexApprovalRequest(command!, devspaceTurnId, () => "0190c6f0-0000-7000-8000-000000000006");
+    expect(commandProjection).not.toBeNull();
+    expect(commandProjection?.public.presentation.kind).toBe("command");
+    expect(JSON.stringify(commandProjection?.public)).not.toContain(secret);
+    expect(commandProjection?.public.presentation).toMatchObject({ risk: "mixed" });
+
+    const input = parseCodexServerInteractionRequest({
+      id: 97,
+      method: "item/tool/requestUserInput",
+      params: {
+        itemId: "item-input-secret",
+        questions: [{
+          header: "Authorization",
+          id: "token",
+          question: `Authorization: Bearer ${secret}`,
+          options: [{ label: "Use token", description: `Authorization: Bearer ${secret}` }]
+        }],
+        threadId: "native-thread-1",
+        turnId: "native-turn-1"
+      }
     });
+    const inputProjection = projectCodexInputRequest(input!, devspaceTurnId, () => "0190c6f0-0000-7000-8000-000000000007");
+    expect(inputProjection).not.toBeNull();
+    expect(JSON.stringify(inputProjection?.public)).not.toContain(secret);
+    expect(inputProjection?.public.questions[0]?.options[0]?.label).toBe("Use token");
   });
 
   test("rejects secret user-input requests before creating a public projection", () => {

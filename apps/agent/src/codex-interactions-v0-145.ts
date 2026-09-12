@@ -8,6 +8,7 @@ import {
   aiStructuredInputAnswersSchema,
   aiStructuredInputQuestionsSchema
 } from "@devspace/contracts";
+import { redactSensitiveText } from "@devspace/diagnostics";
 import { v7 as uuidv7 } from "uuid";
 import * as z from "zod";
 
@@ -42,6 +43,14 @@ type CommonInteractionBinding = Readonly<{
   nativeThreadId: string;
   nativeTurnId: string;
   nativeItemId: string;
+}>;
+
+export type CodexFileChangeItem = Readonly<{
+  nativeThreadId: string;
+  nativeTurnId: string;
+  nativeItemId: string;
+  paths: ReadonlyArray<string>;
+  truncated: boolean;
 }>;
 
 type ApprovalProjection = Readonly<{
@@ -142,7 +151,7 @@ function clipUtf8(value: string, maxBytes: number): string {
 }
 
 function safeText(value: unknown, fallback: string, maxBytes: number, allowEmpty = false): string {
-  const source = typeof value === "string" ? value : fallback;
+  const source = typeof value === "string" ? redactSensitiveText(value) : fallback;
   const clipped = clipUtf8(source, maxBytes);
   return clipped.length > 0 || allowEmpty ? clipped : fallback;
 }
@@ -205,9 +214,8 @@ function approvalSummary(params: NativeParams): string {
   return safeText(params.reason, FALLBACK_SUMMARY, 4_096);
 }
 
-function filePaths(params: NativeParams): { paths: string[]; truncated: boolean } {
-  const rawPaths = Array.isArray(params.paths) ? params.paths : [];
-  const candidates = rawPaths.length > 0 ? rawPaths : [params.grantRoot];
+function filePaths(item: CodexFileChangeItem): { paths: string[]; truncated: boolean } {
+  const candidates = item.paths;
   const paths: string[] = [];
   let truncated = candidates.length > AI_MAX_PRESENTATION_PATHS;
   for (const candidate of candidates.slice(0, AI_MAX_PRESENTATION_PATHS)) {
@@ -216,15 +224,43 @@ function filePaths(params: NativeParams): { paths: string[]; truncated: boolean 
       truncated = true;
       continue;
     }
+    if (path === ".") return { paths: [], truncated: true };
     if (!paths.includes(path)) paths.push(path);
   }
   return { paths, truncated };
 }
 
+function fileChangeItemPaths(item: Record<string, unknown>, threadId: string, turnId: string): CodexFileChangeItem | null {
+  if (item.type !== "fileChange" || typeof item.id !== "string" || !Array.isArray(item.changes) || item.changes.length === 0) return null;
+  const changes = item.changes as unknown[];
+  const truncated = changes.length > AI_MAX_PRESENTATION_PATHS;
+  const paths: string[] = [];
+  for (const change of changes.slice(0, AI_MAX_PRESENTATION_PATHS)) {
+    if (!isRecord(change) || typeof change.path !== "string") return null;
+    const path = workspacePath(change.path);
+    if (path === null || path === ".") return null;
+    if (!paths.includes(path)) paths.push(path);
+    const kind = change.kind;
+    if (isRecord(kind) && kind.type === "update" && kind.move_path !== null && kind.move_path !== undefined) {
+      if (typeof kind.move_path !== "string") return null;
+      const oldPath = workspacePath(kind.move_path);
+      if (oldPath === null || oldPath === ".") return null;
+      if (!paths.includes(oldPath)) paths.push(oldPath);
+    }
+  }
+  return paths.length === 0 ? null : { nativeThreadId: threadId, nativeTurnId: turnId, nativeItemId: item.id, paths, truncated };
+}
+
+export function projectCodexFileChangeItem(value: unknown, threadId: string, turnId: string): CodexFileChangeItem | null {
+  if (!isRecord(value)) return null;
+  return fileChangeItemPaths(value, threadId, turnId);
+}
+
 function projectApproval(
   request: CodexServerInteractionRequest,
   turnId: string,
-  createId: () => string
+  createId: () => string,
+  fileChangeItems: ReadonlyMap<string, CodexFileChangeItem>
 ): ApprovalProjection | null {
   const binding = commonBinding(request);
   if (binding === null) return null;
@@ -249,7 +285,14 @@ function projectApproval(
     };
   }
   if (request.method !== "item/fileChange/requestApproval") return null;
-  const paths = filePaths(request.params);
+  const threadId = stringValue(request.params.threadId);
+  const nativeTurnId = stringValue(request.params.turnId);
+  const nativeItemId = stringValue(request.params.itemId);
+  if (threadId === null || nativeTurnId === null || nativeItemId === null) return null;
+  const item = fileChangeItems.get(nativeItemId);
+  if (item === undefined || item.nativeThreadId !== threadId || item.nativeTurnId !== nativeTurnId || item.nativeItemId !== nativeItemId) return null;
+  const paths = filePaths(item);
+  if (paths.paths.length === 0) return null;
   const presentation = aiApprovalPresentationSchema.parse({
     kind: "file-change",
     summary: approvalSummary(request.params),
@@ -332,10 +375,11 @@ export function parseCodexServerInteractionRequest(value: unknown): CodexServerI
 export function projectCodexApprovalRequest(
   request: CodexServerInteractionRequest,
   turnId: string,
-  createId: () => string = uuidv7
+  createId: () => string = uuidv7,
+  fileChangeItems: ReadonlyMap<string, CodexFileChangeItem> = new Map()
 ): ApprovalProjection | null {
   if (request.method === "item/tool/requestUserInput") return null;
-  return projectApproval(request, turnId, createId);
+  return projectApproval(request, turnId, createId, fileChangeItems);
 }
 
 export function projectCodexInputRequest(

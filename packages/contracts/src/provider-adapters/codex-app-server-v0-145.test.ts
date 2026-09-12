@@ -114,9 +114,9 @@ describe("Codex app-server 0.145.0 adapter boundary", () => {
       fixedArguments: ["app-server", "--stdio"],
       fixedEnvironment: {},
       credentialSourceHandle: "deployment-owned",
-      experimentalApi: false
+      experimentalApi: true
     };
     expect(launch.tty).toBe(false);
-    expect(launch.experimentalApi).toBe(false);
+    expect(launch.experimentalApi).toBe(true);
   });
 });

@@ -42,7 +42,9 @@ import {
   encodeCodexInputResponse,
   parseCodexServerInteractionRequest,
   projectCodexApprovalRequest,
+  projectCodexFileChangeItem,
   projectCodexInputRequest,
+  type CodexFileChangeItem,
   type CodexInteractionProjection
 } from "./codex-interactions-v0-145.js";
 
@@ -65,6 +67,8 @@ const CODEX_MAX_DOCKER_PARTIAL_BUFFER_BYTES = 8 + CODEX_MAX_DOCKER_FRAME_PAYLOAD
 const CODEX_MAX_NATIVE_NOTIFICATIONS = 256;
 const CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS = 1_000;
 const CODEX_APPROVAL_POLICY = "on-request" as const;
+const CODEX_EXPERIMENTAL_API = true as const;
+const CODEX_APPROVALS_REVIEWER = "user" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
 const CODEX_NETWORK_ACCESS = "enabled" as const;
@@ -251,6 +255,8 @@ export interface CodexProfileRevisionAuthority {
   readonly turnSandboxPolicy: string;
   readonly networkAccess: string;
   readonly approvalPolicy: string;
+  readonly experimentalApi: boolean;
+  readonly approvalsReviewer: "user" | "auto_review" | "guardian_subagent";
   readonly declaredCapabilities: Readonly<Record<string, boolean>>;
   readonly credentialSourceIdentity: string;
   readonly persistentAuthorityPolicyVersion?: string;
@@ -272,6 +278,8 @@ export function codexProfileRevisionForAuthority(input: CodexProfileRevisionAuth
     turnSandboxPolicy: input.turnSandboxPolicy,
     networkAccess: input.networkAccess,
     approvalPolicy: input.approvalPolicy,
+    experimentalApi: input.experimentalApi,
+    approvalsReviewer: input.approvalsReviewer,
     declaredCapabilities: input.declaredCapabilities,
     credentialSourceIdentity: input.credentialSourceIdentity,
     persistentAuthorityPolicyVersion: input.persistentAuthorityPolicyVersion ?? CODEX_AUTHORITY_POLICY_VERSION,
@@ -286,6 +294,7 @@ function defaultProfileAuthority(): CodexProfileRevisionAuthority {
   return {
     providerVersion: CODEX_APP_SERVER_CLI_VERSION, transport: "stdio-jsonl", threadSandbox: CODEX_THREAD_SANDBOX,
     turnSandboxPolicy: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS, approvalPolicy: CODEX_APPROVAL_POLICY,
+    experimentalApi: CODEX_EXPERIMENTAL_API, approvalsReviewer: CODEX_APPROVALS_REVIEWER,
     declaredCapabilities: CODEX_CAPABILITIES, credentialSourceIdentity: CODEX_AUTH_CREDENTIAL_SOURCE_IDENTITY,
     persistentAuthorityPolicyVersion: CODEX_AUTHORITY_POLICY_VERSION,
     exclusiveLeasePolicyVersion: CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
@@ -587,6 +596,7 @@ class CodexProvider implements ProviderAdapter {
     readonly request: ReturnType<typeof parseCodexServerInteractionRequest>;
     state: "pending" | "response-attempted";
   }>();
+  private fileChangeItems = new Map<string, CodexFileChangeItem>();
   private containerDir: string | null = null;
   private dockerHeader = Buffer.alloc(0);
   private dockerPayload = Buffer.alloc(0);
@@ -646,14 +656,17 @@ class CodexProvider implements ProviderAdapter {
       this.stream.on("data", (chunk: Buffer) => { this.receiveDockerData(chunk); });
       this.stream.on("error", () => { this.rejectPending(new Error("codex-provider-stream-error")); });
       this.stream.on("close", () => { this.streamClosePromise = this.handleStreamClose(); void this.streamClosePromise.catch(() => undefined); });
-      const initialized = await this.request("initialize", { clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" } });
+      const initialized = await this.request("initialize", {
+        clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" },
+        capabilities: { experimentalApi: CODEX_EXPERIMENTAL_API }
+      });
       if (this.objectRecord(initialized) === null) {
         this.failProtocolOnce();
         throw new CodexRequestFailure(this.protocolFailureObservation ?? this.protocolObservation("request"));
       }
       this.write({ method: "initialized" });
       const thread = await this.request("thread/start", {
-        cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, sandbox: CODEX_THREAD_SANDBOX
+        cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, approvalsReviewer: CODEX_APPROVALS_REVIEWER, sandbox: CODEX_THREAD_SANDBOX
       });
       const threadRecord = this.objectRecord(thread);
       const threadValue = threadRecord === null ? null : this.objectRecord(threadRecord.thread);
@@ -670,6 +683,7 @@ class CodexProvider implements ProviderAdapter {
   }
   async sendTurn(_turnId: string, text: string): Promise<void> {
     if (this.threadId === null) throw new Error("codex-thread-not-started");
+    this.fileChangeItems.clear();
     this.turnFailure = null;
     const response = await this.request("turn/start", {
       threadId: this.threadId, input: [{ type: "text", text }],
@@ -729,6 +743,7 @@ class CodexProvider implements ProviderAdapter {
     for (const [requestId, pending] of this.pendingInteractions.entries()) {
       if (pending.projection.turnId === turnId) this.pendingInteractions.delete(requestId);
     }
+    this.fileChangeItems.clear();
   }
   async stop(): Promise<ProviderFinalizationResult> {
     if (this.finalizationState === "finalized" && this.finalizationResult !== null) return this.finalizationResult;
@@ -1016,7 +1031,7 @@ class CodexProvider implements ProviderAdapter {
     }
     const projection = nativeRequest.method === "item/tool/requestUserInput"
       ? projectCodexInputRequest(nativeRequest, this.devspaceTurnId, this.input.createId)
-      : projectCodexApprovalRequest(nativeRequest, this.devspaceTurnId, this.input.createId);
+      : projectCodexApprovalRequest(nativeRequest, this.devspaceTurnId, this.input.createId, this.fileChangeItems);
     if (projection === null) {
       this.failProtocolOnce();
       return;
@@ -1058,8 +1073,14 @@ class CodexProvider implements ProviderAdapter {
       return;
     }
     if (method === "item/started") {
-      if (!this.correlates(params, true) || this.objectRecord(params.item) === null || typeof params.startedAtMs !== "number"
+      const item = this.objectRecord(params.item);
+      if (!this.correlates(params, true) || item === null || typeof params.startedAtMs !== "number"
         || !Number.isSafeInteger(params.startedAtMs)) { this.failProtocolOnce(); return; }
+      if (item.type === "fileChange") {
+        const fileChangeItem = projectCodexFileChangeItem(item, this.threadId!, this.turnId!);
+        if (fileChangeItem === null) { this.failProtocolOnce(); return; }
+        this.fileChangeItems.set(fileChangeItem.nativeItemId, fileChangeItem);
+      }
       await this.input.callbacks.activity("Provider activity started.");
       return;
     }

@@ -94,7 +94,7 @@ export interface CodexAppServerPrivateLaunch {
   readonly fixedArguments: readonly string[];
   readonly fixedEnvironment: Readonly<Record<string, string>>;
   readonly credentialSourceHandle: string;
-  readonly experimentalApi: false;
+  readonly experimentalApi: true;
 }
 
 /**

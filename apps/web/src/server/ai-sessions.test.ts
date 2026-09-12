@@ -9,6 +9,7 @@ import {
   type AgentOperationObservation,
   type CanonicalAiEvent
 } from "@devspace/contracts";
+import { redactSensitiveText } from "@devspace/diagnostics";
 import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
 import {
   boundAiWorkbenchResponse,
@@ -31,7 +32,7 @@ import {
   utf8ByteLength
 } from "./ai-history.js";
 import { setupPrimaryWorkspace, type WorkspaceSetupAgent } from "./workspace-setup.js";
-import { AgentUnavailableError } from "./agent-client.js";
+import { AgentResponseError, AgentUnavailableError } from "./agent-client.js";
 
 const projectId = "018f0f00-0000-7000-8000-000000000001";
 const workspaceId = "018f0f00-0000-7000-8000-000000000002";
@@ -796,6 +797,29 @@ test("retires an ambiguous response when the Agent can no longer prove the pendi
   });
 });
 
+test("reconciles a structured Agent outbox error after provider response write without resending", async () => {
+  const agent = fakeAgent();
+  const requestId = "018f0f00-0000-7000-8000-000000000040";
+  agent.respondToAiApproval.mockRejectedValueOnce(new AgentResponseError("AI_OUTBOX_UNAVAILABLE"));
+  agent.streamAiEvents.mockImplementation((function* () {
+    yield {
+      schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const,
+      sessionId: sessionAId, throughSequence: 1, processGeneration: 1, pendingInteractionIds: []
+    };
+  }) as never);
+  const database = {
+    getAiSession: vi.fn(() => ({ ...view(sessionAId), session: { ...session(sessionAId), lastSequence: 1 }, interactions: [pendingApproval(requestId)] })),
+    getAiTurn: vi.fn(() => ({ id: turnId, sessionId: sessionAId, state: "waiting-for-approval" })),
+    retireAiInteraction: vi.fn()
+  };
+  await expect(respondToAiApproval(projectId, workspaceId, sessionAId, turnId, requestId, "approve-once", { database, agent } as never))
+    .rejects.toMatchObject({ code: "AI_INTERACTION_STATE_CONFLICT" });
+  expect(agent.respondToAiApproval).toHaveBeenCalledTimes(1);
+  expect(database.retireAiInteraction).toHaveBeenCalledWith({
+    projectId, workspaceId, sessionId: sessionAId, turnId, requestId, state: "lost"
+  });
+});
+
 test.each([
   ["stopped session", "stopped", "running", "AI_SESSION_CONFLICT"],
   ["creating session", "creating", "running", "AI_SESSION_CONFLICT"],
@@ -1168,6 +1192,46 @@ describe("SQLite canonical turn acceptance convergence", () => {
         sequence: 6
       }
     })).toThrow();
+  });
+
+  test("keeps Agent-safe interaction presentations free of provider secret literals through SQLite and browser projection", async () => {
+    const fixture = await historyFixture();
+    const secret = "devspace-super-secret-token";
+    const approval = {
+      ...approvalRequestedEvent(fixture.sessionId, 2, fixture.turnId, "018f0f00-0000-7000-8000-000000000026"),
+      payload: {
+        requestId: "018f0f00-0000-7000-8000-000000000026",
+        presentation: {
+          kind: "command" as const,
+          summary: redactSensitiveText(`Authorization: Bearer ${secret}`),
+          commandText: redactSensitiveText(`curl -H 'Authorization: Bearer ${secret}' https://example.invalid`),
+          workingDirectory: ".",
+          risk: "network" as const,
+          redacted: true as const
+        }
+      }
+    } as CanonicalAiEvent;
+    const input = {
+      ...inputRequestedEvent(fixture.sessionId, 3, fixture.turnId, "018f0f00-0000-7000-8000-000000000027"),
+      payload: {
+        requestId: "018f0f00-0000-7000-8000-000000000027",
+        questions: [{
+          questionId: "question-1", header: "Authorization", question: redactSensitiveText(`Authorization: Bearer ${secret}`),
+          responseKind: "single-select" as const, secret: false as const,
+          options: [{ optionId: "option-1", label: "Use token", description: redactSensitiveText(`Authorization: Bearer ${secret}`) }]
+        }]
+      }
+    } as CanonicalAiEvent;
+    expect(JSON.stringify(approval)).not.toContain(secret);
+    expect(JSON.stringify(input)).not.toContain(secret);
+    fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: approval });
+    fixture.database.commitAiEvent({ projectId: fixture.projectId, workspaceId: fixture.workspaceId, event: input });
+    const raw = new BetterSqlite3(fixture.databasePath);
+    const rows = raw.prepare("select request_json as requestJson from ai_interaction_requests where session_id = ? order by id").all(fixture.sessionId) as Array<{ requestJson: string }>;
+    raw.close();
+    expect(rows).toHaveLength(2);
+    expect(JSON.stringify(rows)).not.toContain(secret);
+    expect(JSON.stringify(fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId))).not.toContain(secret);
   });
 
   test.each(["turn", "session"] as const)("retires pending interactions when the owning %s becomes terminal", async (cause) => {

@@ -1222,7 +1222,9 @@ describe("AI session runtime", () => {
       const schema = JSON.parse(await readFile(new URL("../../../packages/contracts/fixtures/codex-app-server/0.145.0/stable/ClientRequest.json", import.meta.url), "utf8")) as JsonSchema;
       validateFixture({ id: 1, method: threadStart!.method, params: threadStart!.params }, schema, schema);
       validateFixture({ id: 2, method: turnStart!.method, params: turnStart!.params }, schema, schema);
-      expect(threadStart?.params).toMatchObject({ approvalPolicy: "on-request", sandbox: "danger-full-access" });
+      const initialize = requests.find((request) => request.method === "initialize");
+      expect(initialize?.params).toMatchObject({ capabilities: { experimentalApi: true } });
+      expect(threadStart?.params).toMatchObject({ approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "danger-full-access" });
       expect(turnStart?.params).toMatchObject({ sandboxPolicy: { type: "externalSandbox", networkAccess: "enabled" } });
       expect(requests.every((request) => request.method !== "thread/start" || request.params !== undefined)).toBe(true);
       expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);
@@ -1306,10 +1308,146 @@ describe("AI session runtime", () => {
     }
   });
 
+  test("correlates file approval paths to the exact pinned file-change item and never uses grantRoot", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-file-approval-correlation-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ method: "item/started", params: {
+        item: {
+          id: "native-file-item-1", type: "fileChange", status: "inProgress",
+          changes: [
+            { path: "/workspace/src/changed.ts", kind: { type: "update" }, diff: "private diff text" },
+            { path: "/workspace/src/changed.ts", kind: { type: "update" }, diff: "duplicate" }
+          ]
+        }, startedAtMs: 1, threadId: "thread-1", turnId: "turn-1"
+      } });
+      fixture.protocol.emit({ id: 601, method: "item/fileChange/requestApproval", params: {
+        itemId: "native-file-item-1", startedAtMs: 2, threadId: "thread-1", turnId: "turn-1",
+        grantRoot: "/workspace", reason: "Authorization: Bearer devspace-super-secret-token"
+      } });
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      const requested = events.find((event) => event.eventType === "turn.approval.requested");
+      expect(requested?.eventType).toBe("turn.approval.requested");
+      if (requested?.eventType !== "turn.approval.requested") throw new Error("Expected file approval event");
+      expect(requested.payload.presentation).toMatchObject({ kind: "file-change", paths: ["src/changed.ts"], truncated: false });
+      expect(requested.payload.presentation).not.toMatchObject({ paths: ["."] });
+      expect(JSON.stringify(requested)).not.toContain("private diff text");
+      expect(JSON.stringify(requested)).not.toContain("devspace-super-secret-token");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps secret-like structured-input text out of canonical requested events", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-input-redaction-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit({ id: 604, method: "item/tool/requestUserInput", params: {
+        itemId: "native-input-item-1", threadId: "thread-1", turnId: "turn-1",
+        questions: [{
+          id: "token", header: "Authorization", question: "Authorization: Bearer devspace-super-secret-token",
+          options: [{ label: "Use token", description: "Authorization: Bearer devspace-super-secret-token" }]
+        }]
+      } });
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      const requested = events.find((event) => event.eventType === "turn.input.requested");
+      expect(requested?.eventType).toBe("turn.input.requested");
+      if (requested?.eventType !== "turn.input.requested") throw new Error("Expected structured input event");
+      expect(JSON.stringify(requested)).not.toContain("devspace-super-secret-token");
+      expect(requested.payload.questions[0]?.options[0]?.label).toBe("Use token");
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["different item", "native-file-item-2", [{ path: "/workspace/src/changed.ts", kind: { type: "update" }, diff: "private diff" }]],
+    ["missing item state", "native-file-item-1", null],
+    ["outside workspace", "native-file-item-1", [{ path: "../outside.ts", kind: { type: "update" }, diff: "private diff" }]],
+    ["workspace root", "native-file-item-1", [{ path: "/workspace", kind: { type: "update" }, diff: "private diff" }]],
+    ["empty item", "native-file-item-1", []]
+  ] as const)("fails closed for file approval with %s", async (_label, requestedItemId, changes) => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-file-approval-fail-closed-test-"));
+    const fixture = await startedCodexFixture(stateRoot);
+    try {
+      await startFixtureTurn(fixture);
+      if (changes !== null) fixture.protocol.emit({ method: "item/started", params: {
+        item: { id: "native-file-item-1", type: "fileChange", status: "inProgress", changes },
+        startedAtMs: 1, threadId: "thread-1", turnId: "turn-1"
+      } });
+      fixture.protocol.emit({ id: 602, method: "item/fileChange/requestApproval", params: {
+        itemId: requestedItemId, startedAtMs: 2, threadId: "thread-1", turnId: "turn-1", grantRoot: "/workspace"
+      } });
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      expect(events.filter((event) => event.eventType === "turn.approval.requested")).toHaveLength(0);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+    } finally {
+      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("does not make an interaction retryable when provider response succeeds but canonical emit fails", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-response-emit-fault-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    let failResponseEmit = false;
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      if (request.method === "thread/start") {
+        setImmediate(() => emit({ id: request.id, result: { thread: { id: "native-thread-1" } } }));
+        return;
+      }
+      if (request.method === "turn/start") {
+        setImmediate(() => {
+          emit({ id: request.id, result: { turn: { id: "native-turn-1" } } });
+          setImmediate(() => emit({ id: 603, method: "item/commandExecution/requestApproval", params: {
+            itemId: "native-command-item-1", startedAtMs: 1, threadId: "native-thread-1", turnId: "native-turn-1",
+            command: "echo safe", cwd: "/workspace", reason: "Safe command"
+          } }));
+        });
+        return;
+      }
+      setImmediate(() => emit({ id: request.id, result: {} }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      outboxFaultHooks: { beforeAppend: ({ eventType }: { eventType: string }) => {
+        if (failResponseEmit && eventType === "turn.approval.responded") throw new Error("injected-response-emit-failure");
+      } }
+    } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        content: { kind: "text", text: "request approval" } });
+      await new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)));
+      const requested = (await runtime.collect(sessionId, 0, 50)).find((event) => event.eventType === "turn.approval.requested");
+      if (requested?.eventType !== "turn.approval.requested") throw new Error("Expected approval request");
+      failResponseEmit = true;
+      await expect(runtime.respondToAiApproval({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        requestId: requested.payload.requestId, decision: "approve-once" })).rejects.toThrow("AI_OUTBOX_UNAVAILABLE");
+      expect(captured.filter((entry) => {
+        const rpc = entry.jsonRpc as { id?: unknown; result?: unknown } | undefined;
+        return rpc?.id === 603 && rpc.result !== undefined;
+      })).toHaveLength(1);
+      expect((await runtime.synchronized(sessionId)).pendingInteractionIds).toEqual([]);
+      expect((await runtime.collect(sessionId, 0, 100)).filter((event) => event.eventType === "turn.approval.responded")).toHaveLength(0);
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   test("profile revisions fence execution policy but ignore cosmetic display names", () => {
     const authority = {
       providerVersion: "0.145.0", transport: "stdio-jsonl", threadSandbox: "danger-full-access",
       turnSandboxPolicy: "externalSandbox", networkAccess: "enabled", approvalPolicy: "never",
+      experimentalApi: true, approvalsReviewer: "user",
       declaredCapabilities: { interrupt: true, approvals: false, structuredInput: false },
       credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1",
       runtimeIdentity: { projectId, workspaceId, revisionId, runtimePlanHash, runtimeGeneration: 1 },
@@ -1319,6 +1457,8 @@ describe("AI session runtime", () => {
     expect(codexProfileRevisionForAuthority({ ...authority, displayName: "Codex (managed)" })).toBe(base);
     expect(codexProfileRevisionForAuthority({ ...authority, threadSandbox: "workspace-write" })).not.toBe(base);
       expect(codexProfileRevisionForAuthority({ ...authority, approvalPolicy: "on-request" })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, experimentalApi: false })).not.toBe(base);
+      expect(codexProfileRevisionForAuthority({ ...authority, approvalsReviewer: "auto_review" })).not.toBe(base);
       expect(codexProfileRevisionForAuthority({ ...authority, turnSandboxPolicy: "dangerFullAccess" })).not.toBe(base);
       expect(codexProfileRevisionForAuthority({ ...authority, declaredCapabilities: { ...authority.declaredCapabilities, interrupt: false } })).not.toBe(base);
       expect(codexProfileRevisionForAuthority({ ...authority, persistentAuthorityPolicyVersion: "other-authority-policy" })).not.toBe(base);

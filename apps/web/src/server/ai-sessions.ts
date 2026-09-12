@@ -11,7 +11,7 @@ import {
   type AiStructuredInputAnswers
 } from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
-import { AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
+import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { ProjectSetupConflictError, type ProjectDatabase } from "./database.js";
 import {
   AI_EVENT_STREAM_RESPONSE_MAX_BYTES,
@@ -152,6 +152,11 @@ function interactionRequestPayload(interaction: AiInteractionProjection, request
   const request = interaction.request as Record<string, unknown>;
   if (request.requestId !== requestId) throw interactionStateConflict("The retained AI interaction request identity is invalid.");
   return request;
+}
+
+function interactionResponseOutcomeMayBeAmbiguous(error: unknown): boolean {
+  return error instanceof AgentUnavailableError
+    || error instanceof AgentResponseError && error.code === "AI_OUTBOX_UNAVAILABLE";
 }
 
 function validateStructuredInputAnswers(request: Record<string, unknown>, answers: unknown): AiStructuredInputAnswers {
@@ -517,7 +522,7 @@ export async function respondToAiApproval(
       decision: parsedDecision.data
     });
   } catch (error) {
-    if (!(error instanceof AgentUnavailableError)) throw error;
+    if (!interactionResponseOutcomeMayBeAmbiguous(error)) throw error;
     const outcome = await reconcileAmbiguousAiInteraction({
       projectId, workspaceId, sessionId, turnId, requestId, kind: "approval", view: prepared.view, dependencies
     });
@@ -550,7 +555,7 @@ export async function respondToAiStructuredInput(
       answers: validatedAnswers
     });
   } catch (error) {
-    if (!(error instanceof AgentUnavailableError)) throw error;
+    if (!interactionResponseOutcomeMayBeAmbiguous(error)) throw error;
     const outcome = await reconcileAmbiguousAiInteraction({
       projectId, workspaceId, sessionId, turnId, requestId, kind: "input", view: prepared.view, dependencies
     });
