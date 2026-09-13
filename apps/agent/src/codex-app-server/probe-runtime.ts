@@ -62,10 +62,10 @@ function schemaError(): Error {
   return new Error("CODEX_SCHEMA_DISCOVERY_FAILED");
 }
 
-function architectureCompatible(artifactArchitecture: string, imageArchitecture: string): boolean {
+export function architectureCompatible(artifactArchitecture: string, imageArchitecture: string): boolean {
   const normalize = (value: string): string => ({
     x86_64: "amd64", x64: "amd64", x86: "386", i686: "386", aarch64: "arm64", arm64: "arm64"
-  }[value] ?? value);
+  }[value.split("-", 1)[0] ?? value] ?? value);
   return normalize(artifactArchitecture) === normalize(imageArchitecture);
 }
 
@@ -258,6 +258,14 @@ function collectSchemaFiles(raw: Buffer): ReadonlyMap<string, Uint8Array> {
       offset += padded;
       continue;
     }
+    if (type === 0x30 && name.includes("/") && name.split("/").length > 2) {
+      offset += padded;
+      continue;
+    }
+    if (type === 0x30 && !/^(?:stable|experimental)\/(?:ClientRequest|ClientNotification|ServerRequest|ServerNotification|ToolRequestUserInputParams)\.json$/u.test(name)) {
+      offset += padded;
+      continue;
+    }
     if (type !== 0x30 || !/^(?:stable|experimental)\/[A-Za-z0-9._-]+\.json$/u.test(name)
       || size > PROBE_SCHEMA_FILE_MAX_BYTES || files.has(name) || files.size >= PROBE_SCHEMA_FILE_MAX_COUNT) {
       throw schemaError();
@@ -276,7 +284,7 @@ function probeEnvironment(): Readonly<Record<string, string>> {
 }
 
 const expectedProbeTmpfs = Object.freeze({
-  [PROBE_ROOT]: "rw,nosuid,nodev,size=1g",
+  [PROBE_ROOT]: "rw,nosuid,nodev,exec,size=1g",
   [PROBE_HOME]: "rw,nosuid,nodev,noexec,size=16m",
   [PROBE_STATE]: "rw,nosuid,nodev,noexec,size=16m"
 });
@@ -284,6 +292,7 @@ const expectedProbeTmpfs = Object.freeze({
 function verifyProbeContainer(container: DockerContainerInspection, image: DockerImageInspection, user: string): void {
   const host = container.HostConfig;
   const networks = container.NetworkSettings.Networks ?? {};
+  const networkNames = Object.keys(networks);
   if (container.Config.WorkingDir !== "/"
     || JSON.stringify(container.Config.Entrypoint) !== JSON.stringify(["/bin/sh", "-c"])
     || JSON.stringify(container.Config.Cmd) !== JSON.stringify(["exec sleep 2147483647"])
@@ -296,7 +305,7 @@ function verifyProbeContainer(container: DockerContainerInspection, image: Docke
     || JSON.stringify(host.SecurityOpt) !== JSON.stringify(["no-new-privileges:true"])
     || (host.Binds ?? []).length !== 0 || (host.Mounts ?? []).length !== 0
     || JSON.stringify(host.Tmpfs) !== JSON.stringify(expectedProbeTmpfs)
-    || container.Mounts.length !== 0 || Object.keys(networks).length !== 0
+    || container.Mounts.length !== 0 || networkNames.length !== 1 || networkNames[0] !== "none"
     || Object.keys(host.PortBindings ?? {}).length !== 0) {
     throw probeError();
   }

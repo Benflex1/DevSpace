@@ -51,9 +51,10 @@ async function loadVerifiedFixtures() {
   return { manifest, schemas };
 }
 
-describe("Codex app-server 0.145.0 adapter boundary", () => {
+describe("Codex app-server minimum compatibility baseline fixture", () => {
   test("hashes and parses every checked generated fixture", async () => {
     const { manifest, schemas } = await loadVerifiedFixtures();
+    expect(manifest.baselineVersion).toBe("0.145.0");
     expect(manifest.cliVersion).toBe(CODEX_BASELINE_CLI_VERSION);
     expect([...schemas.keys()].sort()).toEqual([
       "experimental/ToolRequestUserInputParams.json",

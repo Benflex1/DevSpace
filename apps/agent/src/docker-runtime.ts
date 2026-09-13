@@ -357,7 +357,7 @@ export class DockerEngineClient {
       ExposedPorts: {},
       HostConfig: {
         Binds: [], Mounts: [], Tmpfs: {
-          "/opt/devspace-codex-probe": "rw,nosuid,nodev,size=1g",
+          "/opt/devspace-codex-probe": "rw,nosuid,nodev,exec,size=1g",
           "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
           "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
         },

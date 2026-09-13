@@ -5,7 +5,7 @@ import { Duplex } from "node:stream";
 import { afterEach, expect, test } from "vitest";
 import type { DockerEngineClient } from "../docker-runtime.js";
 import { resolveCodexExecutionArtifact, stageCodexExecutionArtifact } from "./artifact-identity.js";
-import { createCodexProbeRuntime } from "./probe-runtime.js";
+import { architectureCompatible, createCodexProbeRuntime } from "./probe-runtime.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -42,6 +42,7 @@ function schemaArchive(): Buffer {
   return Buffer.concat([
     tarEntry("stable/ClientRequest.json", Buffer.from("{}")),
     tarEntry("experimental/ToolRequestUserInputParams.json", Buffer.from("{}")),
+    tarEntry("experimental/v2/NewerSurface.json", Buffer.from("{}")),
     Buffer.alloc(1024)
   ]);
 }
@@ -71,10 +72,10 @@ function dockerFixture(expected: Awaited<ReturnType<typeof stagedFixture>>): { d
         NetworkMode: "none", PortBindings: {}, Devices: [], NanoCpus: 1_000_000_000, Memory: 2_147_483_648, PidsLimit: 64,
         CapAdd: [], CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], AutoRemove: false, ReadonlyRootfs: true,
         RestartPolicy: { Name: "no", MaximumRetryCount: 0 }, Binds: [], Mounts: [], Tmpfs: {
-          "/opt/devspace-codex-probe": "rw,nosuid,nodev,size=1g", "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
+          "/opt/devspace-codex-probe": "rw,nosuid,nodev,exec,size=1g", "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
           "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
         }, MemorySwap: 2_147_483_648
-      }, NetworkSettings: { Networks: {} }, Mounts: []
+      }, NetworkSettings: { Networks: { none: { NetworkID: "fixture-none" } } }, Mounts: []
     }) : ({
       Id: "managed-container", Name: "managed", Image: `sha256:${"a".repeat(64)}`,
       Config: { Labels: {}, WorkingDir: "/workspace", User: "1000:1000", Entrypoint: ["/project/start"], Cmd: ["boot"] },
@@ -143,4 +144,10 @@ test("probes the exact managed image with fixed commands and bounded schema outp
   expect(fixture.commands.some((command) => command.includes("--version"))).toBe(true);
   expect(fixture.commands.some((command) => command.includes("--experimental"))).toBe(true);
   expect(fixture.cleanup).toEqual(["stop", "remove"]);
+});
+
+test("matches the architecture component of an official Rust target triple", () => {
+  expect(architectureCompatible("x86_64-unknown", "amd64")).toBe(true);
+  expect(architectureCompatible("aarch64-unknown", "arm64")).toBe(true);
+  expect(architectureCompatible("x86_64-unknown", "arm64")).toBe(false);
 });

@@ -1,0 +1,72 @@
+{
+  "baselineVersion": "0.145.0",
+  "cliVersion": "0.153.4",
+  "versionOutput": "codex-cli 0.153.4",
+  "generatedAt": "2026-09-13",
+  "stableGenerationCommand": "codex app-server generate-json-schema --out <directory>",
+  "experimentalGenerationCommand": "codex app-server generate-json-schema --experimental --out <directory>",
+  "transport": {
+    "mode": "stdio-jsonl",
+    "tty": false,
+    "stdout": "protocol-only",
+    "stderr": "private-diagnostics"
+  },
+  "officialSource": "https://github.com/openai/codex",
+  "upstreamLicense": "Apache-2.0",
+  "fixtures": [
+    {
+      "scope": "stable-default",
+      "file": "stable/ClientRequest.json",
+      "bytes": 196747,
+      "sha256": "25bc001b5dfe3b35785597b8f9ad9e5aaf7e437331fa9921f041c9e0e03fc9f3"
+    },
+    {
+      "scope": "stable-default",
+      "file": "stable/ClientNotification.json",
+      "bytes": 431,
+      "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+    },
+    {
+      "scope": "stable-default",
+      "file": "stable/ServerRequest.json",
+      "bytes": 50320,
+      "sha256": "31f580ad468fbd18766eb7adb12744be4e3790e3357b58bd4413c0108c4f65d0"
+    },
+    {
+      "scope": "stable-default",
+      "file": "stable/ServerNotification.json",
+      "bytes": 200298,
+      "sha256": "b3e76cf11842f3e8b3270c05e000212b56eabafb0152fc38e8f920e2ef902991"
+    },
+    {
+      "scope": "experimental",
+      "file": "experimental/ToolRequestUserInputParams.json",
+      "bytes": 2143,
+      "sha256": "fda15b62e7446105b59c8ed85c908abed2a47db70653e57c92c47a2f204fa77a"
+    }
+  ],
+  "methods": {
+    "clientRequests": [
+      "initialize",
+      "thread/start",
+      "thread/resume",
+      "turn/start",
+      "turn/interrupt"
+    ],
+    "clientNotifications": ["initialized"],
+    "serverNotifications": [
+      "thread/started",
+      "turn/started",
+      "item/started",
+      "item/completed",
+      "item/agentMessage/delta",
+      "turn/completed",
+      "serverRequest/resolved"
+    ],
+    "stableServerRequests": [
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval"
+    ],
+    "experimentalServerRequests": ["item/tool/requestUserInput"]
+  }
+}

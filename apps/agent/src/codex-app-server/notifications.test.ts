@@ -17,6 +17,13 @@ describe("Codex notification policy", () => {
     })).toBe("projected-and-handled");
   });
 
+  test("accepts a newer non-blocking notification absent from the 0.145 baseline schema", () => {
+    expect(validateCodexNotification({
+      method: "thread/queue/changed",
+      params: { threadId: "thread-1" }
+    })).toBe("validated-and-ignored");
+  });
+
   test("does not accept unknown notifications as safe", () => {
     expect(validateCodexNotification({ method: "future/blocking/request", params: {} })).toBeNull();
   });
