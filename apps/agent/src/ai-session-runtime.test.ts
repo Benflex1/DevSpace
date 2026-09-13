@@ -15,6 +15,7 @@ import { MAX_RETAINED_OUTBOX_EVENTS, createAiSessionOutbox, outboxPathForAiSessi
 import { canonicalAiEventSchema } from "@devspace/contracts";
 import type { CodexCapabilitySet, CodexProfileAuthorityInput } from "@devspace/contracts";
 import { codexProfileRevisionForDiscovery } from "./codex-app-server/profile-authority.js";
+import type { CodexArtifactStager, CodexLaunchArtifact } from "./codex-app-server/artifact-stager.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 
@@ -1580,6 +1581,74 @@ describe("AI session runtime", () => {
       expect(profile.profileRevision).toBe(codexProfileRevisionForDiscovery(authority));
       expect(profile.availability).toEqual({ state: "available" });
       expect(profile.capabilities).toMatchObject({ approvals: true, structuredInput: false, interrupt: false });
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("launches the exact staged artifact returned by discovery", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-staged-launch-test-"));
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const capabilities: CodexCapabilitySet = {
+      inspect: true, start: true, resume: true, sendTurn: true, interrupt: true,
+      approvals: true, structuredInput: true, stop: true, streamEvents: true
+    };
+    const authority: CodexProfileAuthorityInput = {
+      providerKind: "codex", reportedVersion: "0.153.4", entrypointSha256: "1".repeat(64),
+      executionArtifactClosureDigest: "2".repeat(64), executionArtifactLayout: "self-contained-native",
+      protocolFamily: "stdio-jsonl", stableSchemaFingerprint: "3".repeat(64), experimentalSchemaFingerprint: "4".repeat(64),
+      effectiveCapabilities: capabilities, experimentalApi: true, approvalPolicy: "on-request", approvalsReviewer: "user",
+      semanticAdapterVersion: "codex-app-server-family-v1", compatibilityPolicyVersion: "codex-compatibility-v1",
+      probeRuntimeIdentity: { imageId: `sha256:${"5".repeat(32)}`, operatingSystem: "linux", architecture: "amd64", containerUser: "1000:1000", policyVersion: "codex-probe-runtime-v1" },
+      credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1", runtimeIdentity: { projectId, workspaceId, revisionId, runtimePlanHash, runtimeGeneration: 1 }
+    };
+    const discovery = {
+      artifact: {}, stagedArtifact: {}, probe: {}, profileAuthority: authority,
+      compatibility: {
+        transport: "compatible", diagnostic: null, capabilities,
+        stableSchemaFingerprint: authority.stableSchemaFingerprint, experimentalSchemaFingerprint: authority.experimentalSchemaFingerprint,
+        features: {
+          basicSession: { feature: "basicSession", state: "supported", reason: null },
+          approvals: { feature: "approvals", state: "supported", reason: null },
+          structuredInput: { feature: "structuredInput", state: "supported", reason: null },
+          interrupt: { feature: "interrupt", state: "supported", reason: null }
+        }
+      }
+    } as never;
+    const captured: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured);
+    let received: CodexLaunchArtifact | null = null;
+    const artifactStager: CodexArtifactStager = {
+      stageIntoManagedProvider: async (input) => {
+        received = input.launchArtifact;
+        return {
+          containerRoot: "/tmp/devspace-ai/exact-stage",
+          entrypointPath: "/tmp/devspace-ai/exact-stage/artifact/vendor/codex",
+          artifactReadbackPath: "/tmp/devspace-ai/exact-stage/codex-artifact-readback"
+        };
+      }
+    };
+    const runtime = createAiSessionRuntime({
+      mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath: join(stateRoot, "configured-path-that-is-not-read"),
+      codexReadbackHelperBytes: Buffer.from("auth-helper"), codexArtifactReadbackHelperBytes: Buffer.from("artifact-helper"),
+      codexCredentialAuthority: createCodexCredentialAuthority(stateRoot),
+      codexDiscovery: async () => discovery,
+      codexArtifactStager: () => artifactStager
+    });
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const exactBinding = { ...binding, profileRevision: profile.profileRevision };
+      await runtime.start(exactBinding);
+      const launched = received as CodexLaunchArtifact | null;
+      expect(launched?.staged).toBe((discovery as { stagedArtifact: unknown }).stagedArtifact);
+      expect(launched?.managedImageId).toBe(authority.probeRuntimeIdentity.imageId);
+      expect(launched?.profileRevision).toBe(codexProfileRevisionForDiscovery(authority));
+      const providerStart = captured.find((entry) => String(entry.id).startsWith("provider-"));
+      expect((providerStart?.input as DockerExecInput).command).toEqual([
+        "/tmp/devspace-ai/exact-stage/artifact/vendor/codex", "app-server", "--stdio"
+      ]);
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }

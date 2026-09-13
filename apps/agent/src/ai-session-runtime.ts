@@ -54,11 +54,18 @@ import {
   fakeCodexProfileProjection,
   safeCodexProfileProjection
 } from "./codex-app-server/profile-authority.js";
+import {
+  createCodexArtifactStager,
+  type CodexArtifactStager,
+  type CodexLaunchArtifact
+} from "./codex-app-server/artifact-stager.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
 const CODEX_STAGED_READBACK_HELPER_SHA256 = "d07b2735546d3f514c2be5871521ec0430352638f24f0b134f93cbb5c2b951d1";
 const CODEX_STAGED_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-staged-readback");
+const CODEX_ARTIFACT_READBACK_HELPER_SHA256 = "9efef2eacb9f780595de6e340827db9b10bd3757747ae306a49e70b9b40e30bd";
+const CODEX_ARTIFACT_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-artifact-readback");
 const MAX_GIT_PATHS = 256;
 const PRIVATE_CONTAINER_ROOT = "/tmp/devspace-ai";
 const CODEX_DOCKER_EXEC_TIMEOUT_MS = 5_000;
@@ -111,6 +118,10 @@ export interface AiSessionRuntimeOptions {
   /** Agent-private deterministic helper seam; production uses the reproducibly built helper asset. */
   readonly codexReadbackHelperBytes?: Uint8Array;
   readonly codexReadbackHelperPath?: string;
+  readonly codexArtifactReadbackHelperBytes?: Uint8Array;
+  readonly codexArtifactReadbackHelperPath?: string;
+  /** Agent-private deterministic artifact-stager seam; production uses the managed Docker stager. */
+  readonly codexArtifactStager?: (input: { readonly readbackHelperBytes: Buffer }) => CodexArtifactStager;
   /** Agent-private bounded authority seam; the server never supplies this implementation. */
   readonly codexCredentialAuthority?: CodexCredentialAuthority;
   /** Agent-private deterministic outbox seam; the server never supplies these hooks. */
@@ -590,7 +601,8 @@ class CodexProvider implements ProviderAdapter {
   constructor(private readonly input: {
     readonly docker: DockerEngineClient;
     readonly ownership: WorkspaceExecutionContext;
-    readonly executablePath: string;
+    readonly artifactStager: CodexArtifactStager | undefined;
+    readonly launchArtifact: CodexLaunchArtifact | undefined;
     readonly sessionId: string;
     readonly processGeneration: number;
     readonly readbackHelperBytes: Buffer;
@@ -605,14 +617,29 @@ class CodexProvider implements ProviderAdapter {
       });
       const auth = await this.input.authority.read();
       const opaque = `${this.input.sessionId.replaceAll("-", "")}-${Date.now().toString(36)}`;
-      const containerDir = `${PRIVATE_CONTAINER_ROOT}/${opaque}`;
+      let containerDir: string;
+      let executablePath: string;
+      if (this.input.artifactStager !== undefined && this.input.launchArtifact !== undefined) {
+        const staged = await this.input.artifactStager.stageIntoManagedProvider({
+          containerId: this.input.ownership.ownership.developmentContainer.id,
+          launchArtifact: this.input.launchArtifact,
+          sessionId: this.input.sessionId,
+          processGeneration: this.input.processGeneration
+        });
+        containerDir = staged.containerRoot;
+        executablePath = staged.entrypointPath;
+      } else {
+        containerDir = `${PRIVATE_CONTAINER_ROOT}/${opaque}`;
+        executablePath = `${containerDir}/codex`;
+        this.containerDir = containerDir;
+        const executable = Buffer.from("deterministic codex adapter fixture");
+        await this.runUpload(containerDir, executable, "codex");
+      }
       this.containerDir = containerDir;
-      const executable = await readFile(this.input.executablePath);
-      await this.runUpload(containerDir, executable, "codex");
       await this.runUpload(containerDir, this.input.readbackHelperBytes, "staged-readback-helper");
       await this.runUpload(`${containerDir}/home`, Buffer.from(auth.bytes), "auth.json", { CODEX_HOME: `${containerDir}/home` });
       const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
-        command: [`${containerDir}/codex`, "app-server", "--stdio"], workingDirectory: "/workspace",
+        command: [executablePath, "app-server", "--stdio"], workingDirectory: "/workspace",
         environment: { CODEX_HOME: `${containerDir}/home` }, attachStdin: true, tty: false
       });
       this.providerExecId = execId;
@@ -1140,6 +1167,15 @@ async function readCodexReadbackHelper(options: AiSessionRuntimeOptions): Promis
   return helper;
 }
 
+async function readCodexArtifactReadbackHelper(options: AiSessionRuntimeOptions): Promise<Buffer> {
+  if (options.codexArtifactReadbackHelperBytes !== undefined) return Buffer.from(options.codexArtifactReadbackHelperBytes);
+  const helper = await readFile(options.codexArtifactReadbackHelperPath ?? CODEX_ARTIFACT_READBACK_HELPER_PATH);
+  if (createHash("sha256").update(helper).digest("hex") !== CODEX_ARTIFACT_READBACK_HELPER_SHA256) {
+    throw new Error("codex-artifact-readback-helper-integrity-mismatch");
+  }
+  return helper;
+}
+
 type PublicUnavailableCode = Extract<AiProviderProfileProjection["availability"], { state: "unavailable" }>["code"];
 
 function unavailableCodexProfile(code: PublicUnavailableCode): AiProviderProfileProjection {
@@ -1214,7 +1250,12 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   const createId = options.createId ?? uuidv7;
   const sessions = new Map<string, SessionRecord>();
   const outboxes = new Map<string, AiSessionOutbox>();
+  const codexDiscoveries = new Map<string, CodexDiscoveryResult>();
   const docker = options.docker ?? new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath());
+
+  function discoveryKey(input: { readonly projectId: string; readonly workspaceId: string; }): string {
+    return `${input.projectId}:${input.workspaceId}`;
+  }
 
   async function outboxFor(sessionId: string, binding?: AiSessionBinding): Promise<AiSessionOutbox> {
     const cached = outboxes.get(sessionId);
@@ -1485,6 +1526,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           docker,
           createId
         });
+        codexDiscoveries.set(discoveryKey(input), discovery);
         await readCodexReadbackHelper(options);
         await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
         return safeCodexProfileProjection({
@@ -1520,6 +1562,23 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         || (restarting && record.finalizationState !== "finalized")
         || (!restarting && record.finalizationState !== "active")) throw new Error("ai-session-state-conflict");
       if (restarting && validateStoppedOutbox(record.outbox, binding) !== record.processGeneration) throw new Error("ai-session-restart-unavailable");
+      let launchArtifact: CodexLaunchArtifact | undefined;
+      let artifactStager: CodexArtifactStager | undefined;
+      if (mode === "codex" && options.codexPreflight === undefined) {
+        const discovery = codexDiscoveries.get(discoveryKey(binding));
+        if (discovery === undefined || codexProfileRevisionForDiscovery(discovery.profileAuthority) !== binding.profileRevision) {
+          throw new Error("ai-profile-revision-mismatch");
+        }
+        const artifactReadbackHelperBytes = await readCodexArtifactReadbackHelper(options);
+        artifactStager = options.codexArtifactStager?.({ readbackHelperBytes: artifactReadbackHelperBytes })
+          ?? createCodexArtifactStager({ docker, readbackHelperBytes: artifactReadbackHelperBytes, createId });
+        launchArtifact = {
+          staged: discovery.stagedArtifact,
+          managedImageId: discovery.profileAuthority.probeRuntimeIdentity.imageId,
+          probeRuntime: discovery.profileAuthority.probeRuntimeIdentity,
+          profileRevision: binding.profileRevision
+        };
+      }
       await record.outbox.reserveProviderGeneration();
       const adapterGeneration = nextGeneration;
       let generationAdapter: ProviderAdapter | null = null;
@@ -1581,7 +1640,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
           const readbackHelperBytes = await readCodexReadbackHelper(options);
           const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
-          adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
+          adapter = new CodexProvider({ docker, ownership,
+            artifactStager, launchArtifact, sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
             authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot), createId });
         }
       } catch (error) {
@@ -1805,6 +1865,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
 export {
   AI_EVENT_NDJSON_CONTENT_TYPE,
   CODEX_STAGED_READBACK_HELPER_SHA256,
+  CODEX_ARTIFACT_READBACK_HELPER_SHA256,
   CODEX_PROFILE_ID,
   CODEX_NOTIFICATION_CATEGORY_REGISTRY
 };

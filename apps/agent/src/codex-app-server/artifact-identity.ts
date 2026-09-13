@@ -91,6 +91,21 @@ function canonicalJson(value: unknown): string {
   throw new Error("artifact-canonical-json-unsupported");
 }
 
+export function codexExecutionArtifactClosureDigest(input: {
+  readonly layout: CodexArtifactLayout;
+  readonly target: { readonly os: string; readonly architecture: string; readonly abi: string };
+  readonly packageVersion: string | null;
+  readonly entries: readonly CodexArtifactEntry[];
+}): string {
+  const entries = [...input.entries].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  return sha256(Buffer.from(canonicalJson({
+    layout: input.layout,
+    target: input.target,
+    packageVersion: input.packageVersion,
+    entries
+  }), "utf8"));
+}
+
 function isContained(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
@@ -274,12 +289,9 @@ async function makeArtifact(input: {
   const entries = [...input.entries].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   const entrypoint = entries.find((entry) => entry.relativePath === input.entrypointRelativePath && entry.kind === "file");
   if (entrypoint === undefined || entrypoint.sha256 === null) throw artifactError("CODEX_UNRECOGNIZED_EXECUTION_FORM");
-  const closureDigest = sha256(Buffer.from(canonicalJson({
-    layout: input.layout,
-    target: input.target,
-    packageVersion: input.packageVersion,
-    entries
-  }), "utf8"));
+  const closureDigest = codexExecutionArtifactClosureDigest({
+    layout: input.layout, target: input.target, packageVersion: input.packageVersion, entries
+  });
   return {
     configuredPath: input.configuredPath,
     canonicalSourceRoot: input.root,
