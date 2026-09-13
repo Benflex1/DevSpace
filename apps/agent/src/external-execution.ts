@@ -41,6 +41,8 @@ export function isExactLinuxProcessIdentity(
 
 const POLL_MS = 25;
 const TERMINATION_GRACE_MS = 150;
+const IDENTITY_OBSERVATION_WINDOW_MS = 250;
+const TRANSIENT_PROCESS_OBSERVATION_CODES = new Set(["EACCES", "ENOENT", "EPERM", "ESRCH"]);
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -94,6 +96,16 @@ export interface ExternalExecutionResult {
   readonly signal: NodeJS.Signals | null;
   readonly timedOut: boolean;
 }
+
+type ChildCompletionResult = { readonly code: number | null; readonly signal: NodeJS.Signals | null };
+type ChildCompletionSignal =
+  | { readonly kind: "completed"; readonly result: ChildCompletionResult }
+  | { readonly kind: "error"; readonly error: unknown };
+type IdentityObservation =
+  | { readonly kind: "observation"; readonly observed: LinuxProcessIdentity | null }
+  | { readonly kind: "observation-error"; readonly error: unknown };
+type IdentityRaceOutcome = IdentityObservation | ChildCompletionSignal | { readonly kind: "retry" };
+type RetryOutcome = ChildCompletionSignal | { readonly kind: "retry" };
 
 export class ExternalExecutionFence {
   private corruption: PrivateStateCorruptionError | null = null;
@@ -332,19 +344,113 @@ export class ExternalExecutionFence {
       await this.retire(marker);
       throw error;
     }
-    releaseLaunchFence?.();
-    await Promise.all([stdoutFile.close(), stderrFile.close()]);
-    const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", (code, signal) => resolve({ code, signal }));
+    let completionState: ChildCompletionSignal | null = null;
+    const completion = new Promise<ChildCompletionResult>((resolve, reject) => {
+      child.once("error", (error) => {
+        if (completionState === null) completionState = { kind: "error", error };
+        reject(error);
+      });
+      child.once("close", (code: number | null, signal: NodeJS.Signals | null) => {
+        const result = { code, signal };
+        if (completionState === null) completionState = { kind: "completed", result };
+        resolve(result);
+      });
     });
+    const completionSignal: Promise<ChildCompletionSignal> = completion.then(
+      (result) => ({ kind: "completed", result }),
+      (error: unknown) => ({ kind: "error" as const, error })
+    );
+    releaseLaunchFence?.();
+    const outputHandlesClosed = Promise.all([stdoutFile.close(), stderrFile.close()]);
     const pid = child.pid;
-    if (pid === undefined || pid <= 1) { await this.retire(marker); throw new Error("git-spawn-identity-missing"); }
-    const identity = await readLinuxProcess(pid);
-    if (identity !== null) {
-      if (identity.executionId !== executionId || identity.processGroupId !== pid) {
-        this.fail(marker, "spawned Git process identity is inconsistent");
+    if (pid === undefined || pid <= 1) {
+      await outputHandlesClosed;
+      await this.retire(marker);
+      throw new Error("git-spawn-identity-missing");
+    }
+    let identity: LinuxProcessIdentity | null = null;
+    let terminalBeforeIdentity = false;
+    const identityDeadlineMs = Math.min(
+      new Date(marker.deadlineAt).getTime(), this.now().getTime() + IDENTITY_OBSERVATION_WINDOW_MS
+    );
+    const useTerminalCompletion = (): boolean => {
+      const settled = completionState;
+      if (settled?.kind === "completed") {
+        terminalBeforeIdentity = true;
+        return true;
       }
+      if (settled?.kind === "error") throw settled.error;
+      return false;
+    };
+    try {
+      for (;;) {
+        const remainingMs = identityDeadlineMs - this.now().getTime();
+        if (remainingMs <= 0) this.fail(marker, "spawned Git process identity is inconsistent");
+        const observation: Promise<IdentityObservation> = readLinuxProcess(pid).then(
+          (observed) => ({ kind: "observation" as const, observed }),
+          (error: unknown) => ({ kind: "observation-error" as const, error })
+        );
+        const outcome: IdentityRaceOutcome = await Promise.race<IdentityRaceOutcome>([
+          observation,
+          completionSignal,
+          delay(Math.min(POLL_MS, remainingMs)).then(() => ({ kind: "retry" as const }))
+        ]);
+        if (outcome.kind === "completed") {
+          terminalBeforeIdentity = true;
+          break;
+        }
+        if (outcome.kind === "error") throw outcome.error;
+        if (outcome.kind === "retry") {
+          if (useTerminalCompletion()) break;
+          continue;
+        }
+        if (outcome.kind === "observation-error") {
+          if (useTerminalCompletion()) break;
+          const code = (outcome.error as NodeJS.ErrnoException).code;
+          if (!TRANSIENT_PROCESS_OBSERVATION_CODES.has(code ?? "")) throw outcome.error;
+        } else if (outcome.observed !== null) {
+          if (outcome.observed.processGroupId !== pid) {
+            if (useTerminalCompletion()) break;
+            this.fail(marker, "spawned Git process identity is inconsistent");
+          }
+          if (outcome.observed.executionId === executionId) {
+            identity = outcome.observed;
+            break;
+          }
+          if (outcome.observed.executionId !== null) {
+            if (useTerminalCompletion()) break;
+            this.fail(marker, "spawned Git process identity is inconsistent");
+          }
+        }
+        if (useTerminalCompletion()) break;
+        const retryRemainingMs = identityDeadlineMs - this.now().getTime();
+        if (retryRemainingMs <= 0) this.fail(marker, "spawned Git process identity is inconsistent");
+        const retryOutcome: RetryOutcome = await Promise.race<RetryOutcome>([
+          completionSignal,
+          delay(Math.min(POLL_MS, retryRemainingMs)).then(() => ({ kind: "retry" as const }))
+        ]);
+        if (retryOutcome.kind === "completed") {
+          terminalBeforeIdentity = true;
+          break;
+        }
+        if (retryOutcome.kind === "error") throw retryOutcome.error;
+      }
+    } catch (error) {
+      await outputHandlesClosed.catch(() => undefined);
+      throw error;
+    }
+    await outputHandlesClosed;
+    if (terminalBeforeIdentity) {
+      let remainingProcesses: LinuxProcessIdentity[];
+      try {
+        remainingProcesses = await findExecutionProcesses(executionId);
+      } catch (error) {
+        this.fail(marker, `execution-token descendants could not be verified: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
+      if (remainingProcesses.length > 0) {
+        this.fail(marker, "execution-token descendants remain after terminal child without exact identity proof");
+      }
+    } else if (identity !== null) {
       marker = runningMarkerSchema.parse({ ...marker, phase: "running", process: {
         pid, processGroupId: identity.processGroupId, startTimeTicks: identity.startTimeTicks
       } });

@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
+import { promisify } from "node:util";
 import {
   ExternalExecutionFence,
   externalExecutionMarkerSchema,
@@ -13,6 +15,7 @@ const operationId = "018f0f00-0000-7000-8000-000000000001";
 const projectId = "018f0f00-0000-7000-8000-000000000002";
 const executionId = "018f0f00-0000-7000-8000-000000000003";
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 afterEach(async () => await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))));
 
 async function executionRoot(): Promise<string> {
@@ -102,4 +105,30 @@ test("a timed-out real Git process group is terminated and its marker is retired
   expect(result.code === 0 && result.signal === null).toBe(false);
   expect(result.timedOut).toBe(true);
   expect(await readdir(root)).toEqual([]);
+});
+
+test("a fast update-ref returns the mutation result without retrying", async () => {
+  const root = await executionRoot();
+  const bareRepository = path.join(path.dirname(root), "mutation.git");
+  const hookLog = path.join(path.dirname(root), "reference-transaction.log");
+  await execFileAsync("/usr/bin/git", ["clone", "--bare", path.resolve("."), bareRepository], {
+    env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C" }
+  });
+  await writeFile(path.join(bareRepository, "hooks", "reference-transaction"),
+    `#!/bin/sh\nprintf '%s\\n' "$1" >> ${JSON.stringify(hookLog)}\n`, "utf8");
+  await execFileAsync("/bin/chmod", ["0755", path.join(bareRepository, "hooks", "reference-transaction")]);
+
+  const fence = new ExternalExecutionFence(root);
+  await fence.initialize();
+  const result = await fence.runGit({ operationId, projectId, executionId, role: "workspace-branch-update",
+    args: ["--git-dir", bareRepository, "update-ref", "refs/heads/diagnostic", "HEAD"], timeoutMs: 1_000,
+    maxOutputBytes: 64 * 1024, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C" } });
+  expect(result).toMatchObject({ code: 0, signal: null, timedOut: false });
+  const revParse = await execFileAsync("/usr/bin/git", ["--git-dir", bareRepository, "rev-parse", "refs/heads/diagnostic"], {
+    env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C" }
+  });
+  expect(revParse.stdout).toMatch(/^[0-9a-f]{40}\n$/u);
+  expect((await readFile(hookLog, "utf8")).trim().split("\n")).toEqual(["prepared", "committed"]);
+  expect(await readdir(root)).toEqual([]);
+  expect(fence.isHealthy).toBe(true);
 });
