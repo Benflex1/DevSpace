@@ -11,6 +11,7 @@ import {
   codexCompatibilityDiagnostics,
   mapCodexDiagnosticToPublicAvailability,
   type CanonicalAiEvent,
+  type CodexCapabilitySet,
   type AiProviderProfileProjection,
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
@@ -137,6 +138,7 @@ interface SessionRecord {
   readonly turnBaselines: Map<string, Set<string>>;
   readonly privateFailures: Map<string, CodexPrivateFailureObservation>;
   readonly pendingInteractions: Map<string, PendingAgentInteraction>;
+  capabilities: CodexCapabilitySet;
   adapter: ProviderAdapter | null;
   ready: boolean;
   activeTurnId: string | null;
@@ -527,6 +529,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const previousGeneration = outbox.events.length === 0 ? 1 : validateStoppedOutbox(outbox, binding);
     const record: SessionRecord = {
       binding, processGeneration: previousGeneration, outbox, turnBaselines: new Map(), privateFailures: new Map(), pendingInteractions: new Map(), adapter: null, ready: false, activeTurnId: null,
+      capabilities: fakeCodexProfileProjection().capabilities,
       activeTurnToken: null, activeTurnPromise: null, admissionPromise: null, finalizationPromise: null,
       finalizationState: outbox.events.length === 0 ? "active" : "finalized", finalizationReason: null,
       cleanupProven: outbox.events.length > 0, stoppingEmitted: outbox.events.length > 0,
@@ -799,6 +802,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       }
       const profile = await runtime.inspect(binding);
       if (profile.availability.state !== "available" || (mode === "codex" && profile.profileRevision !== binding.profileRevision)) throw new Error("ai-profile-unavailable");
+      record.capabilities = profile.capabilities;
       const stillRestarting = record.outbox.events.length > 0;
       if (stillRestarting !== restarting || record.adapter !== null || record.activeTurnId !== null || record.finalizationPromise !== null
         || (restarting && record.finalizationState !== "finalized")
@@ -806,11 +810,21 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (restarting && validateStoppedOutbox(record.outbox, binding) !== record.processGeneration) throw new Error("ai-session-restart-unavailable");
       let launchArtifact: CodexLaunchArtifact | undefined;
       let artifactStager: CodexArtifactStager | undefined;
+      let experimentalApi = true;
+      let approvalPolicy: "on-request" = "on-request";
+      let approvalsReviewer: "user" = "user";
       if (mode === "codex" && options.codexPreflight === undefined) {
         const discovery = codexDiscoveries.get(discoveryKey(binding));
         if (discovery === undefined || codexProfileRevisionForDiscovery(discovery.profileAuthority) !== binding.profileRevision) {
           throw new Error("ai-profile-revision-mismatch");
         }
+        if (discovery.profileAuthority.approvalPolicy !== "on-request"
+          || discovery.profileAuthority.approvalsReviewer !== "user") {
+          throw new Error("CODEX_APPROVAL_PROTOCOL_UNAVAILABLE");
+        }
+        experimentalApi = discovery.profileAuthority.experimentalApi;
+        approvalPolicy = "on-request";
+        approvalsReviewer = "user";
         const artifactReadbackHelperBytes = await readCodexArtifactReadbackHelper(options);
         artifactStager = options.codexArtifactStager?.({ readbackHelperBytes: artifactReadbackHelperBytes })
           ?? createCodexArtifactStager({ docker, readbackHelperBytes: artifactReadbackHelperBytes, createId });
@@ -898,7 +912,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
           adapter = new CodexProvider({ docker, ownership,
             artifactStager, launchArtifact, sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
-            authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot), createId });
+            authority: options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot), createId,
+            capabilities: profile.capabilities, experimentalApi, approvalPolicy, approvalsReviewer });
         }
       } catch (error) {
         await record.outbox.cancelProviderGenerationReservation().catch(() => undefined);
@@ -1011,6 +1026,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (record.adapter === null || !record.ready || record.finalizationState !== "active" || record.activeTurnId !== input.turnId) {
         throw new Error("ai-turn-state-conflict");
       }
+      if (!record.capabilities.interrupt) throw new Error("ai-capability-unsupported");
       await emit(record, input.turnId, "turn.interrupt.requested", {}); await record.adapter.interrupt();
     },
     async respondToAiApproval(input) {
@@ -1021,6 +1037,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         || pending.processGeneration !== input.processGeneration || pending.adapter !== record.adapter
         || pending.projection.turnId !== input.turnId || pending.projection.kind !== "approval"
         || pending.state !== "pending") throw new Error("ai-interaction-state-conflict");
+      if (!record.capabilities.approvals) throw new Error("ai-capability-unsupported");
       pending.state = "response-attempted";
       try {
         await record.adapter.respondToApproval(input.requestId, input.decision);
@@ -1038,6 +1055,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         || pending.processGeneration !== input.processGeneration || pending.adapter !== record.adapter
         || pending.projection.turnId !== input.turnId || pending.projection.kind !== "input"
         || pending.state !== "pending") throw new Error("ai-interaction-state-conflict");
+      if (!record.capabilities.structuredInput) throw new Error("ai-capability-unsupported");
       pending.state = "response-attempted";
       try {
         await record.adapter.respondToStructuredInput(input.requestId, input.answers);

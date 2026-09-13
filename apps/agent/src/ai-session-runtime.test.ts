@@ -16,6 +16,7 @@ import { canonicalAiEventSchema } from "@devspace/contracts";
 import type { CodexCapabilitySet, CodexProfileAuthorityInput } from "@devspace/contracts";
 import { codexProfileRevisionForDiscovery } from "./codex-app-server/profile-authority.js";
 import type { CodexArtifactStager, CodexLaunchArtifact } from "./codex-app-server/artifact-stager.js";
+import type { CodexPrivateFailureObservation } from "./codex-app-server/provider.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 
@@ -1393,7 +1394,7 @@ describe("AI session runtime", () => {
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
       managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
       docker: protocol.docker, executablePath, codexPreflight: () => undefined,
-      onPrivateFailureObservation: (observation) => diagnostics.push(observation)
+      onPrivateFailureObservation: (observation: CodexPrivateFailureObservation) => diagnostics.push(observation)
     } as never);
     try {
       const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
@@ -1694,6 +1695,12 @@ describe("AI session runtime", () => {
       expect((providerStart?.input as DockerExecInput).command).toEqual([
         "/tmp/devspace-ai/exact-stage/artifact/vendor/codex", "app-server", "--stdio"
       ]);
+      const initialize = captured.map((entry) => entry.jsonRpc as { method?: string; params?: unknown } | undefined)
+        .find((request) => request?.method === "initialize");
+      const threadStart = captured.map((entry) => entry.jsonRpc as { method?: string; params?: unknown } | undefined)
+        .find((request) => request?.method === "thread/start");
+      expect(initialize?.params).toEqual(expect.objectContaining({ capabilities: { experimentalApi: true } }));
+      expect(threadStart?.params).toEqual(expect.objectContaining({ approvalPolicy: "on-request", approvalsReviewer: "user" }));
       await runtime.stop({ ...exactBinding, processGeneration: 1 });
     } finally {
       await rm(stateRoot, { recursive: true, force: true });

@@ -345,6 +345,9 @@ export async function createAiSession(projectId: string, workspaceId: string, ac
   if (profile.availability.state !== "available") throw new AiSessionActionError("AI_PROFILE_UNAVAILABLE", "Codex is unavailable for this workspace.");
   const initial = dependencies.database.createInitialAiSession({ projectId, workspaceId, profileId: profile.profileId, profileRevision: profile.profileRevision });
   const created = initial.session;
+  if (initial.kind === "blocked-by-live-profile") {
+    return { sessionId: created.id, operationId: null };
+  }
   if (created.state !== "creating" || created.lastSequence !== 0 || created.processGeneration !== 1) {
     return { sessionId: created.id, operationId: null };
   }
@@ -438,7 +441,7 @@ export async function restartAiSession(projectId: string, workspaceId: string, s
     throw new AiSessionActionError("AI_PROFILE_UNAVAILABLE", "Codex is unavailable for this workspace.");
   }
   if (profile.profileId !== selected.session.profileId || profile.profileRevision !== selected.session.profileRevision) {
-    throw new AiSessionActionError("AI_SESSION_CONFLICT", "The stopped AI session no longer matches this workspace.");
+    throw new AiSessionActionError("AI_PROFILE_REVISION_CONFLICT", "The stopped AI session no longer matches this Codex profile revision.");
   }
   let prepared: ReturnType<ProjectDatabase["prepareAiSessionRestart"]>;
   try {

@@ -1,4 +1,4 @@
-import { AI_OUTPUT_DELTA_MAX_BYTES, AI_OUTPUT_ITEM_MAX_BYTES, type CodexCompatibilityDiagnostic } from "@devspace/contracts";
+import { AI_OUTPUT_DELTA_MAX_BYTES, AI_OUTPUT_ITEM_MAX_BYTES, type CodexCapabilitySet, type CodexCompatibilityDiagnostic } from "@devspace/contracts";
 import { DockerEngineClient } from "../docker-runtime.js";
 import type { WorkspaceExecutionContext } from "../managed-workspaces.js";
 import type { CodexCredentialAuthority } from "../codex-credential-authority.js";
@@ -24,9 +24,7 @@ const CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES = CODEX_MAX_NATIVE_JSON_MESSAGE_BYTES
 const CODEX_MAX_DOCKER_PARTIAL_BUFFER_BYTES = 8 + CODEX_MAX_DOCKER_FRAME_PAYLOAD_BYTES;
 const CODEX_MAX_NATIVE_NOTIFICATIONS = 256;
 const CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS = 1_000;
-const CODEX_APPROVAL_POLICY = "on-request" as const;
 const CODEX_EXPERIMENTAL_API = true as const;
-const CODEX_APPROVALS_REVIEWER = "user" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
 const CODEX_NETWORK_ACCESS = "enabled" as const;
@@ -210,6 +208,10 @@ export class CodexProvider implements ProviderAdapter {
     readonly callbacks: AdapterCallbacks;
     readonly authority: CodexCredentialAuthority;
     readonly createId: () => string;
+    readonly capabilities: CodexCapabilitySet;
+    readonly experimentalApi: boolean;
+    readonly approvalPolicy: "on-request";
+    readonly approvalsReviewer: "user";
   }) {}
   async start(): Promise<void> {
     try {
@@ -258,7 +260,7 @@ export class CodexProvider implements ProviderAdapter {
       this.stream.on("close", () => { this.streamClosePromise = this.handleStreamClose(); void this.streamClosePromise.catch(() => undefined); });
       const initialized = await this.request("initialize", {
         clientInfo: { name: "devspace", title: "DevSpace", version: "1.0.0" },
-        capabilities: { experimentalApi: CODEX_EXPERIMENTAL_API }
+        capabilities: this.input.experimentalApi ? { experimentalApi: CODEX_EXPERIMENTAL_API } : {}
       });
       if (this.objectRecord(initialized) === null) {
         this.failProtocolOnce();
@@ -266,7 +268,7 @@ export class CodexProvider implements ProviderAdapter {
       }
       this.write({ method: "initialized" });
       const thread = await this.request("thread/start", {
-        cwd: "/workspace", approvalPolicy: CODEX_APPROVAL_POLICY, approvalsReviewer: CODEX_APPROVALS_REVIEWER, sandbox: CODEX_THREAD_SANDBOX
+        cwd: "/workspace", approvalPolicy: this.input.approvalPolicy, approvalsReviewer: this.input.approvalsReviewer, sandbox: CODEX_THREAD_SANDBOX
       });
       const threadRecord = this.objectRecord(thread);
       const threadValue = threadRecord === null ? null : this.objectRecord(threadRecord.thread);
@@ -536,6 +538,14 @@ export class CodexProvider implements ProviderAdapter {
     const nativeRequest = parseCodexServerInteractionRequest({ id: message.id, method: message.method, params });
     if (nativeRequest === null || this.nativeTurnState !== "active" || this.devspaceTurnId === null
       || nativeRequest.params.threadId !== this.threadId || nativeRequest.params.turnId !== this.turnId) {
+      await this.handleUnknownBlockingRequest();
+      return;
+    }
+    if (nativeRequest.method === "item/tool/requestUserInput" && !this.input.capabilities.structuredInput) {
+      await this.handleUnknownBlockingRequest();
+      return;
+    }
+    if (nativeRequest.method !== "item/tool/requestUserInput" && !this.input.capabilities.approvals) {
       await this.handleUnknownBlockingRequest();
       return;
     }

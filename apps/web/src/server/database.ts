@@ -1466,7 +1466,14 @@ export function openProjectDatabase(path: string, options: {
             eq(aiSessions.state, "waiting_for_input"), eq(aiSessions.state, "interrupted"))
         ))
           .orderBy(desc(aiSessions.createdAt), desc(aiSessions.id)).get();
-        if (existing !== undefined) return { session: existing, created: false as const };
+        if (existing !== undefined) {
+          const sameProfile = existing.profileKey === input.profileId && existing.profileRevision === input.profileRevision;
+          return {
+            session: existing,
+            created: false as const,
+            kind: sameProfile ? "reused-current-profile" as const : "blocked-by-live-profile" as const
+          };
+        }
         if (input.profileId !== "codex" || context.revision.runtimePlanHash === null) throw new ProjectSetupConflictError("AI is not configured for this workspace.");
         const timestamp = now().toISOString();
         const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
@@ -1479,7 +1486,7 @@ export function openProjectDatabase(path: string, options: {
           createdAt: timestamp, updatedAt: timestamp, lastActivityAt: null, stoppedAt: null
         };
         db.insert(aiSessions).values(session).run();
-        return { session, created: true as const };
+        return { session, created: true as const, kind: "created" as const };
       }).immediate();
     },
     prepareInitialAiSessionRetry(input: {

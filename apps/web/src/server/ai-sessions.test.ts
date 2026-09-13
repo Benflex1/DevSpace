@@ -1159,7 +1159,7 @@ describe("SQLite canonical turn acceptance convergence", () => {
     const initial = fixture.database.createInitialAiSession({
       projectId: fixture.projectId, workspaceId: fixture.workspaceId, profileId: "codex", profileRevision
     });
-    expect(initial).toMatchObject({ session: { id: fixture.sessionId }, created: false });
+    expect(initial).toMatchObject({ kind: "reused-current-profile", session: { id: fixture.sessionId }, created: false });
     const raw = new BetterSqlite3(fixture.databasePath);
     raw.prepare("update ai_sessions set state = 'stopped', profile_revision = ? where id = ?")
       .run(`sha256-ai-profile-v1:${"c".repeat(64)}`, fixture.sessionId);
@@ -1174,6 +1174,15 @@ describe("SQLite canonical turn acceptance convergence", () => {
       projectId: fixture.projectId, workspaceId: fixture.workspaceId, profileId: "codex", profileRevision
     });
     expect(repeated).toMatchObject({ session: { id: created.session.id }, created: false });
+  });
+
+  test("reports a live session from another profile revision as lease-blocking", async () => {
+    const fixture = await historyFixture(false);
+    const result = fixture.database.createInitialAiSession({
+      projectId: fixture.projectId, workspaceId: fixture.workspaceId, profileId: "codex",
+      profileRevision: `sha256-ai-profile-v1:${"c".repeat(64)}`
+    });
+    expect(result).toMatchObject({ kind: "blocked-by-live-profile", created: false, session: { id: fixture.sessionId } });
   });
 
   test("projects requested and responded interactions atomically and idempotently", async () => {
@@ -1444,6 +1453,18 @@ describe("SQLite canonical turn acceptance convergence", () => {
 });
 
 describe("SQLite stopped-session restart fencing", () => {
+  test("reports an explicit profile-revision conflict before attempting an old-profile restart", async () => {
+    const fixture = await stoppedHistoryFixture();
+    const raw = new BetterSqlite3(fixture.databasePath);
+    raw.prepare("update ai_sessions set profile_revision = ? where id = ?")
+      .run(`sha256-ai-profile-v1:${"c".repeat(64)}`, fixture.sessionId);
+    raw.close();
+
+    await expect(restartAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId, {
+      database: fixture.database, agent: fakeAgent()
+    } as never)).rejects.toMatchObject({ code: "AI_PROFILE_REVISION_CONFLICT" });
+  });
+
   test("does not create a turn row for a stopped session", async () => {
     const fixture = await stoppedHistoryFixture();
     const before = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId)!.turns;
