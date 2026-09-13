@@ -79,7 +79,8 @@ function unavailableEvaluation(diagnostic: CodexCompatibilityDiagnostic): CodexC
 }
 
 function experimentalFingerprint(probe: CodexProbeResult, compatibility: CodexCompatibilityEvaluation): string | null {
-  return [...probe.schemaFiles.keys()].some((file) => file.startsWith("experimental/"))
+  return compatibility.transport === "compatible"
+    && [...probe.schemaFiles.keys()].some((file) => file.startsWith("experimental/"))
     ? compatibility.experimentalSchemaFingerprint : null;
 }
 
@@ -93,7 +94,8 @@ function cacheKey(artifact: CodexExecutionArtifact, runtime: CodexProbeRuntimeId
 
 function compatibilityFromCache(value: CodexDiscoveryCacheValue): CodexCompatibilityEvaluation {
   return {
-    transport: value.diagnostic === "CODEX_PROTOCOL_INCOMPATIBLE" ? "incompatible" : "compatible",
+    transport: value.diagnostic === null || value.diagnostic === "CODEX_APPROVAL_PROTOCOL_UNAVAILABLE"
+      ? "compatible" : "incompatible",
     features: value.featureResults, capabilities: value.capabilities, diagnostic: value.diagnostic,
     stableSchemaFingerprint: value.stableSchemaFingerprint,
     experimentalSchemaFingerprint: value.experimentalSchemaFingerprint ?? emptySchemaFingerprint

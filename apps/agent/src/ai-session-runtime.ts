@@ -10,10 +10,10 @@ import {
   aiAfterSequenceSchema,
   AI_OUTPUT_DELTA_MAX_BYTES,
   AI_OUTPUT_ITEM_MAX_BYTES,
-  aiProviderProfileProjectionSchema,
+  codexCompatibilityDiagnostics,
+  mapCodexDiagnosticToPublicAvailability,
   type CanonicalAiEvent,
   type AiProviderProfileProjection,
-  CODEX_BASELINE_CLI_VERSION, CODEX_BASELINE_VERSION_OUTPUT
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
@@ -47,10 +47,16 @@ import {
   type CodexFileChangeItem,
   type CodexInteractionProjection
 } from "./codex-interactions-v0-145.js";
+import { discoverCodex, type CodexDiscoveryResult } from "./codex-app-server/discovery.js";
+import {
+  codexProfileRevisionForDiscovery,
+  discoveryAvailability,
+  fakeCodexProfileProjection,
+  safeCodexProfileProjection
+} from "./codex-app-server/profile-authority.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
-const CODEX_EXECUTABLE_SHA256 = "a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14";
 const CODEX_STAGED_READBACK_HELPER_SHA256 = "d07b2735546d3f514c2be5871521ec0430352638f24f0b134f93cbb5c2b951d1";
 const CODEX_STAGED_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-staged-readback");
 const MAX_GIT_PATHS = 256;
@@ -72,10 +78,6 @@ const CODEX_APPROVALS_REVIEWER = "user" as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
 const CODEX_NETWORK_ACCESS = "enabled" as const;
-const CODEX_CAPABILITIES = Object.freeze({
-  inspect: true, start: true, resume: false, sendTurn: true, interrupt: true,
-  approvals: true, structuredInput: true, stop: true, streamEvents: true
-});
 
 export interface AiSessionBinding {
   readonly projectId: string;
@@ -104,6 +106,8 @@ export interface AiSessionRuntimeOptions {
   readonly onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void;
   /** Deterministic adapter-test preflight; the server never supplies this hook. */
   readonly codexPreflight?: () => void | Promise<void>;
+  /** Agent-private discovery seam used by deterministic compatibility tests. */
+  readonly codexDiscovery?: (input: Parameters<typeof discoverCodex>[0]) => Promise<CodexDiscoveryResult>;
   /** Agent-private deterministic helper seam; production uses the reproducibly built helper asset. */
   readonly codexReadbackHelperBytes?: Uint8Array;
   readonly codexReadbackHelperPath?: string;
@@ -290,51 +294,6 @@ export function codexProfileRevisionForAuthority(input: CodexProfileRevisionAuth
     runtimeIdentity: input.runtimeIdentity
   });
   return `sha256-ai-profile-v1:${createHash("sha256").update(identity).digest("hex")}`;
-}
-
-function defaultProfileAuthority(): CodexProfileRevisionAuthority {
-  return {
-    providerVersion: CODEX_BASELINE_CLI_VERSION, transport: "stdio-jsonl", threadSandbox: CODEX_THREAD_SANDBOX,
-    turnSandboxPolicy: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS, approvalPolicy: CODEX_APPROVAL_POLICY,
-    experimentalApi: CODEX_EXPERIMENTAL_API, approvalsReviewer: CODEX_APPROVALS_REVIEWER,
-    declaredCapabilities: CODEX_CAPABILITIES, credentialSourceIdentity: CODEX_AUTH_CREDENTIAL_SOURCE_IDENTITY,
-    persistentAuthorityPolicyVersion: CODEX_AUTHORITY_POLICY_VERSION,
-    exclusiveLeasePolicyVersion: CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
-    stagedWritebackPolicyVersion: CODEX_STAGED_WRITEBACK_POLICY_VERSION, runtimeIdentity: null
-  };
-}
-
-function profileRevision(): string { return codexProfileRevisionForAuthority(defaultProfileAuthority()); }
-
-function profileAuthorityForContext(context: WorkspaceExecutionContext): CodexProfileRevisionAuthority {
-  return {
-    ...defaultProfileAuthority(),
-    runtimeIdentity: {
-      projectId: context.projectId, workspaceId: context.workspaceId, revisionId: context.revisionId,
-      runtimePlanHash: context.runtimePlanHash, runtimeGeneration: context.generation
-    }
-  };
-}
-
-function profileRevisionForBinding(binding: AiSessionBinding): string {
-  return codexProfileRevisionForAuthority({
-    ...defaultProfileAuthority(),
-    runtimeIdentity: {
-      projectId: binding.projectId, workspaceId: binding.workspaceId, revisionId: binding.revisionId,
-      runtimePlanHash: binding.runtimePlanHash, runtimeGeneration: binding.runtimeGeneration
-    }
-  });
-}
-
-function publicProfile(availability: AiProviderProfileProjection["availability"], authority = defaultProfileAuthority()): AiProviderProfileProjection {
-  return aiProviderProfileProjectionSchema.parse({
-    profileId: CODEX_PROFILE_ID,
-    profileRevision: codexProfileRevisionForAuthority(authority),
-    provider: CODEX_PROFILE_ID,
-    displayName: "Codex",
-    capabilities: CODEX_CAPABILITIES,
-    availability
-  });
 }
 
 class CodexRequestFailure extends Error {
@@ -1173,18 +1132,42 @@ class CodexProvider implements ProviderAdapter {
   }
 }
 
-async function verifyCodexExecutable(executablePath: string): Promise<void> {
-  const executable = await readFile(executablePath);
-  const digest = createHash("sha256").update(executable).digest("hex");
-  if (digest !== CODEX_EXECUTABLE_SHA256) throw new Error("codex-executable-integrity-mismatch");
-}
-
 async function readCodexReadbackHelper(options: AiSessionRuntimeOptions): Promise<Buffer> {
   if (options.codexReadbackHelperBytes !== undefined) return Buffer.from(options.codexReadbackHelperBytes);
   if (options.codexPreflight !== undefined) return Buffer.from("deterministic-agent-owned-readback-helper");
   const helper = await readFile(options.codexReadbackHelperPath ?? CODEX_STAGED_READBACK_HELPER_PATH);
   if (createHash("sha256").update(helper).digest("hex") !== CODEX_STAGED_READBACK_HELPER_SHA256) throw new Error("codex-readback-helper-integrity-mismatch");
   return helper;
+}
+
+type PublicUnavailableCode = Extract<AiProviderProfileProjection["availability"], { state: "unavailable" }>["code"];
+
+function unavailableCodexProfile(code: PublicUnavailableCode): AiProviderProfileProjection {
+  const generic = fakeCodexProfileProjection();
+  return safeCodexProfileProjection({
+    revision: generic.profileRevision,
+    capabilities: {
+      ...generic.capabilities,
+      interrupt: false,
+      approvals: false,
+      structuredInput: false
+    },
+    availability: { state: "unavailable", code }
+  });
+}
+
+function availabilityForDiscoveryError(error: unknown): AiProviderProfileProjection["availability"] {
+  const message = error instanceof Error ? error.message : "";
+  const diagnostic = codexCompatibilityDiagnostics.find((candidate) => candidate === message);
+  if (diagnostic !== undefined) {
+    return {
+      state: "unavailable",
+      code: mapCodexDiagnosticToPublicAvailability(diagnostic) ?? "PROFILE_DISABLED"
+    };
+  }
+  if (message.includes("credential")) return { state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" };
+  if (message.includes("identity")) return { state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" };
+  return { state: "unavailable", code: "EXECUTABLE_MISSING" };
 }
 
 function bindingMatches(left: AiSessionBinding, right: AiSessionBinding): boolean {
@@ -1274,7 +1257,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     const providerFinalization = eventType === "session.stopping" || eventType === "session.stopped";
     return await record.outbox.append({ turnId, eventType, payload, profile: {
       profileId: CODEX_PROFILE_ID,
-      profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
+      profileRevision: record.binding.profileRevision,
       provider: CODEX_PROFILE_ID
     }, processGeneration: record.processGeneration,
     kind: turnFinalization ? "turn-finalization" : providerFinalization ? "provider-finalization" : eventType === "session.lost" ? "terminal" : "normal" });
@@ -1484,27 +1467,34 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
   const runtime: AiSessionRuntime = {
     async inspect(input) {
       if (input.profileId !== CODEX_PROFILE_ID) throw new Error("ai-profile-not-found");
-      if (mode === "fake") return publicProfile({ state: "available" });
-      if (options.managed === undefined) return publicProfile({ state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" });
-      let authority = defaultProfileAuthority();
+      if (mode === "fake") return fakeCodexProfileProjection();
+      if (options.managed === undefined) return unavailableCodexProfile("RUNTIME_IDENTITY_UNAVAILABLE");
       try {
         const context = await options.managed.executionContext(input.projectId, input.workspaceId);
-        authority = profileAuthorityForContext(context);
-        if (options.codexPreflight !== undefined) await options.codexPreflight();
-        else {
-          const executablePath = options.executablePath ?? "/home/benjamin/.local/bin/codex";
-          await verifyCodexExecutable(executablePath);
-          const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
-          if (result.stdout.trim() !== CODEX_BASELINE_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
+        if (options.codexPreflight !== undefined) {
+          await options.codexPreflight();
+          await readCodexReadbackHelper(options);
+          await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
+          return fakeCodexProfileProjection();
         }
+        const discovery = await (options.codexDiscovery ?? discoverCodex)({
+          configuredPath: options.executablePath ?? "/home/benjamin/.local/bin/codex",
+          managedContainerId: context.ownership.developmentContainer.id,
+          workspaceContext: context,
+          stateRoot,
+          docker,
+          createId
+        });
         await readCodexReadbackHelper(options);
         await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
-        return publicProfile({ state: "available" }, authority);
+        return safeCodexProfileProjection({
+          revision: codexProfileRevisionForDiscovery(discovery.profileAuthority),
+          capabilities: discovery.compatibility.capabilities,
+          availability: discoveryAvailability(discovery)
+        });
       } catch (error) {
-        if (error instanceof Error && error.message.includes("credential")) return publicProfile({ state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" }, authority);
-        if (error instanceof Error && error.message.includes("identity")) return publicProfile({ state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" }, authority);
-        if (error instanceof Error && error.message.includes("integrity")) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" }, authority);
-        return publicProfile({ state: "unavailable", code: "EXECUTABLE_MISSING" }, authority);
+        const availability = availabilityForDiscoveryError(error);
+        return unavailableCodexProfile(availability.state === "unavailable" ? availability.code : "PROFILE_DISABLED");
       }
     },
     async start(binding) {
@@ -1523,7 +1513,6 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         }
         nextGeneration = previousGeneration + 1;
       }
-      if (mode === "codex" && binding.profileRevision !== profileRevisionForBinding(binding)) throw new Error("ai-profile-revision-mismatch");
       const profile = await runtime.inspect(binding);
       if (profile.availability.state !== "available" || (mode === "codex" && profile.profileRevision !== binding.profileRevision)) throw new Error("ai-profile-unavailable");
       const stillRestarting = record.outbox.events.length > 0;
@@ -1590,7 +1579,6 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           adapter = new FakeProvider(callbacks, worktreePath, options.fakeProviderTestHooks, createId);
         } else {
           if (options.managed === undefined) throw new Error("runtime-identity-unavailable");
-          if (options.codexPreflight === undefined) await verifyCodexExecutable(options.executablePath ?? "/home/benjamin/.local/bin/codex");
           const readbackHelperBytes = await readCodexReadbackHelper(options);
           const ownership = await options.managed.executionContext(binding.projectId, binding.workspaceId);
           adapter = new CodexProvider({ docker, ownership, executablePath: options.executablePath ?? "/home/benjamin/.local/bin/codex", sessionId: binding.aiSessionId, processGeneration: adapterGeneration, readbackHelperBytes, callbacks,
@@ -1654,7 +1642,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
         try {
           await record.outbox.beginTurn({ turnId: input.turnId, profile: {
             profileId: CODEX_PROFILE_ID,
-            profileRevision: mode === "codex" ? profileRevisionForBinding(record.binding) : profileRevision(),
+            profileRevision: record.binding.profileRevision,
             provider: CODEX_PROFILE_ID
           }, processGeneration: admissionGeneration, content: input.content });
         } catch (error) {
@@ -1816,9 +1804,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
 
 export {
   AI_EVENT_NDJSON_CONTENT_TYPE,
-  CODEX_EXECUTABLE_SHA256,
   CODEX_STAGED_READBACK_HELPER_SHA256,
   CODEX_PROFILE_ID,
-  CODEX_BASELINE_CLI_VERSION,
   CODEX_NOTIFICATION_CATEGORY_REGISTRY
 };

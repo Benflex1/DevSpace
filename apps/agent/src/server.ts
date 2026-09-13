@@ -327,8 +327,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
+  const configuredCodexPath = process.env.DEVSPACE_CODEX_EXECUTABLE_PATH;
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
-    mode: process.env.DEVSPACE_AI_PROVIDER_MODE === "fake" ? "fake" : "codex" });
+    mode: process.env.DEVSPACE_AI_PROVIDER_MODE === "fake" ? "fake" : "codex",
+    // The configured entrypoint is inspected and staged by Agent-owned
+    // compatibility discovery before any provider process is launched.
+    ...(configuredCodexPath === undefined ? {} : { executablePath: configuredCodexPath }) });
   let githubAuthority = options.githubAuthority ?? null;
   const aiStreamAdmission = createAiStreamAdmission({
     globalLimit: Math.max(0, Math.min(options.aiStreamGlobalLimit ?? 4, 4)),

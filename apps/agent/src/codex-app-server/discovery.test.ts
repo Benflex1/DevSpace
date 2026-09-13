@@ -108,8 +108,13 @@ test("invalidates cache evidence when probe runtime identity changes", async () 
 test("rejects below-minimum and malformed versions while retaining bounded diagnostics", async () => {
   const below = await nativeFixture();
   const belowProbe = probeFixture({ version: "0.144.9" });
-  const belowResult = await discoverCodex(discoveryInput(below, belowProbe.probe));
+  const belowInput = discoveryInput(below, belowProbe.probe);
+  const belowResult = await discoverCodex(belowInput);
   expect(belowResult.compatibility.diagnostic).toBe("CODEX_VERSION_BELOW_MINIMUM");
+  expect(belowResult.compatibility.transport).toBe("incompatible");
+  expect(belowResult.profileAuthority.experimentalSchemaFingerprint).toBeNull();
+  const belowCached = await discoverCodex(belowInput);
+  expect(belowCached.compatibility.transport).toBe("incompatible");
 
   const malformed = await nativeFixture();
   const malformedProbe: CodexProbeRuntime = {

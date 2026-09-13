@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { describe, expect, test, vi } from "vitest";
 import {
-  CODEX_EXECUTABLE_SHA256,
   CODEX_NOTIFICATION_CATEGORY_REGISTRY,
   codexProfileRevisionForAuthority,
   createAiSessionRuntime
@@ -14,6 +13,8 @@ import {
 import { createCodexCredentialAuthority, type CodexCredentialAuthority } from "./codex-credential-authority.js";
 import { MAX_RETAINED_OUTBOX_EVENTS, createAiSessionOutbox, outboxPathForAiSession } from "./ai-session-outbox.js";
 import { canonicalAiEventSchema } from "@devspace/contracts";
+import type { CodexCapabilitySet, CodexProfileAuthorityInput } from "@devspace/contracts";
+import { codexProfileRevisionForDiscovery } from "./codex-app-server/profile-authority.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 
@@ -1229,7 +1230,6 @@ describe("AI session runtime", () => {
       expect(requests.every((request) => request.method !== "thread/start" || request.params !== undefined)).toBe(true);
       expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);
       expect(JSON.stringify(await runtime.replay(sessionId, 0))).not.toContain(fixtureCredentialToken);
-      expect(CODEX_EXECUTABLE_SHA256).toHaveLength(64);
       expect((await runtime.replay(sessionId, 0)).every((event) => event.profile.profileRevision === profile.profileRevision)).toBe(true);
       const restartedProtocol = createProtocolDocker([]);
       restartedRuntime = createAiSessionRuntime({ mode: "codex", stateRoot, managed, docker: restartedProtocol.docker, executablePath,
@@ -1528,6 +1528,61 @@ describe("AI session runtime", () => {
       expect(codexProfileRevisionForAuthority({ ...authority, persistentAuthorityPolicyVersion: "other-authority-policy" })).not.toBe(base);
       expect(codexProfileRevisionForAuthority({ ...authority, exclusiveLeasePolicyVersion: "other-lease-policy" })).not.toBe(base);
       expect(codexProfileRevisionForAuthority({ ...authority, stagedWritebackPolicyVersion: "other-writeback-policy" })).not.toBe(base);
+  });
+
+  test("projects the current discovered Codex capabilities and profile authority", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-discovered-profile-test-"));
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const capabilities: CodexCapabilitySet = {
+      inspect: true, start: true, resume: true, sendTurn: true, interrupt: false,
+      approvals: true, structuredInput: false, stop: true, streamEvents: true
+    };
+    const authority: CodexProfileAuthorityInput = {
+      providerKind: "codex", reportedVersion: "0.153.4", entrypointSha256: "1".repeat(64),
+      executionArtifactClosureDigest: "2".repeat(64), executionArtifactLayout: "self-contained-native",
+      protocolFamily: "stdio-jsonl", stableSchemaFingerprint: "3".repeat(64),
+      experimentalSchemaFingerprint: null, effectiveCapabilities: capabilities, experimentalApi: false,
+      approvalPolicy: "on-request", approvalsReviewer: "user", semanticAdapterVersion: "codex-app-server-family-v1",
+      compatibilityPolicyVersion: "codex-compatibility-v1", probeRuntimeIdentity: {
+        imageId: `sha256:${"4".repeat(32)}`, operatingSystem: "linux", architecture: "amd64",
+        containerUser: "1000:1000", policyVersion: "codex-probe-runtime-v1"
+      }, credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1", runtimeIdentity: {
+        projectId, workspaceId, revisionId, runtimePlanHash, runtimeGeneration: 1
+      }
+    };
+    const discovery = {
+      artifact: {}, stagedArtifact: {}, probe: {},
+      compatibility: {
+        transport: "compatible", diagnostic: null, capabilities,
+        stableSchemaFingerprint: authority.stableSchemaFingerprint, experimentalSchemaFingerprint: "5".repeat(64),
+        features: {
+          basicSession: { feature: "basicSession", state: "supported", reason: null },
+          approvals: { feature: "approvals", state: "supported", reason: null },
+          structuredInput: { feature: "structuredInput", state: "missing", reason: "experimental-schema-missing" },
+          interrupt: { feature: "interrupt", state: "missing", reason: "turn/interrupt-missing" }
+        }
+      },
+      profileAuthority: authority
+    } as never;
+    const runtime = createAiSessionRuntime({
+      mode: "codex", stateRoot, executablePath,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      codexReadbackHelperBytes: Buffer.from("test-helper"),
+      codexCredentialAuthority: { inspect: async () => undefined } as never,
+      codexDiscovery: async (input) => {
+        expect(input.configuredPath).toBe(executablePath);
+        expect(input.managedContainerId).toBe("devspace-test-container");
+        return discovery;
+      }
+    });
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      expect(profile.profileRevision).toBe(codexProfileRevisionForDiscovery(authority));
+      expect(profile.availability).toEqual({ state: "available" });
+      expect(profile.capabilities).toMatchObject({ approvals: true, structuredInput: false, interrupt: false });
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
   });
 
   test("fake long turns remain active until interrupt", async () => {

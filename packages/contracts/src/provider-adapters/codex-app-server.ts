@@ -168,8 +168,8 @@ export interface CodexProfileAuthorityInput {
   readonly experimentalSchemaFingerprint: string | null;
   readonly effectiveCapabilities: CodexCapabilitySet;
   readonly experimentalApi: boolean;
-  readonly approvalPolicy: "on-request";
-  readonly approvalsReviewer: "user";
+  readonly approvalPolicy: "on-request" | "never" | "untrusted";
+  readonly approvalsReviewer: "user" | "auto_review" | "guardian_subagent";
   readonly semanticAdapterVersion: string;
   readonly compatibilityPolicyVersion: string;
   readonly probeRuntimeIdentity: CodexProbeRuntimeIdentity;

@@ -55,6 +55,9 @@ function boundedContent(maxBytes: number, allowEmpty = false) {
 export const aiProfileRevisionSchema = z.string()
   .regex(/^sha256-ai-profile-v1:[0-9a-f]{64}$/u);
 export const aiProviderKeySchema = configurationKeySchema;
+// Browser-safe availability intentionally exposes a small stable vocabulary.
+// Agent-private Codex discovery diagnostics map into these bounded codes rather
+// than exposing executable paths, schemas, stderr, or provider details.
 export const aiProviderAvailabilitySchema = z.discriminatedUnion("state", [
   z.strictObject({ state: z.literal("available") }),
   z.strictObject({
