@@ -1,4 +1,5 @@
 import type { BigIntStats } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as z from "zod";
@@ -45,6 +46,31 @@ export async function lstatIdentity(target: string): Promise<{ stats: BigIntStat
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
+  }
+}
+
+/**
+ * Reads a private regular file through a no-follow descriptor and verifies the
+ * descriptor identity/size remained stable for the complete read. Callers
+ * that need a stronger content identity should hash the returned bytes.
+ */
+export async function readRegularFileNoFollow(
+  target: string,
+  maxBytes: number
+): Promise<{ readonly bytes: Buffer; readonly stats: BigIntStats; readonly identity: FileIdentity }> {
+  const descriptor = await open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const before = await descriptor.stat({ bigint: true });
+    if (!before.isFile() || before.isSymbolicLink()) throw new PrivateStateCorruptionError(target, "expected a regular file");
+    if (before.size > BigInt(maxBytes)) throw new PrivateStateCorruptionError(target, "private file exceeds the read bound");
+    const bytes = await descriptor.readFile();
+    const after = await descriptor.stat({ bigint: true });
+    if (!identitiesEqual(identityOf(before), identityOf(after)) || before.size !== after.size || BigInt(bytes.length) !== after.size) {
+      throw new PrivateStateCorruptionError(target, "private file changed during read");
+    }
+    return { bytes, stats: after, identity: identityOf(after) };
+  } finally {
+    await descriptor.close();
   }
 }
 
