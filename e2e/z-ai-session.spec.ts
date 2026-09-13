@@ -46,11 +46,21 @@ test("runs the fake-provider AI session through interactions, navigation, refres
 
   await ai.getByLabel("AI prompt").fill("question");
   await ai.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(ai.getByText("Codex has questions", { exact: true })).toBeVisible();
+  await expect(ai.getByRole("button", { name: "Submit answers" })).toBeEnabled();
   await ai.getByRole("group", { name: /Mode Choose a safe mode\./u }).getByRole("radio", { name: /Safe/u }).check();
-  await ai.getByRole("group", { name: /Reason Why should Codex continue\?/u }).getByRole("radio", { name: /Other/u }).check();
-  await ai.getByRole("textbox", { name: "Reason other" }).fill("The bounded fixture is safe.");
+  await ai.getByRole("group", { name: /Reason Why should Codex continue\?/u }).getByRole("radio", { name: /Continue/u }).check();
   await ai.getByRole("button", { name: "Submit answers" }).click();
+  await expect(ai.getByText("Thanks, I will continue with the selected options.", { exact: true })).toBeVisible();
+
+  await ai.getByLabel("AI prompt").fill("question");
+  await ai.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(ai.getByText("Codex has questions", { exact: true })).toBeVisible();
+  const pendingQuestions = ai.locator('section[aria-label="Codex structured questions"]').filter({ hasText: "Action required" });
+  await expect(pendingQuestions).toHaveCount(1);
+  await pendingQuestions.getByRole("group", { name: /Mode Choose a safe mode\./u }).getByRole("radio", { name: /Safe/u }).check();
+  await pendingQuestions.getByRole("group", { name: /Reason Why should Codex continue\?/u }).getByRole("radio", { name: /Other/u }).check();
+  await pendingQuestions.getByRole("textbox", { name: "Reason other" }).fill("The bounded fixture is safe.");
+  await pendingQuestions.getByRole("button", { name: "Submit answers" }).click();
   await expect(ai.getByText("Thanks, I will continue with the Other answer.", { exact: true })).toBeVisible();
   await expect(ai.getByRole("button", { name: "Submit answers" })).toHaveCount(0);
 

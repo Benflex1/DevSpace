@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 /* eslint-disable @typescript-eslint/require-await */
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,7 @@ import {
 } from "./ai-session-outbox.js";
 import { CODEX_NOTIFICATION_CATEGORY_REGISTRY } from "./codex-app-server/notifications.js";
 import type { CodexInteractionProjection } from "./codex-app-server/interactions.js";
+import { FakeProvider, type FakeProviderTestHooks } from "./codex-app-server/fake-provider.js";
 import {
   CodexProvider,
   CodexRequestFailure,
@@ -108,12 +109,7 @@ export interface AiSessionRuntimeOptions {
   /** Agent-private deterministic outbox seam; the server never supplies these hooks. */
   readonly outboxFaultHooks?: AiSessionOutboxFaultHooks;
   /** Agent-private deterministic fake-provider seam; the server never supplies these hooks. */
-  readonly fakeProviderTestHooks?: Readonly<{
-    readonly onStart?: () => void;
-    readonly onSend?: () => void;
-    readonly onStop?: () => void;
-    readonly closeAfterTurn?: boolean;
-  }>;
+  readonly fakeProviderTestHooks?: FakeProviderTestHooks;
 }
 
 export interface AiSessionRuntime {
@@ -276,131 +272,6 @@ async function gitBaseline(worktreePath: string): Promise<Set<string>> {
     env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" }, maxBuffer: 2_000_000
   });
   return new Set(parseGitStatus(result.stdout).files.map((file) => `${file.change}:${file.path}:${file.oldPath ?? ""}`));
-}
-
-class FakeProvider implements ProviderAdapter {
-  private interrupted = false;
-  private stopped = false;
-  private releaseLongTurn: (() => void) | null = null;
-  private longTurnTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly pendingInteractions = new Map<string, { kind: "approval" | "input"; decision?: AiInteractionDecision; answers?: readonly AiStructuredInputAnswer[] }>();
-  private releaseInteraction: (() => void) | null = null;
-  constructor(
-    private readonly callbacks: AdapterCallbacks,
-    private readonly worktreePath: string | null,
-    private readonly testHooks: AiSessionRuntimeOptions["fakeProviderTestHooks"],
-    private readonly createId: () => string
-  ) {}
-  async start(): Promise<void> { this.testHooks?.onStart?.(); }
-  async sendTurn(_turnId: string, text: string): Promise<void> {
-    this.testHooks?.onSend?.();
-    this.interrupted = false;
-    this.stopped = false;
-    if (text.includes("devspace-ai-beta-check.txt") && this.worktreePath !== null) {
-      await writeFile(path.join(this.worktreePath, "devspace-ai-beta-check.txt"), "DevSpace AI beta check", { mode: 0o600 });
-    }
-    if (text.includes("approval") || text.includes("file approval")) {
-      const requestId = this.createId();
-      const fileChange = text.includes("file approval");
-      const projection: CodexInteractionProjection = fileChange ? {
-        requestId, turnId: _turnId, kind: "approval",
-        presentation: { kind: "file-change", summary: "Codex wants to update the beta check file.", paths: ["devspace-ai-beta-check.txt"], truncated: false, redacted: true },
-        public: { requestId, turnId: _turnId, kind: "approval", presentation: { kind: "file-change", summary: "Codex wants to update the beta check file.", paths: ["devspace-ai-beta-check.txt"], truncated: false, redacted: true } },
-        binding: { nativeRequestId: "fake-native-approval", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" }
-      } : {
-        requestId, turnId: _turnId, kind: "approval",
-        presentation: { kind: "command", summary: "Codex wants to run the bounded approval test command.", commandText: "printf 'DevSpace approval'", workingDirectory: ".", risk: "read", redacted: true },
-        public: { requestId, turnId: _turnId, kind: "approval", presentation: { kind: "command", summary: "Codex wants to run the bounded approval test command.", commandText: "printf 'DevSpace approval'", workingDirectory: ".", risk: "read", redacted: true } },
-        binding: { nativeRequestId: "fake-native-approval", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" }
-      };
-      this.pendingInteractions.set(requestId, { kind: "approval" });
-      await this.callbacks.interactionRequested(projection);
-      await this.waitForInteraction();
-      const result = this.pendingInteractions.get(requestId);
-      if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
-      await this.callbacks.outputDelta(result?.decision === "deny" ? "The command was denied." : "The approved command completed.");
-      this.pendingInteractions.delete(requestId);
-      await this.callbacks.completed("completed");
-      return;
-    }
-    if (text.includes("question") || text.includes("structured input")) {
-      const requestId = this.createId();
-      const questions = [
-        { questionId: "question-1", header: "Mode", question: "Choose a safe mode.", responseKind: "single-select" as const, allowOther: true, secret: false as const,
-          options: [{ optionId: "option-1", label: "Safe", description: "Use the bounded safe mode." }, { optionId: "option-2", label: "Explain", description: "Explain before continuing." }] },
-        { questionId: "question-2", header: "Reason", question: "Why should Codex continue?", responseKind: "single-select" as const, allowOther: true, secret: false as const,
-          options: [{ optionId: "option-1", label: "Continue", description: "Continue with the bounded task." }] }
-      ];
-      const projection: CodexInteractionProjection = {
-        requestId, turnId: _turnId, kind: "input", questions,
-        public: { requestId, turnId: _turnId, kind: "input", questions },
-        mapping: { requestId, turnId: _turnId, questions: [
-          { publicQuestionId: "question-1", nativeQuestionId: "fake-question-1", responseKind: "single-select", allowOther: true, options: [{ publicOptionId: "option-1", nativeOptionLabel: "Safe" }, { publicOptionId: "option-2", nativeOptionLabel: "Explain" }] },
-          { publicQuestionId: "question-2", nativeQuestionId: "fake-question-2", responseKind: "single-select", allowOther: true, options: [{ publicOptionId: "option-1", nativeOptionLabel: "Continue" }] }
-        ], binding: { nativeRequestId: "fake-native-input", nativeThreadId: "fake-thread", nativeTurnId: "fake-turn", nativeItemId: "fake-item" } }
-      };
-      this.pendingInteractions.set(requestId, { kind: "input" });
-      await this.callbacks.interactionRequested(projection);
-      await this.waitForInteraction();
-      const result = this.pendingInteractions.get(requestId);
-      if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
-      await this.callbacks.outputDelta(result?.answers === undefined ? "The answer was not received." : result.answers.some((answer) => answer.kind === "other")
-        ? "Thanks, I will continue with the Other answer."
-        : "Thanks, I will continue with those answers.");
-      this.pendingInteractions.delete(requestId);
-      await this.callbacks.completed("completed");
-      return;
-    }
-    if (text === "long") {
-      await this.callbacks.activity("Deterministic provider is inspecting the workspace.");
-      await this.callbacks.outputDelta("I am still working on it.");
-      await new Promise<void>((resolve) => {
-        this.releaseLongTurn = resolve;
-        this.longTurnTimer = setTimeout(resolve, 30_000);
-        if (this.interrupted || this.stopped) resolve();
-      });
-      if (this.longTurnTimer !== null) clearTimeout(this.longTurnTimer);
-      this.longTurnTimer = null; this.releaseLongTurn = null;
-      await this.callbacks.completed(this.interrupted || this.stopped ? "interrupted" : "completed");
-      if (this.testHooks?.closeAfterTurn === true) await this.callbacks.providerClosed();
-      return;
-    }
-    const chunks = ["Hello from the deterministic provider."];
-    for (const chunk of chunks) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      if (this.interrupted || this.stopped) return await this.callbacks.completed("interrupted");
-      await this.callbacks.outputDelta(chunk);
-    }
-    await this.callbacks.completed("completed");
-    if (this.testHooks?.closeAfterTurn === true) await this.callbacks.providerClosed();
-  }
-  private async waitForInteraction(): Promise<void> {
-    await new Promise<void>((resolve) => {
-      this.releaseInteraction = resolve;
-      if (this.interrupted || this.stopped) resolve();
-    });
-    this.releaseInteraction = null;
-  }
-  async interrupt(): Promise<void> { this.interrupted = true; this.releaseLongTurn?.(); this.releaseInteraction?.(); }
-  async respondToApproval(requestId: string, decision: AiInteractionDecision): Promise<void> {
-    const pending = this.pendingInteractions.get(requestId);
-    if (pending?.kind !== "approval") throw new Error("ai-interaction-not-pending");
-    pending.decision = decision;
-    this.releaseInteraction?.();
-  }
-  async respondToStructuredInput(requestId: string, answers: readonly AiStructuredInputAnswer[]): Promise<void> {
-    const pending = this.pendingInteractions.get(requestId);
-    if (pending?.kind !== "input") throw new Error("ai-interaction-not-pending");
-    pending.answers = answers;
-    this.releaseInteraction?.();
-  }
-  pendingInteractionIds(): readonly string[] { return [...this.pendingInteractions.keys()]; }
-  retireInteractions(): void { this.pendingInteractions.clear(); this.releaseInteraction?.(); }
-  async stop(): Promise<ProviderFinalizationResult> {
-    this.testHooks?.onStop?.();
-    this.stopped = true; this.releaseLongTurn?.(); this.releaseInteraction?.();
-    return { state: "finalized", synchronization: "unchanged-valid" };
-  }
 }
 
 async function readCodexReadbackHelper(options: AiSessionRuntimeOptions): Promise<Buffer> {

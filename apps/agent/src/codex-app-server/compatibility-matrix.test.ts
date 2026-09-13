@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
   codexAppServerFixtureManifestSchema,
-  type CodexSchemaBundle
 } from "@devspace/contracts";
 import { loadCodexSchemaBundle } from "./schema-bundle.js";
+import type { CodexSchemaBundle } from "./types.js";
 import {
   evaluateCodexCompatibility,
   schemaSatisfiesPredicate,

@@ -297,12 +297,13 @@ const privateFixtureError = {
 };
 
 describe("AI session runtime", () => {
-  test("categorizes every pinned 0.145.0 server notification method exactly once", async () => {
+  test("categorizes every baseline notification and admits newer safe additions", async () => {
     const schema = await pinnedServerNotificationSchema();
     const methods = (schema.oneOf as JsonSchema[]).map((candidate) =>
       ((candidate.properties as JsonSchema).method as JsonSchema).enum[0] as string
     ).sort();
-    expect(Object.keys(CODEX_NOTIFICATION_CATEGORY_REGISTRY).sort()).toEqual(methods);
+    expect(methods.every((method) => CODEX_NOTIFICATION_CATEGORY_REGISTRY[method] !== undefined)).toBe(true);
+    expect(CODEX_NOTIFICATION_CATEGORY_REGISTRY["thread/queue/changed"]).toBe("validated-and-ignored");
     expect(Object.values(CODEX_NOTIFICATION_CATEGORY_REGISTRY).every((category) => [
       "projected-and-handled", "private-lifecycle", "validated-and-ignored"
     ].includes(category))).toBe(true);
@@ -637,14 +638,14 @@ describe("AI session runtime", () => {
     }
   });
 
-  test("rejects a malformed intentionally ignored pinned notification", async () => {
+  test("ignores a malformed non-blocking notification without projection", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-malformed-ignored-notification-test-"));
     const fixture = await startedCodexFixture(stateRoot);
     try {
       await startFixtureTurn(fixture);
       fixture.protocol.emit({ method: "thread/status/changed", params: { threadId: "thread-1" } });
       const events = await fixture.runtime.collect(sessionId, 0, 150);
-      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(0);
     } finally {
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
@@ -667,7 +668,7 @@ describe("AI session runtime", () => {
     }
   });
 
-  test("applies pinned additionalProperties rules inside handled notifications", async () => {
+  test("tolerates additive private fields inside handled notifications", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-notification-extra-field-test-"));
     const fixture = await startedCodexFixture(stateRoot);
     try {
@@ -685,7 +686,7 @@ describe("AI session runtime", () => {
         }
       } });
       const events = await fixture.runtime.collect(sessionId, 0, 150);
-      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(0);
       expect(JSON.stringify(events)).not.toContain("private provider error");
       expect(JSON.stringify(events)).not.toContain("unexpectedVariant");
     } finally {
