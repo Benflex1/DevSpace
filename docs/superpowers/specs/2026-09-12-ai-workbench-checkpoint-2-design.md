@@ -234,6 +234,6 @@ workflow, files/editor/terminal integration, activity presentation, approvals/qu
 changed-file/review flow. [`pingdotgg/t3code`](https://github.com/pingdotgg/t3code) at revision
 `d1d15c67f4a5fb82fd8d5e01e5e3b288296789c3` is a secondary technical/conceptual reference for
 isolated mechanics that Orca does not cover. Checkpoint 2 used T3 patterns conceptually only;
-no T3 source architecture or source code was copied or substantially adapted, so this work does
-not require copied-code MIT attribution. Neither reference overrides DevSpace's authority
-boundaries.
+no T3 source architecture or source code was copied or substantially adapted. The neutral policy
+is recorded in `docs/references/product-references.md`; neither reference overrides DevSpace's
+authority boundaries.

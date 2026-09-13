@@ -43,8 +43,8 @@ workflow, files/editor/terminal/browser integration, activity presentation, appr
 changed-file/review flow, and visual behavior.
 
 [`pingdotgg/t3code`](https://github.com/pingdotgg/t3code) is a secondary technical/conceptual reference for isolated mechanics Orca does
-not cover well. The inspected Checkpoint 2 revision is recorded in
-`docs/attributions/t3code-ai-session.md`; no T3 source code was copied or substantially adapted.
+not cover well. The inspected Checkpoint 2 revision and policy are recorded in
+`docs/references/product-references.md`; no T3 source code was copied or substantially adapted.
 If a future change does copy or substantially adapt T3 Code source, preserve the required MIT
 notice and record the exact source files/revision there.
 

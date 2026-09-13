@@ -112,8 +112,10 @@ The policy is:
 | Reported version at or above `0.145.0`, compatible required protocol | Provider available. |
 | New optional object fields | Ignore after bounded validation. |
 | New non-blocking notifications | Ignore only under the explicit notification policy. |
-| Required feature absent | Disable the corresponding DevSpace capability. |
+| Required security/product feature absent | Provider/profile unavailable. |
+| Optional feature absent | Disable only that DevSpace capability. |
 | Required shape for an optional feature incompatible | Disable that feature, unless the provider can be waiting on an unsafe request; then fail the provider/session closed. |
+| Current writable-profile approval semantics incompatible | Provider/profile unavailable; never switch to `approvalPolicy: "never"`. |
 | Basic app-server transport or turn semantics incompatible | Provider unavailable. |
 | Unknown server request that may require a response | Fail closed with a safe incompatibility diagnostic; never leave Codex waiting silently. |
 
@@ -152,20 +154,24 @@ an executable path, launch arguments, environment, or hash.
 
 For one discovery operation the Agent:
 
-1. resolves the administrator-configured executable path according to the existing Agent path
-   policy and canonicalizes it;
-2. opens and validates the source as a bounded regular executable without following a final
-   replacement symlink;
-3. copies the exact inspected bytes into an Agent-private staging area and verifies the staged
-   copy's digest;
-4. runs all probes against the staged copy, not the mutable configured path;
-5. computes SHA-256 and runs the staged copy with bounded `--version` output;
-6. checks the minimum version;
-7. loads a valid private discovery-cache entry keyed by the exact digest, or generates stable
-   and experimental schemas from the staged copy;
-8. evaluates the structural and semantic compatibility rules;
-9. derives effective capabilities and the profile revision; and
-10. uses those same staged bytes for the managed provider launch after the runtime/workspace
+1. resolves the administrator-configured entrypoint path according to the existing Agent path
+   policy and canonicalizes its symlink chain without executing it;
+2. classifies the entrypoint as one recognized official Codex package form or a self-contained
+   native executable;
+3. resolves the complete bounded execution artifact closure for that form, rejecting arbitrary
+   shell/JavaScript launchers, package-manager code, unexpected links, devices, and paths outside
+   the recognized package root;
+4. opens, validates, and reads the closure with the existing Agent file-identity rules;
+5. copies the exact closure into an Agent-private immutable staging area and computes its
+   entrypoint and closure digests;
+6. runs all provider-code probes only inside the isolated compatibility-probe runtime described
+   below, using that staged closure and not the mutable configured path;
+7. checks the minimum version;
+8. loads a valid private discovery-cache entry keyed by the exact closure identity, or generates
+   stable and experimental schemas in the probe runtime;
+9. evaluates the structural and semantic compatibility rules;
+10. derives effective capabilities and the profile revision; and
+11. admits the same staged closure for managed-provider launch after the runtime/workspace
     authority checks succeed.
 
 The pinned 0.145 CLI source and repository fixture define these discovery commands:
@@ -176,14 +182,78 @@ The pinned 0.145 CLI source and repository fixture define these discovery comman
 <staged-codex> app-server generate-json-schema --experimental --out <private-temp-dir>
 ```
 
-The managed runtime launch remains the existing bounded stdio app-server entrypoint for the
-compatibility family. A future executable that changes the transport or launch contract is not
-made safe by a version number; it receives a fundamental transport-incompatibility diagnostic
-unless a deliberately supported family change is designed.
+Those commands are executed in the probe runtime, not by the Agent host. The managed runtime
+launch remains the existing bounded stdio app-server entrypoint for the compatibility family. A
+future executable that changes the transport or launch contract is not made safe by a version
+number; it receives a fundamental transport-incompatibility diagnostic unless a deliberately
+supported family change is designed.
 
 Every subprocess probe has bounded wall time, stdout/stderr bytes, output file count/size, and
 exit handling. Probe stderr is Agent-private. Discovery does not read the user's ambient Codex
 home or mutate host Codex configuration.
+
+### Probe isolation
+
+The compatibility probe is a small Agent-managed isolated runtime using the same architecture,
+ABI target, and trusted base runtime needed by the eventual managed provider. The staged
+execution closure is mounted or copied read-only. The probe receives only the closure, a fresh
+empty temporary `CODEX_HOME`, and the fixed probe command; it receives no workspace mount,
+workspace credential, GitHub App credential, Docker socket, Agent socket, unrelated host
+filesystem mount, or network. Normal version and schema generation runs with network disabled.
+
+The Agent may open, read, hash, classify, and copy configured files on the host. It never
+executes the configured Codex entrypoint, its launcher, its schema generator, or any resolved
+provider payload with Agent-host privileges. If the isolated runtime cannot execute the exact
+closure for the target ABI, discovery fails closed. The probe's artifact identity is retained
+and passed to provider launch; the launch path cannot reread a different source path.
+
+### Recognized official packaging and execution closure
+
+The identity unit is an `ExecutionArtifact`:
+
+```text
+entrypoint relative path
+entrypoint SHA-256
+sorted closure entries:
+  relative path, kind, mode, link target (if any), SHA-256(bytes)
+closure digest
+target/ABI and package-layout authority
+```
+
+The closure digest is the executable identity for packaged installs. For a self-contained
+native executable it is a one-file closure, so it includes the native entrypoint SHA-256. For a
+package it includes the manifest, entrypoint, and every declared provider-runtime file needed by
+the recognized layout. A changed byte, package member, link target, target ABI, or entrypoint
+changes the identity.
+
+The implementation recognizes only these bounded forms:
+
+1. **Official standalone package.** The 0.145 install source recognizes a release directory
+   containing `codex-package.json`, `bin/codex`, the `codex -> bin/codex` convenience link,
+   `bin/codex-code-mode-host`, the declared `codex-resources` and `codex-path` directories,
+   and the target/version layout. The locally installed 0.153.4 package has this same shape:
+   `current` resolves to a target release directory and its `bin/codex` is an ELF native
+   entrypoint. The closure is the validated manifest plus the declared package directories and
+   runtime helpers; unlisted or unsafe members are rejected.
+2. **Official npm/pnpm/bun package.** The pinned 0.145 source's `@openai/codex` launcher is a
+   Node script that selects an OS/architecture-specific optional package and spawns its native
+   `vendor/<target>/bin/codex` payload. A package-manager shim or symlink is resolved without
+   execution; the Agent validates the official package metadata, target mapping, launcher
+   relationship, and native vendor payload, then chooses the native payload and its recognized
+   package resources as the execution entrypoint/closure. Hashing only `bin/codex.js` is never
+   sufficient. The launcher is not run on the Agent host or required in the probe.
+3. **Recognized self-contained native executable.** A direct native entrypoint may be accepted
+   as a one-file closure when its target/ABI and loader behavior are compatible with the fixed
+   probe/provider runtime and all protocol probes pass there. Runtime libraries are supplied by
+   that immutable trusted runtime image, whose identity is separately part of profile authority;
+   arbitrary host library resolution is not accepted.
+
+An arbitrary shell script, JavaScript launcher, npm shim with unresolved dependencies, symlink
+to an unrecognized target, package with ambiguous optional-dependency resolution, or package
+whose wrapper-only semantics cannot be reproduced safely is unavailable with
+`CODEX_UNRECOGNIZED_EXECUTION_FORM`. Supporting every possible wrapper is not a goal. Official
+updates remain routine because the recognized package manifest/target shape and native payload
+are rediscovered by artifact identity rather than a release-number allowlist.
 
 ## 6. Executable identity and TOCTOU safety
 
@@ -196,14 +266,14 @@ The proposed identity flow is:
 ```text
 configured path
   -> canonical path policy + no-follow open
-  -> descriptor validation and bounded complete read
-  -> SHA-256(bytes)
-  -> private staged file written atomically and fsynced
-  -> reopen/readback/hash staged file
-  -> version/schema probes on staged file
-  -> container upload from staged bytes
+  -> closure validation and bounded complete reads
+  -> entrypoint + closure digests
+  -> private staged closure written atomically and fsynced
+  -> reopen/readback/hash staged closure
+  -> isolated probe runtime executes staged closure
+  -> managed-provider upload from staged closure
   -> bounded container readback digest proof
-  -> launch only the verified staged/uploaded bytes
+  -> launch only the verified staged/uploaded artifact set
 ```
 
 The source check retains the existing security requirements for regular files, ownership,
@@ -213,10 +283,11 @@ and re-opened for an identity check. The source path may change after staging wi
 the bytes used by the rest of the operation. If the source changes before staging or any digest
 proof differs, discovery fails with `CODEX_EXECUTABLE_INTEGRITY_CHANGED` and does not launch.
 
-The Agent records the staged digest with the private provider ownership record. The existing
-container upload/readback proof is extended to compare that digest before the app-server process
-is considered running. Process generation, exact container identity, workspace/runtime identity,
-profile revision, and staged executable digest remain one authority tuple.
+The Agent records the staged entrypoint and closure digests with the private provider ownership
+record. The existing container upload/readback proof is extended to compare the complete artifact
+identity before the app-server process is considered running. Process generation, exact container
+identity, workspace/runtime identity, profile revision, and staged execution artifact remain one
+authority tuple.
 
 `canonicalPath` is retained for private diagnostics and configured-source resolution. The
 profile hash is primarily bound to the executable SHA-256, not to a cosmetic pathname, so moving
@@ -248,7 +319,9 @@ Discovery produces an Agent-private value with these conceptual parts:
 
 ```text
 ExecutableIdentity
-  sha256
+  entrypointSha256
+  executionArtifactClosureDigest
+  executionArtifactLayout
   reportedVersion
   canonicalSourcePath (private, not profile identity by itself)
 
@@ -272,6 +345,88 @@ paths, and native method inventories are not browser authority. A schema can est
 field has a string-shaped slot; only the stable semantic adapter decides whether the field is
 safe, bounded, workspace-relative, provider-private, or sufficient for a DevSpace capability.
 
+### Deterministic compatibility evaluator
+
+Compatibility evaluation is a deterministic predicate over a bounded stable or experimental
+schema bundle. It is not a fingerprint comparison and it never requires exact generated-schema
+equality. A schema fingerprint is retained as profile/discovery evidence only.
+
+The evaluator input is normalized into:
+
+```text
+SchemaBundle {
+  surface: "stable" | "experimental"
+  envelope schemas
+  request method -> params/response schemas
+  notification method -> params schema
+  bounded local definitions/$defs graph
+}
+
+FeatureRequirement {
+  feature
+  requiredSurface
+  method predicates
+  field predicates
+  enum predicates
+  classifications
+}
+```
+
+Evaluation proceeds as follows:
+
+1. Load only bounded JSON documents from the expected generated bundle names. Reject invalid
+   JSON, oversized files/bundles, external `$ref` URIs, unexpected root shapes, and unresolved
+   references. Resolve local `#/definitions/...` and `#/$defs/...` references with a bounded
+   recursion/visited set; a cycle is not treated as a successful match.
+2. Build a method inventory from the literal method discriminators in the request, response,
+   and notification unions. A required method must exist on the required stable/experimental
+   surface and must resolve to the expected params/response envelope. An experimental method
+   appearing only in the stable bundle does not satisfy an experimental requirement.
+3. Match object predicates by required property name and recursively matched property schema.
+   Optional properties are evidence only and do not become required because they appear in the
+   schema. `additionalProperties: true`, `false`, or a schema never turns an unknown field into
+   a failure at admission; runtime parsing follows the explicit additive-field policy and
+   ignores unknown keys after bounds validation.
+4. Match arrays by `type: "array"` and recursively match `items`. Apply `minItems`, `maxItems`,
+   and string/number bounds only when the feature requirement explicitly classifies that bound
+   as semantic; provider schemas do not replace DevSpace's own presentation bounds.
+5. Match `oneOf`/`anyOf` by evaluating each alternative. A nullable union expressed as
+   `oneOf`/`anyOf` or as `type: [T, "null"]` is a supported non-null branch plus an explicit
+   `null` branch. A multi-branch union is admitted only when a declared supported alternative is
+   present and unambiguous; an unrelated alternative cannot be used to satisfy a required
+   semantic field.
+6. Match enums by requiring every baseline value needed by the semantic adapter. Additional
+   enum values are additive evidence and do not fail discovery. The runtime never coerces an
+   observed unknown value: a new value in a non-blocking activity is omitted/ignored by policy,
+   while a new value in a request, response, terminal state, or approval/input decision fails
+   the affected capability or provider safely.
+7. Record the result per feature as `supported`, `missing`, or `incompatible`, with only stable
+   private reason codes. Raw schema descriptions and provider values are not diagnostic output.
+
+Each predicate is explicitly classified:
+
+| Classification | Evaluator rule | Example |
+| --- | --- | --- |
+| Exact semantic requirement | Required literal method/field/union member must exist with the adapter's expected role; no alternate meaning is accepted. | `serverRequest/resolved`, request `threadId`/`turnId`, and the exact approval method names. |
+| Type-compatible/additive requirement | Required broad JSON shape must match; optional fields and extra object keys are tolerated. | A delta remains a bounded string field and an event retains required identity fields. |
+| Optional evidence | Used to enable a capability or richer activity, but its absence does not fail basic turns. | Experimental structured-input option metadata when `structuredInput` is otherwise disabled. |
+| Ignored/private evidence | Parsed only for Agent-private correlation or retained only as a fingerprint; it cannot establish public safety or authority. | Native command text, native option labels, raw diffs, schema descriptions, and provider IDs. |
+
+The baseline feature predicates are:
+
+| Feature | Required semantic/structural predicates |
+| --- | --- |
+| `basicSession` | Stable `initialize`/response plus `initialized`; `thread/start`; `turn/start`; required thread/turn identity; assistant delta and turn completion notifications; bounded JSON-RPC errors. |
+| `interrupt` | Stable `turn/interrupt` request/response and a terminal observation that can be matched to the same native turn. |
+| `approvals` | Stable command and file approval request/response methods; request `threadId`, `turnId`, `itemId`, and `startedAtMs`; supported response decision enum members; exact file-item correlation evidence; and `serverRequest/resolved`. This is required for the current writable profile. |
+| `structuredInput` | Experimental `item/tool/requestUserInput` request/response; request `threadId`, `turnId`, `itemId`, `questions`, and `autoResolutionMs`; question `header`, `id`, `question`, non-empty options, `isOther`; non-secret semantics; and `serverRequest/resolved`. |
+
+The evaluator admits a feature only when all exact semantic requirements and all required
+type-compatible predicates pass on the correct surface. The semantic adapter then performs the
+second, authoritative validation on every runtime message. A schema saying `string` never makes
+that string safe, redacted, workspace-relative, an approval path, a provider-private identity,
+or otherwise trusted.
+
 The initialize handshake remains a runtime proof even when discovery is cached. The Agent sends
 only the bounded capability request selected by the compatibility result. For the 0.145
 structured-input surface, that includes `capabilities: { experimentalApi: true }`. If discovery
@@ -284,12 +439,13 @@ session changes capability mode in place.
 ## 8. Discovery caching
 
 Discovery is lazy at the first provider inspection/AI use and single-flighted per Agent
-executable identity. The Agent still reopens, stages, and hashes the configured executable on
-each profile resolution; a cache hit skips schema regeneration but never skips byte identity
-verification.
+execution-artifact identity. The Agent still reopens, resolves, stages, and hashes the
+configured closure on each profile resolution; a cache hit skips schema regeneration but never
+skips artifact identity verification.
 
-The private cache is keyed primarily by executable SHA-256. To prevent stale policy reuse, the
-key/value also binds:
+The private cache is keyed primarily by the execution-artifact closure digest (which is the
+entrypoint SHA-256 for a one-file native closure). To prevent stale policy reuse, the key/value
+also binds:
 
 - host/runtime target needed by the probe;
 - schema command mode (`stable` and `experimental`);
@@ -421,14 +577,16 @@ Codex normally has a feature.
 | `sendTurn` / basic session | Initialize, initialized, thread/start, turn/start, bounded assistant/terminal events, and compatible transport. | If absent or incompatible, provider unavailable. |
 | `streamEvents` | Required event envelope and assistant/activity/terminal projections. | Provider unavailable if normal output cannot be represented; optional activity messages may be ignored. |
 | `interrupt` | `turn/interrupt` plus a reconciliable terminal/response outcome. | `interrupt: false`; the UI does not offer an impossible action. |
-| `approvals` | Both required approval request families, safe response shapes, command presentation validation, exact file-change item correlation, and resolution handling. | `approvals: false` if the provider can run ordinary turns without exposing an unsafe request. An unsafe blocking request fails the provider/session closed instead of hanging. |
+| `approvals` | Both required approval request families, safe response shapes, command presentation validation, exact file-change item correlation, and resolution handling. | Required for the current writable managed profile. Missing or incompatible approval semantics make the provider/profile unavailable; the runtime never changes to `approvalPolicy: "never"` and never continues writable mutations without approval. |
 | `structuredInput` | Experimental schema contains the supported request/response surface, `experimentalApi` can be enabled, options/Other semantics are valid, and resolution handling is present. | `structuredInput: false`; basic turns remain usable if no structured request can be emitted. |
 | `stop` | Existing Agent process lifecycle and cleanup proof. | Required for this DevSpace session profile; inability to prove cleanup makes the provider unavailable. |
 | `resume` | Existing DevSpace profile/session rules and the exact provider/process authority needed by that operation. | Historical inspection remains available; restart is rejected when profile identity differs. |
 
 If a provider starts a turn and then sends a known request whose semantics fail validation,
-the adapter does not pretend the relevant capability was absent. It fails the affected provider
-session closed, retires pending interactions, and exposes only a bounded incompatibility code.
+the adapter does not pretend the relevant capability was absent. Approval incompatibility
+fails the current writable provider/profile closed; optional structured-input or interrupt
+incompatibility may disable only that capability before a request is possible. If the provider
+can already be waiting on the unrepresentable request, the teardown path above is mandatory.
 
 ## 12. Tolerant parsing policy
 
@@ -461,10 +619,26 @@ The Agent maintains an explicit notification policy with three categories:
    explicitly classified as safe non-blocking observations by the compatibility policy.
 
 An unknown message with a JSON-RPC request ID is a server request, not a harmless notification.
-It fails closed with `CODEX_UNKNOWN_BLOCKING_REQUEST`; the Agent does not send a guessed response
-and does not leave the provider waiting. A known method with missing required semantic fields is
-handled the same way for that request family. A notification with an invalid envelope or unsafe
-size also fails the provider rather than being silently discarded.
+It enters the following terminal teardown path:
+
+1. classify the message privately as protocol incompatibility;
+2. discard its raw params without canonical/public projection, logging, or safe-error inclusion;
+3. retire/fence pending DevSpace interactions owned by the affected turn/session using the
+   existing `lost`, `expired`, or `cancelled` lifecycle cause supported by the state machine;
+4. fence the provider generation so new turns and browser responses are rejected;
+5. close the exact managed provider stdin/stdout and terminate the exact provider generation;
+6. transition the session through the existing provider-failed/lost lifecycle and publish only
+   `CODEX_UNKNOWN_BLOCKING_REQUEST`; and
+7. ignore duplicate or late messages from that generation using the existing generation guard.
+
+The default is to close without sending a provider-domain response. If the transport writer has
+already proven that a generic JSON-RPC error can be emitted before closure, the only permitted
+response is the standard `-32601` method-not-found error with the native request ID and no
+`data`/provider content; it is not an approval, input, tool, or permission decision. The
+implementation must not keep the process alive to wait for or guess a semantic response. A
+known method with missing required semantic fields follows the same path for that request
+family. A notification with an invalid envelope or unsafe size also fails the provider rather
+than being silently discarded.
 
 This rule permits additive telemetry/activity notifications while preventing a new Codex
 permission, approval, elicitation, or tool request from being silently stranded.
@@ -514,7 +688,10 @@ new managed Codex process. The normalized authority document must include at lea
 ```text
 providerKind: "codex"
 reportedCodexVersion
-executableSha256
+entrypointSha256
+executionArtifactClosureDigest
+executionArtifactLayout
+probe/providerRuntimeIdentity
 protocolFamily
 stableSchemaFingerprint
 experimentalSchemaFingerprint (or an explicit absent marker)
@@ -532,9 +709,12 @@ credential-source and lease policy identities
 
 The exact names may follow the existing `devspace.ai-provider-profile-authority/v1` contract,
 but the meanings are mandatory. The executable SHA-256 is the byte identity; changing bytes at
-the same path changes the revision. A changed schema/capability result or compatibility policy
-changes the revision. A change to the experimental opt-in or browser reviewer changes the
-revision. A semantic adapter release changes the revision because it can change interpretation.
+the same path changes the revision. For a recognized package, the closure digest binds the
+launcher/package metadata and every staged native/resource member that can affect the managed
+entrypoint; for a self-contained executable it reduces to the one-file identity plus runtime
+identity. A changed schema/capability result or compatibility policy changes the revision. A
+change to the experimental opt-in or browser reviewer changes the revision. A semantic adapter
+release changes the revision because it can change interpretation.
 
 The normalized authority is serialized with the existing JCS/revision hashing rules and a
 versioned domain separator. Effective false capabilities are included so a structured-input
@@ -589,6 +769,11 @@ uniqueness and operation reconciliation remain the final duplicate barrier.
 No old session is silently migrated. A new current-profile session is admitted only after the
 one-live-provider lease, runtime generation, and current profile inspection all succeed.
 
+Thus “native support for new Codex versions” means that a newly inspected compatible Codex can
+be used without a DevSpace release. It does not promise transparent cross-version resumption or
+migration of a provider-native live session. Cross-version provider resume is a separate future
+design and is out of scope here.
+
 ## 17. Compatibility diagnostics
 
 Diagnostics are stable codes plus bounded safe details, never raw provider output. The initial
@@ -598,8 +783,11 @@ closed set should include:
 | --- | --- |
 | `CODEX_EXECUTABLE_MISSING` | Configured executable cannot be securely opened. |
 | `CODEX_EXECUTABLE_INTEGRITY_CHANGED` | Source/staged/uploaded bytes did not remain identical. |
+| `CODEX_UNRECOGNIZED_EXECUTION_FORM` | The configured path is an unsupported or ambiguous wrapper/package shape. |
 | `CODEX_VERSION_UNREADABLE` | `--version` output was missing or malformed. |
 | `CODEX_VERSION_BELOW_MINIMUM` | Reported version is below `0.145.0`. |
+| `CODEX_APPROVAL_PROTOCOL_UNAVAILABLE` | The current writable profile cannot prove safe command/file approval semantics. |
+| `CODEX_PROBE_RUNTIME_UNAVAILABLE` | The isolated compatibility runtime cannot run the exact target artifact. |
 | `CODEX_SCHEMA_DISCOVERY_FAILED` | Bounded schema generation or parsing failed. |
 | `CODEX_PROTOCOL_INCOMPATIBLE` | Required transport or semantic baseline is absent. |
 | `CODEX_REQUIRED_CAPABILITY_UNAVAILABLE` | A required DevSpace capability cannot be represented. |
@@ -623,18 +811,23 @@ The repository remains deterministic and must not require internet access for no
 | Synthetic additive fixture | Adds optional fields, non-blocking notifications, and harmless enum/object additions; compatibility remains available and the new fields do not reach public state. |
 | Synthetic breaking fixture | Removes/changes a required method or semantic field; provider or only the affected capability fails closed as defined. |
 | Missing-capability fixture | Retains basic turns but removes experimental structured input or interrupt; effective capability becomes false without claiming support. |
-| Executable identity fixtures | Same path replaced with different bytes, same bytes at a different path, corrupt cache, changed digest, and failed container readback. |
+| Packaging/identity fixtures | Standalone package, official npm platform closure, symlink/current-link resolution, direct native one-file closure, unsupported launcher, changed member, corrupt cache, and failed container readback. |
+| Probe-isolation fixtures | Probe has no workspace/credential/socket/network access and cannot execute provider code on the Agent host. |
+| Evaluator fixtures | `$ref`/`$defs`, required/optional properties, open/closed `additionalProperties`, arrays/items, nullable and multi-branch unions, baseline-plus-additive enums, stable/experimental method inventories, and exact feature predicates. |
+| Teardown fixtures | Unknown blocking request closes/fences the generation, retires interactions, prevents later turns/responses, and ignores late messages. |
 
 Focused automated tests must prove:
 
 - lower versions reject and newer compatible versions do not fail an upper-bound check;
-- discovery uses the exact staged bytes and cache hits do not skip hashing;
+- discovery uses the exact staged artifact closure and cache hits do not skip identity hashing;
 - 0.145 stable and experimental schemas produce the expected feature set;
 - additive fields/notifications are tolerated only under the explicit policy;
 - unknown server requests fail closed and unknown unsafe enum values are not coerced;
 - missing structured input disables only that capability;
-- profile revision changes for bytes, reported version, schema/feature set, experimental opt-in,
+- profile revision changes for any closure member/entrypoint bytes, reported version, schema/feature set, experimental opt-in,
   approval policy/reviewer, or policy version, but not display name/cache path;
+- approval incompatibility makes the writable profile unavailable rather than degrading
+  `approvals` to false;
 - old-profile sessions remain history-only and current-profile Create is idempotent across
   repeated/ambiguous requests;
 - native interaction IDs stay private through requested/responded/resolved replay;
@@ -660,13 +853,14 @@ The migration is a boundary refactor, not a second AI-session foundation:
 3. Replace the exact `CODEX_APP_SERVER_CLI_VERSION` equality check with the minimum-version gate
    plus protocol evaluation. Keep the 0.145 version string as a baseline fixture expectation.
 4. Remove the exact 0.145 executable hash from the production authorization decision. Retain it
-   in the baseline manifest/acceptance corpus and use the inspected digest in the runtime
-   profile instead.
+   in the baseline manifest/acceptance corpus and use the inspected entrypoint plus closure
+   digest in the runtime profile instead.
 5. Replace the exact-version notification registry with a generic explicit policy registry whose
    baseline entries are populated from 0.145 evidence and whose unknown-message behavior follows
    this design.
-6. Add the private discovery-cache and exact staged-byte identity path around the existing
-   provider launch; do not duplicate provider transport architecture.
+6. Add recognized package-closure resolution, isolated compatibility-probe runtime, private
+   discovery-cache, and exact staged-artifact identity around the existing provider launch; do
+   not duplicate provider transport architecture or execute provider code on the Agent host.
 7. Project discovered capabilities into the existing safe profile response and use them to gate
    Checkpoint 2 UI/actions. Do not duplicate capability state in SQLite.
 8. Keep exact 0.145 generated schemas and fixtures under a baseline-corpus path. Add newer and
@@ -717,7 +911,8 @@ pattern. It is not the primary product reference.
 Neither project overrides DevSpace's Web/Agent authority, SQLite ownership, managed-workspace,
 Git, Docker, filesystem, process, credential, preview, or provider boundaries. Checkpoint 2 used
 conceptual T3 patterns only; no T3 source code was copied or substantially adapted. The existing
-T3 note is therefore a neutral reference record, not a claim that copied MIT source is present.
+neutral policy is recorded in `docs/references/product-references.md`, not as a claim that copied
+MIT source is present.
 
 ## 22. Security and authority analysis
 
@@ -726,6 +921,7 @@ The main new risks and controls are:
 | Risk | Control |
 | --- | --- |
 | Executable path replacement between inspection and use | One Agent-private staged byte set, digest/readback proof, and launch from that staged set. |
+| Configured provider code executes with Agent-host authority | Only Agent file I/O/classification occurs on the host; provider probes run in an isolated, network-disabled runtime with no workspace/credential/socket mounts. |
 | A newer provider sends a private/secret field | Provider-native values stay Agent-private; public presentations pass the existing typed redaction policy and fail closed when unsafe. |
 | Generated schema is treated as permission to execute a new operation | Schema is structural evidence only; the semantic adapter has explicit method/capability allowlists. |
 | Unknown request leaves Codex waiting | Any unknown request with an ID fails closed with a stable diagnostic; no guessed response. |
@@ -733,6 +929,7 @@ The main new risks and controls are:
 | Same option label is transformed publicly and sent back incorrectly | Public option IDs map to an Agent-private exact native-label table; the transformed label is never the response value. |
 | Cache poisoning or stale policy | Digest-keyed bounded cache, atomic writes, policy/evaluator fingerprints, private access, and per-use executable hashing. |
 | Existing session silently runs a new binary | Stored profile revision and process generation fencing; old sessions are historical/lost rather than migrated. |
+| Approval support disappears from a writable profile | The profile is unavailable; it never changes to `approvalPolicy: "never"` or proceeds without command/file approval. |
 | Browser overrides process/profile authority | Web derives the persisted binding; Agent revalidates the current profile and exact private process ownership. |
 | Ambient host Codex behavior changes unrelated sessions | Managed launch arguments, isolated credential authority, and no host configuration mutation. |
 
@@ -796,16 +993,19 @@ to all of the following:
 
 - `0.145.0` is the minimum supported version and no upper version bound exists in production
   code, contracts, or profile policy;
-- an administrator-configured newer executable is inspected by actual bytes, version, schemas,
-  and initialize negotiation before launch;
-- the same inspected/staged bytes are launched, with digest/readback proof across the container
-  boundary;
-- discovery is private, bounded, deterministic, cached by executable SHA-256, and does not need
-  runtime internet access;
+- an administrator-configured newer executable is resolved into a recognized execution artifact
+  closure, inspected by actual bytes, version, schemas, and initialize negotiation before launch;
+- provider code executes only in the bounded isolated probe/managed runtime, never with Agent-host
+  privileges, and receives no workspace credentials, Docker/Agent sockets, unrelated host files,
+  or network for normal discovery;
+- the same inspected/staged artifact closure is launched, with digest/readback proof across the
+  container boundary;
+- discovery is private, bounded, deterministic, cached by executable/artifact identity, and does
+  not need runtime internet access;
 - stable DevSpace semantic code, not arbitrary generated schemas, owns lifecycle, redaction,
   approval/input, resolution, path, and one-shot semantics;
-- optional capabilities degrade truthfully, while required incompatibility and unknown blocking
-  requests fail closed with safe diagnostics;
+- structured input and interrupt degrade truthfully when absent, while approval incompatibility,
+  required incompatibility, and unknown blocking requests fail closed with safe diagnostics;
 - profile revision includes executable bytes, reported version, protocol/schema evidence,
   effective features, experimental opt-in, approval policy/reviewer, and existing runtime/
   workspace authority, while excluding cosmetic/raw/private values;
@@ -833,6 +1033,15 @@ not current/latest protocol documentation. The relevant baseline evidence is:
 - the pinned `ServerRequest`, `ToolRequestUserInputParams`, approval, item, and
   `ServerRequestResolvedNotification` schemas.
 
+Packaging evidence was also checked without executing provider code on the Agent host:
+
+- the 0.145 `scripts/install/install.sh` package path and legacy platform-npm fallback;
+- the 0.145 `codex-cli/bin/codex.js` launcher and
+  `codex-cli/scripts/build_npm_package.py` native vendor layout; and
+- the local 0.153.4 standalone installation: a `current` release link, a release
+  `codex-package.json`, `codex -> bin/codex`, native `bin/codex`, and sibling
+  `codex-code-mode-host`, `codex-resources`, and `codex-path` contents.
+
 The product/UX reference hierarchy is documented separately in the Checkpoint 2 design,
-roadmap, and T3 reference note: Orca first, T3 Code second, with DevSpace authority always
-authoritative.
+roadmap, and `docs/references/product-references.md`: Orca first, T3 Code second, with DevSpace
+authority always authoritative.
