@@ -7,7 +7,7 @@ import {
   projectCodexApprovalRequest,
   projectCodexFileChangeItem,
   projectCodexInputRequest
-} from "./codex-interactions-v0-145.js";
+} from "./interactions.js";
 
 const commandRequest = (overrides: Record<string, unknown> = {}) => ({
   id: 91,
@@ -26,7 +26,7 @@ const commandRequest = (overrides: Record<string, unknown> = {}) => ({
 
 const devspaceTurnId = "0190c6f0-0000-7000-8000-000000000010";
 
-describe("pinned Codex interaction projection", () => {
+describe("Codex interaction projection", () => {
   test("creates a DevSpace approval identity without exposing the native request id", () => {
     const request = parseCodexServerInteractionRequest(commandRequest());
     expect(request).not.toBeNull();

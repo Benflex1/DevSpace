@@ -1,10 +1,11 @@
-import serverNotificationSchemaJson from "../../../packages/contracts/fixtures/codex-app-server/0.145.0/stable/ServerNotification.json" with { type: "json" };
+import serverNotificationSchemaJson from "../../../../packages/contracts/fixtures/codex-app-server/0.145.0/stable/ServerNotification.json" with { type: "json" };
 
 type JsonSchema = Readonly<Record<string, unknown>>;
 export type CodexNotificationCategory =
   | "projected-and-handled"
   | "private-lifecycle"
   | "validated-and-ignored";
+export type CodexNotificationClassification = CodexNotificationCategory | "unknown-non-blocking";
 
 const projectedAndHandled = [
   "item/agentMessage/delta",
@@ -176,11 +177,20 @@ function matchesSchema(value: unknown, initialSchema: JsonSchema, depth = 0): bo
   return true;
 }
 
-export function validatePinnedCodexNotification(notification: Readonly<Record<string, unknown>>): CodexNotificationCategory | null {
+export function validateCodexNotification(notification: Readonly<Record<string, unknown>>): CodexNotificationCategory | null {
   const method = notification.method;
   if (typeof method !== "string") return null;
   const category = CODEX_NOTIFICATION_CATEGORY_REGISTRY[method];
   const schema = notificationSchemas.get(method);
   if (category === undefined || schema === undefined || !matchesSchema(notification, schema)) return null;
   return category;
+}
+
+export function classifyCodexNotification(notification: Readonly<Record<string, unknown>>): CodexNotificationClassification | null {
+  const method = notification.method;
+  const params = notification.params;
+  if (typeof method !== "string" || params === null || typeof params !== "object" || Array.isArray(params)) return null;
+  const known = validateCodexNotification(notification);
+  if (known !== null) return known;
+  return CODEX_NOTIFICATION_CATEGORY_REGISTRY[method] === undefined ? "unknown-non-blocking" : null;
 }

@@ -618,15 +618,17 @@ describe("AI session runtime", () => {
     }
   });
 
-  test("one unknown notification fails the protocol immediately and privately exactly once", async () => {
+  test("well-formed unknown notifications are ignored without public projection", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-unknown-notification-test-"));
     const fixture = await startedCodexFixture(stateRoot);
     try {
       await startFixtureTurn(fixture);
       fixture.protocol.emit({ method: "pinned/unknown", params: { rawSecret: "must-remain-private" } });
       fixture.protocol.emit({ method: "another/unknown", params: { rawSecret: "must-remain-private" } });
+      fixture.protocol.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } });
       const events = await fixture.runtime.collect(sessionId, 0, 150);
-      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(0);
+      expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("must-remain-private");
     } finally {
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
@@ -1365,6 +1367,50 @@ describe("AI session runtime", () => {
       expect(captured.filter((entry) => {
         const rpc = entry.jsonRpc as { id?: unknown; result?: unknown } | undefined;
         return rpc?.id === 605 && rpc.result !== undefined;
+      })).toHaveLength(0);
+    } finally {
+      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("terminates the generation for an unknown blocking server request without answering it", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-unknown-blocking-request-test-"));
+    const captured: Array<Record<string, unknown>> = [];
+    const diagnostics: Array<Record<string, unknown>> = [];
+    const protocol = createProtocolDocker(captured, (request, emit) => {
+      if (request.method === "thread/start") {
+        setImmediate(() => emit({ id: request.id, result: { thread: { id: "thread-1" } } }));
+        return;
+      }
+      if (request.method === "turn/start") {
+        setImmediate(() => emit({ id: request.id, result: { turn: { id: "turn-1" } } }));
+        return;
+      }
+      setImmediate(() => emit({ id: request.id, result: {} }));
+    });
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      onPrivateFailureObservation: (observation) => diagnostics.push(observation)
+    } as never);
+    try {
+      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
+      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId,
+        content: { kind: "text", text: "request unknown interaction" } });
+      await new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)));
+      protocol.emit({ id: 606, method: "future/blocking/request", params: {
+        threadId: "thread-1", turnId: "turn-1", rawProviderSecret: "must-remain-private"
+      } });
+      const events = await runtime.collect(sessionId, 0, 150);
+      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
+      expect(JSON.stringify(events)).not.toContain("must-remain-private");
+      expect(diagnostics.filter((observation) => observation.diagnostic === "CODEX_UNKNOWN_BLOCKING_REQUEST")).toHaveLength(1);
+      expect(captured.filter((entry) => {
+        const rpc = entry.jsonRpc as { id?: unknown; result?: unknown } | undefined;
+        return rpc?.id === 606 && rpc.result !== undefined;
       })).toHaveLength(0);
     } finally {
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
