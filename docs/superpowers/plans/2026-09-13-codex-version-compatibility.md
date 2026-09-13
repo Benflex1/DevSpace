@@ -114,19 +114,83 @@ cases remain deterministic in evaluator tests and do not require a runtime Codex
       streamEvents: true;
     }>;
 
+    /** Agent-private discovery/compatibility diagnostic; never a browser or SQLite field. */
     export type CodexCompatibilityDiagnostic =
-      | "CODEX_VERSION_BELOW_MINIMUM"
-      | "CODEX_UNRECOGNIZED_EXECUTION_FORM"
+      | "CODEX_EXECUTABLE_MISSING"
       | "CODEX_EXECUTABLE_INTEGRITY_CHANGED"
+      | "CODEX_UNRECOGNIZED_EXECUTION_FORM"
+      | "CODEX_VERSION_UNREADABLE"
+      | "CODEX_VERSION_BELOW_MINIMUM"
+      | "CODEX_PROBE_RUNTIME_UNAVAILABLE"
+      | "CODEX_SCHEMA_DISCOVERY_FAILED"
       | "CODEX_PROTOCOL_INCOMPATIBLE"
       | "CODEX_APPROVAL_PROTOCOL_UNAVAILABLE"
-      | "CODEX_UNKNOWN_BLOCKING_REQUEST";
+      | "CODEX_REQUIRED_CAPABILITY_UNAVAILABLE"
+      | "CODEX_INITIALIZE_NEGOTIATION_FAILED"
+      | "CODEX_UNKNOWN_BLOCKING_REQUEST"
+      | "CODEX_PROFILE_CHANGED"
+      | "CODEX_DISCOVERY_CACHE_INVALID";
+
+    /** Existing bounded Web availability vocabulary; private discovery codes map into it. */
+    export type CodexPublicAvailabilityDiagnostic =
+      | "PROFILE_DISABLED"
+      | "EXECUTABLE_MISSING"
+      | "VERSION_MISMATCH"
+      | "RUNTIME_IDENTITY_UNAVAILABLE"
+      | "CREDENTIAL_SOURCE_UNAVAILABLE"
+      | "WORKSPACE_REQUIREMENT_UNMET";
+
+    /** Safe session-loss vocabulary added for an unknown blocking provider request. */
+    export type CodexPublicSessionDiagnostic = "CODEX_UNKNOWN_BLOCKING_REQUEST";
+
+    export function mapCodexDiagnosticToPublicAvailability(
+      diagnostic: CodexCompatibilityDiagnostic
+    ): CodexPublicAvailabilityDiagnostic | null;
 
     export type CodexCompatibilityFeatureResult = Readonly<{
       feature: CodexFeature;
       state: "supported" | "missing" | "incompatible";
       reason: string | null;
     }>;
+
+    export type CodexArtifactLayout =
+      | "standalone-package"
+      | "official-node-native-payload"
+      | "self-contained-native";
+
+    export interface CodexProbeRuntimeIdentity {
+      readonly imageId: string;
+      readonly operatingSystem: string;
+      readonly architecture: string;
+      readonly containerUser: string;
+      readonly policyVersion: "codex-probe-runtime-v1";
+    }
+
+    export interface CodexProfileAuthorityInput {
+      readonly providerKind: "codex";
+      readonly reportedVersion: string;
+      readonly entrypointSha256: string;
+      readonly executionArtifactClosureDigest: string;
+      readonly executionArtifactLayout: CodexArtifactLayout;
+      readonly protocolFamily: "stdio-jsonl";
+      readonly stableSchemaFingerprint: string;
+      readonly experimentalSchemaFingerprint: string | null;
+      readonly effectiveCapabilities: CodexCapabilitySet;
+      readonly experimentalApi: boolean;
+      readonly approvalPolicy: "on-request";
+      readonly approvalsReviewer: "user";
+      readonly semanticAdapterVersion: string;
+      readonly compatibilityPolicyVersion: string;
+      readonly probeRuntimeIdentity: CodexProbeRuntimeIdentity;
+      readonly credentialSourceIdentity: string;
+      readonly runtimeIdentity: {
+        readonly projectId: string;
+        readonly workspaceId: string;
+        readonly revisionId: string;
+        readonly runtimePlanHash: string;
+        readonly runtimeGeneration: number;
+      };
+    }
 
     export const codexProtocolFixtureManifestSchema = z.strictObject({
       baselineVersion: z.string(),
@@ -155,15 +219,28 @@ cases remain deterministic in evaluator tests and do not require a runtime Codex
 The manifest schema must accept baseline version, stable and experimental schema files,
 transport mode, bounded method inventory, and SHA-256/byte-count metadata. It must not expose
 native request IDs, raw schema contents, executable bytes, or private diagnostics through browser
-contracts. Extend the existing profile authority document with explicit authority fields for
-executionArtifactClosureDigest, executionArtifactLayout, protocolSchemaFingerprint,
-probeRuntimeIdentity, experimentalApi, approvalPolicy, and approvalsReviewer. Keep the existing
-sha256-ai-profile-v1 revision string format so SQLite rows remain valid; the expanded canonical
-authority document changes the digest when an effective authority input changes.
+contracts. Extend the existing profile authority document with the authoritative fields
+reportedVersion, entrypointSha256, executionArtifactClosureDigest, executionArtifactLayout,
+stableSchemaFingerprint, experimentalSchemaFingerprint, probeRuntimeIdentity,
+semanticAdapterVersion, compatibilityPolicyVersion, effectiveCapabilities, experimentalApi,
+approvalPolicy, approvalsReviewer, credentialSourceIdentity, and runtimeIdentity. Keep the
+existing sha256-ai-profile-v1 revision string format so SQLite rows remain valid; the expanded
+canonical authority document changes the digest when an effective authority input changes.
 
-Add availability diagnostics for minimum-version, artifact-form, integrity, protocol, and
-required-approval failures. Add CODEX_UNKNOWN_BLOCKING_REQUEST to the safe session-loss
-diagnostic union used by canonical events; never add a raw provider message field.
+Keep CodexCompatibilityDiagnostic Agent-private and complete. The existing public
+aiProviderAvailabilitySchema retains its narrower bounded vocabulary through
+mapCodexDiagnosticToPublicAvailability; it never receives raw discovery details or private
+diagnostic names that are not part of that contract. CODEX_UNKNOWN_BLOCKING_REQUEST is emitted
+only through the safe session-loss diagnostic union used by canonical events; profile-change
+conflicts remain the existing Web profile-revision conflict. Never add a raw provider message
+field.
+
+The mapping is deterministic: CODEX_EXECUTABLE_MISSING maps to EXECUTABLE_MISSING;
+CODEX_VERSION_UNREADABLE and CODEX_VERSION_BELOW_MINIMUM map to VERSION_MISMATCH;
+CODEX_PROBE_RUNTIME_UNAVAILABLE maps to RUNTIME_IDENTITY_UNAVAILABLE; all other discovery
+failures, including an unrecoverable CODEX_DISCOVERY_CACHE_INVALID, map to PROFILE_DISABLED.
+CODEX_UNKNOWN_BLOCKING_REQUEST and CODEX_PROFILE_CHANGED return null because they use the
+session-loss and existing profile-revision-conflict paths respectively.
 
 **Interfaces consumed:**
 
@@ -175,19 +252,33 @@ diagnostic union used by canonical events; never add a raw provider message fiel
   method inventory, experimental-surface, and private-launch tests under the baseline fixture
   name. Add tests proving a newer version is representable, the minimum is 0.145.0, additive
   capability evidence is expressible, approval absence is a required-profile failure, and
-  profile hashing changes for closure digest, protocol fingerprint, probe image identity,
-  experimental opt-in, approval policy, and reviewer.
+  profile hashing changes for reportedVersion, entrypointSha256, closure digest/layout, stable
+  and experimental schema fingerprints, probe runtime identity, effective capabilities,
+  semantic/policy versions, experimental opt-in, approval policy/reviewer, credential source,
+  and runtime identity.
 
     const authority = Object.assign({}, baselineAuthority, {
-      providerVersion: "0.153.4",
-      executableIdentity: "sha256-entrypoint",
+      reportedVersion: "0.153.4",
+      entrypointSha256: "sha256-entrypoint",
       executionArtifactClosureDigest: "sha256-closure",
       executionArtifactLayout: "standalone-package",
-      protocolSchemaFingerprint: "sha256-schema",
-      probeRuntimeIdentity: { imageId: "sha256-image", os: "linux", architecture: "amd64" },
+      stableSchemaFingerprint: "sha256-stable-schema",
+      experimentalSchemaFingerprint: "sha256-experimental-schema",
+      effectiveCapabilities: baselineAuthority.effectiveCapabilities,
+      probeRuntimeIdentity: {
+        imageId: "sha256-image",
+        operatingSystem: "linux",
+        architecture: "amd64",
+        containerUser: "1000:1000",
+        policyVersion: "codex-probe-runtime-v1"
+      },
+      semanticAdapterVersion: "codex-app-server-family-v1",
+      compatibilityPolicyVersion: "codex-compatibility-v1",
       experimentalApi: true,
       approvalPolicy: "on-request",
-      approvalsReviewer: "user"
+      approvalsReviewer: "user",
+      credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1",
+      runtimeIdentity: baselineAuthority.runtimeIdentity
     });
     expect(hashAiProviderAuthorityV1(authority)).not.toBe(hashAiProviderAuthorityV1(baselineAuthority));
 
@@ -355,11 +446,6 @@ or provider-private identity from a JSON Schema scalar type.
 
 **Interfaces produced:**
 
-    export type CodexArtifactLayout =
-      | "standalone-package"
-      | "official-node-native-payload"
-      | "self-contained-native";
-
     export interface CodexArtifactEntry {
       readonly relativePath: string;
       readonly kind: "file" | "symlink";
@@ -395,7 +481,7 @@ or provider-private identity from a JSON Schema scalar type.
     }): Promise<StagedCodexExecutionArtifact>;
     export function verifyStagedCodexExecutionArtifact(staged: StagedCodexExecutionArtifact): Promise<void>;
 
-The resolver uses no-follow descriptor reads and existing private-state identity checks. It
+The resolver uses the CodexArtifactLayout type from Task 1. It uses no-follow descriptor reads and existing private-state identity checks. It
 hashes exact regular-file bytes and includes sorted relative path, kind, mode, link target,
 byte length, and per-file SHA-256 in the closure digest. The configured pathname is private
 diagnostic data and is not itself the identity hash.
@@ -488,14 +574,6 @@ failure returns provider-unavailable without exposing container details.
 
 **Interfaces produced:**
 
-    export interface CodexProbeRuntimeIdentity {
-      readonly imageId: string;
-      readonly operatingSystem: string;
-      readonly architecture: string;
-      readonly containerUser: string;
-      readonly policyVersion: "codex-probe-runtime-v1";
-    }
-
     export interface CodexProbeResult {
       readonly runtime: CodexProbeRuntimeIdentity;
       readonly versionOutput: string;
@@ -515,9 +593,26 @@ failure returns provider-unavailable without exposing container details.
       readonly createId: () => string;
     }): CodexProbeRuntime;
 
-The probe-specific container method must not reuse createContainer's worktree bind or workspace
-network defaults. Its serialized HostConfig is tested for no mounts, network none, no privileges,
-no devices, no credentials, and no automatic restart.
+The probe runtime consumes CodexProbeRuntimeIdentity from Task 1. Its probe-specific container
+method must not reuse createContainer's worktree bind or workspace network defaults. Its
+serialized request explicitly overrides inherited image startup behavior with an Agent-controlled
+inert bootstrap (`Entrypoint: ["/bin/sh", "-c"]`, `Cmd: ["exec sleep 2147483647"]`); it never
+inherits the image Entrypoint or Cmd and never executes workspace/project startup commands. If
+that fixed bootstrap is unavailable in the selected image, discovery fails closed rather than
+falling back to the image defaults.
+
+The container starts only to accept the exact staged closure through the existing attached exec
+upload primitive. Only after upload and private readback verification does the Agent execute the
+three fixed Codex probe commands. It uses no workspace bind, project environment, credentials,
+Agent socket, Docker socket, or network; `NetworkMode` is `none`, `Privileged` is false, and
+Devices and restart policy are empty/disabled. Where supported by the rootless Docker API, the
+request sets `ReadonlyRootfs: true`, `SecurityOpt: ["no-new-privileges:true"]`, `CapDrop:
+["ALL"]`, `CapAdd: []`, and bounded PIDs/CPU/memory. The only writable locations are bounded
+tmpfs mounts for the staged executable closure (`/opt/devspace-codex-probe`, executable), empty
+HOME/CODEX_HOME, generated schema output, and temporary probe state; generated/output tmpfs use
+`nosuid,nodev,noexec` where execution is not required. If the required containment controls or
+bounded tmpfs layout cannot be represented by the rootless API, the probe is unavailable and no
+provider launch occurs.
 
 **Interfaces consumed:**
 
@@ -525,15 +620,43 @@ no devices, no credentials, and no automatic restart.
 - StagedCodexExecutionArtifact from Task 3.
 - Existing rootless Docker socket verification and bounded exec stream handling.
 
-- [ ] **Step 1: Write failing Docker/probe tests.** Assert exact image ID, no network, no
-  mounts, no workspace path, no configured secrets, bounded output/time, and cleanup.
+- [ ] **Step 1: Write failing Docker/probe tests.** Assert exact image ID, explicit inert
+  Entrypoint/Cmd override, no inherited project startup process, no network, no host/workspace
+  mounts, no workspace path, no configured secrets or sockets, only the declared bounded tmpfs
+  layout, read-only root, dropped capabilities, no-new-privileges, bounded output/time, and
+  cleanup.
 
     expect(createRequests[0]).toMatchObject({
       Image: "sha256:managed-image",
-      HostConfig: { NetworkMode: "none", Binds: [], Mounts: [], Privileged: false, Devices: [] }
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: ["exec sleep 2147483647"],
+      HostConfig: {
+        NetworkMode: "none",
+        Binds: [],
+        Mounts: [],
+        Tmpfs: {
+          "/opt/devspace-codex-probe": "rw,nosuid,nodev,size=1g",
+          "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
+          "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
+        },
+        Privileged: false,
+        Devices: [],
+        ReadonlyRootfs: true,
+        SecurityOpt: ["no-new-privileges:true"],
+        CapDrop: ["ALL"],
+        CapAdd: [],
+        PidsLimit: 64,
+        NanoCpus: 1_000_000_000,
+        Memory: 2_147_483_648,
+        MemorySwap: 2_147_483_648,
+        RestartPolicy: { Name: "no" }
+      }
     });
+    expect(createRequests[0].Entrypoint).not.toEqual(imageInspection.Config.Entrypoint);
+    expect(createRequests[0].Cmd).not.toEqual(imageInspection.Config.Cmd);
     expect(JSON.stringify(createRequests)).not.toContain("GITHUB");
     expect(JSON.stringify(createRequests)).not.toContain("workspace-secret");
+    expect(JSON.stringify(createRequests)).not.toContain("/var/run/devspace-agent.sock");
 
 - [ ] **Step 2: Run RED.**
 
@@ -565,32 +688,6 @@ no devices, no credentials, and no automatic restart.
 - Modify: apps/agent/src/managed-workspaces.ts
 
 **Interfaces produced:**
-
-    export interface CodexProfileAuthorityInput {
-      readonly providerKind: "codex";
-      readonly reportedVersion: string;
-      readonly entrypointSha256: string;
-      readonly executionArtifactClosureDigest: string;
-      readonly executionArtifactLayout: CodexArtifactLayout;
-      readonly protocolFamily: "stdio-jsonl";
-      readonly stableSchemaFingerprint: string;
-      readonly experimentalSchemaFingerprint: string | null;
-      readonly effectiveCapabilities: CodexCapabilitySet;
-      readonly experimentalApi: boolean;
-      readonly approvalPolicy: "on-request";
-      readonly approvalsReviewer: "user";
-      readonly semanticAdapterVersion: string;
-      readonly compatibilityPolicyVersion: string;
-      readonly probeRuntimeIdentity: CodexProbeRuntimeIdentity;
-      readonly credentialSourceIdentity: string;
-      readonly runtimeIdentity: {
-        readonly projectId: string;
-        readonly workspaceId: string;
-        readonly revisionId: string;
-        readonly runtimePlanHash: string;
-        readonly runtimeGeneration: number;
-      };
-    }
 
     export interface CodexDiscoveryCacheKey {
       readonly closureDigest: string;
@@ -630,8 +727,10 @@ no devices, no credentials, and no automatic restart.
 
 **Interfaces consumed:**
 
+- CodexProfileAuthorityInput, CodexArtifactLayout, and CodexProbeRuntimeIdentity from Task 1.
 - CodexExecutionArtifact and StagedCodexExecutionArtifact from Task 3.
-- CodexProbeRuntime, CodexProbeResult, and CodexProbeRuntimeIdentity from Task 4.
+- CodexProbeRuntime and CodexProbeResult from Task 4; CodexProbeRuntimeIdentity remains the
+  authoritative Task 1 type.
 - Existing private-state atomic file and single-flight conventions.
 
 The cache is Agent-private at ai/codex-discovery-cache/<closure-digest>.json. It stores only
@@ -690,12 +789,13 @@ rejects only values below 0.145.0. It never rejects a newer version merely becau
 
 **Interfaces consumed:**
 
-- CodexProfileAuthorityInput, CodexDiscoveryResult, and CodexCapabilitySet from Task 5.
+- CodexProfileAuthorityInput and CodexCapabilitySet from Task 1.
+- CodexDiscoveryResult from Task 5.
 - Existing AiProviderProfileProjection and profile-revision hashing contracts.
 
 **Interfaces produced:**
 
-    // Uses CodexProfileAuthorityInput from Task 5 as its canonical input.
+    // Uses CodexProfileAuthorityInput from Task 1 as its canonical input.
     export function codexProfileRevisionForDiscovery(input: CodexProfileAuthorityInput): string;
     export function safeCodexProfileProjection(input: {
       readonly revision: string;
@@ -705,20 +805,23 @@ rejects only values below 0.145.0. It never rejects a newer version merely becau
 
 Replace hard-coded executable hash, exact version output, fixed capability object, and default
 profile revision authority in ai-session-runtime.ts with the discovery result. The profile hash
-includes actual version, entrypoint/closure digest and layout, schema fingerprints, effective
-capabilities, probe image/ABI identity, experimental opt-in, approval policy/reviewer,
-semantic/policy versions, credential source identity, and existing runtime/workspace identity.
-Display names and other cosmetic metadata are excluded.
+includes reportedVersion, entrypointSha256, executionArtifactClosureDigest,
+executionArtifactLayout, stableSchemaFingerprint, experimentalSchemaFingerprint,
+effectiveCapabilities, probeRuntimeIdentity, experimentalApi, approvalPolicy, approvalsReviewer,
+semanticAdapterVersion, compatibilityPolicyVersion, credentialSourceIdentity, and existing
+runtimeIdentity. Display names and other cosmetic metadata are excluded.
 
 Discovery rejects approval capability false or incompatible before returning an available
 writable profile. structuredInput false and interrupt false are safe projections only when their
 absence cannot leave an unhandled blocking request. Map private discovery failures to bounded
 enumerated availability codes; never include paths, schemas, raw stderr, or native diagnostics.
 
-- [ ] **Step 1: Write failing profile tests.** Prove byte/closure, protocol fingerprint,
-  optional capability, probe image, approval policy/reviewer, and experimental opt-in changes
-  alter revision. Prove display name does not. Prove 0.153.4 compatible evidence is available
-  and 0.144.0 is unavailable.
+- [ ] **Step 1: Write failing profile tests.** Prove reportedVersion, entrypointSha256,
+  executionArtifactClosureDigest/layout, stableSchemaFingerprint,
+  experimentalSchemaFingerprint, effective capability, probe runtime identity,
+  semantic/policy versions, approval policy/reviewer, credential source, and experimental opt-in
+  each alter revision. Prove display name does not. Prove 0.153.4 compatible evidence is
+  available and 0.144.0 is unavailable.
 
 - [ ] **Step 2: Run RED.**
 
@@ -777,8 +880,8 @@ enumerated availability codes; never include paths, schemas, raw stderr, or nati
 
 **Interfaces consumed:**
 
-- StagedCodexExecutionArtifact from Task 3 and CodexProbeRuntimeIdentity from Task 4.
-- CodexProfileAuthorityInput and profile revision from Tasks 5 and 6.
+- StagedCodexExecutionArtifact from Task 3 and CodexProbeRuntimeIdentity from Task 1.
+- CodexProfileAuthorityInput from Task 1 and the computed profile revision from Task 6.
 - Existing DockerEngineClient and credential-authority launch contracts.
 
 The stager uploads every closure entry under a private generated directory, preserving relative
@@ -1217,20 +1320,23 @@ or substantially adapted.
 - All contracts, evaluator, artifact, probe, provider, session, fixture, and browser outputs
   from Tasks 1 through 12.
 
-Before full gates, perform one focused security/authority review of only the changed provider
-boundary. Verify host never executes configured Codex code; recognized closure and exact
-staged/probed/launched bytes are digest-bound; probe image ID is the managed provider image;
-probe has no network, mounts, workspace, credentials, Agent socket, or Docker socket; profile
-revision includes effective executable/protocol/capability/runtime authority; approvals remain
-required; optional capability degradation is truthful; native IDs/labels/raw diffs/schemas stay
-private; file paths come from exact item correlation; unknown blocking teardown retires,
-terminates, diagnoses, and fences; old-profile sessions do not silently resume; and the
-one-live-provider lease remains intact.
+The final execution order is intentionally fixed: focused tests first; one focused provider-
+boundary authority/security review; one correction pass and only materially affected focused
+tests; complete repository gates; Playwright; one final integrated regression review; real
+newer-Codex dogfood; then push. Do not run the full suite before the focused review and then
+invalidate it with review corrections.
 
-Fix substantive findings once, rerun only affected focused tests, then perform one final
-integrated regression review. Do not dispatch a second whole-branch review.
+The focused review covers only the changed provider boundary. Verify host never executes
+configured Codex code; recognized closure and exact staged/probed/launched bytes are
+digest-bound; probe image ID is the managed provider image; the probe has no host/workspace
+mounts, credentials, Agent socket, Docker socket, or network; its inherited image startup is
+overridden; profile revision includes effective executable/protocol/capability/runtime
+authority; approvals remain required; optional capability degradation is truthful; native
+IDs/labels/raw diffs/schemas stay private; file paths come from exact item correlation; unknown
+blocking teardown retires, terminates, diagnoses, and fences; old-profile sessions do not
+silently resume; and the one-live-provider lease remains intact.
 
-Run the repository gates:
+Run the complete repository gates only after the focused review correction pass:
 
     pnpm install --frozen-lockfile
     pnpm workspace:check
@@ -1244,11 +1350,7 @@ Run the repository gates:
     pnpm db:check
     git diff --check origin/main...HEAD
 
-Run:
-
-    pnpm exec playwright test e2e/z-ai-session.spec.ts
-
-For real installed-Codex dogfood, use the normal configured entrypoint and new Agent discovery.
+For the final dogfood step, use the normal configured entrypoint and new Agent discovery.
 The investigated candidate is the official standalone 0.153.4 entrypoint resolved through
 /config/.local/bin/codex. Do not execute it directly from the Agent shell, change the minimum,
 add a hash allowlist, or substitute another binary. Inspect through the normal AI profile route,
@@ -1261,17 +1363,38 @@ exact bounded diagnostic and predicate; do not weaken compatibility policy to pa
 
     pnpm exec vitest run apps/agent/src/codex-app-server apps/agent/src/ai-session-runtime.test.ts apps/agent/src/ai-session-server.test.ts packages/contracts/src/provider-adapters packages/contracts/src/ai-sessions.test.ts apps/web/src/server/ai-sessions.test.ts
 
-- [ ] **Step 2: Run all full gates and Playwright.** Record every exit status and preserve
-  a real-provider-unavailable diagnostic as a blocker rather than claiming acceptance.
+- [ ] **Step 2: Perform the one focused provider-boundary authority/security review.** Record
+  only substantive findings in the artifact, probe, profile, semantic-adapter, or teardown
+  paths described above.
 
-- [ ] **Step 3: Perform the one focused authority review, apply one correction pass if
-  needed, and rerun only materially affected focused tests.**
+- [ ] **Step 3: Fix substantive findings once.** Do not broaden the review or begin unrelated
+  hardening.
 
-- [ ] **Step 4: Perform the final integrated regression review.** Confirm send/reconnect,
+- [ ] **Step 4: Rerun only materially affected focused tests.** If there were no substantive
+  findings, continue without repeating unchanged focused suites.
+
+- [ ] **Step 5: Run the complete repository verification gates.** Record every exit status and
+  preserve a provider-unavailable diagnostic as a blocker rather than claiming acceptance.
+
+- [ ] **Step 6: Run Playwright.**
+
+    pnpm exec playwright test e2e/z-ai-session.spec.ts
+
+- [ ] **Step 7: Perform the one final integrated regression review.** Confirm send/reconnect,
   interrupt, stop, restart, history/output bounds, stream sequence, changed-file bounds,
-  cleanup, interaction retirement, and Workbench behavior.
+  cleanup, interaction retirement, and Workbench behavior. Do not repeat the focused authority
+  review.
 
-- [ ] **Step 5: Commit any review correction and push normally.**
+- [ ] **Step 8: Run real newer-Codex dogfood through the normal authority path.** If the
+  configured 0.153.4 candidate is unavailable or incompatible, report the exact bounded
+  blocker; do not substitute an executable or change policy.
+
+- [ ] **Step 9: Apply a further code correction only for a concrete dogfood P0/blocking
+  compatibility bug.** Rerun only the materially affected focused tests and the relevant
+  acceptance path, commit the correction, and stop; do not begin another generalized hardening
+  or review cycle.
+
+- [ ] **Step 10: Commit any review/dogfood correction and push normally.**
 
     git diff --check origin/main...HEAD
     git status --short
