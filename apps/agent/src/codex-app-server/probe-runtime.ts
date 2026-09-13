@@ -42,6 +42,11 @@ export interface CodexProbeResult {
 }
 
 export interface CodexProbeRuntime {
+  inspect?(input: {
+    readonly managedContainerId: string;
+    readonly stagedArtifact: StagedCodexExecutionArtifact;
+    readonly workspaceContext: WorkspaceExecutionContext;
+  }): Promise<CodexProbeRuntimeIdentity>;
   probe(input: {
     readonly managedContainerId: string;
     readonly stagedArtifact: StagedCodexExecutionArtifact;
@@ -338,24 +343,41 @@ async function verifyRemoteArtifact(docker: DockerEngineClient, containerId: str
 class DockerCodexProbeRuntime implements CodexProbeRuntime {
   constructor(private readonly docker: DockerEngineClient, private readonly createId: () => string) {}
 
+  private async inspectEvidence(input: {
+    readonly managedContainerId: string;
+    readonly stagedArtifact: StagedCodexExecutionArtifact;
+    readonly workspaceContext: WorkspaceExecutionContext;
+  }): Promise<{ readonly runtime: CodexProbeRuntimeIdentity; readonly image: DockerImageInspection; readonly user: string }> {
+    const managed = await this.docker.inspectContainer(input.managedContainerId);
+    if (managed.Image === undefined) throw probeError();
+    const image = await this.docker.inspectImage(managed.Image);
+    const authority = assertManagedImage(managed, image, input);
+    if (!architectureCompatible(input.stagedArtifact.artifact.target.architecture, image.Architecture)) throw probeError();
+    return {
+      runtime: { imageId: authority.imageId, operatingSystem: image.Os, architecture: image.Architecture,
+        containerUser: authority.user, policyVersion: "codex-probe-runtime-v1" }, image, user: authority.user
+    };
+  }
+
+  async inspect(input: {
+    readonly managedContainerId: string;
+    readonly stagedArtifact: StagedCodexExecutionArtifact;
+    readonly workspaceContext: WorkspaceExecutionContext;
+  }): Promise<CodexProbeRuntimeIdentity> {
+    await verifyStagedCodexExecutionArtifact(input.stagedArtifact);
+    return (await this.inspectEvidence(input)).runtime;
+  }
+
   async probe(input: {
     readonly managedContainerId: string;
     readonly stagedArtifact: StagedCodexExecutionArtifact;
     readonly workspaceContext: WorkspaceExecutionContext;
   }): Promise<CodexProbeResult> {
     await verifyStagedCodexExecutionArtifact(input.stagedArtifact);
-    const managed = await this.docker.inspectContainer(input.managedContainerId);
-    if (managed.Image === undefined) throw probeError();
-    const image = await this.docker.inspectImage(managed.Image);
-    const authority = assertManagedImage(managed, image, input);
-    if (!architectureCompatible(input.stagedArtifact.artifact.target.architecture, image.Architecture)) throw probeError();
-    const runtime: CodexProbeRuntimeIdentity = {
-      imageId: authority.imageId,
-      operatingSystem: image.Os,
-      architecture: image.Architecture,
-      containerUser: authority.user,
-      policyVersion: "codex-probe-runtime-v1"
-    };
+    const evidence = await this.inspectEvidence(input);
+    const runtime = evidence.runtime;
+    const image = evidence.image;
+    const authority = { imageId: runtime.imageId, user: evidence.user };
     const probeName = `devspace-codex-probe-${this.createId().replaceAll("-", "")}`;
     let containerId: string | null = null;
     let result: CodexProbeResult | null = null;
