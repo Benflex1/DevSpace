@@ -72,14 +72,14 @@ export function architectureCompatible(artifactArchitecture: string, imageArchit
 function assertManagedImage(container: DockerContainerInspection, image: DockerImageInspection, input: {
   readonly managedContainerId: string;
   readonly workspaceContext: WorkspaceExecutionContext;
-}): { readonly imageId: string; readonly user: string } {
+}): { readonly imageId: string; readonly imageReference: string; readonly user: string } {
   if (input.workspaceContext.ownership.developmentContainer.id !== input.managedContainerId
     || container.Id !== input.managedContainerId || container.State.Running !== true
     || typeof container.Image !== "string" || !/^sha256:[0-9a-f]{32,}$/u.test(container.Image)
     || image.Id !== container.Image || image.Os !== "linux" || container.Config.User === undefined) {
     throw probeError();
   }
-  return { imageId: container.Image, user: container.Config.User };
+  return { imageId: container.Image, imageReference: container.Config.Image ?? container.Image, user: container.Config.User };
 }
 
 function tarString(buffer: Buffer, offset: number, length: number, value: string): void {
@@ -356,7 +356,7 @@ class DockerCodexProbeRuntime implements CodexProbeRuntime {
     readonly managedContainerId: string;
     readonly stagedArtifact: StagedCodexExecutionArtifact;
     readonly workspaceContext: WorkspaceExecutionContext;
-  }): Promise<{ readonly runtime: CodexProbeRuntimeIdentity; readonly image: DockerImageInspection; readonly user: string }> {
+  }): Promise<{ readonly runtime: CodexProbeRuntimeIdentity; readonly image: DockerImageInspection; readonly imageReference: string; readonly user: string }> {
     const managed = await this.docker.inspectContainer(input.managedContainerId);
     if (managed.Image === undefined) throw probeError();
     const image = await this.docker.inspectImage(managed.Image);
@@ -364,7 +364,8 @@ class DockerCodexProbeRuntime implements CodexProbeRuntime {
     if (!architectureCompatible(input.stagedArtifact.artifact.target.architecture, image.Architecture)) throw probeError();
     return {
       runtime: { imageId: authority.imageId, operatingSystem: image.Os, architecture: image.Architecture,
-        containerUser: authority.user, policyVersion: "codex-probe-runtime-v1" }, image, user: authority.user
+        containerUser: authority.user, policyVersion: "codex-probe-runtime-v1" }, image,
+      imageReference: authority.imageReference, user: authority.user
     };
   }
 
@@ -386,7 +387,7 @@ class DockerCodexProbeRuntime implements CodexProbeRuntime {
     const evidence = await this.inspectEvidence(input);
     const runtime = evidence.runtime;
     const image = evidence.image;
-    const authority = { imageId: runtime.imageId, user: evidence.user };
+    const authority = { imageId: runtime.imageId, imageReference: evidence.imageReference, user: evidence.user };
     const probeName = `devspace-codex-probe-${this.createId().replaceAll("-", "")}`;
     let containerId: string | null = null;
     let result: CodexProbeResult | null = null;
@@ -394,7 +395,7 @@ class DockerCodexProbeRuntime implements CodexProbeRuntime {
     const deadline = Date.now() + PROBE_TOTAL_TIMEOUT_MS;
     try {
       containerId = await this.docker.createProbeContainer(probeName, {
-        imageId: authority.imageId,
+        imageId: authority.imageId, imageReference: authority.imageReference,
         user: authority.user,
         labels: { "devspace.managed": "true", "devspace.resource-role": "codex-compatibility-probe" },
         environment: probeEnvironment(),

@@ -69,7 +69,7 @@ export interface DockerContainerInspection {
   Id: string;
   Name: string;
   Image?: string;
-  Config: { Labels: Record<string, string>; WorkingDir: string; User?: string; Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
+  Config: { Labels: Record<string, string>; Image?: string; WorkingDir: string; User?: string; Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
   State: { Running: boolean; Status: string };
   HostConfig: { Privileged: boolean; PublishAllPorts: boolean; PidMode: string;
     IpcMode: string; UTSMode: string; UsernsMode: string; CgroupnsMode: string;
@@ -95,6 +95,8 @@ export interface DockerImageInspection {
 }
 export interface DockerProbeContainerInput {
   readonly imageId: string;
+  /** A stable configured reference used only to ask the engine to create from the verified image. */
+  readonly imageReference?: string;
   readonly user: string;
   readonly labels: Readonly<Record<string, string>>;
   readonly environment: Readonly<Record<string, string>>;
@@ -175,7 +177,7 @@ export interface DockerExecInspection {
 
 const dockerContainerInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1), Image: z.string().min(1).optional(),
-  Config: z.object({ Labels: z.record(z.string(), z.string()), WorkingDir: z.string(), User: z.string().optional(),
+  Config: z.object({ Labels: z.record(z.string(), z.string()), Image: z.string().min(1).optional(), WorkingDir: z.string(), User: z.string().optional(),
     Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() }),
   State: z.object({ Running: z.boolean(), Status: z.string() }),
   HostConfig: z.object({
@@ -344,9 +346,12 @@ export class DockerEngineClient {
   }
 
   async createProbeContainer(name: string, input: DockerProbeContainerInput): Promise<string> {
-    if (input.imageId.length === 0 || input.user.includes("\0")) throw new Error("probe-image-or-user-invalid");
+    const imageReference = input.imageReference ?? input.imageId;
+    if (input.imageId.length === 0 || imageReference.length === 0 || imageReference.includes("\0") || input.user.includes("\0")) {
+      throw new Error("probe-image-or-user-invalid");
+    }
     const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, {
-      Image: input.imageId,
+      Image: imageReference,
       Entrypoint: ["/bin/sh", "-c"],
       Cmd: ["exec sleep 2147483647"],
       WorkingDir: "/",

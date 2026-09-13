@@ -59,9 +59,12 @@ async function stagedFixture(): Promise<Awaited<ReturnType<typeof stageCodexExec
   return await stageCodexExecutionArtifact({ artifact, stateRoot: state });
 }
 
-function dockerFixture(expected: Awaited<ReturnType<typeof stagedFixture>>): { docker: DockerEngineClient; commands: string[][]; cleanup: string[] } {
+function dockerFixture(expected: Awaited<ReturnType<typeof stagedFixture>>): {
+  docker: DockerEngineClient; commands: string[][]; cleanup: string[]; probeImageReference?: string
+} {
   const commands: string[][] = [];
   const cleanup: string[] = [];
+  let probeImageReference: string | undefined;
   let sequence = 0;
   const execInputs = new Map<string, { command: string[]; attachStdin: boolean }>();
   const docker = {
@@ -79,14 +82,17 @@ function dockerFixture(expected: Awaited<ReturnType<typeof stagedFixture>>): { d
       }, NetworkSettings: { Networks: { none: { NetworkID: "fixture-none" } } }, Mounts: []
     }) : ({
       Id: "managed-container", Name: "managed", Image: `sha256:${"a".repeat(64)}`,
-      Config: { Labels: {}, WorkingDir: "/workspace", User: "1000:1000", Entrypoint: ["/project/start"], Cmd: ["boot"] },
+      Config: { Labels: {}, Image: "node:24-bookworm", WorkingDir: "/workspace", User: "1000:1000", Entrypoint: ["/project/start"], Cmd: ["boot"] },
       State: { Running: true, Status: "running" }, HostConfig: {}, NetworkSettings: { Networks: {} }, Mounts: []
     }),
     inspectImage: async () => ({
       Id: `sha256:${"a".repeat(64)}`, Os: "linux", Architecture: "amd64",
       Config: { Entrypoint: ["/project/start"], Cmd: ["boot"] }
     }),
-    createProbeContainer: async () => "probe-container",
+    createProbeContainer: async (_name: string, input: { readonly imageReference?: string }) => {
+      probeImageReference = input.imageReference;
+      return "probe-container";
+    },
     startContainer: async () => undefined,
     createExec: async (_containerId: string, input: { command: readonly string[]; attachStdin: boolean }) => {
       const id = `exec-${++sequence}`;
@@ -121,7 +127,7 @@ function dockerFixture(expected: Awaited<ReturnType<typeof stagedFixture>>): { d
     stopContainer: async () => { cleanup.push("stop"); },
     removeContainer: async () => { cleanup.push("remove"); }
   } as unknown as DockerEngineClient;
-  return { docker, commands, cleanup };
+  return { docker, commands, cleanup, get probeImageReference() { return probeImageReference; } };
 }
 
 test("probes the exact managed image with fixed commands and bounded schema output", async () => {
@@ -144,6 +150,7 @@ test("probes the exact managed image with fixed commands and bounded schema outp
   expect(result.schemaFiles.get("experimental/ToolRequestUserInputParams.json")).toEqual(Buffer.from("{}"));
   expect(fixture.commands.some((command) => command.includes("--version"))).toBe(true);
   expect(fixture.commands.some((command) => command.includes("--experimental"))).toBe(true);
+  expect(fixture.probeImageReference).toBe("node:24-bookworm");
   expect(fixture.cleanup).toEqual(["stop", "remove"]);
 });
 

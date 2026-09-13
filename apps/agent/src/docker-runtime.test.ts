@@ -127,13 +127,13 @@ describe("dedicated rootless Docker boundary", () => {
     const fixture = await recordingEngineSocket();
     const engine = new DockerEngineClient(fixture.socket);
     await expect(engine.createProbeContainer("devspace-codex-probe", {
-      imageId: "sha256:managed-image", user: "1000:1000", labels: { "devspace.probe": "true" },
+      imageId: "sha256:managed-image", imageReference: "node:24-bookworm", user: "1000:1000", labels: { "devspace.probe": "true" },
       environment: { CODEX_HOME: "/tmp/devspace-codex-home", HOME: "/tmp/devspace-codex-home" },
       cpuMillicores: 1_000, memoryBytes: 2_147_483_648, pidLimit: 64
     })).resolves.toBe("container-1");
     const request = fixture.bodies[0] as Record<string, unknown>;
     expect(request).toMatchObject({
-      Image: "sha256:managed-image",
+      Image: "node:24-bookworm",
       Entrypoint: ["/bin/sh", "-c"],
       Cmd: ["exec sleep 2147483647"],
       HostConfig: {
