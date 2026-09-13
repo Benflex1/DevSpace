@@ -53,8 +53,10 @@ probing is isolated from Agent-host privileges, and the exact recognized executi
 is bound through discovery and launch. Command/file approvals remain required for the writable
 profile; structured input and interrupt may degrade only when the discovered protocol proves they
 are unavailable. Existing sessions remain pinned to their profile revision across Codex updates.
-The deterministic browser fixture covers the workflow; real installed-Codex browser dogfood remains
-a separate acceptance check for this branch.
+The deterministic browser fixture covers the workflow; the configured official Codex `0.153.4`
+was admitted through the isolated discovery path with the required capabilities. Full real-browser
+dogfood remains a separate acceptance check because the available local database references managed
+workspace containers that are no longer reconstructable in the restored runtime.
 
 ## Durable Milestone 1 and product path
 
