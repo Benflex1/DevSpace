@@ -36,17 +36,21 @@ than exhaustive production hardening.
 Only P0 issues should normally block a beta slice. P1/P2 work may be included when small and directly
 adjacent, but must not turn a vertical slice into an open-ended hardening project.
 
-## T3 Code reuse policy
+## AI Workbench reference policy
 
-`pingdotgg/t3code` is an MIT-licensed reference implementation and should be inspected before
-designing equivalent AI-session or Workbench UX from scratch.
+[`stablyai/orca`](https://github.com/stablyai/orca) is the primary product/UX reference for Workbench structure, agent-centric
+workflow, files/editor/terminal/browser integration, activity presentation, approvals/questions,
+changed-file/review flow, and visual behavior.
 
-DevSpace may copy or adapt suitable T3 Code code where this accelerates delivery. Substantial reuse
-must preserve the required license notices and be recorded in attribution documentation.
+[`pingdotgg/t3code`](https://github.com/pingdotgg/t3code) is a secondary technical/conceptual reference for isolated mechanics Orca does
+not cover well. The inspected Checkpoint 2 revision is recorded in
+`docs/attributions/t3code-ai-session.md`; no T3 source code was copied or substantially adapted.
+If a future change does copy or substantially adapt T3 Code source, preserve the required MIT
+notice and record the exact source files/revision there.
 
-Strong reuse targets include AI-session navigation, streaming turns, approvals, structured questions,
-model/provider selection, activity rendering, changed-file summaries, diff UX, interruption/reconnect
-states, keyboard interactions, and loading/empty/error states.
+Strong reference targets include AI-session navigation, streaming turns, approvals, structured
+questions, activity rendering, changed-file summaries, interruption/reconnect states, keyboard
+interactions, and loading/empty/error states.
 
 DevSpace must retain its own authority boundaries: Web remains the sole SQLite writer; Agent owns
 Git, filesystem, Docker, PTYs, tasks, previews, and provider processes; providers run in the exact
@@ -403,8 +407,8 @@ Stop rule:
    - ✅ stop the live session and verify post-fix ephemeral staging cleanup;
    - ✅ Checkpoint 2 browser slice adds approvals, structured questions, durable interaction replay,
      profile-pinned session navigation, and Workbench changed-file opening;
-   - ✅ use T3 Code-informed UX patterns with attribution; no host/process/persistence assumptions
-     were copied;
+   - ✅ record an Orca-first / T3-secondary conceptual UX policy; Checkpoint 2 used T3 patterns
+     conceptually only and copied no host/process/persistence assumptions;
    - ✅ failed-turn/Unauthorized finalization now requires provider exit, staging cleanup, and lease
      release proof before `session.stopped`;
    - ✅ owner device-code onboarding and bounded real-provider browser validation passed; Checkpoint 1
@@ -437,7 +441,7 @@ Stop rule:
    - ✅ Workbench 1B practical Git status/diff/stage/commit with existing explicit push;
    - better task/process output and controls;
    - essential Project Options editing;
-   - cohesive T3 Code-inspired Workbench navigation and visual polish.
+   - cohesive Orca-first Workbench navigation and visual polish.
 
 5. ⏳ **Focused beta stabilization**
    - fix P0 defects and high-frequency P1 defects found through real use;
@@ -539,8 +543,8 @@ A beta user can:
 6. inspect Git status/diffs and explicitly stage, commit, and push;
 7. edit the Project Options required for normal runtime/task/preview behavior;
 8. recover from ordinary failures through clear retry, session restart, or workspace restart actions;
-9. navigate a cohesive, polished, responsive Workbench inspired by the strongest applicable T3 Code
-   patterns.
+9. navigate a cohesive, polished, responsive Workbench informed first by Orca and supplemented by
+   the strongest applicable T3 Code patterns.
 
 Not required for this milestone:
 

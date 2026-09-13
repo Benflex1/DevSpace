@@ -1,13 +1,16 @@
-# T3 Code AI-session attribution
+# AI Workbench reference note
 
-DevSpace inspected `pingdotgg/t3code` at commit
-`d1d15c67f4a5fb82fd8d5e01e5e3b288296789c3` under the MIT license.
+DevSpace's primary product and UX reference for the Workbench is
+[`stablyai/orca`](https://github.com/stablyai/orca).
+[`pingdotgg/t3code`](https://github.com/pingdotgg/t3code) is a secondary technical/conceptual reference, inspected at commit
+`d1d15c67f4a5fb82fd8d5e01e5e3b288296789c3`.
 
-Checkpoint 2 uses conceptual UX inspiration only: compact AI-session navigation, inline approval
-and structured-question cards, quieter activity presentation, changed-file links, and reconnect /
-loading / empty states. No T3 Code source was copied or substantially adapted, so no additional
-MIT source attribution is required for the implementation. DevSpace retains its own Web/Agent,
-workspace, persistence, transport, and authentication boundaries.
+Checkpoint 2 uses conceptual T3 UX inspiration only: compact AI-session navigation, inline
+approval and structured-question cards, quieter activity presentation, changed-file links, and
+reconnect/loading/empty states. No T3 Code source was copied or substantially adapted, so this
+repository does not contain copied T3 code and no additional MIT source notice is required for
+that implementation. DevSpace retains its own Web/Agent, workspace, persistence, transport,
+and authentication boundaries.
 
 Inspected source paths:
 
@@ -23,5 +26,6 @@ Inspected source paths:
 - `packages/shared/src/chatList.ts`
 - `packages/shared/src/toolActivity.ts`
 
-Copyright (c) T3 Code contributors. Licensed under the MIT License. The upstream license text was
-retained in the inspected repository at `LICENSE`.
+This file is a neutral reference record, not a claim of copied-code attribution. If a future
+change copies or substantially adapts T3 Code source, record the exact source files/revision and
+retain the required MIT notice at that time.

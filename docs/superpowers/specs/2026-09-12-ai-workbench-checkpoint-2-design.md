@@ -14,6 +14,14 @@ persisted AI sessions can be selected, turns can pause for bounded command/file 
 or structured questions, browser responses continue the same provider turn, and AI changed
 files open through the existing Workbench editor/Changes authority.
 
+The provider boundary for this slice is the protocol-family design in
+`docs/superpowers/specs/2026-09-13-codex-version-compatibility-design.md`. Codex `0.145.0`
+is the minimum compatibility baseline and fixture, not a permanent executable allowlist or
+upper-version bound. The Checkpoint 2 interaction and session semantics remain valid while
+the Agent runtime moves from the current exact-pin implementation to runtime discovery,
+capability negotiation, and profile fingerprinting. That runtime migration is intentionally
+outside this already-approved interaction design.
+
 ## Existing boundaries to preserve
 
 - The browser calls only the Web application. Web remains the sole SQLite writer.
@@ -59,7 +67,11 @@ ambiguous create requests reuse the existing current nonterminal session through
 database/session-lease idempotency behavior instead of creating another live session. The
 one-live-Codex/provider lease remains authoritative.
 
-The Agent validates the pinned Codex v0.145 request shapes before projecting them:
+The Agent validates the minimum-baseline Codex request shapes through a stable semantic
+protocol-family adapter before projecting them. Runtime-discovered structural evidence and
+capability negotiation must gate optional behavior; generated schemas do not replace the
+redaction, provider-private identity, file-item correlation, lifecycle, or one-shot response
+rules below:
 
 - command approval becomes a redacted command presentation with safe summary, command text,
   relative working directory, and risk classification;
@@ -215,10 +227,13 @@ the pinned provider.
 - Follow the rapid-alpha rule: fix substantive findings once, verify, dogfood, and move on
   instead of entering iterative perfection loops.
 
-## T3 Code usage
+## UX reference hierarchy
 
-The inspected reference is `pingdotgg/t3code` at revision
-`d1d15c67f4a5fb82fd8d5e01e5e3b288296789c3`. Checkpoint 2 uses its approval-card,
-structured-question, quieter-activity, changed-file-link, and reconnect-state patterns as
-conceptual UX inspiration only. No T3 source architecture is adopted and no source code is
-copied unless a later implementation change explicitly records the exact file and MIT notice.
+[`stablyai/orca`](https://github.com/stablyai/orca) is the primary product/UX reference for Workbench structure, agent-centric
+workflow, files/editor/terminal integration, activity presentation, approvals/questions, and
+changed-file/review flow. [`pingdotgg/t3code`](https://github.com/pingdotgg/t3code) at revision
+`d1d15c67f4a5fb82fd8d5e01e5e3b288296789c3` is a secondary technical/conceptual reference for
+isolated mechanics that Orca does not cover. Checkpoint 2 used T3 patterns conceptually only;
+no T3 source architecture or source code was copied or substantially adapted, so this work does
+not require copied-code MIT attribution. Neither reference overrides DevSpace's authority
+boundaries.
