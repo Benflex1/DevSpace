@@ -17,32 +17,32 @@
     {
       "scope": "stable-default",
       "file": "stable/ClientRequest.json",
-      "bytes": 196747,
-      "sha256": "25bc001b5dfe3b35785597b8f9ad9e5aaf7e437331fa9921f041c9e0e03fc9f3"
+      "bytes": 196748,
+      "sha256": "454c83a43a95352adfa7fb9d20bcb6845e715f17a24147d1780a056e29547572"
     },
     {
       "scope": "stable-default",
       "file": "stable/ClientNotification.json",
-      "bytes": 431,
-      "sha256": "706cf248d75027c84a3c63348d0ed507182e8eba40069dd17541793de029145a"
+      "bytes": 432,
+      "sha256": "f36c3cc912cb67c5f2543a3c8898d9b5e06be15782d9f34f2920b321b7601537"
     },
     {
       "scope": "stable-default",
       "file": "stable/ServerRequest.json",
-      "bytes": 50320,
-      "sha256": "31f580ad468fbd18766eb7adb12744be4e3790e3357b58bd4413c0108c4f65d0"
+      "bytes": 50321,
+      "sha256": "5d98053dc7dfe036e2dbd97602227e454ca4fd91354fa86f8293b4ee5c6d3334"
     },
     {
       "scope": "stable-default",
       "file": "stable/ServerNotification.json",
-      "bytes": 200298,
-      "sha256": "b3e76cf11842f3e8b3270c05e000212b56eabafb0152fc38e8f920e2ef902991"
+      "bytes": 200299,
+      "sha256": "0566c3770a4cfdf3b6471ddc406cc82b9e850d3c33e48e2c7ebb53de8caf3449"
     },
     {
       "scope": "experimental",
       "file": "experimental/ToolRequestUserInputParams.json",
-      "bytes": 2143,
-      "sha256": "fda15b62e7446105b59c8ed85c908abed2a47db70653e57c92c47a2f204fa77a"
+      "bytes": 2144,
+      "sha256": "75429f49e09b3dcfecb3dc9bb33eb2e76ffcca62c193c6f29cac71bb4c0ac582"
     }
   ],
   "methods": {

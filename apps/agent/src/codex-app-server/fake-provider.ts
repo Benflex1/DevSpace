@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/require-await */
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {

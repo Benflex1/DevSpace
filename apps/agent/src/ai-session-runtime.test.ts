@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment,
+/* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment,
   @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,8 +12,7 @@ import {
 } from "./ai-session-runtime.js";
 import { createCodexCredentialAuthority, type CodexCredentialAuthority } from "./codex-credential-authority.js";
 import { MAX_RETAINED_OUTBOX_EVENTS, createAiSessionOutbox, outboxPathForAiSession } from "./ai-session-outbox.js";
-import { canonicalAiEventSchema } from "@devspace/contracts";
-import type { CodexCapabilitySet, CodexProfileAuthorityInput } from "@devspace/contracts";
+import { canonicalAiEventSchema, type CodexCapabilitySet, type CodexProfileAuthorityInput } from "@devspace/contracts";
 import { codexProfileRevisionForDiscovery } from "./codex-app-server/profile-authority.js";
 import type { CodexArtifactStager, CodexLaunchArtifact } from "./codex-app-server/artifact-stager.js";
 import type { CodexPrivateFailureObservation } from "./codex-app-server/provider.js";
@@ -1636,7 +1635,7 @@ describe("AI session runtime", () => {
 
   test("launches the exact staged artifact returned by discovery", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-staged-launch-test-"));
-    const executablePath = await createCodexTestExecutable(stateRoot);
+    await createCodexTestExecutable(stateRoot);
     const capabilities: CodexCapabilitySet = {
       inspect: true, start: true, resume: true, sendTurn: true, interrupt: true,
       approvals: true, structuredInput: true, stop: true, streamEvents: true

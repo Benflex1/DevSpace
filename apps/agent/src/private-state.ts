@@ -1,5 +1,4 @@
-import type { BigIntStats } from "node:fs";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as z from "zod";

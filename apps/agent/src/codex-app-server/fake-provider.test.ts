@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/require-await */
 import { describe, expect, test } from "vitest";
 import type { AdapterCallbacks, AiStructuredInputAnswer } from "./provider.js";
 import { FakeProvider } from "./fake-provider.js";

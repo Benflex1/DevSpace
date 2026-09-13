@@ -1,5 +1,4 @@
 import type {
-  CodexCapabilitySet,
   CodexCompatibilityDiagnostic,
   CodexCompatibilityFeatureResult,
   CodexFeature
@@ -130,11 +129,6 @@ export function schemaSatisfiesPredicate(
 }
 
 const stringType: SchemaPredicate = { kind: "type", types: ["string"] };
-const integerOrNullType: SchemaPredicate = {
-  kind: "union",
-  alternatives: [{ kind: "type", types: ["integer"] }],
-  nullable: true
-};
 const interactionBinding: SchemaPredicate = {
   kind: "object",
   required: {

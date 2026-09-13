@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
 import {
   CODEX_COMPATIBILITY_POLICY_VERSION,
   CODEX_MINIMUM_SUPPORTED_VERSION,

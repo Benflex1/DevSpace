@@ -131,7 +131,7 @@ describe("dedicated rootless Docker boundary", () => {
       environment: { CODEX_HOME: "/tmp/devspace-codex-home", HOME: "/tmp/devspace-codex-home" },
       cpuMillicores: 1_000, memoryBytes: 2_147_483_648, pidLimit: 64
     })).resolves.toBe("container-1");
-    const request = fixture.bodies[0] as Record<string, any>;
+    const request = fixture.bodies[0] as Record<string, unknown>;
     expect(request).toMatchObject({
       Image: "sha256:managed-image",
       Entrypoint: ["/bin/sh", "-c"],

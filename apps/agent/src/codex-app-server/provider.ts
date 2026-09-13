@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/require-await */
 import { AI_OUTPUT_DELTA_MAX_BYTES, AI_OUTPUT_ITEM_MAX_BYTES, type CodexCapabilitySet, type CodexCompatibilityDiagnostic } from "@devspace/contracts";
 import { DockerEngineClient } from "../docker-runtime.js";
 import type { WorkspaceExecutionContext } from "../managed-workspaces.js";

@@ -16,9 +16,8 @@ import {
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
-import type { ManagedWorkspaces, WorkspaceExecutionContext } from "./managed-workspaces.js";
+import type { ManagedWorkspaces } from "./managed-workspaces.js";
 import {
-  CODEX_AUTH_CREDENTIAL_SOURCE_IDENTITY,
   CODEX_AUTHORITY_POLICY_VERSION,
   CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
   CODEX_STAGED_WRITEBACK_POLICY_VERSION,
@@ -44,8 +43,7 @@ import {
   type AiInteractionDecision,
   type AiStructuredInputAnswer,
   type CodexPrivateFailureObservation,
-  type ProviderAdapter,
-  type ProviderFinalizationResult
+  type ProviderAdapter
 } from "./codex-app-server/provider.js";
 import { discoverCodex, type CodexDiscoveryResult } from "./codex-app-server/discovery.js";
 import {
@@ -682,8 +680,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       let launchArtifact: CodexLaunchArtifact | undefined;
       let artifactStager: CodexArtifactStager | undefined;
       let experimentalApi = true;
-      let approvalPolicy: "on-request" = "on-request";
-      let approvalsReviewer: "user" = "user";
+      let approvalPolicy = "on-request" as const;
+      let approvalsReviewer = "user" as const;
       if (mode === "codex" && options.codexPreflight === undefined) {
         const discovery = codexDiscoveries.get(discoveryKey(binding));
         if (discovery === undefined || codexProfileRevisionForDiscovery(discovery.profileAuthority) !== binding.profileRevision) {

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import {
   chmod,
-  lstat,
   mkdir,
   mkdtemp,
   readlink,
@@ -277,7 +276,7 @@ async function assertRegularNative(filePath: string): Promise<{ bytes: Buffer; m
   return { bytes: read.bytes, mode, identity: read.identity };
 }
 
-async function makeArtifact(input: {
+function makeArtifact(input: {
   readonly configuredPath: string;
   readonly root: string;
   readonly layout: CodexArtifactLayout;
@@ -340,7 +339,7 @@ async function resolveStandalone(configuredPath: string, canonicalEntrypoint: st
   await assertDirectory(path.join(root, "bin"));
   await assertDirectory(path.join(root, "codex-resources"));
   await assertDirectory(path.join(root, "codex-path"));
-  const entrypoint = await assertRegularNative(entrypointPath);
+  await assertRegularNative(entrypointPath);
   const helper = await lstatIdentity(path.join(root, "bin", "codex-code-mode-host"));
   if (helper === null || !helper.stats.isFile()) throw artifactError("CODEX_UNRECOGNIZED_EXECUTION_FORM");
   const convenience = await lstatIdentity(path.join(root, "codex"));
@@ -390,7 +389,7 @@ async function findNodeNativePayload(root: string, packageData: Record<string, u
     relativeTarget: string;
     target: { os: string; architecture: string; abi: string };
   }> = [];
-  for (const dependencyName of Object.keys(optional as Record<string, unknown>).sort()) {
+  for (const dependencyName of Object.keys(optional).sort()) {
     if (!/^@openai\/codex-[A-Za-z0-9-]+$/u.test(dependencyName)) continue;
     const dependencyRoot = path.join(root, "node_modules", ...dependencyName.split("/"));
     const dependencyRecord = await readJson(path.join(dependencyRoot, "package.json")).catch((error: unknown) => {
@@ -503,7 +502,7 @@ async function copyEntry(artifact: CodexExecutionArtifact, entry: CodexArtifactE
     if (link.target !== entry.linkTarget || !identitiesEqual(sourceObserved.identity, link.identity)) {
       throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
     }
-    await symlink(entry.linkTarget!, destination);
+    await symlink(entry.linkTarget, destination);
     return;
   }
   const read = await readRegularFileNoFollow(source, MAX_ENTRY_BYTES);

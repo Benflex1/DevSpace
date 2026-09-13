@@ -21,7 +21,7 @@ export interface CodexJsonlTransport {
   destroy(): void;
 }
 
-export function dockerMultiplexedFrame(payload: unknown | Buffer, streamType = 1): Buffer {
+export function dockerMultiplexedFrame(payload: unknown, streamType = 1): Buffer {
   const body = Buffer.isBuffer(payload) ? payload : Buffer.from(`${JSON.stringify(payload)}\n`, "utf8");
   if (streamType !== 1 && streamType !== 2) throw new Error("unsupported-docker-stream");
   const header = Buffer.alloc(8);

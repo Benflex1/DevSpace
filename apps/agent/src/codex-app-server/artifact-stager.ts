@@ -8,7 +8,6 @@ import {
   codexExecutionArtifactClosureDigest,
   verifyStagedCodexExecutionArtifact,
   type CodexArtifactEntry,
-  type CodexExecutionArtifact,
   type StagedCodexExecutionArtifact
 } from "./artifact-identity.js";
 
