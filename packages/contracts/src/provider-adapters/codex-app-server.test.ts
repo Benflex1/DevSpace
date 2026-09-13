@@ -8,10 +8,6 @@ import {
   codexCompatibilityDiagnostics,
   mapCodexDiagnosticToPublicAvailability
 } from "./codex-app-server.js";
-import {
-  AI_PROFILE_AUTHORITY_FORMAT,
-  hashAiProviderAuthorityV1
-} from "./ai-profile-revision-v1.js";
 
 describe("version-independent Codex app-server contracts", () => {
   test("accepts a newer compatible fixture manifest without a release allowlist", () => {
@@ -67,53 +63,4 @@ describe("version-independent Codex app-server contracts", () => {
       .toBeNull();
   });
 
-  test("changes profile authority when effective Codex authority changes", () => {
-    const authority = {
-      format: AI_PROFILE_AUTHORITY_FORMAT,
-      profileId: "codex",
-      provider: "codex",
-      reportedVersion: "0.153.4",
-      entrypointSha256: "0000000000000000000000000000000000000000000000000000000000000001",
-      executionArtifactClosureDigest: "0000000000000000000000000000000000000000000000000000000000000002",
-      executionArtifactLayout: "standalone-package",
-      protocolFamily: "stdio-jsonl",
-      stableSchemaFingerprint: "0000000000000000000000000000000000000000000000000000000000000003",
-      experimentalSchemaFingerprint: "0000000000000000000000000000000000000000000000000000000000000004",
-      effectiveCapabilities: {
-        inspect: true,
-        start: true,
-        resume: true,
-        sendTurn: true,
-        interrupt: true,
-        approvals: true,
-        structuredInput: true,
-        stop: true,
-        streamEvents: true
-      },
-      experimentalApi: true,
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      semanticAdapterVersion: CODEX_SEMANTIC_ADAPTER_VERSION,
-      compatibilityPolicyVersion: CODEX_COMPATIBILITY_POLICY_VERSION,
-      probeRuntimeIdentity: {
-        imageId: "sha256:image",
-        operatingSystem: "linux",
-        architecture: "amd64",
-        containerUser: "1000:1000",
-        policyVersion: "codex-probe-runtime-v1"
-      },
-      credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1",
-      runtimeIdentity: {
-        projectId: "project",
-        workspaceId: "workspace",
-        revisionId: "revision",
-        runtimePlanHash: "runtime-plan",
-        runtimeGeneration: 1
-      }
-    } as const;
-
-    expect(hashAiProviderAuthorityV1(authority)).not.toBe(
-      hashAiProviderAuthorityV1({ ...authority, entrypointSha256: authority.executionArtifactClosureDigest })
-    );
-  });
 });

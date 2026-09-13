@@ -1,17 +1,11 @@
-import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import * as z from "zod";
-import {
-  aiProviderCapabilitiesSchema,
-  aiProfileRevisionSchema
-} from "../ai-sessions.js";
+import { aiProviderCapabilitiesSchema } from "../ai-sessions.js";
 import { configurationKeySchema } from "../primitives.js";
 import type { CodexProfileAuthorityInput } from "./codex-app-server.js";
 
 export const AI_PROFILE_AUTHORITY_FORMAT =
   "devspace.ai-provider-profile-authority/v1" as const;
-const AI_PROFILE_REVISION_DOMAIN = "devspace.ai-provider-profile-revision/v1";
-
 function isUnicodeScalarString(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -140,14 +134,4 @@ export function canonicalizeAiProviderAuthorityV1(input: unknown): string {
     throw new TypeError("AI provider authority is not a JSON value");
   }
   return canonical;
-}
-
-export function hashAiProviderAuthorityV1(input: unknown): string {
-  const hash = createHash("sha256");
-  hash.update(AI_PROFILE_REVISION_DOMAIN, "utf8");
-  hash.update(Uint8Array.of(0));
-  hash.update(canonicalizeAiProviderAuthorityV1(input), "utf8");
-  return aiProfileRevisionSchema.parse(
-    `sha256-ai-profile-v1:${hash.digest("hex")}`
-  );
 }

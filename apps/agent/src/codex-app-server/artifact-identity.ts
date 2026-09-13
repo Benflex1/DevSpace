@@ -359,7 +359,7 @@ async function resolveStandalone(configuredPath: string, canonicalEntrypoint: st
   if (collectedEntrypoint?.sha256 !== sha256(revalidatedEntrypoint.bytes)) {
     throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   }
-  return await makeArtifact({ configuredPath, root, layout: "standalone-package", target, packageVersion: version,
+  return makeArtifact({ configuredPath, root, layout: "standalone-package", target, packageVersion: version,
     entrypointRelativePath: "bin/codex", entries });
 }
 
@@ -449,7 +449,7 @@ async function resolveNodePackage(configuredPath: string, canonicalEntrypoint: s
   if (collectedEntrypoint?.sha256 !== sha256(native.bytes)) {
     throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   }
-  return await makeArtifact({ configuredPath, root, layout: "official-node-native-payload", target: payload.target,
+  return makeArtifact({ configuredPath, root, layout: "official-node-native-payload", target: payload.target,
     packageVersion: version, entrypointRelativePath: nativeRelative, entries });
 }
 
@@ -462,7 +462,7 @@ async function resolveDirectNative(configuredPath: string, canonicalEntrypoint: 
     relativePath: relative, kind: "file", mode: native.mode, linkTarget: null,
     byteLength: native.bytes.length, sha256: sha256(native.bytes)
   };
-  return await makeArtifact({ configuredPath, root, layout: "self-contained-native",
+  return makeArtifact({ configuredPath, root, layout: "self-contained-native",
     target: { os: process.platform, architecture: process.arch, abi: "native" }, packageVersion: null,
     entrypointRelativePath: relative, entries: [entry] });
 }

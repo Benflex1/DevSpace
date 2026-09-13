@@ -1,13 +1,13 @@
 import {
   AI_PROFILE_AUTHORITY_FORMAT,
   aiProviderProfileProjectionSchema,
-  hashAiProviderAuthorityV1,
   mapCodexDiagnosticToPublicAvailability,
   type AiProviderProfileProjection,
   type CodexCapabilitySet,
   type CodexProfileAuthorityInput
 } from "@devspace/contracts";
 import type { CodexDiscoveryResult } from "./discovery.js";
+import { hashAiProviderAuthorityV1 } from "./profile-revision.js";
 
 const CODEX_PROFILE_ID = "codex" as const;
 
