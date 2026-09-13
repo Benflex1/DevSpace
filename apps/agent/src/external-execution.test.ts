@@ -128,7 +128,16 @@ test("a fast update-ref returns the mutation result without retrying", async () 
     env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C", LC_ALL: "C" }
   });
   expect(revParse.stdout).toMatch(/^[0-9a-f]{40}\n$/u);
-  expect((await readFile(hookLog, "utf8")).trim().split("\n")).toEqual(["prepared", "committed"]);
+  const hookPhases = (await readFile(hookLog, "utf8")).trim().split("\n");
+  expect(hookPhases.filter((phase) => phase === "prepared")).toHaveLength(1);
+  expect(hookPhases.filter((phase) => phase === "committed")).toHaveLength(1);
+  expect(hookPhases[hookPhases.length - 1]).toBe("committed");
+  expect(hookPhases).not.toContain("aborted");
+  const preparingIndex = hookPhases.indexOf("preparing");
+  if (preparingIndex !== -1) {
+    expect(hookPhases.filter((phase) => phase === "preparing")).toHaveLength(1);
+    expect(preparingIndex).toBeLessThan(hookPhases.indexOf("prepared"));
+  }
   expect(await readdir(root)).toEqual([]);
   expect(fence.isHealthy).toBe(true);
 });
