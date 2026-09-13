@@ -10,7 +10,7 @@ const authority = {
   profileId: "codex",
   provider: "codex",
   providerVersion: "0.145.0",
-  adapterVersion: "codex-app-server-v0-145",
+  adapterVersion: "codex-app-server-family-v1",
   executableIdentity: "deployment-profile-pinned-codex",
   launchMode: "app-server-stdio",
   fixedArguments: ["app-server", "--stdio"],
@@ -39,7 +39,7 @@ const authority = {
 describe("AI provider profile revision v1", () => {
   test("has a fixed domain-separated golden digest", () => {
     expect(hashAiProviderAuthorityV1(authority)).toBe(
-      "sha256-ai-profile-v1:2e2182ea28025847d41470e66b4b6088410297c29b456eca404bfee8a624c193"
+      "sha256-ai-profile-v1:e1ed55ba30b422ccefe6f7d5a46314364e2c6e5ed66c054ebc6e547e666644d4"
     );
   });
 
@@ -69,7 +69,7 @@ describe("AI provider profile revision v1", () => {
     ["profileId", { profileId: "codex-other" }],
     ["provider", { provider: "other" }],
     ["providerVersion", { providerVersion: "0.146.0" }],
-    ["adapterVersion", { adapterVersion: "codex-app-server-v0-146" }],
+    ["adapterVersion", { adapterVersion: "codex-app-server-family-v2" }],
     ["executableIdentity", { executableIdentity: "other-codex" }],
     ["launchMode", { launchMode: "other-mode" }],
     ["fixedArguments", { fixedArguments: ["app-server"] }],

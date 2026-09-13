@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
-  CODEX_APP_SERVER_CLI_VERSION,
+  CODEX_BASELINE_CLI_VERSION,
   codexAppServerFixtureManifestSchema,
   codexAppServerProtocolMethods,
   type CodexAppServerPrivateLaunch
-} from "./codex-app-server-v0-145.js";
+} from "./codex-app-server-baseline-fixture.js";
 
 const fixtureRootUrl = new URL(
   "../../fixtures/codex-app-server/0.145.0/",
@@ -54,7 +54,7 @@ async function loadVerifiedFixtures() {
 describe("Codex app-server 0.145.0 adapter boundary", () => {
   test("hashes and parses every checked generated fixture", async () => {
     const { manifest, schemas } = await loadVerifiedFixtures();
-    expect(manifest.cliVersion).toBe(CODEX_APP_SERVER_CLI_VERSION);
+    expect(manifest.cliVersion).toBe(CODEX_BASELINE_CLI_VERSION);
     expect([...schemas.keys()].sort()).toEqual([
       "experimental/ToolRequestUserInputParams.json",
       "stable/ClientNotification.json",

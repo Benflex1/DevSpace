@@ -439,7 +439,8 @@ const sessionLostCode = z.enum([
   "AGENT_RESTART",
   "RUNTIME_REPLACED",
   "OWNERSHIP_AMBIGUOUS",
-  "EVENT_HISTORY_UNAVAILABLE"
+  "EVENT_HISTORY_UNAVAILABLE",
+  "CODEX_UNKNOWN_BLOCKING_REQUEST"
 ]);
 
 const canonicalAiEventSchemas = [

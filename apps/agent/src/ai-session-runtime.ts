@@ -13,7 +13,7 @@ import {
   aiProviderProfileProjectionSchema,
   type CanonicalAiEvent,
   type AiProviderProfileProjection,
-  CODEX_APP_SERVER_CLI_VERSION, CODEX_APP_SERVER_VERSION_OUTPUT
+  CODEX_BASELINE_CLI_VERSION, CODEX_BASELINE_VERSION_OUTPUT
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
@@ -294,7 +294,7 @@ export function codexProfileRevisionForAuthority(input: CodexProfileRevisionAuth
 
 function defaultProfileAuthority(): CodexProfileRevisionAuthority {
   return {
-    providerVersion: CODEX_APP_SERVER_CLI_VERSION, transport: "stdio-jsonl", threadSandbox: CODEX_THREAD_SANDBOX,
+    providerVersion: CODEX_BASELINE_CLI_VERSION, transport: "stdio-jsonl", threadSandbox: CODEX_THREAD_SANDBOX,
     turnSandboxPolicy: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS, approvalPolicy: CODEX_APPROVAL_POLICY,
     experimentalApi: CODEX_EXPERIMENTAL_API, approvalsReviewer: CODEX_APPROVALS_REVIEWER,
     declaredCapabilities: CODEX_CAPABILITIES, credentialSourceIdentity: CODEX_AUTH_CREDENTIAL_SOURCE_IDENTITY,
@@ -1495,7 +1495,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           const executablePath = options.executablePath ?? "/home/benjamin/.local/bin/codex";
           await verifyCodexExecutable(executablePath);
           const result = await execFileAsync(executablePath, ["--version"], { maxBuffer: 1024 });
-          if (result.stdout.trim() !== CODEX_APP_SERVER_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
+          if (result.stdout.trim() !== CODEX_BASELINE_VERSION_OUTPUT) return publicProfile({ state: "unavailable", code: "VERSION_MISMATCH" });
         }
         await readCodexReadbackHelper(options);
         await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
@@ -1819,6 +1819,6 @@ export {
   CODEX_EXECUTABLE_SHA256,
   CODEX_STAGED_READBACK_HELPER_SHA256,
   CODEX_PROFILE_ID,
-  CODEX_APP_SERVER_CLI_VERSION,
+  CODEX_BASELINE_CLI_VERSION,
   CODEX_NOTIFICATION_CATEGORY_REGISTRY
 };

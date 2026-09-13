@@ -102,12 +102,13 @@ export * from "./terminal.js";
 export * from "./ai-sessions.js";
 export * from "./github-app.js";
 export * from "./github-app-endpoints.js";
+export * from "./provider-adapters/codex-app-server.js";
 export {
-  CODEX_APP_SERVER_CLI_VERSION,
-  CODEX_APP_SERVER_VERSION_OUTPUT,
-  codexAppServerProtocolMethods,
-  codexAppServerFixtureManifestSchema,
+  CODEX_BASELINE_CLI_VERSION,
+  CODEX_BASELINE_VERSION_OUTPUT,
+  codexAppServerProtocolMethods as codexBaselineProtocolMethods,
+  codexAppServerFixtureManifestSchema as codexBaselineFixtureManifestSchema,
   type CodexAppServerPrivateLaunch,
   type CodexAppServerPrivateCorrelation
-} from "./provider-adapters/codex-app-server-v0-145.js";
+} from "./provider-adapters/codex-app-server-baseline-fixture.js";
 export { generateAgentApiV1JsonSchema, type AgentApiV1JsonSchema } from "./json-schema.js";

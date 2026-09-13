@@ -6,6 +6,7 @@ import {
   aiProfileRevisionSchema
 } from "../ai-sessions.js";
 import { configurationKeySchema } from "../primitives.js";
+import type { CodexProfileAuthorityInput } from "./codex-app-server.js";
 
 export const AI_PROFILE_AUTHORITY_FORMAT =
   "devspace.ai-provider-profile-authority/v1" as const;
@@ -48,6 +49,54 @@ const requiredRuntimeCapabilitiesSchema = z.array(configurationKeySchema)
     "Runtime capabilities must be unique"
   );
 
+const codexDigestSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+const codexRuntimeIdentitySchema = z.strictObject({
+  projectId: privateBoundedString,
+  workspaceId: privateBoundedString,
+  revisionId: privateBoundedString,
+  runtimePlanHash: privateBoundedString,
+  runtimeGeneration: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
+});
+const codexProbeRuntimeIdentitySchema = z.strictObject({
+  imageId: privateBoundedString,
+  operatingSystem: privateBoundedString,
+  architecture: privateBoundedString,
+  containerUser: privateBoundedString,
+  policyVersion: z.literal("codex-probe-runtime-v1")
+});
+
+export const codexProviderAuthorityDocumentV1Schema = z.strictObject({
+  format: z.literal(AI_PROFILE_AUTHORITY_FORMAT),
+  profileId: z.literal("codex"),
+  provider: z.literal("codex"),
+  reportedVersion: privateBoundedString,
+  entrypointSha256: codexDigestSchema,
+  executionArtifactClosureDigest: codexDigestSchema,
+  executionArtifactLayout: z.enum([
+    "standalone-package",
+    "official-node-native-payload",
+    "self-contained-native"
+  ]),
+  protocolFamily: z.literal("stdio-jsonl"),
+  stableSchemaFingerprint: codexDigestSchema,
+  experimentalSchemaFingerprint: codexDigestSchema.nullable(),
+  effectiveCapabilities: aiProviderCapabilitiesSchema,
+  experimentalApi: z.boolean(),
+  approvalPolicy: z.literal("on-request"),
+  approvalsReviewer: z.literal("user"),
+  semanticAdapterVersion: configurationKeySchema,
+  compatibilityPolicyVersion: configurationKeySchema,
+  probeRuntimeIdentity: codexProbeRuntimeIdentitySchema,
+  credentialSourceIdentity: configurationKeySchema,
+  runtimeIdentity: codexRuntimeIdentitySchema
+});
+
+export type CodexProviderAuthorityDocumentV1 = z.infer<
+  typeof codexProviderAuthorityDocumentV1Schema
+>;
+
+export type CodexProviderAuthorityInput = CodexProfileAuthorityInput;
+
 export const aiProviderAuthorityDocumentV1Schema = z.strictObject({
   format: z.literal(AI_PROFILE_AUTHORITY_FORMAT),
   profileId: configurationKeySchema,
@@ -75,7 +124,9 @@ export type AiProviderAuthorityDocumentV1 = z.infer<
 
 function normalizedAuthorityDocument(
   input: unknown
-): AiProviderAuthorityDocumentV1 {
+): AiProviderAuthorityDocumentV1 | CodexProviderAuthorityDocumentV1 {
+  const codexParsed = codexProviderAuthorityDocumentV1Schema.safeParse(input);
+  if (codexParsed.success) return codexParsed.data;
   const parsed = aiProviderAuthorityDocumentV1Schema.parse(input);
   return {
     ...parsed,
