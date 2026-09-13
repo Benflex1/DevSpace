@@ -284,7 +284,7 @@ function makeArtifact(input: {
   readonly packageVersion: string | null;
   readonly entrypointRelativePath: string;
   readonly entries: readonly CodexArtifactEntry[];
-}): Promise<CodexExecutionArtifact> {
+}): CodexExecutionArtifact {
   const entries = [...input.entries].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   const entrypoint = entries.find((entry) => entry.relativePath === input.entrypointRelativePath && entry.kind === "file");
   if (entrypoint === undefined || entrypoint.sha256 === null) throw artifactError("CODEX_UNRECOGNIZED_EXECUTION_FORM");
