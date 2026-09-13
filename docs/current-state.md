@@ -47,8 +47,14 @@ Agent-owned.
 AI Session Beta Checkpoint 2 is implemented on `feat/ai-workbench-checkpoint-2`: durable interaction
 projection and terminal retirement, canonical response reconciliation, profile-pinned session
 navigation, and changed-file opening through the existing Workbench editor/Changes views are in
-place. The deterministic browser fixture covers the workflow; real Codex browser dogfood remains a
-separate acceptance check for this branch.
+place. The branch also derives Codex compatibility from the inspected protocol/capability surface:
+Codex `0.145.0` is the minimum regression baseline with no upper version bound, compatibility
+probing is isolated from Agent-host privileges, and the exact recognized execution-artifact closure
+is bound through discovery and launch. Command/file approvals remain required for the writable
+profile; structured input and interrupt may degrade only when the discovered protocol proves they
+are unavailable. Existing sessions remain pinned to their profile revision across Codex updates.
+The deterministic browser fixture covers the workflow; real installed-Codex browser dogfood remains
+a separate acceptance check for this branch.
 
 ## Durable Milestone 1 and product path
 

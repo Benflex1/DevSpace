@@ -89,13 +89,14 @@ projections, appear in URLs, or enter logs. Private provider errors are mapped t
 
 ### Approved provider profile
 
-The initial registry is deployment-owned and immutable. Browser-visible projection:
+The Codex profile is Agent-discovered from the configured entrypoint after the Agent recognizes,
+stages, and probes its exact execution-artifact closure. Browser-visible projection:
 
 ```text
 {
   profileId: ConfigurationKey,
   profileRevision: "sha256-ai-profile-v1:<64 lowercase hex>",
-  provider: ConfigurationKey,
+  provider: "codex",
   displayName: bounded content,
   capabilities: {
     inspect: true,
@@ -103,7 +104,7 @@ The initial registry is deployment-owned and immutable. Browser-visible projecti
     resume: boolean,
     sendTurn: true,
     interrupt: boolean,
-    approvals: boolean,
+    approvals: true,
     structuredInput: boolean,
     stop: true,
     streamEvents: true
@@ -114,56 +115,51 @@ The initial registry is deployment-owned and immutable. Browser-visible projecti
 }
 ```
 
-The Agent-private definition may contain only administrator-deployed values: fixed executable
-identity, fixed `app-server --stdio` launch mode/arguments, adapter and CLI version, required
-container identity/capabilities, credential-source handle, and availability inspection policy.
+Codex `0.145.0` is the minimum supported protocol baseline, not the only authorized executable;
+there is no upper release bound. The Agent-private authority is derived from actual inspected
+protocol/capability evidence and contains bounded identity fields: the reported version,
+entrypoint and recognized closure digests/layout, stable and experimental schema fingerprints,
+effective capabilities, fixed app-server launch policy, approval policy/reviewer, probe-runtime
+identity, credential-source handle, and the existing workspace/runtime authority.
 
 #### Profile revision algorithm
 
 `profileRevision` is the Agent-calculated identity of one strict
-`devspace.ai-provider-profile-authority/v1` document. Every field is required, unknown fields are
-invalid, and v1 has no implicit defaults:
+`devspace.ai-provider-profile-authority/v1` document. The effective fields are:
 
 ```text
 {
   format: "devspace.ai-provider-profile-authority/v1",
-  profileId,
-  provider,
-  providerVersion,
-  adapterVersion,
-  executableIdentity,
-  launchMode,
-  fixedArguments,
-  runtimeIdentity,
-  requiredRuntimeCapabilities,
-  credentialSourceHandle,
-  capabilities,
-  availabilityInspectionPolicy: {
-    executableProbe,
-    expectedVersionOutput,
-    credentialProbe,
-    runtimeProbe: "required-before-acceptance"
-  }
+  providerKind: "codex",
+  reportedVersion,
+  entrypointSha256,
+  executionArtifactClosureDigest,
+  executionArtifactLayout,
+  protocolFamily,
+  stableSchemaFingerprint,
+  experimentalSchemaFingerprint,
+  probeRuntimeIdentity,
+  semanticAdapterVersion,
+  compatibilityPolicyVersion,
+  effectiveCapabilities,
+  experimentalApi,
+  approvalPolicy: "on-request",
+  approvalsReviewer: "user",
+  credentialSourceIdentity,
+  runtimeIdentity
 }
 ```
 
-`profileId`, `provider`, `adapterVersion`, `executableIdentity`, `launchMode`,
-`credentialSourceHandle`, each runtime-capability entry, and
-`availabilityInspectionPolicy.executableProbe` are `ConfigurationKey` values.
-`providerVersion`, each fixed argument, an exact container-user name, and expected version output
-are non-empty, NUL-free strings of at most 4,096 code units. `fixedArguments` has at most 64
-ordered entries. `runtimeIdentity` is exactly either
-`{ kind: "workspace-default-user" }` or
-`{ kind: "exact-container-user", user: <bounded string> }`.
-`requiredRuntimeCapabilities` has at most 64 unique entries.
-`availabilityInspectionPolicy.credentialProbe` is exactly `required | not-required`, and
-`runtimeProbe` is the literal `required-before-acceptance`. `capabilities` is the complete strict
-public capability declaration; no capability is omitted.
+All digest fields are lowercase SHA-256 values over bounded Agent-verified bytes or canonical
+discovery evidence. `reportedVersion` is parsed as a semantic version and must be at least
+`0.145.0`; no maximum is applied. `executionArtifactLayout`, `protocolFamily`, semantic/policy
+versions, and capability names are closed bounded values. `probeRuntimeIdentity` includes the exact
+managed image identity, architecture/ABI target, container user, and containment policy version.
+`effectiveCapabilities` is the result of deterministic structural evaluation plus semantic adapter
+checks, not a browser declaration. `runtimeIdentity` retains the exact project/workspace/runtime
+generation authority already required by AI sessions.
 
-`fixedArguments` is ordered and order affects authority.
-`requiredRuntimeCapabilities` is a unique semantic set and is sorted by Unicode code point before
-hashing. All other arrays retain their order. The normalized document is serialized using RFC
-8785/JCS. Agent calculates:
+The normalized document is serialized using RFC 8785/JCS. Agent calculates:
 
 ```text
 digest = SHA-256(
@@ -175,21 +171,25 @@ profileRevision = "sha256-ai-profile-v1:" || lowercaseHex(digest)
 ```
 
 This is a separate semantic namespace from Project Options revision hashing. Object insertion
-order cannot affect it. Changing any execution-authority field changes the digest. A replacement
-under one `profileId` therefore has a new revision.
+order cannot affect it. Changing executable bytes at an unchanged path, recognized closure
+contents, compatible schema evidence, capabilities, experimental opt-in, approval policy/reviewer,
+or runtime authority changes the digest and fences the profile. Harmless display metadata and
+transient availability observations do not change it.
 
 `displayName` is intentionally excluded because it is cosmetic and is forbidden from affecting
-launch or inspection. Transient availability observations are excluded, while the policy that
-produces them is bound. Credential/secret values, host paths, executable paths, and raw environment
-values are prohibited; fixed non-host argument strings remain private authority and are bound.
-Only opaque deployed identities such as `executableIdentity` and `credentialSourceHandle` cross
-those boundaries. The public projection exposes only the digest, never this private authority
-document. Agent owns calculation and verification.
+launch or inspection. Credential/secret values, host paths, executable paths, raw environment
+values, provider-native IDs, and generated schema contents are prohibited from public projection;
+only bounded opaque identities and safe capability evidence cross that boundary. The public
+projection exposes only the profile digest, safe availability information, and effective
+capabilities, never this private authority document. Agent owns calculation and verification.
 
-Required enabled-v1 capabilities are `inspect`, `start`, `sendTurn`, `stop`, and `streamEvents`.
-`resume`, `interrupt`, `approvals`, and `structuredInput` are optional. Unsupported optional work
-returns `AI_CAPABILITY_UNSUPPORTED` with the capability name. No browser branch depends on the
-provider key.
+Required enabled-v1 capabilities are `inspect`, `start`, `sendTurn`, `stop`, `streamEvents`, and
+compatible command/file `approvals` for the writable managed profile. `resume`, `structuredInput`,
+and `interrupt` are optional and may be disabled only when the discovered protocol cannot safely
+support them. If required approval semantics are absent or incompatible, the profile is unavailable;
+it must never silently switch to `approvalPolicy: "never"` or continue a writable workflow without
+approvals. Unsupported optional work returns `AI_CAPABILITY_UNSUPPORTED` with the capability name.
+No browser branch depends on the provider key.
 
 Browser selection contains only `profileId`. Web obtains the safe inspection projection and sends
 its `profileId` plus `profileRevision` on Web-to-Agent start/resume. Before durable operation
@@ -203,8 +203,14 @@ Agent also checks the exact workspace runtime independently. Availability codes 
 
 ```text
 PROFILE_DISABLED
-EXECUTABLE_MISSING
-VERSION_MISMATCH
+CODEX_EXECUTABLE_MISSING
+CODEX_EXECUTABLE_INTEGRITY_CHANGED
+CODEX_UNRECOGNIZED_EXECUTION_FORM
+CODEX_VERSION_BELOW_MINIMUM
+CODEX_PROTOCOL_INCOMPATIBLE
+CODEX_APPROVAL_PROTOCOL_UNAVAILABLE
+CODEX_INITIALIZE_NEGOTIATION_FAILED
+CODEX_PROBE_RUNTIME_UNAVAILABLE
 RUNTIME_IDENTITY_UNAVAILABLE
 CREDENTIAL_SOURCE_UNAVAILABLE
 WORKSPACE_REQUIREMENT_UNMET
@@ -811,11 +817,16 @@ exceptions receive an incident at the existing user-facing boundary. Browser-saf
 Web-owned fixed projections. Raw provider errors and all content-plane data remain private from
 generic errors and diagnostics.
 
-## Codex app-server adapter v0.145.0
+## Codex app-server protocol-family adapter
 
-The exact pin is `codex-cli 0.145.0`; the captured CLI binary SHA-256 is
-`a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14`.
-Stable-default component evidence was generated with:
+The stable DevSpace semantic adapter supports Codex `0.145.0` and newer compatible releases. The
+`0.145.0` schemas below are the minimum regression baseline, not a production executable or binary
+authorization pin. A compatible newer release is admitted without a DevSpace release or a
+version-specific adapter; the upper supported version is unbounded. The Agent first verifies the
+recognized execution-artifact closure, then probes that exact staged artifact in an isolated
+runtime and evaluates its structural/capability evidence.
+
+Baseline stable-default component evidence was generated with:
 
 ```text
 codex app-server generate-json-schema --out <directory>
@@ -838,8 +849,9 @@ The repository checks the actual generated bytes:
 | experimental | `experimental/ToolRequestUserInputParams.json` | 1,977 | `21e569e32c05d51c1ee5e587730c182b911ede97a4df267f6e4ef24e1717f34e` |
 
 Offline tests read, hash, parse, and derive the required method inventory from these fixtures.
-`UPSTREAM-NOTICE.md` records OpenAI Codex provenance and Apache-2.0 licensing. The adapter mapping
-is:
+The repository also retains a captured `0.153.4` schema fixture from the isolated probe path and
+synthetic additive/breaking/missing-capability fixtures. `UPSTREAM-NOTICE.md` records OpenAI Codex
+provenance and Apache-2.0 licensing. The adapter mapping is:
 
 | Codex native method | DevSpace behavior |
 | --- | --- |
@@ -857,12 +869,15 @@ is:
 | `item/tool/requestUserInput` | optional experimental structured-input capability |
 | `turn/completed` | `turn.provider-completed`, then Web quiescence |
 
-The adapter sends `initialize` first with the bounded
-`capabilities.experimentalApi: true` opt-in required by the pinned structured-input surface, then
-responds with `initialized`. The owner/browser is the explicit `approvalsReviewer: "user"` at
-`thread/start`; neither setting is ambient host Codex configuration. Both values are part of the
-Agent profile-revision authority, so changing either fences existing sessions. Other experimental
-methods/fields are ignored unless a later profile revision and contract explicitly adopt them.
+For a profile whose structural evidence supports structured input, the adapter sends `initialize`
+with the bounded `capabilities.experimentalApi: true` opt-in, then responds with `initialized`.
+The owner/browser is the explicit `approvalsReviewer: "user"` at `thread/start`; neither setting
+is ambient host Codex configuration. Both values are part of the Agent profile-revision authority,
+so changing either fences existing sessions. Optional structured input and interrupt are disabled
+truthfully when their required surface is absent. Unknown blocking server requests fail closed,
+fence and terminate the exact provider generation, retire pending interactions, and expose only a
+bounded compatibility diagnostic; they are never left waiting for a guessed response. Other
+experimental methods/fields are ignored only under the explicit notification policy.
 
 The adapter fixes the exact managed `/workspace` cwd and approved sandbox/approval policy from the
 deployment profile and runtime authorization. It does not forward browser-supplied Codex model,
@@ -892,7 +907,10 @@ configuration, host AI execution, terminal-backed first-class sessions, database
 credentials, provider runtime, Agent/Web handlers, browser UI, file editor, Git staging/publish,
 checkpoints, autonomous orchestration, persistent generic terminals, multiple workspaces,
 authentication replacement, automatic merge, production deployment, or broad event sourcing.
-Current Beta Slice B implements the Codex-only runtime, storage, handlers, stream, credentials, and
-Workbench path described above. It still excludes multiple providers, provider-native resume,
-approvals, structured questions, hostile-descendant containment, automatic merge, and production
-deployment.
+Current Beta Slice B implements the Codex-only runtime, storage, handlers, stream, credentials,
+approvals, structured questions, and Workbench path described above. It still excludes multiple
+providers, provider-native resume, hostile-descendant containment, automatic merge, and production
+deployment. Existing sessions remain pinned to their profile revision: a Codex update creates a new
+profile authority, does not replace a live old generation in place, and does not silently resume an
+old-profile session with new bytes. Old sessions remain inspectable history; a new compatible
+profile session is required after the old generation stops or is lost.

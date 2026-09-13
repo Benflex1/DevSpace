@@ -407,6 +407,12 @@ Stop rule:
    - ✅ stop the live session and verify post-fix ephemeral staging cleanup;
    - ✅ Checkpoint 2 browser slice adds approvals, structured questions, durable interaction replay,
      profile-pinned session navigation, and Workbench changed-file opening;
+   - ✅ Codex compatibility now uses the protocol/capability surface rather than an executable
+     release whitelist: `0.145.0` is the minimum regression baseline, newer compatible versions
+     have no upper bound, and discovery/probing is isolated and bound to the exact execution
+     artifact closure;
+   - ✅ Writable managed sessions require compatible command/file approvals; structured input and
+     interrupt degrade truthfully when optional protocol capabilities are absent;
    - ✅ record an Orca-first / T3-secondary conceptual UX policy; Checkpoint 2 used T3 patterns
      conceptually only and copied no host/process/persistence assumptions;
    - ✅ failed-turn/Unauthorized finalization now requires provider exit, staging cleanup, and lease
@@ -598,7 +604,8 @@ Foundation completed:
 AI Session Beta Slice B — Checkpoint 1:
 
 - ✅ Codex-first AI session tab
-- ✅ Agent-owned persistent Codex authority, exclusive beta lease, and exact-container staging path
+- ✅ Agent-owned persistent Codex authority, exclusive beta lease, exact-container staging path, and
+  isolated version/capability discovery for the recognized execution artifact
 - ✅ Create, prompt, stream, interrupt, stop, and new-turn controls
 - ✅ Persistent public session/turn metadata and refresh recovery
 - ✅ Streaming assistant text and useful activity events
@@ -615,7 +622,8 @@ AI Session Beta Slice B — Checkpoint 1:
 - ✅ Checkpoint 1 passed: private Probe A, private Probe B, and the real browser first-write/read-
   only/interrupt/replay/Stop flow all used the Agent-owned Codex provider; provider exit, staging,
   synchronization, lease, authority, and container cleanup were verified
-- 🟡 Checkpoint 2 real Codex/browser dogfood remains to be completed on the implementation branch
+- 🟡 Checkpoint 2 real installed-Codex/browser dogfood remains to be completed on the implementation
+  branch; deterministic 0.145-baseline and captured newer-protocol fixtures are green
 
 Deferred until later:
 
