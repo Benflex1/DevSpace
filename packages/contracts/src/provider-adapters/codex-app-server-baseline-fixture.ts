@@ -86,8 +86,8 @@ export const codexAppServerFixtureManifestSchema = z.strictObject({
  * Agent-private adapter launch authority. No member of this type is a public
  * Agent/Web or browser contract.
  */
-export interface CodexAppServerPrivateLaunch {
-  readonly executableIdentity: "deployment-profile-pinned-codex";
+export interface CodexBaselineFixturePrivateLaunch {
+  readonly executableIdentity: "baseline-fixture-only";
   readonly cliVersion: typeof CODEX_BASELINE_CLI_VERSION;
   readonly launchMode: "app-server-stdio";
   readonly tty: false;
@@ -102,7 +102,7 @@ export interface CodexAppServerPrivateLaunch {
  * Raw JSON-RPC IDs and provider-native thread/turn/item identities live only in
  * the Agent adapter and its private ownership record.
  */
-export interface CodexAppServerPrivateCorrelation {
+export interface CodexBaselineFixturePrivateCorrelation {
   readonly providerThreadId: string;
   readonly providerTurnId: string | null;
   readonly providerItemId: string | null;

@@ -5,7 +5,7 @@ import {
   CODEX_BASELINE_CLI_VERSION,
   codexAppServerFixtureManifestSchema,
   codexAppServerProtocolMethods,
-  type CodexAppServerPrivateLaunch
+  type CodexBaselineFixturePrivateLaunch
 } from "./codex-app-server-baseline-fixture.js";
 
 const fixtureRootUrl = new URL(
@@ -106,8 +106,8 @@ describe("Codex app-server minimum compatibility baseline fixture", () => {
   });
 
   test("makes every launch authority field Agent-private and fixed", () => {
-    const launch: CodexAppServerPrivateLaunch = {
-      executableIdentity: "deployment-profile-pinned-codex",
+    const launch: CodexBaselineFixturePrivateLaunch = {
+      executableIdentity: "baseline-fixture-only",
       cliVersion: "0.145.0",
       launchMode: "app-server-stdio",
       tty: false,
