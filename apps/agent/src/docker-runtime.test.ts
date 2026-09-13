@@ -123,6 +123,38 @@ describe("dedicated rootless Docker boundary", () => {
     })).rejects.toThrow("preview-host-network-is-forbidden");
   });
 
+  test("serializes an isolated probe container without inheriting image startup or workspace authority", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createProbeContainer("devspace-codex-probe", {
+      imageId: "sha256:managed-image", user: "1000:1000", labels: { "devspace.probe": "true" },
+      environment: { CODEX_HOME: "/tmp/devspace-codex-home", HOME: "/tmp/devspace-codex-home" },
+      cpuMillicores: 1_000, memoryBytes: 2_147_483_648, pidLimit: 64
+    })).resolves.toBe("container-1");
+    const request = fixture.bodies[0] as Record<string, any>;
+    expect(request).toMatchObject({
+      Image: "sha256:managed-image",
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: ["exec sleep 2147483647"],
+      HostConfig: {
+        NetworkMode: "none", Binds: [], Mounts: [],
+        Tmpfs: {
+          "/opt/devspace-codex-probe": "rw,nosuid,nodev,size=1g",
+          "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
+          "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
+        },
+        Privileged: false, Devices: [], ReadonlyRootfs: true,
+        SecurityOpt: ["no-new-privileges:true"], CapDrop: ["ALL"], CapAdd: [],
+        PidsLimit: 64, NanoCpus: 1_000_000_000, Memory: 2_147_483_648, MemorySwap: 2_147_483_648,
+        RestartPolicy: { Name: "no" }
+      }
+    });
+    expect(request).not.toHaveProperty("NetworkingConfig.EndpointsConfig");
+    expect(JSON.stringify(request)).not.toContain("/workspace");
+    expect(JSON.stringify(request)).not.toContain("GITHUB");
+    expect(JSON.stringify(request)).not.toContain("/var/run/devspace-agent.sock");
+  });
+
   test("accepts additional Docker container-list fields from newer engines", async () => {
     const engine = new DockerEngineClient(await listedEngineSocket());
     await expect(engine.listContainers()).resolves.toEqual([{
