@@ -60,7 +60,7 @@ async function stagedFixture(): Promise<Awaited<ReturnType<typeof stageCodexExec
 }
 
 function dockerFixture(expected: Awaited<ReturnType<typeof stagedFixture>>): {
-  docker: DockerEngineClient; commands: string[][]; cleanup: string[]; probeImageReference?: string
+  docker: DockerEngineClient; commands: string[][]; cleanup: string[]; probeImageReference: string | undefined
 } {
   const commands: string[][] = [];
   const cleanup: string[] = [];
