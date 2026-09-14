@@ -57,6 +57,7 @@ import {
   type CodexArtifactStager,
   type CodexLaunchArtifact
 } from "./codex-app-server/artifact-stager.js";
+import { resolveCodexExecutionArtifact } from "./codex-app-server/artifact-identity.js";
 import {
   CODEX_ARTIFACT_READBACK_HELPER_SHA256,
   CODEX_STAGED_READBACK_HELPER_SHA256
@@ -649,15 +650,39 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
           return fakeCodexProfileProjection();
         }
+        const configuredPath = options.executablePath ?? resolveCodexExecutablePath();
+        const key = discoveryKey(input);
+        const cached = codexDiscoveries.get(key);
+        const runtimeIdentity = cached?.profileAuthority.runtimeIdentity;
+        if (cached !== undefined && cached.artifact.configuredPath === configuredPath
+          && runtimeIdentity !== undefined
+          && runtimeIdentity.projectId === context.projectId
+          && runtimeIdentity.workspaceId === context.workspaceId
+          && runtimeIdentity.revisionId === context.revisionId
+          && runtimeIdentity.runtimePlanHash === context.runtimePlanHash
+          && runtimeIdentity.runtimeGeneration === context.generation) {
+          const currentArtifact = await resolveCodexExecutionArtifact(configuredPath);
+          if (currentArtifact.closureDigest === cached.artifact.closureDigest
+            && currentArtifact.entrypointSha256 === cached.artifact.entrypointSha256) {
+            await readCodexReadbackHelper(options);
+            await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
+            return safeCodexProfileProjection({
+              revision: codexProfileRevisionForDiscovery(cached.profileAuthority),
+              capabilities: cached.compatibility.capabilities,
+              availability: discoveryAvailability(cached)
+            });
+          }
+          codexDiscoveries.delete(key);
+        }
         const discovery = await (options.codexDiscovery ?? discoverCodex)({
-          configuredPath: options.executablePath ?? resolveCodexExecutablePath(),
+          configuredPath,
           managedContainerId: context.ownership.developmentContainer.id,
           workspaceContext: context,
           stateRoot,
           docker,
           createId
         });
-        codexDiscoveries.set(discoveryKey(input), discovery);
+        codexDiscoveries.set(key, discovery);
         await readCodexReadbackHelper(options);
         await (options.codexCredentialAuthority ?? createCodexCredentialAuthority(stateRoot)).inspect();
         return safeCodexProfileProjection({

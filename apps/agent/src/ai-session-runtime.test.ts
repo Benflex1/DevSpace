@@ -14,6 +14,7 @@ import { createCodexCredentialAuthority, type CodexCredentialAuthority } from ".
 import { MAX_RETAINED_OUTBOX_EVENTS, createAiSessionOutbox, outboxPathForAiSession } from "./ai-session-outbox.js";
 import { canonicalAiEventSchema, type CodexCapabilitySet, type CodexProfileAuthorityInput } from "@devspace/contracts";
 import { codexProfileRevisionForDiscovery } from "./codex-app-server/profile-authority.js";
+import { resolveCodexExecutionArtifact } from "./codex-app-server/artifact-identity.js";
 import type { CodexArtifactStager, CodexLaunchArtifact } from "./codex-app-server/artifact-stager.js";
 import type { CodexPrivateFailureObservation } from "./codex-app-server/provider.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
@@ -1661,6 +1662,53 @@ describe("AI session runtime", () => {
       expect(profile.profileRevision).toBe(codexProfileRevisionForDiscovery(authority));
       expect(profile.availability).toEqual({ state: "available" });
       expect(profile.capabilities).toMatchObject({ approvals: true, structuredInput: false, interrupt: false });
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("reuses an unchanged discovered artifact without restaging it", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-discovery-reuse-test-"));
+    const executablePath = "/usr/bin/true";
+    const artifact = await resolveCodexExecutionArtifact(executablePath);
+    const capabilities: CodexCapabilitySet = {
+      inspect: true, start: true, resume: true, sendTurn: true, interrupt: true,
+      approvals: true, structuredInput: true, stop: true, streamEvents: true
+    };
+    const authority: CodexProfileAuthorityInput = {
+      providerKind: "codex", reportedVersion: "0.153.4", entrypointSha256: artifact.entrypointSha256,
+      executionArtifactClosureDigest: artifact.closureDigest, executionArtifactLayout: artifact.layout,
+      protocolFamily: "stdio-jsonl", stableSchemaFingerprint: "3".repeat(64), experimentalSchemaFingerprint: "4".repeat(64),
+      effectiveCapabilities: capabilities, experimentalApi: true, approvalPolicy: "on-request", approvalsReviewer: "user",
+      semanticAdapterVersion: "codex-app-server-family-v1", compatibilityPolicyVersion: "codex-compatibility-v1",
+      probeRuntimeIdentity: { imageId: `sha256:${"5".repeat(32)}`, operatingSystem: "linux", architecture: "amd64", containerUser: "", policyVersion: "codex-probe-runtime-v1" },
+      credentialSourceIdentity: "agent-owned-persistent-codex-auth-v1", runtimeIdentity: { projectId, workspaceId, revisionId, runtimePlanHash, runtimeGeneration: 1 }
+    };
+    const discovery = {
+      artifact, stagedArtifact: {}, probe: {}, profileAuthority: authority,
+      compatibility: {
+        transport: "compatible", diagnostic: null, capabilities,
+        stableSchemaFingerprint: authority.stableSchemaFingerprint, experimentalSchemaFingerprint: authority.experimentalSchemaFingerprint,
+        features: {
+          basicSession: { feature: "basicSession", state: "supported", reason: null },
+          approvals: { feature: "approvals", state: "supported", reason: null },
+          structuredInput: { feature: "structuredInput", state: "supported", reason: null },
+          interrupt: { feature: "interrupt", state: "supported", reason: null }
+        }
+      }
+    } as never;
+    const inspect = vi.fn(async () => undefined);
+    const discover = vi.fn(async () => discovery);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, executablePath,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      codexReadbackHelperBytes: Buffer.from("test-helper"), codexCredentialAuthority: { inspect } as never,
+      codexDiscovery: discover });
+    try {
+      const first = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      const second = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      expect(second).toEqual(first);
+      expect(discover).toHaveBeenCalledTimes(1);
+      expect(inspect).toHaveBeenCalledTimes(2);
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }
