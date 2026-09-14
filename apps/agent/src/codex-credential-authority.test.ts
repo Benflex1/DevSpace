@@ -579,4 +579,17 @@ describe("Codex credential authority", () => {
       await rm(fixture.root, { recursive: true, force: true });
     }
   });
+
+  test("clears only a valid reauthentication marker after replacement", async () => {
+    const fixture = await authorityFixture();
+    try {
+      await writeAuthority(fixture.authority);
+      await fixture.authority.markReauthenticationRequired();
+      await fixture.authority.clearReauthenticationRequired();
+      await expect(fixture.authority.inspect()).resolves.toBeUndefined();
+      await expect(fixture.authority.clearReauthenticationRequired()).resolves.toBeUndefined();
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
 });

@@ -104,6 +104,52 @@ export interface DockerProbeContainerInput {
   readonly memoryBytes: number;
   readonly pidLimit: number;
 }
+
+export interface DockerCodexBootstrapContainerInput {
+  readonly imageId: string;
+  /** Agent-private staged Codex artifact closure; never a workspace path. */
+  readonly artifactRoot: string;
+  /** Agent-private empty temporary CODEX_HOME for one authentication attempt. */
+  readonly codexHomePath: string;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly cpuMillicores: number;
+  readonly memoryBytes: number;
+  readonly pidLimit: number;
+}
+
+export function buildCodexBootstrapContainerInput(input: DockerCodexBootstrapContainerInput) {
+  if (!/^sha256:[0-9a-f]{32,}$/u.test(input.imageId)
+    || input.artifactRoot.length === 0 || input.codexHomePath.length === 0
+    || input.artifactRoot.includes("\0") || input.codexHomePath.includes("\0")) {
+    throw new Error("codex-bootstrap-container-input-invalid");
+  }
+  return {
+    Image: input.imageId,
+    Entrypoint: ["/bin/sh", "-c"],
+    Cmd: ["exec sleep 2147483647"],
+    WorkingDir: "/",
+    User: "",
+    Env: ["CODEX_HOME=/opt/codex-home", "HOME=/opt/codex-home", "TMPDIR=/tmp"],
+    Labels: { ...input.labels },
+    ExposedPorts: {},
+    HostConfig: {
+      Binds: [],
+      Mounts: [
+        { Type: "bind", Source: path.resolve(input.artifactRoot), Target: "/opt/codex", ReadOnly: true,
+          BindOptions: { Propagation: "rprivate" } },
+        { Type: "bind", Source: path.resolve(input.codexHomePath), Target: "/opt/codex-home", ReadOnly: false,
+          BindOptions: { Propagation: "rprivate" } }
+      ],
+      Tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=64m" },
+      NetworkMode: "bridge", PortBindings: {}, PublishAllPorts: false,
+      Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
+      AutoRemove: false, ReadonlyRootfs: true, RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"],
+      NanoCpus: input.cpuMillicores * 1_000_000, Memory: input.memoryBytes, MemorySwap: input.memoryBytes,
+      PidsLimit: input.pidLimit
+    }
+  } as const;
+}
 export const DOCKER_LOOPBACK_HOST = "127.0.0.1" as const;
 export interface DockerPortBinding { readonly HostIp: string; readonly HostPort: string }
 export type DockerPortBindings = Readonly<Record<string, readonly DockerPortBinding[]>>;
@@ -375,6 +421,13 @@ export class DockerEngineClient {
       }
     });
     if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("docker-probe-container-id-missing");
+    return response.Id;
+  }
+
+  async createCodexBootstrapContainer(name: string, input: DockerCodexBootstrapContainerInput): Promise<string> {
+    const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`,
+      buildCodexBootstrapContainerInput(input));
+    if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("codex-bootstrap-container-id-missing");
     return response.Id;
   }
 

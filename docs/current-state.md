@@ -55,8 +55,10 @@ profile; structured input and interrupt may degrade only when the discovered pro
 are unavailable. Existing sessions remain pinned to their profile revision across Codex updates.
 The deterministic browser fixture covers the workflow; the configured official Codex `0.153.4`
 was admitted through the isolated discovery path with the required capabilities. Full real-browser
-dogfood remains blocked at the normal Agent-owned Codex credential authority because the fresh
-disposable acceptance state has no provisioned authority; no credential bypass is permitted.
+dogfood remains blocked until an operator completes the isolated device-login step for the fresh
+Agent-owned authority. A bounded deployment/admin bootstrap now performs that step inside a
+dedicated rootless Docker container and installs the validated result through the existing Agent
+lease and atomic writeback path; no credential bypass is permitted.
 
 The Codex readback helpers now have explicit linux-x64 provenance: reviewed C sources are built
 inside the digest-pinned `gcc:13.3.0-bookworm` builder, canonical binaries are checked by their

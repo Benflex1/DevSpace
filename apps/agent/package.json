@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "pnpm run build:helper && pnpm --dir ../.. exec tsx apps/agent/src/cli.ts",
     "start": "node dist/cli.js",
+    "codex:bootstrap": "pnpm run build && node dist/codex-bootstrap-cli.js",
     "test": "pnpm --dir ../.. exec vitest run --project @devspace/agent",
     "verify:runtime:real": "pnpm --dir ../.. exec tsx apps/agent/test/verify-real-rootless.ts",
     "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",

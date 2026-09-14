@@ -155,6 +155,39 @@ describe("dedicated rootless Docker boundary", () => {
     expect(JSON.stringify(request)).not.toContain("/var/run/devspace-agent.sock");
   });
 
+  test("serializes a credential bootstrap with only the staged artifact and temporary authority", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    const imageId = `sha256:${"b".repeat(64)}`;
+    await expect(engine.createCodexBootstrapContainer("devspace-codex-bootstrap", {
+      imageId, artifactRoot: "/srv/devspace/managed/state/codex-artifacts/staged",
+      codexHomePath: "/srv/devspace/managed/state/.codex-bootstrap-home-test",
+      labels: { "devspace.private-purpose": "codex-credential-bootstrap" },
+      cpuMillicores: 1_000, memoryBytes: 512 * 1024 * 1024, pidLimit: 128
+    })).resolves.toBe("container-1");
+    const request = fixture.bodies[0] as Record<string, unknown>;
+    expect(request).toMatchObject({
+      Image: imageId, Entrypoint: ["/bin/sh", "-c"], Cmd: ["exec sleep 2147483647"], WorkingDir: "/", User: "",
+      HostConfig: {
+        NetworkMode: "bridge", Binds: [], Privileged: false, ReadonlyRootfs: true,
+        CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"],
+        PortBindings: {}, PublishAllPorts: false, AutoRemove: false,
+        Tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=64m" },
+        NanoCpus: 1_000_000_000, Memory: 512 * 1024 * 1024, MemorySwap: 512 * 1024 * 1024, PidsLimit: 128,
+        Mounts: [
+          { Type: "bind", Source: "/srv/devspace/managed/state/codex-artifacts/staged", Target: "/opt/codex", ReadOnly: true,
+            BindOptions: { Propagation: "rprivate" } },
+          { Type: "bind", Source: "/srv/devspace/managed/state/.codex-bootstrap-home-test", Target: "/opt/codex-home", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } }
+        ]
+      }
+    });
+    expect(JSON.stringify(request)).not.toContain("/workspace");
+    expect(JSON.stringify(request)).not.toContain("docker.sock");
+    expect(JSON.stringify(request)).not.toContain("agent.sock");
+    expect(request).not.toHaveProperty("NetworkingConfig");
+  });
+
   test("accepts additional Docker container-list fields from newer engines", async () => {
     const engine = new DockerEngineClient(await listedEngineSocket());
     await expect(engine.listContainers()).resolves.toEqual([{
