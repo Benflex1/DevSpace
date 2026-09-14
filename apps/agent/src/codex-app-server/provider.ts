@@ -32,6 +32,11 @@ const CODEX_TURN_SANDBOX_POLICY = {
   writableRoots: ["/workspace"],
   networkAccess: true
 } as const;
+const CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG = "features.default_mode_request_user_input=true";
+
+export function codexAppServerCommand(executablePath: string): readonly string[] {
+  return [executablePath, "-c", CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG, "app-server", "--stdio"];
+}
 
 export type CodexPrivateFailureObservation = Readonly<{
   stage: "request" | "turn";
@@ -246,7 +251,7 @@ export class CodexProvider implements ProviderAdapter {
       await this.runUpload(containerDir, this.input.readbackHelperBytes, "staged-readback-helper");
       await this.runUpload(`${containerDir}/home`, Buffer.from(auth.bytes), "auth.json", { CODEX_HOME: `${containerDir}/home` });
       const execId = await this.input.docker.createExec(this.input.ownership.ownership.developmentContainer.id, {
-        command: [executablePath, "app-server", "--stdio"], workingDirectory: "/workspace",
+        command: codexAppServerCommand(executablePath), workingDirectory: "/workspace",
         environment: { CODEX_HOME: `${containerDir}/home` }, attachStdin: true, tty: false
       });
       this.providerExecId = execId;

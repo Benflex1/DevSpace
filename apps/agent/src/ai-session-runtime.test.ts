@@ -1774,7 +1774,8 @@ describe("AI session runtime", () => {
       expect(launched?.profileRevision).toBe(codexProfileRevisionForDiscovery(authority));
       const providerStart = captured.find((entry) => String(entry.id).startsWith("provider-"));
       expect((providerStart?.input as DockerExecInput).command).toEqual([
-        "/tmp/devspace-ai/exact-stage/artifact/vendor/codex", "app-server", "--stdio"
+        "/tmp/devspace-ai/exact-stage/artifact/vendor/codex", "-c",
+        "features.default_mode_request_user_input=true", "app-server", "--stdio"
       ]);
       const initialize = captured.map((entry) => entry.jsonRpc as { method?: string; params?: unknown } | undefined)
         .find((request) => request?.method === "initialize");
