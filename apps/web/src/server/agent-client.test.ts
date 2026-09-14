@@ -599,6 +599,27 @@ test("allows Codex profile discovery to complete beyond the general observation 
   } finally { await service.close(); }
 }, 15_000);
 
+test("gives real AI startup a bounded window beyond the general mutation timeout", async () => {
+  const service = await listen((_request, response) => {
+    setTimeout(() => {
+      response.writeHead(202, { "content-type": "application/json" });
+      response.end(JSON.stringify({ meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp }, data: { operationId: id } }));
+    }, 50);
+  });
+  try {
+    await expect(createAgentClient(service.socketPath, { timeoutMs: 10, createId: () => id, now: () => new Date(timestamp) }).startAiSession(id, {
+      projectId: id,
+      workspaceId: streamSessionId,
+      aiSessionId: "018f0f00-0000-7000-8000-000000000011",
+      revisionId: "018f0f00-0000-7000-8000-000000000012",
+      runtimePlanHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+      runtimeGeneration: 1,
+      profileId: "codex",
+      profileRevision: `sha256-ai-profile-v1:${"b".repeat(64)}`
+    })).resolves.toEqual({ operationId: id });
+  } finally { await service.close(); }
+}, 15_000);
+
 test("keeps an established AI event stream alive through the observation timeout", async () => {
   const sessionId = "018f0f00-0000-7000-8000-000000000010";
     const frame = { schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence: 0,
