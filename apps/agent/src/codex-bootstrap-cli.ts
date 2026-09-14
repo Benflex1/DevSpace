@@ -4,6 +4,7 @@ import {
   bootstrapCodexCredential,
   codexBootstrapStateRootFromManagedRoot
 } from "./codex-credential-bootstrap.js";
+import { resolveCodexExecutablePath } from "./codex-executable-resolution.js";
 
 function usageError(message: string): never {
   throw new Error(`codex-bootstrap-usage: ${message}`);
@@ -26,7 +27,7 @@ try {
   await docker.assertRootlessAvailable();
   const result = await bootstrapCodexCredential({
     stateRoot: codexBootstrapStateRootFromManagedRoot(managedRoot),
-    configuredCodexPath: process.env.DEVSPACE_CODEX_EXECUTABLE_PATH ?? "/home/benjamin/.local/bin/codex",
+    configuredCodexPath: resolveCodexExecutablePath(),
     docker,
     createId: randomUUID,
     reauthenticate: argumentsList.includes("--reauth"),

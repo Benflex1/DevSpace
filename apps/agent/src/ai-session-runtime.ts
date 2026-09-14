@@ -61,6 +61,7 @@ import {
   CODEX_ARTIFACT_READBACK_HELPER_SHA256,
   CODEX_STAGED_READBACK_HELPER_SHA256
 } from "./codex-native-helper-identity.js";
+import { resolveCodexExecutablePath } from "./codex-executable-resolution.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
@@ -635,7 +636,7 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
           return fakeCodexProfileProjection();
         }
         const discovery = await (options.codexDiscovery ?? discoverCodex)({
-          configuredPath: options.executablePath ?? "/home/benjamin/.local/bin/codex",
+          configuredPath: options.executablePath ?? resolveCodexExecutablePath(),
           managedContainerId: context.ownership.developmentContainer.id,
           workspaceContext: context,
           stateRoot,
