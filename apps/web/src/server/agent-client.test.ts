@@ -576,6 +576,29 @@ test("constructs protocol headers and parses valid success envelopes", async () 
   } finally { await service.close(); }
 });
 
+test("allows Codex profile discovery to complete beyond the general observation timeout", async () => {
+  const profile = {
+    profileId: "codex",
+    profileRevision: `sha256-ai-profile-v1:${"a".repeat(64)}`,
+    provider: "codex",
+    displayName: "Codex",
+    capabilities: {
+      inspect: true, start: true, resume: true, sendTurn: true, interrupt: true,
+      approvals: true, structuredInput: true, stop: true, streamEvents: true
+    },
+    availability: { state: "available" }
+  } as const;
+  const service = await listen((_request, response) => {
+    setTimeout(() => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp }, data: profile }));
+    }, 5_200);
+  });
+  try {
+    await expect(createAgentClient(service.socketPath).inspectAiProvider(id, streamSessionId, "codex")).resolves.toEqual(profile);
+  } finally { await service.close(); }
+}, 15_000);
+
 test("keeps an established AI event stream alive through the observation timeout", async () => {
   const sessionId = "018f0f00-0000-7000-8000-000000000010";
     const frame = { schemaVersion: "devspace.ai-stream/v1", frameType: "stream.synchronized", sessionId, throughSequence: 0,

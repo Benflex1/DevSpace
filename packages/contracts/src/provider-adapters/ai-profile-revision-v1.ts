@@ -27,6 +27,12 @@ const privateBoundedString = z.string()
     (value) => !value.includes("\0") && isUnicodeScalarString(value),
     "Must contain Unicode scalar values and no NUL"
   );
+const privatePossiblyEmptyString = z.string()
+  .max(4_096)
+  .refine(
+    (value) => !value.includes("\0") && isUnicodeScalarString(value),
+    "Must contain Unicode scalar values and no NUL"
+  );
 
 const exactRuntimeIdentitySchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("workspace-default-user") }),
@@ -55,7 +61,8 @@ const codexProbeRuntimeIdentitySchema = z.strictObject({
   imageId: privateBoundedString,
   operatingSystem: privateBoundedString,
   architecture: privateBoundedString,
-  containerUser: privateBoundedString,
+  // Docker represents the image's default user as an empty Config.User.
+  containerUser: privatePossiblyEmptyString.max(128),
   policyVersion: z.literal("codex-probe-runtime-v1")
 });
 

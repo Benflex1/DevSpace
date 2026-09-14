@@ -133,6 +133,17 @@ describe("Codex profile authority", () => {
     }).capabilities.approvals).toBe(true);
   });
 
+  test("admits the image default user represented by an empty Docker user", () => {
+    const result = discovery({
+      profileAuthority: {
+        ...authority,
+        probeRuntimeIdentity: { ...authority.probeRuntimeIdentity, containerUser: "" }
+      }
+    });
+    expect(() => codexProfileRevisionForDiscovery(result.profileAuthority)).not.toThrow();
+    expect(discoveryAvailability(result)).toEqual({ state: "available" });
+  });
+
   test("rejects a below-minimum result without weakening approval authority", () => {
     const result = discovery({
       profileAuthority: { ...authority, reportedVersion: "0.144.0" },

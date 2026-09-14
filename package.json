@@ -30,7 +30,8 @@
     "preview-gateway:coolify-materialization-check": "node tooling/check-preview-gateway-coolify-materialization.mjs",
     "preview-gateway:caddy-smoke": "node tooling/preview-gateway-caddy-smoke.mjs",
     "preview-gateway:coolify-smoke": "node tooling/preview-gateway-coolify-smoke.mjs",
-    "ai-supervisor:proof": "node tooling/ai-supervisor-proof/run-proof.mjs"
+    "ai-supervisor:proof": "node tooling/ai-supervisor-proof/run-proof.mjs",
+    "native-helper:check": "node tooling/verify-native-helper-reproducibility.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

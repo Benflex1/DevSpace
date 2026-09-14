@@ -55,8 +55,15 @@ profile; structured input and interrupt may degrade only when the discovered pro
 are unavailable. Existing sessions remain pinned to their profile revision across Codex updates.
 The deterministic browser fixture covers the workflow; the configured official Codex `0.153.4`
 was admitted through the isolated discovery path with the required capabilities. Full real-browser
-dogfood remains a separate acceptance check because the available local database references managed
-workspace containers that are no longer reconstructable in the restored runtime.
+dogfood remains blocked at the normal Agent-owned Codex credential authority because the fresh
+disposable acceptance state has no provisioned authority; no credential bypass is permitted.
+
+The Codex readback helpers now have explicit linux-x64 provenance: reviewed C sources are built
+inside the digest-pinned `gcc:13.3.0-bookworm` builder, canonical binaries are checked by their
+independent trusted SHA-256 identities, and Agent packaging copies only those verified artifacts.
+The reproducibility check builds twice from clean output and compares both bytes and hashes with
+the canonical and packaged copies. Codex turns also explicitly retain `on-request`/`user`
+approval authority with a workspace-write sandbox rooted at `/workspace`.
 
 ## Durable Milestone 1 and product path
 

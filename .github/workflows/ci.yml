@@ -115,6 +115,11 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Verify pinned native helper provenance
+        env:
+          DEVSPACE_HELPER_BUILDER_DOCKER_SOCKET: /var/run/docker.sock
+        run: pnpm native-helper:check
+
       - name: Verify agent contracts
         run: pnpm contracts:check
 

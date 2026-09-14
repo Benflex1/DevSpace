@@ -1230,7 +1230,11 @@ describe("AI session runtime", () => {
       const initialize = requests.find((request) => request.method === "initialize");
       expect(initialize?.params).toMatchObject({ capabilities: { experimentalApi: true } });
       expect(threadStart?.params).toMatchObject({ approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "danger-full-access" });
-      expect(turnStart?.params).toMatchObject({ sandboxPolicy: { type: "externalSandbox", networkAccess: "enabled" } });
+      expect(turnStart?.params).toMatchObject({
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/workspace"], networkAccess: true }
+      });
       expect(requests.every((request) => request.method !== "thread/start" || request.params !== undefined)).toBe(true);
       expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);
       expect(JSON.stringify(await runtime.replay(sessionId, 0))).not.toContain(fixtureCredentialToken);

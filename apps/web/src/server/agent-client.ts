@@ -50,6 +50,9 @@ import {
 } from "./ai-stream-admission.js";
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
+// Codex profile inspection may stage an artifact and run the bounded isolated
+// compatibility probe before returning its projection.
+const AI_PROFILE_OBSERVATION_TIMEOUT_MS = 120_000;
 // JSON escaping can roughly double newline/control-heavy text; keep the transport bound
 // above two bounded content sides without making the response unbounded.
 const GIT_DIFF_RESPONSE_MAX_BYTES = GIT_DIFF_MAX_BYTES * 4 + 128 * 1024;
@@ -243,7 +246,8 @@ export function createAgentClient(socketPath: string, options: {
         durationMs: Date.now() - callStartedAt, statusCode, ...resourceFields
       });
     };
-    const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs : observationTimeoutMs;
+    const timeoutMs = endpoint.classification === "mutation" ? mutationReceiptTimeoutMs
+      : operation === "ai-provider.inspect" ? AI_PROFILE_OBSERVATION_TIMEOUT_MS : observationTimeoutMs;
     const maxResponseBytes = operation === "project.git.diff" ? GIT_DIFF_RESPONSE_MAX_BYTES
       : operation.startsWith("workspace.files.") ? WORKSPACE_FILE_RESPONSE_MAX_BYTES : MAX_RESPONSE_BYTES;
     let body: string | undefined;

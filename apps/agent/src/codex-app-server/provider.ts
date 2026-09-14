@@ -27,8 +27,11 @@ const CODEX_MAX_NATIVE_NOTIFICATIONS = 256;
 const CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS = 1_000;
 const CODEX_EXPERIMENTAL_API = true as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
-const CODEX_TURN_SANDBOX_POLICY = "externalSandbox" as const;
-const CODEX_NETWORK_ACCESS = "enabled" as const;
+const CODEX_TURN_SANDBOX_POLICY = {
+  type: "workspaceWrite",
+  writableRoots: ["/workspace"],
+  networkAccess: true
+} as const;
 
 export type CodexPrivateFailureObservation = Readonly<{
   stage: "request" | "turn";
@@ -290,7 +293,9 @@ export class CodexProvider implements ProviderAdapter {
     this.turnFailure = null;
     const response = await this.request("turn/start", {
       threadId: this.threadId, input: [{ type: "text", text }],
-      sandboxPolicy: { type: CODEX_TURN_SANDBOX_POLICY, networkAccess: CODEX_NETWORK_ACCESS }
+      approvalPolicy: this.input.approvalPolicy,
+      approvalsReviewer: this.input.approvalsReviewer,
+      sandboxPolicy: CODEX_TURN_SANDBOX_POLICY
     });
     const responseRecord = this.objectRecord(response);
     const turnRecord = responseRecord === null ? null : this.objectRecord(responseRecord.turn);

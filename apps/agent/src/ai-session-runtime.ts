@@ -57,12 +57,14 @@ import {
   type CodexArtifactStager,
   type CodexLaunchArtifact
 } from "./codex-app-server/artifact-stager.js";
+import {
+  CODEX_ARTIFACT_READBACK_HELPER_SHA256,
+  CODEX_STAGED_READBACK_HELPER_SHA256
+} from "./codex-native-helper-identity.js";
 
 const execFileAsync = promisify(execFile);
 const CODEX_PROFILE_ID = "codex";
-const CODEX_STAGED_READBACK_HELPER_SHA256 = "d07b2735546d3f514c2be5871521ec0430352638f24f0b134f93cbb5c2b951d1";
 const CODEX_STAGED_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-staged-readback");
-const CODEX_ARTIFACT_READBACK_HELPER_SHA256 = "9efef2eacb9f780595de6e340827db9b10bd3757747ae306a49e70b9b40e30bd";
 const CODEX_ARTIFACT_READBACK_HELPER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/native/codex-artifact-readback");
 const MAX_GIT_PATHS = 256;
 
