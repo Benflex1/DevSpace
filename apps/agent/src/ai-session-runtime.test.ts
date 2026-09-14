@@ -1234,7 +1234,7 @@ describe("AI session runtime", () => {
       expect(turnStart?.params).toMatchObject({
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
-        sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/workspace"], networkAccess: true }
+        sandboxPolicy: { type: "externalSandbox", networkAccess: "enabled" }
       });
       expect(requests.every((request) => request.method !== "thread/start" || request.params !== undefined)).toBe(true);
       expect(JSON.stringify(captured)).not.toContain(fixtureCredentialToken);

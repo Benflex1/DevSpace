@@ -28,9 +28,8 @@ const CODEX_NOTIFICATION_DRAIN_TIMEOUT_MS = 1_000;
 const CODEX_EXPERIMENTAL_API = true as const;
 const CODEX_THREAD_SANDBOX = "danger-full-access" as const;
 const CODEX_TURN_SANDBOX_POLICY = {
-  type: "workspaceWrite",
-  writableRoots: ["/workspace"],
-  networkAccess: true
+  type: "externalSandbox",
+  networkAccess: "enabled"
 } as const;
 const CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG = "features.default_mode_request_user_input=true";
 
