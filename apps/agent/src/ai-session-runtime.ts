@@ -410,6 +410,18 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
     sessions.set(binding.aiSessionId, record); return record;
   }
 
+  function admittedProfileFor(input: { projectId: string; workspaceId: string; profileId: string }): AiProviderProfileProjection | null {
+    const record = [...sessions.values()].find((candidate) => candidate.binding.projectId === input.projectId
+      && candidate.binding.workspaceId === input.workspaceId && candidate.binding.profileId === input.profileId
+      && candidate.adapter !== null && candidate.ready && candidate.finalizationState === "active");
+    if (record === undefined) return null;
+    return safeCodexProfileProjection({
+      revision: record.binding.profileRevision,
+      capabilities: record.capabilities,
+      availability: { state: "available" }
+    });
+  }
+
   async function emit(record: SessionRecord, turnId: string | null, eventType: string, payload: unknown): Promise<CanonicalAiEvent> {
     const turnFinalization = new Set(["turn.interrupted", "turn.provider-completed", "turn.files.changed", "turn.quiesced", "turn.failed"]).has(eventType);
     const providerFinalization = eventType === "session.stopping" || eventType === "session.stopped";
@@ -627,6 +639,8 @@ export function createAiSessionRuntime(options: AiSessionRuntimeOptions = {}): A
       if (input.profileId !== CODEX_PROFILE_ID) throw new Error("ai-profile-not-found");
       if (mode === "fake") return fakeCodexProfileProjection();
       if (options.managed === undefined) return unavailableCodexProfile("RUNTIME_IDENTITY_UNAVAILABLE");
+      const admitted = admittedProfileFor(input);
+      if (admitted !== null) return admitted;
       try {
         const context = await options.managed.executionContext(input.projectId, input.workspaceId);
         if (options.codexPreflight !== undefined) {

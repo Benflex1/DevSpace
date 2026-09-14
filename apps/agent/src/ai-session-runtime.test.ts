@@ -1321,6 +1321,35 @@ describe("AI session runtime", () => {
     }
   });
 
+  test("reuses the admitted profile while the active provider holds the credential lease", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-active-profile-test-"));
+    const protocol = createProtocolDocker([]);
+    const executablePath = await createCodexTestExecutable(stateRoot);
+    const authority = createCodexCredentialAuthority(stateRoot);
+    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
+      managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
+      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+      codexCredentialAuthority: authority } as never);
+    let exactBinding: typeof binding | null = null;
+    let stopped = false;
+    try {
+      const admitted = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
+      exactBinding = { ...binding, profileRevision: admitted.profileRevision };
+      await runtime.start(exactBinding);
+
+      await expect(runtime.inspect({ projectId, workspaceId, profileId: "codex" })).resolves.toEqual(admitted);
+
+      await runtime.stop({ ...exactBinding, processGeneration: 1 });
+      stopped = true;
+      await expect(authority.inspect()).resolves.toBeUndefined();
+    } finally {
+      if (exactBinding !== null && !stopped) {
+        await runtime.stop({ ...exactBinding, processGeneration: 1 }).catch(() => undefined);
+      }
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   test("retires a provider-resolved interaction without fabricating a user response", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-provider-resolved-test-"));
     const captured: Array<Record<string, unknown>> = [];
