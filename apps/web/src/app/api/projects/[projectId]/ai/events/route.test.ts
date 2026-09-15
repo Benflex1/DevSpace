@@ -9,7 +9,8 @@ const ids = {
 const mocks = vi.hoisted(() => ({
   agentStream: vi.fn(async function* (_sessionId: string, _afterSequence: number, _options?: { signal?: AbortSignal }) {
     await Promise.resolve();
-    yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+    yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 0,
+      processGeneration: 1, pendingInteractionIds: [] };
   }),
   getSession: vi.fn(),
   getConfig: vi.fn(() => ({ databasePath: "test.sqlite", agentSocketPath: "test.sock", auth: { mode: "development", actor: "owner@example.invalid" } })),
@@ -99,7 +100,8 @@ describe("AI event stream HTTP preflight", () => {
     ) {
       try {
         yielded += 1;
-        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+        yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 0,
+          processGeneration: 1, pendingInteractionIds: [] };
         await new Promise<void>((resolve) => {
           if (options?.signal === undefined) return resolve();
           if (options.signal.aborted) {
@@ -147,7 +149,8 @@ describe("AI event stream HTTP preflight", () => {
       options?: { signal?: AbortSignal }
     ) {
       try {
-        yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+        yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 0,
+          processGeneration: 1, pendingInteractionIds: [] };
         await new Promise<void>((resolve) => {
           options!.signal!.addEventListener("abort", () => {
             abortObserved = true;
@@ -195,10 +198,12 @@ describe("AI event stream HTTP preflight", () => {
       _afterSequence: number,
       options?: { signal?: AbortSignal }
     ) {
-      yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 0 };
+      yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 0,
+        processGeneration: 1, pendingInteractionIds: [] };
       await new Promise<void>((resolve) => options!.signal!.addEventListener("abort", () => resolve(), { once: true }));
       secondFrameProduced = true;
-      yield { frameType: "stream.synchronized", sessionId: ids.sessionId, throughSequence: 1 };
+      yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 1,
+        processGeneration: 1, pendingInteractionIds: [] };
     });
     const response = await GET(request(0), context);
     const reader = response.body!.getReader();

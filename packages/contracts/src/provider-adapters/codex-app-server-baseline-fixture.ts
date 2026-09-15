@@ -1,7 +1,7 @@
 import * as z from "zod";
 
-export const CODEX_APP_SERVER_CLI_VERSION = "0.145.0" as const;
-export const CODEX_APP_SERVER_VERSION_OUTPUT = "codex-cli 0.145.0" as const;
+export const CODEX_BASELINE_CLI_VERSION = "0.145.0" as const;
+export const CODEX_BASELINE_VERSION_OUTPUT = "codex-cli 0.145.0" as const;
 
 export const codexAppServerProtocolMethods = Object.freeze({
   clientRequests: Object.freeze([
@@ -30,8 +30,9 @@ export const codexAppServerProtocolMethods = Object.freeze({
 } as const);
 
 export const codexAppServerFixtureManifestSchema = z.strictObject({
-  cliVersion: z.literal(CODEX_APP_SERVER_CLI_VERSION),
-  versionOutput: z.literal(CODEX_APP_SERVER_VERSION_OUTPUT),
+  baselineVersion: z.literal("0.145.0"),
+  cliVersion: z.literal(CODEX_BASELINE_CLI_VERSION),
+  versionOutput: z.literal(CODEX_BASELINE_VERSION_OUTPUT),
   cliBinarySha256: z.string().regex(/^[0-9a-f]{64}$/u),
   generatedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
   stableGenerationCommand: z.literal(
@@ -85,23 +86,23 @@ export const codexAppServerFixtureManifestSchema = z.strictObject({
  * Agent-private adapter launch authority. No member of this type is a public
  * Agent/Web or browser contract.
  */
-export interface CodexAppServerPrivateLaunch {
-  readonly executableIdentity: "deployment-profile-pinned-codex";
-  readonly cliVersion: typeof CODEX_APP_SERVER_CLI_VERSION;
+export interface CodexBaselineFixturePrivateLaunch {
+  readonly executableIdentity: "baseline-fixture-only";
+  readonly cliVersion: typeof CODEX_BASELINE_CLI_VERSION;
   readonly launchMode: "app-server-stdio";
   readonly tty: false;
   readonly workspaceDirectory: string;
   readonly fixedArguments: readonly string[];
   readonly fixedEnvironment: Readonly<Record<string, string>>;
   readonly credentialSourceHandle: string;
-  readonly experimentalApi: false;
+  readonly experimentalApi: true;
 }
 
 /**
  * Raw JSON-RPC IDs and provider-native thread/turn/item identities live only in
  * the Agent adapter and its private ownership record.
  */
-export interface CodexAppServerPrivateCorrelation {
+export interface CodexBaselineFixturePrivateCorrelation {
   readonly providerThreadId: string;
   readonly providerTurnId: string | null;
   readonly providerItemId: string | null;

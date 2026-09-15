@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
-  CODEX_APP_SERVER_CLI_VERSION,
+  CODEX_BASELINE_CLI_VERSION,
   codexAppServerFixtureManifestSchema,
   codexAppServerProtocolMethods,
-  type CodexAppServerPrivateLaunch
-} from "./codex-app-server-v0-145.js";
+  type CodexBaselineFixturePrivateLaunch
+} from "./codex-app-server-baseline-fixture.js";
 
 const fixtureRootUrl = new URL(
   "../../fixtures/codex-app-server/0.145.0/",
@@ -51,10 +51,11 @@ async function loadVerifiedFixtures() {
   return { manifest, schemas };
 }
 
-describe("Codex app-server 0.145.0 adapter boundary", () => {
+describe("Codex app-server minimum compatibility baseline fixture", () => {
   test("hashes and parses every checked generated fixture", async () => {
     const { manifest, schemas } = await loadVerifiedFixtures();
-    expect(manifest.cliVersion).toBe(CODEX_APP_SERVER_CLI_VERSION);
+    expect(manifest.baselineVersion).toBe("0.145.0");
+    expect(manifest.cliVersion).toBe(CODEX_BASELINE_CLI_VERSION);
     expect([...schemas.keys()].sort()).toEqual([
       "experimental/ToolRequestUserInputParams.json",
       "stable/ClientNotification.json",
@@ -105,8 +106,8 @@ describe("Codex app-server 0.145.0 adapter boundary", () => {
   });
 
   test("makes every launch authority field Agent-private and fixed", () => {
-    const launch: CodexAppServerPrivateLaunch = {
-      executableIdentity: "deployment-profile-pinned-codex",
+    const launch: CodexBaselineFixturePrivateLaunch = {
+      executableIdentity: "baseline-fixture-only",
       cliVersion: "0.145.0",
       launchMode: "app-server-stdio",
       tty: false,
@@ -114,9 +115,9 @@ describe("Codex app-server 0.145.0 adapter boundary", () => {
       fixedArguments: ["app-server", "--stdio"],
       fixedEnvironment: {},
       credentialSourceHandle: "deployment-owned",
-      experimentalApi: false
+      experimentalApi: true
     };
     expect(launch.tty).toBe(false);
-    expect(launch.experimentalApi).toBe(false);
+    expect(launch.experimentalApi).toBe(true);
   });
 });

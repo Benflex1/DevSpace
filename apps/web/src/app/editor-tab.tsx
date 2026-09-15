@@ -22,7 +22,7 @@ const MonacoDiffEditor = dynamic(() => import("./monaco-diff-editor.js").then(({
 
 type ApiFailure = { readonly code?: string; readonly message?: string };
 
-export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, diffKind, documents, remountCount, onModeChange, onDirtyChange, onDiffNoLongerPresent, onSaved }: {
+export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, diffKind, readFile = true, documents, remountCount, onModeChange, onDirtyChange, onDiffNoLongerPresent, onSaved }: {
   projectId: string;
   workspaceId: string;
   path: string;
@@ -30,6 +30,7 @@ export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, d
   tabId: string;
   mode: "edit" | "changes";
   diffKind: "staged" | "unstaged";
+  readFile?: boolean;
   documents: WorkbenchEditorDocuments;
   remountCount: number;
   onModeChange: (mode: "edit" | "changes") => void;
@@ -80,9 +81,10 @@ export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, d
   }, [documentKey, documents, path, projectId]);
 
   useEffect(() => {
+    if (!readFile) return;
     documents.ensure(documentKey, path);
     loadFile("initial").catch(() => undefined);
-  }, [documentKey, documents, loadFile, path]);
+  }, [documentKey, documents, loadFile, path, readFile]);
 
   useEffect(() => {
     if (mode !== "changes") return;
@@ -189,7 +191,7 @@ export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, d
       </div>}
     </div>
     <div className="editor-tab-view" hidden={viewVisibility.editHidden}>
-      {loading ? <div className="editor-tab-message">Opening {path}…</div> : error !== null ? <div className="editor-tab-message error" role="alert">
+      {!readFile ? <div className="editor-tab-message" role="status"><p>{path} is not present in the workspace.</p><button type="button" onClick={() => onModeChange("changes")}>Open Changes view</button></div> : loading ? <div className="editor-tab-message">Opening {path}…</div> : error !== null ? <div className="editor-tab-message error" role="alert">
         <p>{error}</p><button type="button" onClick={() => { loadFile("retry").catch(() => undefined); }}>Retry</button>
       </div> : document !== null ? <div className="editor-tab-content">
         <MonacoEditor height="100%" width="100%" language={editorLanguageForPath(path)} theme="vs-dark" path={modelPaths.editable} value={document.content} onMount={onMount}

@@ -1,5 +1,5 @@
 import { constants, type BigIntStats } from "node:fs";
-import { chmod, mkdir, open, lstat, readdir, rename, rm } from "node:fs/promises";
+import { chmod, mkdir, open, lstat, readdir, rename, rm, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { Duplex } from "node:stream";
 import path from "node:path";
@@ -46,6 +46,13 @@ export interface CodexCredentialLease {
 }
 
 type DockerReadbackClient = Pick<DockerEngineClient, "createExec" | "startExecAttached" | "inspectExec">;
+type StagedReadbackInput = Readonly<{
+  readonly docker: DockerReadbackClient;
+  readonly containerId: string;
+  readonly stagedAuthPath: string;
+  readonly readbackHelperPath: string;
+  readonly workingDirectory?: string;
+}>;
 
 export type LeaseFileSystem = Readonly<{
   readonly rename: (oldPath: string, newPath: string) => Promise<void>;
@@ -105,9 +112,11 @@ export interface CodexCredentialAuthority {
   read(): Promise<ValidatedCodexAuthority>;
   inspect(): Promise<void>;
   acquire(metadata: CodexCredentialLeaseMetadata): Promise<CodexCredentialLease>;
-  synchronizeStaged(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string; readbackHelperPath: string }): Promise<void>;
+  synchronizeStaged(input: StagedReadbackInput): Promise<void>;
   replaceDurable(bytes: Uint8Array, options?: { readonly failAfterWrite?: () => void }): Promise<void>;
   markReauthenticationRequired(): Promise<void>;
+  /** Clears the deliberate reauthentication gate only after a new authority is durable. */
+  clearReauthenticationRequired(): Promise<void>;
 }
 
 export function codexAuthorityDirectoryForStateRoot(stateRoot: string): string {
@@ -368,10 +377,10 @@ function decodePrivateStagedReadback(input: Buffer): StagedReadbackProof {
   return { before, bytes: Buffer.from(bytes), after };
 }
 
-async function readStagedAuth(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string; readbackHelperPath: string }): Promise<StagedReadbackProof> {
+async function readStagedAuth(input: StagedReadbackInput): Promise<StagedReadbackProof> {
   const execId = await input.docker.createExec(input.containerId, {
     command: [input.readbackHelperPath],
-    workingDirectory: "/workspace", environment: { DEVSPACE_TARGET_FILE: input.stagedAuthPath }, attachStdin: false, tty: false
+    workingDirectory: input.workingDirectory ?? "/workspace", environment: { DEVSPACE_TARGET_FILE: input.stagedAuthPath }, attachStdin: false, tty: false
   });
   const stream = await input.docker.startExecAttached(execId, false);
   const output = await readDockerOutput(stream);
@@ -505,7 +514,7 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
       }
     };
   }
-  async synchronizeStaged(input: { docker: DockerReadbackClient; containerId: string; stagedAuthPath: string; readbackHelperPath: string }): Promise<void> {
+  async synchronizeStaged(input: StagedReadbackInput): Promise<void> {
     const first = await readStagedAuth(input);
     const second = await readStagedAuth(input);
     const sameSnapshot = (left: StagedSnapshot, right: StagedSnapshot) => left.dev === right.dev && left.ino === right.ino
@@ -546,6 +555,24 @@ class FileCodexCredentialAuthority implements CodexCredentialAuthority {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw safeError("reauth-marker");
     }
+  }
+  async clearReauthenticationRequired(): Promise<void> {
+    await assertPrivateDirectory(this.authorityDir);
+    let stats;
+    try { stats = await lstat(this.reauthMarkerPath, { bigint: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw safeError("reauth-marker");
+    }
+    if (!stats.isFile() || (stats.mode & 0o7777n) !== 0o600n
+      || (expectedUid() !== null && stats.uid !== expectedUid()) || stats.nlink !== 1n) {
+      throw safeError("reauth-marker");
+    }
+    try { await unlink(this.reauthMarkerPath); }
+    catch { throw safeError("reauth-marker"); }
+    try { await syncDirectory(this.authorityDir); }
+    catch { throw safeError("reauth-marker"); }
+    if (await existsAsAnyPath(this.reauthMarkerPath)) throw safeError("reauth-marker");
   }
 }
 

@@ -123,6 +123,71 @@ describe("dedicated rootless Docker boundary", () => {
     })).rejects.toThrow("preview-host-network-is-forbidden");
   });
 
+  test("serializes an isolated probe container without inheriting image startup or workspace authority", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createProbeContainer("devspace-codex-probe", {
+      imageId: "sha256:managed-image", imageReference: "node:24-bookworm", user: "1000:1000", labels: { "devspace.probe": "true" },
+      environment: { CODEX_HOME: "/tmp/devspace-codex-home", HOME: "/tmp/devspace-codex-home" },
+      cpuMillicores: 1_000, memoryBytes: 2_147_483_648, pidLimit: 64
+    })).resolves.toBe("container-1");
+    const request = fixture.bodies[0] as Record<string, unknown>;
+    expect(request).toMatchObject({
+      Image: "node:24-bookworm",
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: ["exec sleep 2147483647"],
+      HostConfig: {
+        NetworkMode: "none", Binds: [], Mounts: [],
+        Tmpfs: {
+          "/opt/devspace-codex-probe": "rw,nosuid,nodev,exec,size=1g",
+          "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
+          "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
+        },
+        Privileged: false, Devices: [], ReadonlyRootfs: true,
+        SecurityOpt: ["no-new-privileges:true"], CapDrop: ["ALL"], CapAdd: [],
+        PidsLimit: 64, NanoCpus: 1_000_000_000, Memory: 2_147_483_648, MemorySwap: 2_147_483_648,
+        RestartPolicy: { Name: "no" }
+      }
+    });
+    expect(request).not.toHaveProperty("NetworkingConfig.EndpointsConfig");
+    expect(JSON.stringify(request)).not.toContain("/workspace");
+    expect(JSON.stringify(request)).not.toContain("GITHUB");
+    expect(JSON.stringify(request)).not.toContain("/var/run/devspace-agent.sock");
+  });
+
+  test("serializes a credential bootstrap with only the staged artifact and temporary authority", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    const imageId = `sha256:${"b".repeat(64)}`;
+    await expect(engine.createCodexBootstrapContainer("devspace-codex-bootstrap", {
+      imageId, artifactRoot: "/srv/devspace/managed/state/codex-artifacts/staged",
+      codexHomePath: "/srv/devspace/managed/state/.codex-bootstrap-home-test",
+      labels: { "devspace.private-purpose": "codex-credential-bootstrap" },
+      cpuMillicores: 1_000, memoryBytes: 512 * 1024 * 1024, pidLimit: 128
+    })).resolves.toBe("container-1");
+    const request = fixture.bodies[0] as Record<string, unknown>;
+    expect(request).toMatchObject({
+      Image: imageId, Entrypoint: ["/bin/sh", "-c"], Cmd: ["exec sleep 2147483647"], WorkingDir: "/", User: "",
+      HostConfig: {
+        NetworkMode: "bridge", Binds: [], Privileged: false, ReadonlyRootfs: true,
+        CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"],
+        PortBindings: {}, PublishAllPorts: false, AutoRemove: false,
+        Tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=64m" },
+        NanoCpus: 1_000_000_000, Memory: 512 * 1024 * 1024, MemorySwap: 512 * 1024 * 1024, PidsLimit: 128,
+        Mounts: [
+          { Type: "bind", Source: "/srv/devspace/managed/state/codex-artifacts/staged", Target: "/opt/codex", ReadOnly: true,
+            BindOptions: { Propagation: "rprivate" } },
+          { Type: "bind", Source: "/srv/devspace/managed/state/.codex-bootstrap-home-test", Target: "/opt/codex-home", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } }
+        ]
+      }
+    });
+    expect(JSON.stringify(request)).not.toContain("/workspace");
+    expect(JSON.stringify(request)).not.toContain("docker.sock");
+    expect(JSON.stringify(request)).not.toContain("agent.sock");
+    expect(request).not.toHaveProperty("NetworkingConfig");
+  });
+
   test("accepts additional Docker container-list fields from newer engines", async () => {
     const engine = new DockerEngineClient(await listedEngineSocket());
     await expect(engine.listContainers()).resolves.toEqual([{

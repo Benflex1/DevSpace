@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   inspect: vi.fn(),
   restart: vi.fn(),
   send: vi.fn(),
+  respondApproval: vi.fn(),
+  respondInput: vi.fn(),
   getConfig: vi.fn(() => ({ databasePath: "test.sqlite", agentSocketPath: "test.sock", appOrigin: "http://localhost",
     auth: { mode: "development", actor: "owner@example.invalid" } })),
   authenticate: vi.fn(() => Promise.resolve({ identity: "owner@example.invalid" }))
@@ -25,7 +27,8 @@ vi.mock("../../../../../server/database.js", () => ({ getProjectDatabase: () => 
 vi.mock("../../../../../server/agent-client.js", () => ({ createAgentClient: () => ({}) }));
 vi.mock("../../../../../server/ai-sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../../../../server/ai-sessions.js")>("../../../../../server/ai-sessions.js");
-  return { ...actual, inspectAiWorkbench: mocks.inspect, restartAiSession: mocks.restart, sendAiTurn: mocks.send };
+  return { ...actual, inspectAiWorkbench: mocks.inspect, restartAiSession: mocks.restart, sendAiTurn: mocks.send,
+    respondToAiApproval: mocks.respondApproval, respondToAiStructuredInput: mocks.respondInput };
 });
 
 import { GET, POST } from "./route.js";
@@ -44,6 +47,8 @@ afterEach(() => {
   mocks.inspect.mockReset();
   mocks.restart.mockReset();
   mocks.send.mockReset();
+  mocks.respondApproval.mockReset();
+  mocks.respondInput.mockReset();
   mocks.authenticate.mockReset();
   mocks.authenticate.mockResolvedValue({ identity: "owner@example.invalid" });
 });
@@ -155,5 +160,37 @@ describe("AI stopped-session restart route", () => {
     const response = await POST(post({ action: "restart", workspaceId: ids.workspaceId, sessionId: ids.sessionId }), context);
     expect(response.status).toBe(403);
     expect(mocks.restart).not.toHaveBeenCalled();
+  });
+
+  test("dispatches strict approval and structured-input actions with browser-owned identifiers only", async () => {
+    const turnId = "018f0f00-0000-7000-8000-000000000106";
+    const requestId = "018f0f00-0000-7000-8000-000000000107";
+    mocks.respondApproval.mockResolvedValue({ operationId: "018f0f00-0000-7000-8000-000000000108" });
+    mocks.respondInput.mockResolvedValue({ operationId: "018f0f00-0000-7000-8000-000000000109" });
+    const approval = await POST(post({ action: "respond-approval", workspaceId: ids.workspaceId, sessionId: ids.sessionId,
+      turnId, requestId, decision: "approve-once" }), context);
+    const input = await POST(post({ action: "respond-input", workspaceId: ids.workspaceId, sessionId: ids.sessionId,
+      turnId, requestId, answers: [{ questionId: "question-1", kind: "selected", optionId: "option-1" }] }), context);
+    expect(approval.status).toBe(200);
+    expect(input.status).toBe(200);
+    expect(mocks.respondApproval).toHaveBeenCalledWith(ids.projectId, ids.workspaceId, ids.sessionId, turnId, requestId, "approve-once", expect.any(Object));
+    expect(mocks.respondInput).toHaveBeenCalledWith(ids.projectId, ids.workspaceId, ids.sessionId, turnId, requestId,
+      [{ questionId: "question-1", kind: "selected", optionId: "option-1" }], expect.any(Object));
+  });
+
+  test.each([
+    { action: "respond-approval", workspaceId: ids.workspaceId, sessionId: ids.sessionId, turnId: ids.projectId,
+      requestId: ids.sessionId, decision: "approve-once", extra: "reject" },
+    { action: "respond-input", workspaceId: ids.workspaceId, sessionId: ids.sessionId, turnId: ids.projectId,
+      requestId: ids.sessionId, answers: [{ questionId: "question-1", kind: "selected", optionId: "option-1" }], extra: "reject" },
+    { action: "respond-input", workspaceId: ids.workspaceId, sessionId: ids.sessionId, turnId: ids.projectId,
+      requestId: ids.sessionId, answers: [{ questionId: "question-1", kind: "text", text: "ok", providerRequestId: "private" }] },
+    { action: "respond-approval", workspaceId: ids.workspaceId, sessionId: ids.sessionId, turnId: ids.projectId,
+      requestId: ids.sessionId, decision: "approve-once", profileRevision: "private", processGeneration: 9 }
+  ])("rejects malformed or extra interaction response fields", async (body) => {
+    const response = await POST(post(body), context);
+    expect(response.status).toBe(422);
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(mocks.respondInput).not.toHaveBeenCalled();
   });
 });

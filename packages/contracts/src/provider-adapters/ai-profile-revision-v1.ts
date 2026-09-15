@@ -1,16 +1,11 @@
-import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import * as z from "zod";
-import {
-  aiProviderCapabilitiesSchema,
-  aiProfileRevisionSchema
-} from "../ai-sessions.js";
+import { aiProviderCapabilitiesSchema } from "../ai-sessions.js";
 import { configurationKeySchema } from "../primitives.js";
+import type { CodexProfileAuthorityInput } from "./codex-app-server.js";
 
 export const AI_PROFILE_AUTHORITY_FORMAT =
   "devspace.ai-provider-profile-authority/v1" as const;
-const AI_PROFILE_REVISION_DOMAIN = "devspace.ai-provider-profile-revision/v1";
-
 function isUnicodeScalarString(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -32,6 +27,12 @@ const privateBoundedString = z.string()
     (value) => !value.includes("\0") && isUnicodeScalarString(value),
     "Must contain Unicode scalar values and no NUL"
   );
+const privatePossiblyEmptyString = z.string()
+  .max(4_096)
+  .refine(
+    (value) => !value.includes("\0") && isUnicodeScalarString(value),
+    "Must contain Unicode scalar values and no NUL"
+  );
 
 const exactRuntimeIdentitySchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("workspace-default-user") }),
@@ -47,6 +48,55 @@ const requiredRuntimeCapabilitiesSchema = z.array(configurationKeySchema)
     (capabilities) => new Set(capabilities).size === capabilities.length,
     "Runtime capabilities must be unique"
   );
+
+const codexDigestSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+const codexRuntimeIdentitySchema = z.strictObject({
+  projectId: privateBoundedString,
+  workspaceId: privateBoundedString,
+  revisionId: privateBoundedString,
+  runtimePlanHash: privateBoundedString,
+  runtimeGeneration: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
+});
+const codexProbeRuntimeIdentitySchema = z.strictObject({
+  imageId: privateBoundedString,
+  operatingSystem: privateBoundedString,
+  architecture: privateBoundedString,
+  // Docker represents the image's default user as an empty Config.User.
+  containerUser: privatePossiblyEmptyString.max(128),
+  policyVersion: z.literal("codex-probe-runtime-v1")
+});
+
+export const codexProviderAuthorityDocumentV1Schema = z.strictObject({
+  format: z.literal(AI_PROFILE_AUTHORITY_FORMAT),
+  profileId: z.literal("codex"),
+  provider: z.literal("codex"),
+  reportedVersion: privateBoundedString,
+  entrypointSha256: codexDigestSchema,
+  executionArtifactClosureDigest: codexDigestSchema,
+  executionArtifactLayout: z.enum([
+    "standalone-package",
+    "official-node-native-payload",
+    "self-contained-native"
+  ]),
+  protocolFamily: z.literal("stdio-jsonl"),
+  stableSchemaFingerprint: codexDigestSchema,
+  experimentalSchemaFingerprint: codexDigestSchema.nullable(),
+  effectiveCapabilities: aiProviderCapabilitiesSchema,
+  experimentalApi: z.boolean(),
+  approvalPolicy: z.enum(["on-request", "never", "untrusted"]),
+  approvalsReviewer: z.enum(["user", "auto_review", "guardian_subagent"]),
+  semanticAdapterVersion: configurationKeySchema,
+  compatibilityPolicyVersion: configurationKeySchema,
+  probeRuntimeIdentity: codexProbeRuntimeIdentitySchema,
+  credentialSourceIdentity: configurationKeySchema,
+  runtimeIdentity: codexRuntimeIdentitySchema
+});
+
+export type CodexProviderAuthorityDocumentV1 = z.infer<
+  typeof codexProviderAuthorityDocumentV1Schema
+>;
+
+export type CodexProviderAuthorityInput = CodexProfileAuthorityInput;
 
 export const aiProviderAuthorityDocumentV1Schema = z.strictObject({
   format: z.literal(AI_PROFILE_AUTHORITY_FORMAT),
@@ -75,7 +125,9 @@ export type AiProviderAuthorityDocumentV1 = z.infer<
 
 function normalizedAuthorityDocument(
   input: unknown
-): AiProviderAuthorityDocumentV1 {
+): AiProviderAuthorityDocumentV1 | CodexProviderAuthorityDocumentV1 {
+  const codexParsed = codexProviderAuthorityDocumentV1Schema.safeParse(input);
+  if (codexParsed.success) return codexParsed.data;
   const parsed = aiProviderAuthorityDocumentV1Schema.parse(input);
   return {
     ...parsed,
@@ -89,14 +141,4 @@ export function canonicalizeAiProviderAuthorityV1(input: unknown): string {
     throw new TypeError("AI provider authority is not a JSON value");
   }
   return canonical;
-}
-
-export function hashAiProviderAuthorityV1(input: unknown): string {
-  const hash = createHash("sha256");
-  hash.update(AI_PROFILE_REVISION_DOMAIN, "utf8");
-  hash.update(Uint8Array.of(0));
-  hash.update(canonicalizeAiProviderAuthorityV1(input), "utf8");
-  return aiProfileRevisionSchema.parse(
-    `sha256-ai-profile-v1:${hash.digest("hex")}`
-  );
 }

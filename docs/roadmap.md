@@ -1,6 +1,6 @@
 # DevSpace Roadmap
 
-> Updated September 6, 2026.
+> Updated September 12, 2026.
 >
 > DevSpace is a self-hosted, browser-based, project-first AI development workspace where every project runs in its own isolated environment and brings code, terminals, tasks, previews, Git, and AI agents together in one persistent workbench.
 
@@ -36,17 +36,21 @@ than exhaustive production hardening.
 Only P0 issues should normally block a beta slice. P1/P2 work may be included when small and directly
 adjacent, but must not turn a vertical slice into an open-ended hardening project.
 
-## T3 Code reuse policy
+## AI Workbench reference policy
 
-`pingdotgg/t3code` is an MIT-licensed reference implementation and should be inspected before
-designing equivalent AI-session or Workbench UX from scratch.
+[`stablyai/orca`](https://github.com/stablyai/orca) is the primary product/UX reference for Workbench structure, agent-centric
+workflow, files/editor/terminal/browser integration, activity presentation, approvals/questions,
+changed-file/review flow, and visual behavior.
 
-DevSpace may copy or adapt suitable T3 Code code where this accelerates delivery. Substantial reuse
-must preserve the required license notices and be recorded in attribution documentation.
+[`pingdotgg/t3code`](https://github.com/pingdotgg/t3code) is a secondary technical/conceptual reference for isolated mechanics Orca does
+not cover well. The inspected Checkpoint 2 revision and policy are recorded in
+`docs/references/product-references.md`; no T3 source code was copied or substantially adapted.
+If a future change does copy or substantially adapt T3 Code source, preserve the required MIT
+notice and record the exact source files/revision there.
 
-Strong reuse targets include AI-session navigation, streaming turns, approvals, structured questions,
-model/provider selection, activity rendering, changed-file summaries, diff UX, interruption/reconnect
-states, keyboard interactions, and loading/empty/error states.
+Strong reference targets include AI-session navigation, streaming turns, approvals, structured
+questions, activity rendering, changed-file summaries, interruption/reconnect states, keyboard
+interactions, and loading/empty/error states.
 
 DevSpace must retain its own authority boundaries: Web remains the sole SQLite writer; Agent owns
 Git, filesystem, Docker, PTYs, tasks, previews, and provider processes; providers run in the exact
@@ -68,11 +72,12 @@ complete and merged. PR #44 merged Private GitHub Checkpoint 1 at
 `ea5fbbeeb17be0ec393097be1e5dd6374b9bb356`, and the accepted snapshots were proven
 tree-equivalent. Real CP1 local/dev GitHub App acceptance is complete. CP2 real-provider acceptance
 completed successfully with PR #45, and CP3A/CP3B are complete. The current objective is the
-finished owner-controlled MVP, with Workbench 1B Changes + Commit active on
-`feat/workbench-git-changes-commit`. Production deployment remains explicitly pending. The remaining
+finished owner-controlled MVP, with Workbench 1B Changes + Commit merged by PR #49 at
+`47bf2d8c70dcab7b2ff278eb241e927db02a6dd0` and AI Session Beta Checkpoint 2 implemented on its
+feature branch. Production deployment remains explicitly pending. The remaining
 path prioritizes:
 
-1. the remaining browser-usable Codex approvals and structured-question flow;
+1. real Codex/browser acceptance of the implemented approval and structured-question flow;
 2. project creation from scratch;
 3. essential task, Project Options, and Workbench UX;
 4. focused stabilization and visual polish based on real use.
@@ -400,9 +405,16 @@ Stop rule:
    - ✅ cooperatively interrupt and send another turn;
    - ✅ show bounded changed-files summaries and retain history after refresh;
    - ✅ stop the live session and verify post-fix ephemeral staging cleanup;
-   - 🟡 approvals and structured questions remain Checkpoint 2;
-   - ✅ use T3 Code-informed UX patterns with attribution; no host/process/persistence assumptions
-     were copied;
+   - ✅ Checkpoint 2 browser slice adds approvals, structured questions, durable interaction replay,
+     profile-pinned session navigation, and Workbench changed-file opening;
+   - ✅ Codex compatibility now uses the protocol/capability surface rather than an executable
+     release whitelist: `0.145.0` is the minimum regression baseline, newer compatible versions
+     have no upper bound, and discovery/probing is isolated and bound to the exact execution
+     artifact closure;
+   - ✅ Writable managed sessions require compatible command/file approvals; structured input and
+     interrupt degrade truthfully when optional protocol capabilities are absent;
+   - ✅ record an Orca-first / T3-secondary conceptual UX policy; Checkpoint 2 used T3 patterns
+     conceptually only and copied no host/process/persistence assumptions;
    - ✅ failed-turn/Unauthorized finalization now requires provider exit, staging cleanup, and lease
      release proof before `session.stopped`;
    - ✅ owner device-code onboarding and bounded real-provider browser validation passed; Checkpoint 1
@@ -432,10 +444,10 @@ Stop rule:
 
 4. 🟡 **Workbench beta completion**
    - ✅ basic file tree/editing;
-   - 🟡 Workbench 1B practical Git status/diff/stage/commit with existing explicit push;
+   - ✅ Workbench 1B practical Git status/diff/stage/commit with existing explicit push;
    - better task/process output and controls;
    - essential Project Options editing;
-   - cohesive T3 Code-inspired Workbench navigation and visual polish.
+   - cohesive Orca-first Workbench navigation and visual polish.
 
 5. ⏳ **Focused beta stabilization**
    - fix P0 defects and high-frequency P1 defects found through real use;
@@ -450,7 +462,7 @@ Stop rule:
 
 ### Private GitHub repository access
 
-**Status: ✅ Checkpoint 3A/3B private GitHub access complete; Workbench 1B is the active product slice**
+**Status: ✅ Checkpoint 3A/3B private GitHub access and Workbench 1B are complete; AI Session Checkpoint 2 is the current slice**
 
 - ✅ Authenticate the administrator-configured owner account/installation through a GitHub App
 - ✅ List authorized repositories outside project onboarding and refresh live installation authority
@@ -537,8 +549,8 @@ A beta user can:
 6. inspect Git status/diffs and explicitly stage, commit, and push;
 7. edit the Project Options required for normal runtime/task/preview behavior;
 8. recover from ordinary failures through clear retry, session restart, or workspace restart actions;
-9. navigate a cohesive, polished, responsive Workbench inspired by the strongest applicable T3 Code
-   patterns.
+9. navigate a cohesive, polished, responsive Workbench informed first by Orca and supplemented by
+   the strongest applicable T3 Code patterns.
 
 Not required for this milestone:
 
@@ -573,12 +585,12 @@ Remaining delivery order:
 
 ## Git experience
 
-- 🟡 Better status view — Workbench 1B Changes + Commit active on the current feature branch
-- 🟡 Diff UI — Workbench 1B Changes + Commit active on the current feature branch
-- 🟡 Staging — Workbench 1B Changes + Commit active on the current feature branch
-- 🟡 Commit workflow — Workbench 1B Changes + Commit active on the current feature branch
+- ✅ Better status view — Workbench 1B Changes + Commit merged by PR #49
+- ✅ Diff UI — Workbench 1B Changes + Commit merged by PR #49
+- ✅ Staging — Workbench 1B Changes + Commit merged by PR #49
+- ✅ Commit workflow — Workbench 1B Changes + Commit merged by PR #49
 - ✅ Push workflow
-- 🟡 Branch awareness — Workbench 1B Changes + Commit active on the current feature branch
+- ✅ Branch awareness — Workbench 1B Changes + Commit merged by PR #49
 
 ## AI sessions
 
@@ -592,11 +604,16 @@ Foundation completed:
 AI Session Beta Slice B — Checkpoint 1:
 
 - ✅ Codex-first AI session tab
-- ✅ Agent-owned persistent Codex authority, exclusive beta lease, and exact-container staging path
+- ✅ Agent-owned persistent Codex authority, exclusive beta lease, exact-container staging path, and
+  isolated version/capability discovery for the recognized execution artifact
 - ✅ Create, prompt, stream, interrupt, stop, and new-turn controls
 - ✅ Persistent public session/turn metadata and refresh recovery
 - ✅ Streaming assistant text and useful activity events
-- 🟡 Approvals and structured questions — Checkpoint 2
+- ✅ Approvals and structured questions — Checkpoint 2 implementation on
+  `feat/ai-workbench-checkpoint-2`
+- ✅ Durable interaction projection, terminal retirement, canonical response reconciliation, and
+  profile-pinned session navigation
+- ✅ AI changed-file links open the existing Workbench Edit/Changes representation
 - ✅ Bounded changed-files summary after terminal turns
 - ✅ Clear degraded-session and restart-workspace fallback
 - ✅ Exact stopped-session restart with one durable history/event chain and monotonically increasing
@@ -605,7 +622,8 @@ AI Session Beta Slice B — Checkpoint 1:
 - ✅ Checkpoint 1 passed: private Probe A, private Probe B, and the real browser first-write/read-
   only/interrupt/replay/Stop flow all used the Agent-owned Codex provider; provider exit, staging,
   synchronization, lease, authority, and container cleanup were verified
-- 🟡 Checkpoint 2 remains approvals and structured questions
+- 🟡 Checkpoint 2 real installed-Codex/browser dogfood remains to be completed on the implementation
+  branch; deterministic 0.145-baseline and captured newer-protocol fixtures are green
 
 Deferred until later:
 
@@ -632,7 +650,7 @@ Deferred until later:
 
 ## Workbench lifecycle and visual design
 
-- 🟡 Functional tabbed Workbench exists
+- ✅ Functional tabbed Workbench exists
 - ❌ Full visual redesign/polish
 - ❌ Better tab lifecycle
 - ❌ First-class Terminal / Editor / Preview / AI / Git / Task tabs

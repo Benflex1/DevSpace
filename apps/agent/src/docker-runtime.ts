@@ -68,18 +68,87 @@ export class DockerEngineTransportError extends Error {
 export interface DockerContainerInspection {
   Id: string;
   Name: string;
-  Config: { Labels: Record<string, string>; WorkingDir: string };
+  Image?: string;
+  Config: { Labels: Record<string, string>; Image?: string; WorkingDir: string; User?: string; Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
   State: { Running: boolean; Status: string };
   HostConfig: { Privileged: boolean; PublishAllPorts: boolean; PidMode: string;
     IpcMode: string; UTSMode: string; UsernsMode: string; CgroupnsMode: string;
     NetworkMode: string; PortBindings: Record<string, Array<{ HostIp?: string | undefined; HostPort: string }> | null> | null;
     Devices: unknown[] | null; NanoCpus: number; Memory: number; PidsLimit: number | null;
     CapAdd: string[] | null; CapDrop: string[] | null; SecurityOpt: string[] | null;
-    AutoRemove: boolean; ReadonlyRootfs: boolean; RestartPolicy: { Name: string; MaximumRetryCount: number } };
+    AutoRemove: boolean; ReadonlyRootfs: boolean; RestartPolicy: { Name: string; MaximumRetryCount: number };
+    Binds?: readonly string[] | null; Mounts?: readonly unknown[] | null; Tmpfs?: Readonly<Record<string, string>> | null;
+    MemorySwap?: number };
   NetworkSettings: {
     Networks: Record<string, { NetworkID: string }> | null;
   };
   Mounts: Array<{ Type: string; Source: string; Destination: string; RW: boolean; Propagation: string }>;
+}
+export interface DockerImageInspection {
+  readonly Id: string;
+  readonly Os: string;
+  readonly Architecture: string;
+  readonly Config: {
+    readonly Entrypoint?: readonly string[] | null;
+    readonly Cmd?: readonly string[] | null;
+  };
+}
+export interface DockerProbeContainerInput {
+  readonly imageId: string;
+  /** A stable configured reference used only to ask the engine to create from the verified image. */
+  readonly imageReference?: string;
+  readonly user: string;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly cpuMillicores: number;
+  readonly memoryBytes: number;
+  readonly pidLimit: number;
+}
+
+export interface DockerCodexBootstrapContainerInput {
+  readonly imageId: string;
+  /** Agent-private staged Codex artifact closure; never a workspace path. */
+  readonly artifactRoot: string;
+  /** Agent-private empty temporary CODEX_HOME for one authentication attempt. */
+  readonly codexHomePath: string;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly cpuMillicores: number;
+  readonly memoryBytes: number;
+  readonly pidLimit: number;
+}
+
+export function buildCodexBootstrapContainerInput(input: DockerCodexBootstrapContainerInput) {
+  if (!/^sha256:[0-9a-f]{32,}$/u.test(input.imageId)
+    || input.artifactRoot.length === 0 || input.codexHomePath.length === 0
+    || input.artifactRoot.includes("\0") || input.codexHomePath.includes("\0")) {
+    throw new Error("codex-bootstrap-container-input-invalid");
+  }
+  return {
+    Image: input.imageId,
+    Entrypoint: ["/bin/sh", "-c"],
+    Cmd: ["exec sleep 2147483647"],
+    WorkingDir: "/",
+    User: "",
+    Env: ["CODEX_HOME=/opt/codex-home", "HOME=/opt/codex-home", "TMPDIR=/tmp"],
+    Labels: { ...input.labels },
+    ExposedPorts: {},
+    HostConfig: {
+      Binds: [],
+      Mounts: [
+        { Type: "bind", Source: path.resolve(input.artifactRoot), Target: "/opt/codex", ReadOnly: true,
+          BindOptions: { Propagation: "rprivate" } },
+        { Type: "bind", Source: path.resolve(input.codexHomePath), Target: "/opt/codex-home", ReadOnly: false,
+          BindOptions: { Propagation: "rprivate" } }
+      ],
+      Tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=64m" },
+      NetworkMode: "bridge", PortBindings: {}, PublishAllPorts: false,
+      Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
+      AutoRemove: false, ReadonlyRootfs: true, RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"],
+      NanoCpus: input.cpuMillicores * 1_000_000, Memory: input.memoryBytes, MemorySwap: input.memoryBytes,
+      PidsLimit: input.pidLimit
+    }
+  } as const;
 }
 export const DOCKER_LOOPBACK_HOST = "127.0.0.1" as const;
 export interface DockerPortBinding { readonly HostIp: string; readonly HostPort: string }
@@ -153,8 +222,9 @@ export interface DockerExecInspection {
 }
 
 const dockerContainerInspectionSchema = z.object({
-  Id: z.string().min(1), Name: z.string().min(1),
-  Config: z.object({ Labels: z.record(z.string(), z.string()), WorkingDir: z.string() }),
+  Id: z.string().min(1), Name: z.string().min(1), Image: z.string().min(1).optional(),
+  Config: z.object({ Labels: z.record(z.string(), z.string()), Image: z.string().min(1).optional(), WorkingDir: z.string(), User: z.string().optional(),
+    Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() }),
   State: z.object({ Running: z.boolean(), Status: z.string() }),
   HostConfig: z.object({
     Privileged: z.boolean(), PublishAllPorts: z.boolean(), PidMode: z.string(), IpcMode: z.string(), UTSMode: z.string(),
@@ -163,10 +233,16 @@ const dockerContainerInspectionSchema = z.object({
     NanoCpus: z.number().int(), Memory: z.number().int(), PidsLimit: z.number().int().nullable(),
     CapAdd: z.array(z.string()).nullable(), CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable(),
     AutoRemove: z.boolean(), ReadonlyRootfs: z.boolean(),
-    RestartPolicy: z.object({ Name: z.string(), MaximumRetryCount: z.number().int() })
+    RestartPolicy: z.object({ Name: z.string(), MaximumRetryCount: z.number().int() }),
+    Binds: z.array(z.string()).nullable().optional(), Mounts: z.array(z.unknown()).nullable().optional(),
+    Tmpfs: z.record(z.string(), z.string()).nullable().optional(), MemorySwap: z.number().int().optional()
   }),
   NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ NetworkID: z.string() })).nullable() }),
   Mounts: z.array(z.object({ Type: z.string(), Source: z.string(), Destination: z.string(), RW: z.boolean(), Propagation: z.string() }))
+});
+const dockerImageInspectionSchema = z.object({
+  Id: z.string().min(1), Os: z.string().min(1), Architecture: z.string().min(1),
+  Config: z.object({ Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() })
 });
 const dockerNetworkInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1), Labels: z.record(z.string(), z.string())
@@ -296,7 +372,11 @@ export class DockerEngineClient {
   }
 
   async inspectContainer(id: string): Promise<DockerContainerInspection> {
-    return dockerContainerInspectionSchema.parse(await this.json("GET", `/containers/${encodeURIComponent(id)}/json`));
+    return dockerContainerInspectionSchema.parse(await this.json("GET", `/containers/${encodeURIComponent(id)}/json`)) as DockerContainerInspection;
+  }
+
+  async inspectImage(id: string): Promise<DockerImageInspection> {
+    return dockerImageInspectionSchema.parse(await this.json("GET", `/images/${encodeURIComponent(id)}/json`)) as DockerImageInspection;
   }
 
   async startContainer(id: string): Promise<void> {
@@ -305,6 +385,50 @@ export class DockerEngineClient {
 
   async stopContainer(id: string): Promise<void> {
     await this.request("POST", `/containers/${encodeURIComponent(id)}/stop?t=10`, undefined, [204, 304]);
+  }
+
+  async removeContainer(id: string): Promise<void> {
+    await this.request("DELETE", `/containers/${encodeURIComponent(id)}?force=1`, undefined, [204]);
+  }
+
+  async createProbeContainer(name: string, input: DockerProbeContainerInput): Promise<string> {
+    const imageReference = input.imageReference ?? input.imageId;
+    if (input.imageId.length === 0 || imageReference.length === 0 || imageReference.includes("\0") || input.user.includes("\0")) {
+      throw new Error("probe-image-or-user-invalid");
+    }
+    const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, {
+      Image: imageReference,
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: ["exec sleep 2147483647"],
+      WorkingDir: "/",
+      User: input.user,
+      Env: Object.entries(input.environment).sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, value]) => `${key}=${value}`),
+      Labels: { ...input.labels },
+      ExposedPorts: {},
+      HostConfig: {
+        Binds: [], Mounts: [], Tmpfs: {
+          "/opt/devspace-codex-probe": "rw,nosuid,nodev,exec,size=1g",
+          "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
+          "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
+        },
+        NetworkMode: "none", PortBindings: {}, PublishAllPorts: false,
+        Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
+        AutoRemove: false, ReadonlyRootfs: true, RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+        CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"],
+        NanoCpus: input.cpuMillicores * 1_000_000, Memory: input.memoryBytes, MemorySwap: input.memoryBytes,
+        PidsLimit: input.pidLimit
+      }
+    });
+    if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("docker-probe-container-id-missing");
+    return response.Id;
+  }
+
+  async createCodexBootstrapContainer(name: string, input: DockerCodexBootstrapContainerInput): Promise<string> {
+    const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`,
+      buildCodexBootstrapContainerInput(input));
+    if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("codex-bootstrap-container-id-missing");
+    return response.Id;
   }
 
   async createExec(containerId: string, input: {

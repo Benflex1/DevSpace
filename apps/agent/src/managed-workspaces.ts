@@ -553,7 +553,8 @@ export class ManagedWorkspaces {
       path.join(this.stateRoot, "revisions"), path.join(this.stateRoot, "ownership", "projects"),
       path.join(this.stateRoot, "ownership", "workspaces"), path.join(this.stateRoot, "ownership", "runtimes"), path.join(this.stateRoot, "creations"),
       path.join(this.stateRoot, "runtime-creations"), path.join(this.stateRoot, "executions"), path.join(this.stateRoot, "previews"),
-      path.join(this.stateRoot, "preview-leases"), path.join(this.projectRoot, ".staging"),
+      path.join(this.stateRoot, "preview-leases"), path.join(this.stateRoot, "codex-artifacts"),
+      path.join(this.stateRoot, "ai", "codex-discovery-cache"), path.join(this.projectRoot, ".staging"),
       path.join(this.projectRoot, ".cleanup"), path.join(this.workspaceRoot, ".cleanup")
     ];
     this.guardedDirectories.set(this.projectRoot, configuredRoots[0].identity);

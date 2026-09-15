@@ -55,6 +55,9 @@ function boundedContent(maxBytes: number, allowEmpty = false) {
 export const aiProfileRevisionSchema = z.string()
   .regex(/^sha256-ai-profile-v1:[0-9a-f]{64}$/u);
 export const aiProviderKeySchema = configurationKeySchema;
+// Browser-safe availability intentionally exposes a small stable vocabulary.
+// Agent-private Codex discovery diagnostics map into these bounded codes rather
+// than exposing executable paths, schemas, stderr, or provider details.
 export const aiProviderAvailabilitySchema = z.discriminatedUnion("state", [
   z.strictObject({ state: z.literal("available") }),
   z.strictObject({
@@ -166,6 +169,7 @@ export const aiApprovalDecisionSchema = z.enum([
   "deny",
   "cancel"
 ]);
+export type AiApprovalDecision = z.infer<typeof aiApprovalDecisionSchema>;
 
 export const aiStructuredInputOptionSchema = z.strictObject({
   optionId: configurationKeySchema,
@@ -177,6 +181,7 @@ export const aiStructuredInputQuestionSchema = z.strictObject({
   header: boundedContent(256),
   question: boundedContent(4_096),
   responseKind: z.enum(["single-select", "text"]),
+  allowOther: z.boolean().default(false),
   secret: z.literal(false),
   options: z.array(aiStructuredInputOptionSchema).max(AI_MAX_STRUCTURED_INPUT_OPTIONS)
 }).superRefine((question, context) => {
@@ -185,6 +190,9 @@ export const aiStructuredInputQuestionSchema = z.strictObject({
   }
   if (question.responseKind === "text" && question.options.length !== 0) {
     context.addIssue({ code: "custom", path: ["options"], message: "A text question cannot have options" });
+  }
+  if (question.responseKind === "text" && question.allowOther) {
+    context.addIssue({ code: "custom", path: ["allowOther"], message: "A text question cannot allow Other" });
   }
   if (new Set(question.options.map((option) => option.optionId)).size !== question.options.length) {
     context.addIssue({ code: "custom", path: ["options"], message: "Option IDs must be unique" });
@@ -200,6 +208,11 @@ export const aiStructuredInputAnswerSchema = z.discriminatedUnion("kind", [
     questionId: configurationKeySchema,
     kind: z.literal("text"),
     text: boundedContent(AI_USER_CONTENT_MAX_BYTES, true)
+  }),
+  z.strictObject({
+    questionId: configurationKeySchema,
+    kind: z.literal("other"),
+    text: boundedContent(AI_USER_CONTENT_MAX_BYTES)
   })
 ]);
 export const aiStructuredInputQuestionsSchema = z.array(aiStructuredInputQuestionSchema)
@@ -216,6 +229,8 @@ export const aiStructuredInputAnswersSchema = z.array(aiStructuredInputAnswerSch
     (answers) => new Set(answers.map((answer) => answer.questionId)).size === answers.length,
     "Answers must bind unique question IDs"
   );
+export type AiStructuredInputAnswer = z.infer<typeof aiStructuredInputAnswerSchema>;
+export type AiStructuredInputAnswers = z.infer<typeof aiStructuredInputAnswersSchema>;
 
 const sessionIdentityFields = {
   projectId: uuidV7Schema,
@@ -427,7 +442,8 @@ const sessionLostCode = z.enum([
   "AGENT_RESTART",
   "RUNTIME_REPLACED",
   "OWNERSHIP_AMBIGUOUS",
-  "EVENT_HISTORY_UNAVAILABLE"
+  "EVENT_HISTORY_UNAVAILABLE",
+  "CODEX_UNKNOWN_BLOCKING_REQUEST"
 ]);
 
 const canonicalAiEventSchemas = [
@@ -475,6 +491,9 @@ const canonicalAiEventSchemas = [
     requestId: uuidV7Schema,
     answers: aiStructuredInputAnswersSchema
   })),
+  turnEvent("turn.interaction.expired", z.strictObject({
+    requestId: uuidV7Schema
+  })),
   turnEvent("turn.interrupt.requested", emptyPayload),
   turnEvent("turn.interrupted", z.strictObject({
     reason: z.enum(["user-request", "provider-confirmed", "provider-process-stopped"])
@@ -512,7 +531,9 @@ export const aiStreamSynchronizedFrameSchema = z.strictObject({
   schemaVersion: z.literal(AI_STREAM_SCHEMA_VERSION),
   frameType: z.literal("stream.synchronized"),
   sessionId: uuidV7Schema,
-  throughSequence: aiAfterSequenceSchema
+  throughSequence: aiAfterSequenceSchema,
+  processGeneration: aiProcessGenerationSchema,
+  pendingInteractionIds: z.array(uuidV7Schema).max(AI_MAX_PRESENTATION_PATHS)
 });
 export const aiEventStreamFrameSchema = z.union([
   canonicalAiEventSchema,

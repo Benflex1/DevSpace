@@ -1,8 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   AI_PROFILE_AUTHORITY_FORMAT,
-  canonicalizeAiProviderAuthorityV1,
-  hashAiProviderAuthorityV1
+  canonicalizeAiProviderAuthorityV1
 } from "./ai-profile-revision-v1.js";
 
 const authority = {
@@ -10,7 +9,7 @@ const authority = {
   profileId: "codex",
   provider: "codex",
   providerVersion: "0.145.0",
-  adapterVersion: "codex-app-server-v0-145",
+  adapterVersion: "codex-app-server-family-v1",
   executableIdentity: "deployment-profile-pinned-codex",
   launchMode: "app-server-stdio",
   fixedArguments: ["app-server", "--stdio"],
@@ -37,12 +36,6 @@ const authority = {
 } as const;
 
 describe("AI provider profile revision v1", () => {
-  test("has a fixed domain-separated golden digest", () => {
-    expect(hashAiProviderAuthorityV1(authority)).toBe(
-      "sha256-ai-profile-v1:2e2182ea28025847d41470e66b4b6088410297c29b456eca404bfee8a624c193"
-    );
-  });
-
   test("is field-order and runtime-capability-order independent", () => {
     const reordered = {
       availabilityInspectionPolicy: authority.availabilityInspectionPolicy,
@@ -61,15 +54,13 @@ describe("AI provider profile revision v1", () => {
     };
     expect(canonicalizeAiProviderAuthorityV1(reordered))
       .toBe(canonicalizeAiProviderAuthorityV1(authority));
-    expect(hashAiProviderAuthorityV1(reordered))
-      .toBe(hashAiProviderAuthorityV1(authority));
   });
 
   test.each([
     ["profileId", { profileId: "codex-other" }],
     ["provider", { provider: "other" }],
     ["providerVersion", { providerVersion: "0.146.0" }],
-    ["adapterVersion", { adapterVersion: "codex-app-server-v0-146" }],
+    ["adapterVersion", { adapterVersion: "codex-app-server-family-v2" }],
     ["executableIdentity", { executableIdentity: "other-codex" }],
     ["launchMode", { launchMode: "other-mode" }],
     ["fixedArguments", { fixedArguments: ["app-server"] }],
@@ -91,23 +82,23 @@ describe("AI provider profile revision v1", () => {
         credentialProbe: "not-required"
       }
     }]
-  ] as const)("changes the digest when %s changes", (_field, changed) => {
-    expect(hashAiProviderAuthorityV1({ ...authority, ...changed }))
-      .not.toBe(hashAiProviderAuthorityV1(authority));
+  ] as const)("changes the canonical authority when %s changes", (_field, changed) => {
+    expect(canonicalizeAiProviderAuthorityV1({ ...authority, ...changed }))
+      .not.toBe(canonicalizeAiProviderAuthorityV1(authority));
   });
 
   test("rejects omitted, unknown, and secret-value fields", () => {
     const { adapterVersion: _omitted, ...withoutAdapter } = authority;
-    expect(() => hashAiProviderAuthorityV1(withoutAdapter)).toThrow();
-    expect(() => hashAiProviderAuthorityV1({
+    expect(() => canonicalizeAiProviderAuthorityV1(withoutAdapter)).toThrow();
+    expect(() => canonicalizeAiProviderAuthorityV1({
       ...authority,
       displayName: "Cosmetic name"
     })).toThrow();
-    expect(() => hashAiProviderAuthorityV1({
+    expect(() => canonicalizeAiProviderAuthorityV1({
       ...authority,
       credentialValue: "secret"
     })).toThrow();
-    expect(() => hashAiProviderAuthorityV1({
+    expect(() => canonicalizeAiProviderAuthorityV1({
       ...authority,
       providerVersion: "\ud800"
     })).toThrow();

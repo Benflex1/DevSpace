@@ -7,7 +7,7 @@ GitHub access are merged. CP3A/CP3B private GitHub access is complete, including
 private Push and non-fast-forward rejection acceptance. The private GitHub infrastructure phase is
 closed. Workbench 1A Files + Monaco merged as PR #48 at
 `e96afb4ac37b05099af1b6f8b7639677d0482113`, and the browser smoke passed. Workbench 1B Changes +
-Commit is the active Rapid Public Alpha product slice.
+Commit is merged by PR #49 at `47bf2d8c70dcab7b2ff278eb241e927db02a6dd0`.
 
 Private GitHub Repository Access Checkpoint 1 was merged by PR #44 at
 `a74c183e5dc9cf3ed1bf9c9ac4513cb7cdcf126e`. The validated CP1 head was
@@ -38,10 +38,34 @@ are therefore identical even though squash merging changed commit history.
 The merged owner-controlled Codex session path uses one Agent-owned persistent authority beneath
 the configured Agent state root, an exclusive provider lease, exact-container ephemeral credential
 staging, bounded strict stdio, durable public session/turn/event history, and restart reconciliation.
-The browser can create a session, send and stream turns, cooperatively interrupt, view bounded
-changed-file summaries, stop, and restart an exactly stopped session. Web remains the sole SQLite
-writer; provider credentials and private execution state remain Agent-owned. Approvals and
-structured questions remain deferred to AI Session Beta Checkpoint 2.
+The browser can create/select persisted sessions, send and stream turns, cooperatively interrupt,
+answer bounded approvals and structured questions, view bounded changed-file summaries, stop, and
+restart an exactly stopped session when its profile revision still matches. Web remains the sole
+SQLite writer; provider credentials, native interaction IDs, and private execution state remain
+Agent-owned.
+
+AI Session Beta Checkpoint 2 is implemented on `feat/ai-workbench-checkpoint-2`: durable interaction
+projection and terminal retirement, canonical response reconciliation, profile-pinned session
+navigation, and changed-file opening through the existing Workbench editor/Changes views are in
+place. The branch also derives Codex compatibility from the inspected protocol/capability surface:
+Codex `0.145.0` is the minimum regression baseline with no upper version bound, compatibility
+probing is isolated from Agent-host privileges, and the exact recognized execution-artifact closure
+is bound through discovery and launch. Command/file approvals remain required for the writable
+profile; structured input and interrupt may degrade only when the discovered protocol proves they
+are unavailable. Existing sessions remain pinned to their profile revision across Codex updates.
+The deterministic browser fixture covers the workflow; the configured official Codex `0.153.4`
+was admitted through the isolated discovery path with the required capabilities. Full real-browser
+dogfood remains blocked until an operator completes the isolated device-login step for the fresh
+Agent-owned authority. A bounded deployment/admin bootstrap now performs that step inside a
+dedicated rootless Docker container and installs the validated result through the existing Agent
+lease and atomic writeback path; no credential bypass is permitted.
+
+The Codex readback helpers now have explicit linux-x64 provenance: reviewed C sources are built
+inside the digest-pinned `gcc:13.3.0-bookworm` builder, canonical binaries are checked by their
+independent trusted SHA-256 identities, and Agent packaging copies only those verified artifacts.
+The reproducibility check builds twice from clean output and compares both bytes and hashes with
+the canonical and packaged copies. Codex turns also explicitly retain `on-request`/`user`
+approval authority with a workspace-write sandbox rooted at `/workspace`.
 
 ## Durable Milestone 1 and product path
 
@@ -66,8 +90,9 @@ Traefik → Cloudflare Tunnel/Access → reserved preview namespace → connecto
 loopback lease; this deployment choice is not a universal DevSpace core requirement.
 
 The current dashboard and Workbench expose project onboarding, workspace runtime controls, terminal,
-tasks, previews, and the Agent-backed Files + Monaco editor slice. File browsing, editing, and the
-Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime is stopped.
+tasks, previews, AI sessions, and the Agent-backed Files + Monaco editor slice. File browsing,
+editing, and the Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime
+is stopped.
 The confirmed Workbench 1B dogfood corrections reconcile stale Changes entries, preserve unsaved
 editor buffers across Edit/Changes presentation toggles, and use deterministic local Monaco model
 identity and disposal ownership.
