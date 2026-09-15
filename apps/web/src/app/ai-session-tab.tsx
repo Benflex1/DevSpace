@@ -224,7 +224,7 @@ export function AiSessionTab({ projectId, workspaceId, active, runtimeState, run
   }, [cancelWork, loadCoordinator]);
 
   useEffect(() => {
-    void load();
+    void load(selectedSessionId.current ?? undefined);
     return () => { cancelWork(); };
   }, [activeAction, cancelWork, load, runtimeAvailable, runtimeState]);
 

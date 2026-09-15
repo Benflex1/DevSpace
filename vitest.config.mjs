@@ -13,6 +13,7 @@ const workspaceAliases = Object.fromEntries(
 
 const testProjectDefinitions = [...expectedPackages].map(([directory, definition]) => ({
   resolve: { alias: workspaceAliases },
+  ...(definition.name === "@devspace/web" ? { oxc: { jsx: { runtime: "automatic" } } } : {}),
   test: {
     name: definition.name,
     include: [`${directory}/src/**/*.test.ts`],
