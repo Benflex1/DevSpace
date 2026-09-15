@@ -26,6 +26,7 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
   const restartState = isRestart ? runtimeRestartControlState({ runtimeState, runtimeAvailable, activeAction, canStart, canStop, pending }) : null;
   const action = restartState?.mode === "running" ? "stop" : restartState?.mode === "start" ? "start" : state.action;
   const disabled = restartState?.disabled ?? state.disabled;
+  const observedTransition = activeAction === null && ["creating", "starting", "stopping", "removing"].includes(runtimeState);
   const mutate = async () => {
     if (pendingRef.current) return;
     pendingRef.current = true;
@@ -40,7 +41,13 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
         const body = await response.json() as { message?: string; incidentId?: string };
         if (response.status === 202 && rejectInProgress) throw new RuntimeActionError(
           body.message ?? "The runtime action is still in progress; restart was not completed.", body.incidentId);
-        if (response.status === 202) { showNotice(body.message ?? "The runtime action is still in progress.", "info"); return false; }
+        if (response.status === 202) {
+          showNotice(body.message ?? "The runtime action is still in progress.", "info");
+          // Seed the Workbench's canonical runtime observation poller. A 202
+          // is not evidence that the requested state has been reached.
+          router.refresh();
+          return false;
+        }
         if (!response.ok) throw new RuntimeActionError(body.message ?? "The runtime action failed.", body.incidentId);
         return true;
       };
@@ -69,7 +76,7 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
     } catch (error) {
       showNotice(error instanceof Error ? error.message : isRestart ? "Workspace restart failed." : "The runtime action failed.", "error",
         error instanceof RuntimeActionError ? error.incidentId : undefined);
-      if (isRestart) router.refresh();
+      router.refresh();
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -80,10 +87,10 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
       onClick={() => { mutate().catch(() => undefined); }}>
       {pending ? "Restarting…" : "Restart workspace"}
     </button>}
-    {!isRestart && activeAction !== null && <button type="button" disabled title="Another runtime action is already in progress.">
-      {activeAction === "start" ? "Starting…" : "Stopping…"}
+    {!isRestart && (activeAction !== null || observedTransition) && <button type="button" disabled title={state.reason ?? "The workspace runtime is still changing state."}>
+      {(activeAction ?? (runtimeState === "stopping" || runtimeState === "removing" ? "stop" : "start")) === "start" ? "Starting…" : "Stopping…"}
     </button>}
-    {!isRestart && activeAction === null && <button type="button" disabled={state.disabled || pending} title={state.reason ?? undefined}
+    {!isRestart && activeAction === null && !observedTransition && <button type="button" disabled={state.disabled || pending} title={state.reason ?? undefined}
       onClick={() => { mutate().catch(() => undefined); }}>
       {pending ? (action === "start" ? "Starting…" : "Stopping…")
         : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : (stopLabel ?? "Stop runtime")}

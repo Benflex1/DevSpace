@@ -6,6 +6,7 @@ import { WorkspaceSetupForm } from "../../workspace-setup-form.js";
 import { authenticateHeaders } from "../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../server/config.js";
 import { loadProjectWorkspaceData } from "../../../server/project-workspace.js";
+import { runtimePresentationLabel } from "../../runtime-presentation.js";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       <dl>
         <div><dt>Project status</dt><dd>{projectStateLabel(project.state)}</dd></div>
         <div><dt>Primary workspace</dt><dd>{project.primaryWorkspace?.name ?? "Not created"} · {workspaceState}</dd></div>
-        <div><dt>Development runtime</dt><dd>{runtimeState === "absent" ? "No container created" : runtimeStateLabel(runtimeState)}</dd></div>
+        <div><dt>Development runtime</dt><dd>{runtimeState === "absent" && runtimeAvailability === "available" ? "Not started" : runtimePresentationLabel(runtimeState, runtimeAvailability === "available")}</dd></div>
         <div><dt>Rootless runtime</dt><dd>{runtimeAvailability === "available" ? "Available" : "Unavailable"}</dd></div>
         {project.activeRevision !== null && <div><dt>Project Options</dt><dd>Active revision v{project.activeRevision.number}</dd></div>}
         {project.runtime?.errorMessage !== null && project.runtime?.errorMessage !== undefined && <div><dt>Runtime error</dt><dd>{project.runtime.errorMessage}</dd></div>}
@@ -70,8 +71,4 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
 
 function projectStateLabel(state: "registering" | "ready" | "invalid" | "archived"): string {
   return { registering: "Registered — workspace setup pending", ready: "Ready", invalid: "Needs attention", archived: "Archived" }[state];
-}
-
-function runtimeStateLabel(state: string): string {
-  return { starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped" }[state] ?? state;
 }

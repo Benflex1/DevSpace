@@ -54,6 +54,17 @@ async function collectStream(socketPath: string): Promise<unknown[]> {
   return frames;
 }
 
+async function collectStreamOutcome(socketPath: string): Promise<{ frames: unknown[]; error: unknown }> {
+  const frames: unknown[] = [];
+  try {
+    for await (const frame of createAgentClient(socketPath, { createId: () => id, now: () => new Date(timestamp) })
+      .streamAiEvents(streamSessionId, 0)) frames.push(frame);
+  } catch (error) {
+    return { frames, error };
+  }
+  throw new Error("expected the Agent stream to report its clean disconnect");
+}
+
 function streamService(write: (response: http.ServerResponse) => void): Promise<{ socketPath: string; close: () => Promise<void> }> {
   return listen((_request, response) => {
     response.writeHead(200, { "content-type": AI_EVENT_NDJSON_CONTENT_TYPE });
@@ -135,10 +146,14 @@ test("allocates no maximum-sized parser buffer for an empty or small AI event st
   });
   try {
     const empty = await streamService((response) => response.end());
-    try { await expect(collectStream(empty.socketPath)).resolves.toEqual([]); }
+    try {
+      await expect(collectStreamOutcome(empty.socketPath)).resolves.toMatchObject({ frames: [], error: { code: "AGENT_UNAVAILABLE" } });
+    }
     finally { await empty.close(); }
     const small = await streamService((response) => response.end(`${JSON.stringify(synchronizedFrame)}\n`));
-    try { await expect(collectStream(small.socketPath)).resolves.toEqual([synchronizedFrame]); }
+    try {
+      await expect(collectStreamOutcome(small.socketPath)).resolves.toMatchObject({ frames: [synchronizedFrame], error: { code: "AGENT_UNAVAILABLE" } });
+    }
     finally { await small.close(); }
   } finally {
     spy.mockRestore();
@@ -173,7 +188,7 @@ test("one-byte socket chunking retains at most one parser slab for a small frame
     if (size === 64 * 1024) parserSlabs += 1;
     return original(size);
   });
-  try { await expect(collectStream(service.socketPath)).resolves.toEqual([event]); }
+  try { await expect(collectStreamOutcome(service.socketPath)).resolves.toMatchObject({ frames: [event], error: { code: "AGENT_UNAVAILABLE" } }); }
   finally { spy.mockRestore(); await service.close(); }
   expect(parserSlabs).toBe(1);
 });
@@ -205,7 +220,7 @@ test("accepts a legal near-maximum escaped structured-answer frame", async () =>
   expect(encoded.length).toBeGreaterThan(maximumCanonicalFrameBytes - 512 * 1024);
   expect(encoded.length).toBeLessThanOrEqual(maximumCanonicalFrameBytes);
   const service = await streamService((response) => response.end(Buffer.concat([encoded, Buffer.from("\n")])));
-  try { await expect(collectStream(service.socketPath)).resolves.toEqual([event]); }
+  try { await expect(collectStreamOutcome(service.socketPath)).resolves.toMatchObject({ frames: [event], error: { code: "AGENT_UNAVAILABLE" } }); }
   finally { await service.close(); }
 }, 30_000);
 
@@ -239,11 +254,12 @@ test("parses one or multiple canonical NDJSON frames from arbitrary socket chunk
       response.end();
     });
     try {
-      await expect(collectStream(service.socketPath)).resolves.toEqual(
-        chunks.length === 1 && chunks[0]!.length === encoded.length * 2
+      await expect(collectStreamOutcome(service.socketPath)).resolves.toMatchObject({
+        frames: chunks.length === 1 && chunks[0]!.length === encoded.length * 2
           ? [synchronizedFrame, synchronizedFrame]
-          : [synchronizedFrame]
-      );
+          : [synchronizedFrame],
+        error: { code: "AGENT_UNAVAILABLE" }
+      });
     } finally { await service.close(); }
   }
 });
@@ -268,7 +284,7 @@ test("decodes a multibyte UTF-8 scalar split across socket chunks", async () => 
     response.end(encoded.subarray(scalar + 1));
   });
   try {
-    await expect(collectStream(service.socketPath)).resolves.toEqual([event]);
+    await expect(collectStreamOutcome(service.socketPath)).resolves.toMatchObject({ frames: [event], error: { code: "AGENT_UNAVAILABLE" } });
   } finally { await service.close(); }
 });
 
@@ -304,10 +320,10 @@ test.each(["terminated", "unterminated"] as const)("rejects an oversized %s NDJS
   } finally { await service.close(); }
 });
 
-test("accepts an empty stream and cancellation destroys the underlying socket", async () => {
+test("rejects a cleanly closed stream and cancellation destroys the underlying socket", async () => {
   const empty = await streamService((response) => response.end());
   try {
-    await expect(collectStream(empty.socketPath)).resolves.toEqual([]);
+    await expect(collectStreamOutcome(empty.socketPath)).resolves.toMatchObject({ frames: [], error: { code: "AGENT_UNAVAILABLE" } });
   } finally { await empty.close(); }
 
   let closed = false;

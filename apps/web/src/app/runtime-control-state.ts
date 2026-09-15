@@ -1,5 +1,7 @@
 export type RuntimeControlAction = "start" | "stop";
 
+const runtimeTransitionStates = new Set(["creating", "starting", "stopping", "removing"]);
+
 export interface RuntimeControlStateInput {
   readonly runtimeState: string;
   readonly runtimeAvailable: boolean;
@@ -59,11 +61,13 @@ export function runtimeControlState(input: RuntimeControlStateInput): RuntimeCon
       : input.runtimeState === "stopped" || input.runtimeState === "absent" ? "start"
         : input.canStop ? "stop" : "start");
   const authorized = action === "stop" ? input.canStop : input.canStart;
+  const transitioning = runtimeTransitionStates.has(input.runtimeState);
   const reason = input.activeAction !== null ? "Another runtime action is already in progress."
+    : transitioning ? "The workspace runtime is still changing state."
     : !input.runtimeAvailable ? "The dedicated rootless runtime is unavailable."
       : !authorized ? action === "stop"
         ? "The live Agent state does not currently authorize stopping this runtime."
         : "The live Agent state does not currently authorize starting this runtime."
         : null;
-  return { action, visible: true, disabled: input.activeAction !== null || !input.runtimeAvailable || !authorized, reason };
+  return { action, visible: true, disabled: input.activeAction !== null || transitioning || !input.runtimeAvailable || !authorized, reason };
 }

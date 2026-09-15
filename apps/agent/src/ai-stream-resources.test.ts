@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { CanonicalAiEvent } from "@devspace/contracts";
 import { createAgentServer, type AgentServer, type AgentServerOptions } from "./server.js";
 import type { AiSessionRuntime } from "./ai-session-runtime.js";
+import { AiOutboxError } from "./ai-session-outbox.js";
 
 const timestamp = "2026-07-30T00:00:00.000Z";
 const sessionIds = [
@@ -42,7 +43,7 @@ function event(sequence: number, sessionId = sessionIds[0], text = `event-${sequ
   };
 }
 
-function createRuntime(initialEvents: CanonicalAiEvent[] = []) {
+function createRuntime(initialEvents: CanonicalAiEvent[] = [], options: { synchronizedError?: Error } = {}) {
   const durable = [...initialEvents];
   const listeners = new Set<(value: CanonicalAiEvent) => void>();
   let unsubscribeCalls = 0;
@@ -59,15 +60,19 @@ function createRuntime(initialEvents: CanonicalAiEvent[] = []) {
       listeners.delete(listener);
     };
   });
+  const synchronized = vi.fn(() => options.synchronizedError === undefined
+    ? Promise.resolve({ processGeneration: 1, pendingInteractionIds: [] as string[] })
+    : Promise.reject(options.synchronizedError));
   const runtime = {
     inspect: vi.fn(), start: vi.fn(), sendTurn: vi.fn(), interrupt: vi.fn(), stop: vi.fn(),
-    respondToAiApproval: vi.fn(), respondToAiStructuredInput: vi.fn(), synchronized: vi.fn(() => Promise.resolve({ processGeneration: 1, pendingInteractionIds: [] })),
+    respondToAiApproval: vi.fn(), respondToAiStructuredInput: vi.fn(), synchronized,
     replay, subscribe, acknowledge: vi.fn(), collect: vi.fn()
   } as unknown as AiSessionRuntime;
   return {
     runtime,
     replay,
     subscribe,
+    synchronized,
     append(value: CanonicalAiEvent) {
       durable.push(value);
       for (const listener of listeners) listener(value);
@@ -165,6 +170,20 @@ async function collectFramesUntil(
 }
 
 describe("Agent AI event stream resource bounds", () => {
+  test("ends cleanly when the outbox becomes unavailable after HTTP 200", async () => {
+    const harness = createRuntime([], { synchronizedError: new AiOutboxError("AI_OUTBOX_UNAVAILABLE") });
+    const { socketPath } = await startServer(harness.runtime);
+    const stream = await openStream(socketPath, sessionIds[0]);
+    expect(stream.response.statusCode).toBe(200);
+    const outcome = await new Promise<"end" | "error">((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("stream-did-not-close")), 500);
+      stream.response.once("end", () => { clearTimeout(timer); resolve("end"); });
+      stream.response.once("error", () => { clearTimeout(timer); resolve("error"); });
+      stream.response.resume();
+    });
+    expect(outcome).toBe("end");
+  });
+
   test("admits four streams globally, denies the fifth before replay, and releases a closed slot", async () => {
     const harness = createRuntime();
     const { socketPath } = await startServer(harness.runtime);

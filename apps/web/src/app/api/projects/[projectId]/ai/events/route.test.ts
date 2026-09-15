@@ -214,4 +214,121 @@ describe("AI event stream HTTP preflight", () => {
 
     expect(secondFrameProduced).toBe(true);
   });
+
+  test("fails before HTTP 200 when the live Agent stream cannot produce its first control frame", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    mocks.agentStream.mockImplementationOnce(async function* () {
+      await Promise.resolve();
+      yield* [];
+      throw Object.assign(new Error("The Agent is unavailable."), {
+        name: "AgentUnavailableError",
+        code: "AGENT_UNAVAILABLE",
+        retryable: true,
+        failureCategory: "dependency-unavailable"
+      });
+    });
+
+    const response = await GET(request(0), context);
+
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("temporarily unavailable");
+  });
+
+  test("does not wait for a new event before committing an otherwise eligible idle stream", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    mocks.agentStream.mockImplementationOnce(async function* (
+      _sessionId: string,
+      _afterSequence: number,
+      options?: { signal?: AbortSignal }
+    ) {
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted === true) return resolve();
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      yield* [];
+    });
+
+    const response = await Promise.race([
+      GET(request(0), context),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("idle stream establishment hung")), 250))
+    ]);
+
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+  });
+
+  test("closes a temporary mid-stream outage with a bounded product control frame", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    mocks.agentStream.mockImplementationOnce(async function* () {
+      yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 0,
+        processGeneration: 1, pendingInteractionIds: [] };
+      await Promise.resolve();
+      throw Object.assign(new Error("The Agent is unavailable."), {
+        name: "AgentUnavailableError",
+        code: "AGENT_UNAVAILABLE",
+        retryable: true,
+        failureCategory: "dependency-unavailable"
+      });
+    });
+
+    const response = await GET(request(0), context);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain('"frameType":"stream.unavailable"');
+    expect(body).toContain("Committed history is preserved");
+  });
+
+  test("marks an unexpected mid-stream failure without surfacing a failed-to-pipe body error", async () => {
+    mocks.getSession.mockReturnValue({
+      session: {
+        id: ids.sessionId,
+        projectId: ids.projectId,
+        workspaceId: ids.workspaceId,
+        historyStartSequence: 1,
+        lastSequence: 0
+      },
+      turns: [], events: [], interactions: []
+    });
+    mocks.agentStream.mockImplementationOnce(async function* () {
+      yield { schemaVersion: "devspace.ai-stream/v1" as const, frameType: "stream.synchronized" as const, sessionId: ids.sessionId, throughSequence: 0,
+        processGeneration: 1, pendingInteractionIds: [] };
+      await Promise.resolve();
+      throw new Error("unexpected internal stream failure");
+    });
+
+    const response = await GET(request(0), context);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain('"frameType":"stream.failed"');
+    expect(body).toContain("The AI event stream ended unexpectedly.");
+  });
 });

@@ -16,7 +16,7 @@ import {
 } from "@devspace/contracts";
 import { v7 as uuidv7 } from "uuid";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
-import type { ManagedWorkspaces } from "./managed-workspaces.js";
+import { AgentExecutionError, type ManagedWorkspaces } from "./managed-workspaces.js";
 import {
   CODEX_AUTHORITY_POLICY_VERSION,
   CODEX_CREDENTIAL_LEASE_POLICY_VERSION,
@@ -309,7 +309,23 @@ function unavailableCodexProfile(code: PublicUnavailableCode): AiProviderProfile
   });
 }
 
-function availabilityForDiscoveryError(error: unknown): AiProviderProfileProjection["availability"] {
+export function availabilityForDiscoveryError(error: unknown): AiProviderProfileProjection["availability"] {
+  if (error instanceof AgentExecutionError) {
+    switch (error.failure.code) {
+      case "CONFIGURATION_NOT_REGISTERED":
+      case "PROJECT_NOT_FOUND":
+      case "RESOURCE_NOT_FOUND":
+      case "WORKSPACE_STATE_CONFLICT":
+      case "RUNTIME_POLICY_VIOLATION":
+      case "ROOTLESS_RUNTIME_UNAVAILABLE":
+        return { state: "unavailable", code: "WORKSPACE_REQUIREMENT_UNMET" };
+      default:
+        // Agent execution failures that are not workspace prerequisites must
+        // remain a generic unavailable profile. In particular, they must not
+        // be mistaken for a missing executable.
+        return { state: "unavailable", code: "PROFILE_DISABLED" };
+    }
+  }
   const message = error instanceof Error ? error.message : "";
   const diagnostic = codexCompatibilityDiagnostics.find((candidate) => candidate === message);
   if (diagnostic !== undefined) {
@@ -320,7 +336,7 @@ function availabilityForDiscoveryError(error: unknown): AiProviderProfileProject
   }
   if (message.includes("credential")) return { state: "unavailable", code: "CREDENTIAL_SOURCE_UNAVAILABLE" };
   if (message.includes("identity")) return { state: "unavailable", code: "RUNTIME_IDENTITY_UNAVAILABLE" };
-  return { state: "unavailable", code: "EXECUTABLE_MISSING" };
+  return { state: "unavailable", code: "PROFILE_DISABLED" };
 }
 
 function bindingMatches(left: AiSessionBinding, right: AiSessionBinding): boolean {

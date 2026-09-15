@@ -93,6 +93,11 @@ The current dashboard and Workbench expose project onboarding, workspace runtime
 tasks, previews, AI sessions, and the Agent-backed Files + Monaco editor slice. File browsing,
 editing, and the Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime
 is stopped.
+The Workbench runtime projection now distinguishes not-started, transition, running, failed/lost,
+and unavailable observations from the canonical Agent/runtime control path. Codex availability keeps
+a valid executable separate from a missing exact workspace runtime, while persisted nonterminal AI
+history remains readable and live-only actions/stream reconnects are bounded until the runtime and
+provider attachment are available again.
 The confirmed Workbench 1B dogfood corrections reconcile stale Changes entries, preserve unsaved
 editor buffers across Edit/Changes presentation toggles, and use deterministic local Monaco model
 identity and disposal ownership.

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitInspectionData } from "@devspace/contracts";
 import { RuntimeControls } from "./runtime-controls.js";
@@ -11,6 +12,7 @@ import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./previ
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import { AiSessionTab } from "./ai-session-tab.js";
+import { runtimePresentationLabel } from "./runtime-presentation.js";
 import { resolveAiChangedFileOpenTarget } from "./ai-changed-file-open.js";
 import { EditorTab } from "./editor-tab.js";
 import { WorkspaceChanges, type GitCommitFormInput } from "./workspace-changes.js";
@@ -58,6 +60,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   initialMessage?: string | null;
   initialGit: GitInspectionData | null;
 }) {
+  const router = useRouter();
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [editorDocuments] = useState(() => new WorkbenchEditorDocuments());
   const [editorPresentationGeneration, setEditorPresentationGeneration] = useState(0);
@@ -253,6 +256,39 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [refresh, runs]);
+
+  useEffect(() => {
+    const observedInFlight = activeAction !== null || ["creating", "starting", "stopping", "removing"].includes(runtimeState);
+    if (!observedInFlight) return;
+    let stopped = false;
+    let timer: number | null = null;
+    const poll = async () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      try {
+        const response = await fetch(`/api/projects/${projectId}/runtime`, { cache: "no-store" });
+        if (response.ok) {
+          const observation = await response.json() as {
+            runtimeState?: unknown; runtimeAvailable?: unknown; activeAction?: unknown;
+            canStart?: unknown; canStop?: unknown; retryStart?: unknown;
+          };
+          const changed = observation.runtimeState !== runtimeState
+            || observation.runtimeAvailable !== runtimeAvailable
+            || observation.activeAction !== activeAction
+            || observation.canStart !== canStart || observation.canStop !== canStop || observation.retryStart !== retryStart;
+          if (changed && !stopped) router.refresh();
+        }
+      } catch { /* the next observation or the existing control feedback will explain the state */ }
+      if (!stopped) timer = window.setTimeout(() => { poll().catch(() => undefined); }, 750);
+    };
+    const handleVisibility = () => { if (document.visibilityState === "visible") poll().catch(() => undefined); };
+    document.addEventListener("visibilitychange", handleVisibility);
+    poll().catch(() => undefined);
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [activeAction, canStart, canStop, projectId, retryStart, router, runtimeAvailable, runtimeState]);
 
   useEffect(() => {
     // TODO: move active preview reconciliation into background server orchestration rather than relying on an open Workbench.
@@ -530,7 +566,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
           canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId} editorViews={editorViews}
-          editorDocuments={editorDocuments} editorPresentationGeneration={editorPresentationGeneration}
+        editorDocuments={editorDocuments} editorPresentationGeneration={editorPresentationGeneration} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable}
+          activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
           onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }}
           onDiffNoLongerPresent={handleDiffNoLongerPresent} onOpenAiChangedFile={openAiChangedFile} />
@@ -549,7 +586,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     {pushIntent !== null && <PushConfirmationDialog intent={pushIntent} confirming={confirmingPush}
       onCancel={() => { if (!confirmingPush) { setPushIntent(null); clearNotice(); } }} onConfirm={() => { confirmPush().catch(() => showNotice("Repository push failed safely.", "error")); }} />}
     {persistentGitFailure !== null && <GitFailureDialog failure={persistentGitFailure} onDismiss={() => setPersistentGitFailure(null)} />}
-    <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
+    <WorkbenchStatusBar runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
 
@@ -572,7 +609,7 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
       <button type="button" className="topbar-action" disabled={!agentReachable || fetchingRepository} onClick={onFetchRepository}>
         {fetchingRepository ? "Fetching…" : "Fetch repository"}
       </button>
-      <span className={`runtime-chip ${runtimeState}`}>{runtimeLabel(runtimeState)}</span>
+      <span className={`runtime-chip ${runtimeAvailable ? runtimeState : "unavailable"}`}>{runtimePresentationLabel(runtimeState, runtimeAvailable)}</span>
       <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart}
         canStop={canStop} retryStart={retryStart} />
     </div>
@@ -667,10 +704,11 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent, onOpenAiChangedFile }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent, onOpenAiChangedFile }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
   projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged"; readFile: boolean }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   editorDocuments: WorkbenchEditorDocuments; editorPresentationGeneration: number;
+  runtimeState: string; runtimeAvailable: boolean; activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean;
   onReloadPreview: (previewId: string) => Promise<void>;
   previewGateway: { readonly protocol: "http:" | "https:"; readonly port: number | null };
   onEditorDirtyChange: (tabId: string, dirty: boolean) => void; onEditorModeChange: (tabId: string, mode: "edit" | "changes") => void; onEditorSaved: () => void;
@@ -686,7 +724,9 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
-      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} onOpenChangedFile={onOpenAiChangedFile} />
+      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId}
+        runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
+        onOpenChangedFile={onOpenAiChangedFile} />
         : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
           mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
           readFile={editorViews[tab.id]?.readFile ?? true}
@@ -771,16 +811,12 @@ function LostTerminalDialog({ count, projectId, runtimeState, runtimeAvailable, 
   </div>;
 }
 
-function WorkbenchStatusBar({ runtimeState, agentStatus, agentReachable, actor }: {
-  runtimeState: string; agentStatus: string; agentReachable: boolean; actor: string;
+function WorkbenchStatusBar({ runtimeState, runtimeAvailable, agentStatus, agentReachable, actor }: {
+  runtimeState: string; runtimeAvailable: boolean; agentStatus: string; agentReachable: boolean; actor: string;
 }) {
-  return <footer className="workbench-statusbar"><span><i className={`status-dot ${runtimeState}`} aria-hidden="true" /> Runtime {runtimeLabel(runtimeState)}</span>
+  return <footer className="workbench-statusbar"><span><i className={`status-dot ${runtimeAvailable ? runtimeState : "unavailable"}`} aria-hidden="true" /> Runtime {runtimePresentationLabel(runtimeState, runtimeAvailable)}</span>
     <span role="status"><i className={`status-dot ${agentReachable ? "online" : "offline"}`} aria-hidden="true" /> Agent {agentStatus}</span>
     <span className="status-spacer" /><span className="status-actor">{actor}</span></footer>;
-}
-
-function runtimeLabel(state: string): string {
-  return { starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped", absent: "Offline" }[state] ?? state;
 }
 
 function tabTitle(tab: WorkbenchTab): string {

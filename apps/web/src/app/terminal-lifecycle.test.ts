@@ -91,9 +91,20 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain('"Stop runtime"');
     expect(runtimeControls).toContain("activeAction === null");
     expect(runtimeControls).toContain("disabled={state.disabled || pending}");
-    expect(runtimeControls).toContain("{!isRestart && activeAction === null && <button");
+    expect(runtimeControls).toContain("{!isRestart && activeAction === null && !observedTransition && <button");
     expect(workbench).toContain("runtimeState={runtimeState}");
     expect(runtimeControls).toContain("router.refresh()");
+  });
+
+  test("shows runtime failure, loss, and rootless unavailability distinctly", async () => {
+    const workbench = await readFile(new URL("./project-workbench.tsx", import.meta.url), "utf8");
+    const page = await readFile(new URL("./projects/[projectId]/page.tsx", import.meta.url), "utf8");
+    const runtimeControls = await readFile(new URL("./runtime-controls.tsx", import.meta.url), "utf8");
+    expect(workbench).toContain("runtimePresentationLabel(runtimeState, runtimeAvailable)");
+    expect(page).toContain("runtimePresentationLabel(runtimeState, runtimeAvailability === \"available\")");
+    expect(runtimeControls).toContain("Runtime is running.");
+    expect(runtimeControls).toContain("Starting runtime…");
+    expect(runtimeControls).toContain("The dedicated rootless runtime is unavailable.");
   });
 
   test("keeps recovery dialog styling secondary for Dismiss and primary for Restart", async () => {

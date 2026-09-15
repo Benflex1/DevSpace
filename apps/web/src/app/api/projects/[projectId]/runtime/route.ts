@@ -23,7 +23,8 @@ export async function GET(request: Request, context: { params: Promise<{ project
     const runtimeState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping"
       : inspection?.runtimeStack.observedState ?? data.project.runtime?.observedState ?? "absent";
     return json({ runtimeState, runtimeAvailable: data.runtimeAvailability === "available", activeAction,
-      canStart: data.runtimeOperation?.canStart === true, canStop: data.runtimeOperation?.canStop === true }, 200);
+      canStart: data.runtimeOperation?.canStart === true, canStop: data.runtimeOperation?.canStop === true,
+      retryStart: data.runtimeOperation?.canRetryStart === true }, 200);
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     return json({ message: "Fresh runtime authorization could not be obtained." }, 503);

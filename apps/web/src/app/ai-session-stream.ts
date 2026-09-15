@@ -12,6 +12,14 @@ export type BrowserAiEvent = {
 };
 
 type BrowserAiStreamFrame = BrowserAiEvent | { frameType: string; [key: string]: unknown };
+export type BrowserAiStreamControl = { frameType: string; [key: string]: unknown };
+export type BrowserAiStreamStatus = "connected" | "reconnecting" | "unavailable" | "failed";
+export class BrowserAiStreamError extends Error {
+  constructor(message: string, readonly kind: "unavailable" | "failed") {
+    super(message);
+    this.name = "BrowserAiStreamError";
+  }
+}
 type ConsumeAiEventStreamOptions = {
   initialSequence: number;
   initialEventId?: string | null;
@@ -21,9 +29,13 @@ type ConsumeAiEventStreamOptions = {
   apply: (event: BrowserAiEvent) => void | boolean;
   isTerminal: () => boolean;
   sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  onControl?: (control: BrowserAiStreamControl) => void;
+  onStatus?: (status: BrowserAiStreamStatus) => void;
 };
 
 const RETRY_DELAYS_MS = [100, 200, 400, 800, 1_600, 3_000] as const;
+const DEFAULT_UNAVAILABLE_MESSAGE = "The live AI connection is temporarily unavailable. Committed history is preserved.";
+const DEFAULT_FAILED_MESSAGE = "The AI event stream ended unexpectedly. Committed history is preserved.";
 
 export async function sleepWithAbort(delayMs: number, signal: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -70,6 +82,17 @@ function canonicalFrame(value: BrowserAiStreamFrame): BrowserAiEvent | null {
   return value;
 }
 
+function boundedControlMessage(control: BrowserAiStreamControl, fallback: string): string {
+  return typeof control.message === "string" && control.message.length > 0 && control.message.length <= 512
+    ? control.message : fallback;
+}
+
+function streamOpenError(status: number): BrowserAiStreamError {
+  return new BrowserAiStreamError(status === 503 ? DEFAULT_UNAVAILABLE_MESSAGE
+    : status === 409 ? "The selected AI session needs to be reloaded before it can reconnect."
+      : "The AI event stream could not be opened safely.", status === 503 ? "unavailable" : "failed");
+}
+
 async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason: unknown): Promise<void> {
   try { await reader.cancel(reason); } catch { /* the body may already be closed */ }
 }
@@ -80,21 +103,52 @@ export async function consumeAiEventStream(options: ConsumeAiEventStreamOptions)
   let lastAppliedSequence = options.initialSequence;
   let lastAppliedEventId = options.initialEventId ?? null;
   let zeroProgressCloses = 0;
+  let temporaryUnavailableCloses = 0;
+  let lastUnavailableMessage = DEFAULT_UNAVAILABLE_MESSAGE;
   while (!options.signal.aborted && !options.isTerminal()) {
     let response: Response;
     try { response = await options.open(lastAppliedSequence, options.signal); }
     catch (error) { if (options.signal.aborted) return; throw error; }
     if (!response.ok || response.body === null) {
       try { await response.body?.cancel(); } catch { /* the response is already closed */ }
-      throw new Error("The AI event stream could not be opened.");
+      if (response.status === 503) {
+        lastUnavailableMessage = DEFAULT_UNAVAILABLE_MESSAGE;
+        options.onStatus?.("unavailable");
+        if (temporaryUnavailableCloses >= RETRY_DELAYS_MS.length) {
+          throw new BrowserAiStreamError(lastUnavailableMessage, "unavailable");
+        }
+        const delay = RETRY_DELAYS_MS[Math.min(temporaryUnavailableCloses, RETRY_DELAYS_MS.length - 1)]!;
+        temporaryUnavailableCloses += 1;
+        options.onStatus?.("reconnecting");
+        try { await sleep(delay, options.signal); } catch (error) { if (options.signal.aborted) return; throw error; }
+        continue;
+      }
+      options.onStatus?.("failed");
+      throw streamOpenError(response.status);
     }
+    options.onStatus?.("connected");
     const startingSequence = lastAppliedSequence;
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let streamFailureMessage: string | null = null;
+    let streamUnavailableMessage: string | null = null;
     const applyLine = (line: string) => {
       const frame = parseFrame(line);
-      if (frame === null || "frameType" in frame) return;
+      if (frame === null) return;
+      if ("frameType" in frame) {
+        if (options.isTerminal()) return;
+        if (frame.frameType === "stream.unavailable") {
+          streamUnavailableMessage = boundedControlMessage(frame, DEFAULT_UNAVAILABLE_MESSAGE);
+          lastUnavailableMessage = streamUnavailableMessage;
+          options.onStatus?.("unavailable");
+        } else if (frame.frameType === "stream.failed") {
+          streamFailureMessage = boundedControlMessage(frame, DEFAULT_FAILED_MESSAGE);
+          options.onStatus?.("failed");
+        }
+        options.onControl?.(frame);
+        return;
+      }
       if (options.signal.aborted) return;
       const canonical = canonicalFrame(frame);
       if (canonical === null) return;
@@ -143,9 +197,27 @@ export async function consumeAiEventStream(options: ConsumeAiEventStreamOptions)
     }
     if (options.signal.aborted) return;
     if (options.isTerminal()) return;
+    if (streamFailureMessage !== null) throw new BrowserAiStreamError(streamFailureMessage, "failed");
+    if (streamUnavailableMessage !== null) {
+      if (temporaryUnavailableCloses >= RETRY_DELAYS_MS.length) {
+        options.onStatus?.("unavailable");
+        throw new BrowserAiStreamError(lastUnavailableMessage, "unavailable");
+      }
+      const delay = RETRY_DELAYS_MS[Math.min(temporaryUnavailableCloses, RETRY_DELAYS_MS.length - 1)]!;
+      temporaryUnavailableCloses += 1;
+      options.onStatus?.("reconnecting");
+      try { await sleep(delay, options.signal); } catch (error) { if (options.signal.aborted) return; throw error; }
+      continue;
+    }
+    temporaryUnavailableCloses = 0;
     if (lastAppliedSequence === startingSequence) {
+      if (zeroProgressCloses >= RETRY_DELAYS_MS.length) {
+        options.onStatus?.("failed");
+        throw new BrowserAiStreamError(DEFAULT_FAILED_MESSAGE, "failed");
+      }
       const delay = RETRY_DELAYS_MS[Math.min(zeroProgressCloses, RETRY_DELAYS_MS.length - 1)]!;
       zeroProgressCloses += 1;
+      options.onStatus?.("reconnecting");
       try { await sleep(delay, options.signal); } catch (error) { if (options.signal.aborted) return; throw error; }
     } else {
       zeroProgressCloses = 0;

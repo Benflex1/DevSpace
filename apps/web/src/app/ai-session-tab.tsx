@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { appendAiTurnOutput, applyAiInteractionEvent, boundAiSessionTurns, type BrowserAiApprovalDecision, type BrowserAiInteraction, type BrowserAiTurn } from "./ai-session-projection.js";
-import { consumeAiEventStream, type BrowserAiEvent } from "./ai-session-stream.js";
+import { BrowserAiStreamError, consumeAiEventStream, type BrowserAiEvent, type BrowserAiStreamStatus } from "./ai-session-stream.js";
 import { AiHistoryTruncationNotice, AiOutputTruncationNotice } from "./ai-session-notices.js";
 import { replayAiEvents, replayAiInteractions } from "./ai-session-replay.js";
 import {
@@ -15,6 +15,9 @@ import { aiSessionMutationControls, createAiSessionRestartCoordinator } from "./
 import { createAiSessionSendReconciliation } from "./ai-session-send-reconciliation.js";
 import { createAiSessionStopCoordinator } from "./ai-session-stop.js";
 import { AiSessionInteractionCard } from "./ai-session-interaction-cards.js";
+import { RuntimeControls } from "./runtime-controls.js";
+import { aiSessionStreamAdmission } from "./ai-session-stream-admission.js";
+import { runtimePresentationLabel, runtimePresentationMessage } from "./runtime-presentation.js";
 
 type Profile = { profileId: string; profileRevision: string; displayName: string; availability: { state: "available" | "unavailable"; code?: string }; capabilities: { interrupt: boolean; approvals: boolean; structuredInput: boolean } };
 type FileSummary = BrowserAiTurn["changedFiles"];
@@ -24,7 +27,18 @@ type SessionSummary = Pick<SessionData, "id" | "title" | "state" | "lastSequence
 type Event = BrowserAiEvent;
 type AiPostError = Error & { turnId: string | undefined; outcome: string | undefined };
 
-export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile }: { projectId: string; workspaceId: string; active: boolean; onOpenChangedFile?: (file: Turn["changedFiles"]["files"][number]) => void | Promise<void> }) {
+export function AiSessionTab({ projectId, workspaceId, active, runtimeState, runtimeAvailable, activeAction, canStart, canStop, retryStart, onOpenChangedFile }: {
+  projectId: string;
+  workspaceId: string;
+  active: boolean;
+  runtimeState: string;
+  runtimeAvailable: boolean;
+  activeAction: "start" | "stop" | null;
+  canStart: boolean;
+  canStop: boolean;
+  retryStart: boolean;
+  onOpenChangedFile?: (file: Turn["changedFiles"]["files"][number]) => void | Promise<void>;
+}) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [session, setSession] = useState<SessionData | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -34,7 +48,7 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
   const [composer, setComposer] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [reconnecting, setReconnecting] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<BrowserAiStreamStatus | "idle">("idle");
   const [restartPending, setRestartPending] = useState(false);
   const [stopPending, setStopPending] = useState(false);
   const [initialRetryPending, setInitialRetryPending] = useState(false);
@@ -55,6 +69,14 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
     restoreDraft: setComposer,
     setPending: setSendReconciliationPending,
     setMessage
+  });
+  const streamAdmission = aiSessionStreamAdmission({
+    active,
+    sessionState: session?.state ?? null,
+    runtimeState,
+    runtimeAvailable,
+    activeAction,
+    providerAvailable: profile?.availability.state === "available"
   });
 
   const applyEvent = useCallback((event: Event): boolean => {
@@ -150,9 +172,10 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
       return { profile: body.profile, sessions: body.sessions ?? [], selected };
     },
     apply: ({ profile: nextProfile, sessions: nextSessions, selected }) => {
-      setProfile(nextProfile);
-      setSessions(nextSessions);
-      setMessage(null);
+       setProfile(nextProfile);
+       setSessions(nextSessions);
+       setMessage(null);
+       setStreamStatus("idle");
       if (selected !== null && selected !== undefined) {
         selectedSessionId.current = selected.session.id;
         selectedSessionState.current = selected.session.state;
@@ -203,12 +226,13 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
   useEffect(() => {
     void load();
     return () => { cancelWork(); };
-  }, [cancelWork, load]);
+  }, [activeAction, cancelWork, load, runtimeAvailable, runtimeState]);
 
   useEffect(() => {
-    if (!active || session === null || session.state === "stopped" || session.state === "lost") return;
-    const controller = new AbortController(); streamAbortRef.current?.abort(); streamAbortRef.current = controller; setReconnecting(false);
-    const sessionId = session.id;
+    const liveSession = session;
+    if (!streamAdmission.allowed || liveSession === null) return;
+    const controller = new AbortController(); streamAbortRef.current?.abort(); streamAbortRef.current = controller; setStreamStatus("reconnecting");
+    const sessionId = liveSession.id;
     const generation = selectionGeneration.current;
     const run = async () => {
       try {
@@ -224,12 +248,24 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
             lastSequence.current = event.sequence; lastEventId.current = event.eventId;
             return true;
           },
-          isTerminal: () => terminal.current || generation !== selectionGeneration.current || selectedSessionId.current !== sessionId
-        });
-      } catch (error) { if (!controller.signal.aborted) { setReconnecting(true); setMessage(error instanceof Error ? error.message : "The AI stream disconnected."); } }
+          isTerminal: () => terminal.current || generation !== selectionGeneration.current || selectedSessionId.current !== sessionId,
+          onControl: (control) => {
+            if (generation !== selectionGeneration.current || selectedSessionId.current !== sessionId) return;
+            if (control.frameType !== "stream.unavailable" && control.frameType !== "stream.failed") return;
+            setMessage(typeof control.message === "string" ? control.message : "The AI stream disconnected.");
+          },
+           onStatus: (status) => {
+             if (generation !== selectionGeneration.current || selectedSessionId.current !== sessionId) return;
+             setStreamStatus(status);
+             if (status === "connected") {
+               setMessage(null);
+             }
+           }
+         });
+       } catch (error) { if (!controller.signal.aborted) { setStreamStatus(error instanceof BrowserAiStreamError ? error.kind : "failed"); setMessage(error instanceof Error ? error.message : "The AI stream disconnected."); } }
     };
     void run(); return () => { controller.abort(); if (streamAbortRef.current === controller) streamAbortRef.current = null; };
-  }, [active, applyEvent, projectId, session?.id, session?.state, streamRevision, workspaceId]);
+  }, [applyEvent, projectId, session?.id, session?.state, streamAdmission.allowed, streamAdmission.reason, streamRevision, workspaceId]);
 
   const post = useCallback(async (body: Record<string, unknown>) => {
     const response = await fetch(`/api/projects/${projectId}/ai`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify(body) });
@@ -373,7 +409,6 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
     if (session === null) return;
     if (await restartCoordinator.restart(session.id)) setMessage(null);
   };
-  const restartWorkspace = async () => { cancelWork(); try { await fetch(`/api/projects/${projectId}/runtime`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "start" }) }); await load(); } catch { setMessage("Workspace restart could not be requested."); } };
 
   if (loading && profile === null) return <div className="ai-tab-surface" role="status">Inspecting Codex availability…</div>;
   const unavailable = profile?.availability.state === "unavailable";
@@ -382,6 +417,14 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
   const liveSessionExists = sessions.some((candidate) => ["creating", "active", "waiting_for_input", "interrupted"].includes(candidate.state));
   const restartMatchesProfile = session !== null && profile !== null
     && profile.profileId === "codex" && profile.profileRevision === session.profileRevision;
+  const runtimeLabel = runtimePresentationLabel(runtimeState, runtimeAvailable);
+  const runtimePrerequisiteUnmet = session === null
+    ? !runtimeAvailable || runtimeState !== "running" || activeAction !== null
+    : streamAdmission.reason === "workspace-runtime-unavailable";
+  const providerAttachmentUnavailable = session !== null && streamAdmission.reason === "provider-unavailable";
+  const liveAttachmentUnavailable = runtimePrerequisiteUnmet || providerAttachmentUnavailable || streamStatus === "unavailable";
+  const displayedStreamStatus = liveAttachmentUnavailable ? "unavailable"
+    : streamStatus === "failed" ? "failed" : streamStatus === "reconnecting" ? "reconnecting" : null;
   const controls = session === null ? null : aiSessionMutationControls(
     session.state,
     running,
@@ -390,20 +433,27 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
     initialRetryPending
   );
   return <section className="ai-tab-surface" aria-label="AI session">
-    <header className="ai-tab-header"><div><strong>{session?.title ?? "AI session"}</strong><span className={`ai-status ${session?.state ?? (unavailable ? "unavailable" : "ready")}`}>{reconnecting ? "Reconnecting…" : session?.state ?? (unavailable ? "Unavailable" : "Ready")}</span></div>
-      {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && <button type="button" disabled={stopPending} onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
+    <header className="ai-tab-header"><div><strong>{session?.title ?? "AI session"}</strong><span className={`ai-status ${displayedStreamStatus ?? session?.state ?? (unavailable ? "unavailable" : "ready")}`}>{displayedStreamStatus === "unavailable" ? "Live unavailable" : displayedStreamStatus === "failed" ? "Stream failed" : displayedStreamStatus === "reconnecting" ? "Reconnecting…" : session?.state ?? (unavailable ? "Unavailable" : "Ready")}</span><span className={`ai-runtime-state ${runtimeAvailable ? runtimeState : "unavailable"}`}>Runtime {runtimeLabel}</span></div>
+      {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && !liveAttachmentUnavailable && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && !liveAttachmentUnavailable && <button type="button" disabled={stopPending} onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
     {message !== null && <p className="ai-message" role="status">{message}</p>}
-    {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{unavailable ? "Codex unavailable" : "Start an AI session"}</h2><p>{unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : "Ask Codex to inspect, explain, or change files in this workspace."}</p>{!unavailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
+    {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{runtimePrerequisiteUnmet ? "Start the workspace runtime" : unavailable ? "Codex unavailable" : "Start an AI session"}</h2><p>{runtimePrerequisiteUnmet ? runtimePresentationMessage(runtimeState, runtimeAvailable, activeAction) : unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : "Ask Codex to inspect, explain, or change files in this workspace."}</p>{runtimePrerequisiteUnmet
+      ? <RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart}
+        canStop={canStop} retryStart={retryStart} action="start" />
+      : !unavailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
       <div className="ai-session-navigator" aria-label="AI sessions"><label htmlFor="ai-session-select">Session</label><select id="ai-session-select" value={session.id} onChange={(event) => { void selectSession(event.target.value); }}>{sessions.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title} · {candidate.state}</option>)}</select><button type="button" disabled={liveSessionExists} onClick={() => { void create(); }}>{liveSessionExists ? "Live session exists" : "New session"}</button></div>
+      {runtimePrerequisiteUnmet && <div className="ai-degraded" role="status"><strong>Workspace runtime {runtimeLabel.toLowerCase()}.</strong><span>{runtimePresentationMessage(runtimeState, runtimeAvailable, activeAction)} Committed history is preserved.</span><RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable}
+        activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart} action="start" /></div>}
+      {providerAttachmentUnavailable && <div className="ai-degraded" role="status"><strong>Live Codex attachment unavailable.</strong><span>Committed history is preserved. Reconnect when this workspace and Codex profile are available{profile?.availability.code === undefined ? "." : ` (${profile.availability.code}).`}</span></div>}
       {session.historyTruncated && <AiHistoryTruncationNotice historyStartSequence={session.historyStartSequence} />}
       {session.interactionsTruncated && <p className="ai-interactions-truncated" role="note">Some older interaction history is omitted; only retained requests are shown.</p>}
       {controls?.showInitialRetry && <div className="ai-degraded" role="status"><strong>Codex did not finish starting.</strong><span>Retry startup for this exact session.</span><button type="button" disabled={controls.initialRetryDisabled} onClick={() => { void retryInitialStart(); }}>Retry starting Codex</button></div>}
       <div className="ai-timeline" aria-live="polite">{turns.length === 0 && <p className="ai-empty-copy">Your conversation will appear here.</p>}{turns.map((turn) => <article className="ai-turn" key={turn.id}><div className="ai-turn-label">You <span>{turn.state}</span></div><p className="ai-user-text">{turn.content.text}</p>{turn.activities.length > 0 && <div className="ai-activities">{turn.activities.map((activity, index) => <span key={`${turn.id}-activity-${index}`}>{activity}</span>)}</div>}<div className="ai-assistant"><div className="ai-turn-label">Codex</div><p>{turn.outputText || (turn.state === "running" || turn.state.startsWith("waiting-") ? "Working…" : "")}</p>{turn.outputTruncated && <AiOutputTruncationNotice />}</div>{turn.changedFiles.files.length > 0 && <div className="ai-files"><strong>Changed files</strong><ul>{turn.changedFiles.files.map((file) => <li key={`${file.change}:${file.path}`}><span>{file.change} <code>{file.path}</code>{file.oldPath !== null && <> from <code>{file.oldPath}</code></>}</span>{onOpenChangedFile !== undefined && <button type="button" onClick={() => { void onOpenChangedFile(file); }}>Open in Workbench</button>}</li>)}</ul>{turn.changedFiles.truncated && <small>Additional files omitted.</small>}</div>}{interactions.filter((interaction) => interaction.turnId === turn.id).map((interaction) => <AiSessionInteractionCard key={interaction.id} interaction={interaction}
         approvalsSupported={profile?.capabilities.approvals === true} structuredInputSupported={profile?.capabilities.structuredInput === true}
-        responding={respondingInteractionIds.has(interaction.id)} onApproval={(decision) => { void respondApproval(interaction, decision); }} onInput={(answers) => { void respondInput(interaction, answers); }} />)}</article>)}</div>
-      {controls?.showComposer && <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Codex…" aria-label="AI prompt" rows={3} disabled={turnBusy || sendReconciliationPending} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} /><div><small>Ctrl/Cmd + Enter to send</small><button type="submit" disabled={turnBusy || sendReconciliationPending || composer.trim().length === 0}>Send</button></div></form>}
+        responding={respondingInteractionIds.has(interaction.id)} disabled={liveAttachmentUnavailable} onApproval={(decision) => { void respondApproval(interaction, decision); }} onInput={(answers) => { void respondInput(interaction, answers); }} />)}</article>)}</div>
+      {controls?.showComposer && !liveAttachmentUnavailable && <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Codex…" aria-label="AI prompt" rows={3} disabled={turnBusy || sendReconciliationPending} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} /><div><small>Ctrl/Cmd + Enter to send</small><button type="submit" disabled={turnBusy || sendReconciliationPending || composer.trim().length === 0}>Send</button></div></form>}
       {controls?.showRestart && <div className="ai-degraded" role="status"><strong>Codex session stopped.</strong><span>{restartMatchesProfile ? "Committed history is preserved. Start a new provider process for this exact session." : "Committed history is preserved. This session is pinned to an older Codex profile revision and is historical-only."}</span>{restartMatchesProfile && <button type="button" disabled={controls.restartDisabled} onClick={() => { void restart(); }}>Start Codex again</button>}</div>}
-      {session.state === "lost" && <div className="ai-degraded" role="alert"><strong>Live provider session lost.</strong><span>Committed history is preserved. Restart the workspace before creating a new live attachment.</span><button type="button" onClick={() => { void restartWorkspace(); }}>Restart workspace</button></div>}
+      {session.state === "lost" && <div className="ai-degraded" role="alert"><strong>Live provider session lost.</strong><span>Committed history is preserved. Restart the workspace before creating a new live attachment.</span><RuntimeControls projectId={projectId} runtimeState={runtimeState} runtimeAvailable={runtimeAvailable}
+        activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart} restart onSuccess={() => { void load(session.id); }} /></div>}
     </>}
   </section>;
 }

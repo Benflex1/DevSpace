@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import { replayAiEvents, type AiSessionReplayEvent } from "./ai-session-replay.js";
+import { aiSessionStreamAdmission } from "./ai-session-stream-admission.js";
 
 describe("AI session browser hydration", () => {
   test("does not append historical output deltas to persisted turn text", () => {
@@ -36,5 +37,47 @@ describe("AI session browser hydration", () => {
     expect(source).toContain("profile.profileRevision === session.profileRevision");
     expect(source).toContain("historical-only");
     expect(source).toContain('disabled={liveSessionExists}');
+  });
+
+  test("keeps nonterminal session history visible while the runtime prerequisite is unavailable", async () => {
+    const source = await readFile(new URL("./ai-session-tab.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("aiSessionStreamAdmission");
+    expect(source).toContain('reason === "workspace-runtime-unavailable"');
+    expect(source).toContain("Committed history is preserved.");
+    expect(source).toContain("runtimePresentationMessage(runtimeState, runtimeAvailable, activeAction)");
+    expect(source).toContain('action="start"');
+    expect(source).toContain("runtimeState={runtimeState}");
+    expect(source).toContain("runtimeAvailable={runtimeAvailable}");
+  });
+
+  test("keeps creating sessions eligible to observe their lifecycle", async () => {
+    const source = await readFile(new URL("./ai-session-tab.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain('sessionState: session?.state ?? null');
+    expect(source).toContain('runtimeState !== "running"');
+    expect(source).toContain('profile?.availability.state === "available"');
+    expect(source).not.toContain('session?.state === "ready"');
+  });
+
+  test("covers persisted-session recovery from a never-started runtime to a live stream", async () => {
+    const source = await readFile(new URL("./ai-session-tab.tsx", import.meta.url), "utf8");
+    const workbench = await readFile(new URL("./project-workbench.tsx", import.meta.url), "utf8");
+    const stopped = aiSessionStreamAdmission({ active: true, sessionState: "active", runtimeState: "absent", runtimeAvailable: true,
+      activeAction: null, providerAvailable: false });
+    const starting = aiSessionStreamAdmission({ active: true, sessionState: "active", runtimeState: "starting", runtimeAvailable: true,
+      activeAction: "start", providerAvailable: false });
+    const running = aiSessionStreamAdmission({ active: true, sessionState: "creating", runtimeState: "running", runtimeAvailable: true,
+      activeAction: null, providerAvailable: true });
+
+    expect(stopped).toMatchObject({ allowed: false, reason: "workspace-runtime-unavailable" });
+    expect(starting).toMatchObject({ allowed: false, reason: "workspace-runtime-unavailable" });
+    expect(running).toEqual({ allowed: true, reason: "allowed" });
+    expect(source).toContain("replayAiEvents");
+    expect(source).toContain("Committed history is preserved.");
+    expect(source).toContain('action="start"');
+    expect(source).toContain("runtimeState={runtimeState}");
+    expect(workbench).toContain("router.refresh()");
+    expect(workbench).toContain("/api/projects/${projectId}/runtime");
   });
 });

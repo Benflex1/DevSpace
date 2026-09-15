@@ -582,8 +582,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           (event) => delivery.enqueueLive(event)
         );
         delivery.setUnsubscribe(unsubscribe);
-      } catch {
-        delivery.close();
+      } catch (error) {
+        if (error instanceof AiOutboxError && error.code === "AI_OUTBOX_UNAVAILABLE") {
+          // The response is already committed here. End it cleanly so the Web
+          // client can classify this expected dependency loss as temporary
+          // unavailability instead of receiving a reset/protocol failure.
+          if (!response.destroyed) response.end();
+          delivery.close(false);
+        } else {
+          delivery.close();
+        }
       }
       return;
     }

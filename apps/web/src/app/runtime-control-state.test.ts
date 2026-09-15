@@ -38,6 +38,12 @@ describe("runtime control state", () => {
     });
   });
 
+  test.each(["creating", "starting", "stopping", "removing"] as const)("keeps controls pending while runtime is %s", (runtimeState) => {
+    expect(runtimeControlState({ ...base, runtimeState, canStart: true, canStop: true })).toMatchObject({
+      visible: true, disabled: true, reason: "The workspace runtime is still changing state."
+    });
+  });
+
   test("requires only authorized stop to restart a running runtime", () => {
     expect(runtimeRestartControlState({ ...base, runtimeState: "running", canStop: true })).toMatchObject({
       mode: "running", disabled: false, reason: null

@@ -5,6 +5,43 @@ import { readWebRuntimeConfig } from "../../../../../../server/config.js";
 import { getProjectDatabase } from "../../../../../../server/database.js";
 import { preflightAiEventStream, streamAiEvents, toAiActionError } from "../../../../../../server/ai-sessions.js";
 
+const TEMPORARY_STREAM_MESSAGE = "The live AI connection is temporarily unavailable. Committed history is preserved.";
+const UNEXPECTED_STREAM_MESSAGE = "The AI event stream ended unexpectedly. Committed history is preserved.";
+// A replay/control frame is useful preflight evidence when it is immediately
+// available, but an idle live session must not hold the HTTP response open.
+const STREAM_PREFLIGHT_TIMEOUT_MS = 0;
+
+type StreamErrorLike = Error & {
+  code?: unknown;
+  retryable?: unknown;
+  failureCategory?: unknown;
+};
+
+function streamErrorLike(error: unknown): StreamErrorLike | null {
+  return error instanceof Error ? error : null;
+}
+
+function isTemporaryStreamFailure(error: unknown): boolean {
+  const candidate = streamErrorLike(error);
+  if (candidate === null) return false;
+  return candidate.code === "AI_OUTBOX_UNAVAILABLE"
+    || candidate.code === "AGENT_UNAVAILABLE"
+    || candidate.code === "AGENT_REQUEST_TIMEOUT";
+}
+
+function streamFailureControl(error: unknown): { frameType: "stream.unavailable" | "stream.failed"; message: string } {
+  return isTemporaryStreamFailure(error)
+    ? { frameType: "stream.unavailable", message: TEMPORARY_STREAM_MESSAGE }
+    : { frameType: "stream.failed", message: UNEXPECTED_STREAM_MESSAGE };
+}
+
+function preflightStreamFailureResponse(error: unknown): Response {
+  if (isTemporaryStreamFailure(error)) return new Response(TEMPORARY_STREAM_MESSAGE, { status: 503 });
+  const code = streamErrorLike(error)?.code;
+  if (code === "AI_EVENT_GAP") return new Response("The requested AI event history is no longer retained.", { status: 409 });
+  return new Response(UNEXPECTED_STREAM_MESSAGE, { status: 500 });
+}
+
 export async function GET(request: Request, context: { params: Promise<{ projectId: string }> }) {
   try {
     const config = readWebRuntimeConfig(); await authenticateHeaders(request.headers, config.auth); const { projectId } = await context.params;
@@ -40,10 +77,50 @@ export async function GET(request: Request, context: { params: Promise<{ project
       requestAbortListening = true;
       request.signal.addEventListener("abort", onRequestAbort, { once: true });
     }
+    const firstFramePromise = iterator.next();
+    let preflightResult: { kind: "frame"; frame: IteratorResult<unknown> } | { kind: "error"; error: unknown } | { kind: "timeout" };
+    let preflightTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      preflightResult = await Promise.race([
+        firstFramePromise.then(
+          (frame) => ({ kind: "frame" as const, frame }),
+          (error: unknown) => ({ kind: "error" as const, error })
+        ),
+        new Promise<{ kind: "timeout" }>((resolve) => {
+          preflightTimer = setTimeout(() => resolve({ kind: "timeout" }), STREAM_PREFLIGHT_TIMEOUT_MS);
+        })
+      ]);
+    } finally {
+      if (preflightTimer !== undefined) clearTimeout(preflightTimer);
+    }
+    if (preflightResult.kind === "error") {
+      const error = preflightResult.error;
+      if (downstreamCancellation.signal.aborted) {
+        await returnIterator();
+        removeRequestAbortListener();
+        return new Response(null, { status: 204 });
+      }
+      await returnIterator();
+      removeRequestAbortListener();
+      return preflightStreamFailureResponse(error);
+    }
+    if (downstreamCancellation.signal.aborted) {
+      await returnIterator();
+      removeRequestAbortListener();
+      return new Response(null, { status: 204 });
+    }
+    if (preflightResult.kind === "frame" && preflightResult.frame.done) {
+      await returnIterator();
+      removeRequestAbortListener();
+      return new Response(TEMPORARY_STREAM_MESSAGE, { status: 503 });
+    }
+    let pendingFrame: IteratorResult<unknown> | Promise<IteratorResult<unknown>> | null = preflightResult.kind === "frame"
+      ? preflightResult.frame : firstFramePromise;
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          const next = await iterator.next();
+          const next = await (pendingFrame ?? iterator.next());
+          pendingFrame = null;
           if (downstreamCancellation.signal.aborted) {
             if (!browserCancelled) controller.close();
             return;
@@ -52,10 +129,12 @@ export async function GET(request: Request, context: { params: Promise<{ project
             removeRequestAbortListener();
             controller.close();
           } else controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
-        } catch {
+        } catch (error) {
           if (downstreamCancellation.signal.aborted) return;
           removeRequestAbortListener();
-          controller.error(new Error("AI event stream unavailable."));
+          if (browserCancelled) return;
+          try { controller.enqueue(encoder.encode(`${JSON.stringify(streamFailureControl(error))}\n`)); } catch { /* the body may already be closed */ }
+          try { controller.close(); } catch { /* the body may already be closed */ }
         }
       },
       async cancel() {

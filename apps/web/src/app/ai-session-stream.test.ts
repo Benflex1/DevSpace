@@ -21,6 +21,24 @@ function response(frames: BrowserAiEvent[]): Response {
   });
 }
 
+function controlResponse(frameType: "stream.unavailable" | "stream.failed", message: string): Response {
+  return new Response(`${JSON.stringify({ frameType, message })}\n`, {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson" }
+  });
+}
+
+function unavailableResponse(): Response {
+  return new Response("The live AI connection is temporarily unavailable.", { status: 503 });
+}
+
+function eventAndControlResponse(frame: BrowserAiEvent, message: string): Response {
+  return new Response(`${JSON.stringify(frame)}\n${JSON.stringify({ frameType: "stream.unavailable", message })}\n`, {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson" }
+  });
+}
+
 describe("bounded browser AI event continuation", () => {
   test("reconnects from the exact last applied sequence after a capped response", async () => {
     const firstBatch = Array.from({ length: 512 }, (_, index) => event(index + 1));
@@ -66,6 +84,20 @@ describe("bounded browser AI event continuation", () => {
     expect(open).toHaveBeenCalledTimes(1);
   });
 
+  test("does not let a trailing failure control override a terminal session event", async () => {
+    let terminal = false;
+    await consumeAiEventStream({
+      initialSequence: 0,
+      sessionId: "session-a",
+      signal: new AbortController().signal,
+      open: () => Promise.resolve(new Response(`${JSON.stringify(event(1, "session.stopped"))}\n${JSON.stringify({ frameType: "stream.failed", message: "unexpected" })}\n`, { status: 200 })),
+      apply: (frame) => { terminal = frame.eventType === "session.stopped"; },
+      isTerminal: () => terminal,
+      sleep: () => Promise.reject(new Error("sleep should not be called"))
+    });
+    expect(terminal).toBe(true);
+  });
+
   test("backs off repeated zero-progress EOFs and stops when aborted", async () => {
     const controller = new AbortController();
     const open = vi.fn(() => Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start: (stream) => stream.close() }), { status: 200 })));
@@ -87,6 +119,109 @@ describe("bounded browser AI event continuation", () => {
 
     expect(delays).toEqual([100, 200, 400, 800]);
     expect(open).toHaveBeenCalledTimes(4);
+  });
+
+  test("bounds unexpected clean EOFs and reports a failed, non-terminal disconnect", async () => {
+    const open = vi.fn(() => Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start: (stream) => stream.close() }), { status: 200 })));
+    const statuses: string[] = [];
+
+    await expect(consumeAiEventStream({
+      initialSequence: 8,
+      sessionId: "session-a",
+      signal: new AbortController().signal,
+      open,
+      apply: () => undefined,
+      isTerminal: () => false,
+      onStatus: (status) => { statuses.push(status); },
+      sleep: () => Promise.resolve()
+    })).rejects.toMatchObject({ kind: "failed", message: "The AI event stream ended unexpectedly. Committed history is preserved." });
+
+    expect(open).toHaveBeenCalledTimes(7);
+    expect(statuses.at(-1)).toBe("failed");
+  });
+
+  test("bounds temporary unavailable reconnects and surfaces the last safe message", async () => {
+    const controller = new AbortController();
+    const open = vi.fn(() => Promise.resolve(controlResponse("stream.unavailable", "Start the workspace runtime before reconnecting.")));
+    const delays: number[] = [];
+    const statuses: string[] = [];
+
+    await expect(consumeAiEventStream({
+      initialSequence: 8,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open,
+      apply: () => undefined,
+      isTerminal: () => false,
+      onStatus: (status) => { statuses.push(status); },
+      sleep: (delay) => { delays.push(delay); return Promise.resolve(); }
+    })).rejects.toThrow("Start the workspace runtime before reconnecting.");
+
+    expect(open).toHaveBeenCalledTimes(7);
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_000]);
+    expect(statuses.at(-1)).toBe("unavailable");
+  });
+
+  test("bounds repeated unavailable responses before HTTP stream commitment", async () => {
+    const open = vi.fn(() => Promise.resolve(unavailableResponse()));
+    const delays: number[] = [];
+    const statuses: string[] = [];
+
+    await expect(consumeAiEventStream({
+      initialSequence: 8,
+      sessionId: "session-a",
+      signal: new AbortController().signal,
+      open,
+      apply: () => undefined,
+      isTerminal: () => false,
+      onStatus: (status) => { statuses.push(status); },
+      sleep: (delay) => { delays.push(delay); return Promise.resolve(); }
+    })).rejects.toMatchObject({ kind: "unavailable" });
+
+    expect(open).toHaveBeenCalledTimes(7);
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_000]);
+    expect(statuses.at(-1)).toBe("unavailable");
+  });
+
+  test("does not reset the temporary-outage bound just because a stale frame was applied", async () => {
+    const controller = new AbortController();
+    const open = vi.fn()
+      .mockResolvedValueOnce(eventAndControlResponse(event(9), "Runtime is unavailable."))
+      .mockImplementation(() => Promise.resolve(controlResponse("stream.unavailable", "Runtime is unavailable.")));
+    const delays: number[] = [];
+
+    await expect(consumeAiEventStream({
+      initialSequence: 8,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open,
+      apply: () => undefined,
+      isTerminal: () => false,
+      sleep: (delay) => { delays.push(delay); return Promise.resolve(); }
+    })).rejects.toThrow("Runtime is unavailable.");
+
+    expect(open).toHaveBeenCalledTimes(7);
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_000]);
+  });
+
+  test("does not treat an unexpected stream failure control as successful completion", async () => {
+    const controller = new AbortController();
+    const open = vi.fn(() => Promise.resolve(controlResponse("stream.failed", "The AI stream ended unexpectedly.")));
+    const statuses: string[] = [];
+
+    await expect(consumeAiEventStream({
+      initialSequence: 8,
+      sessionId: "session-a",
+      signal: controller.signal,
+      open,
+      apply: () => undefined,
+      isTerminal: () => false,
+      onStatus: (status) => { statuses.push(status); },
+      sleep: () => Promise.reject(new Error("sleep should not be called"))
+    })).rejects.toThrow("The AI stream ended unexpectedly.");
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual(["connected", "failed"]);
   });
 
   test("abort prevents stale continuation after session replacement", async () => {

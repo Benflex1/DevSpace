@@ -12,6 +12,7 @@ type InteractionCardProps = {
   approvalsSupported: boolean;
   structuredInputSupported: boolean;
   responding: boolean;
+  disabled?: boolean;
   onApproval: (decision: BrowserAiApprovalDecision) => void;
   onInput: (answers: unknown[]) => void;
 };
@@ -37,10 +38,11 @@ function InteractionStatus({ interaction }: { interaction: BrowserAiInteraction 
   return null;
 }
 
-function ApprovalCard({ interaction, supported, responding, onApproval }: {
+function ApprovalCard({ interaction, supported, responding, disabled, onApproval }: {
   interaction: BrowserAiInteraction;
   supported: boolean;
   responding: boolean;
+  disabled: boolean;
   onApproval: (decision: BrowserAiApprovalDecision) => void;
 }) {
   const presentation = interaction.request !== null && "presentation" in interaction.request ? interaction.request.presentation : null;
@@ -54,7 +56,7 @@ function ApprovalCard({ interaction, supported, responding, onApproval }: {
     {!supported && interaction.state === "pending" && <p className="ai-interaction-muted">Approvals are not supported by the current Codex profile.</p>}
     <InteractionStatus interaction={interaction} />
     {supported && interaction.state === "pending" && presentation !== null && <div className="ai-interaction-actions">
-      {approvalLabels.map(([decision, label]) => <button key={decision} type="button" disabled={responding} onClick={() => onApproval(decision)}>{label}</button>)}
+      {approvalLabels.map(([decision, label]) => <button key={decision} type="button" disabled={responding || disabled} onClick={() => onApproval(decision)}>{label}</button>)}
     </div>}
   </section>;
 }
@@ -82,10 +84,11 @@ function InputQuestion({ question, value, otherText, onChange, onOtherTextChange
   </fieldset>;
 }
 
-function InputCard({ interaction, supported, responding, onInput }: {
+function InputCard({ interaction, supported, responding, disabled, onInput }: {
   interaction: BrowserAiInteraction;
   supported: boolean;
   responding: boolean;
+  disabled: boolean;
   onInput: (answers: unknown[]) => void;
 }) {
   const questions = interaction.request !== null && "questions" in interaction.request ? interaction.request.questions : [];
@@ -114,17 +117,17 @@ function InputCard({ interaction, supported, responding, onInput }: {
         otherText={otherAnswers[question.questionId] ?? ""}
         onChange={(value) => setAnswers((current) => ({ ...current, [question.questionId]: value }))}
         onOtherTextChange={(value) => setOtherAnswers((current) => ({ ...current, [question.questionId]: value }))}
-        disabled={responding || !supported || interaction.state !== "pending"} />)}
+        disabled={responding || disabled || !supported || interaction.state !== "pending"} />)}
     </div>}
     {!supported && interaction.state === "pending" && <p className="ai-interaction-muted">Structured input is not supported by the current Codex profile.</p>}
     {invalid && <p className="ai-interaction-error" role="alert">Answer every question before continuing.</p>}
     <InteractionStatus interaction={interaction} />
-    {supported && interaction.state === "pending" && questions.length > 0 && <div className="ai-interaction-actions"><button type="button" disabled={responding} onClick={submit}>Submit answers</button></div>}
+    {supported && interaction.state === "pending" && questions.length > 0 && <div className="ai-interaction-actions"><button type="button" disabled={responding || disabled} onClick={submit}>Submit answers</button></div>}
   </section>;
 }
 
 export function AiSessionInteractionCard(props: InteractionCardProps) {
   return props.interaction.kind === "approval"
-    ? <ApprovalCard interaction={props.interaction} supported={props.approvalsSupported} responding={props.responding} onApproval={props.onApproval} />
-    : <InputCard interaction={props.interaction} supported={props.structuredInputSupported} responding={props.responding} onInput={props.onInput} />;
+    ? <ApprovalCard interaction={props.interaction} supported={props.approvalsSupported} responding={props.responding} disabled={props.disabled === true} onApproval={props.onApproval} />
+    : <InputCard interaction={props.interaction} supported={props.structuredInputSupported} responding={props.responding} disabled={props.disabled === true} onInput={props.onInput} />;
 }

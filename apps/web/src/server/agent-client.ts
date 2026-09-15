@@ -126,6 +126,9 @@ async function* parseBoundedAiEventNdjson(
       }
     }
     if (pendingBytes !== 0) throw streamProtocolFailure(requestId);
+    if (signal?.aborted !== true) {
+      throw new AgentUnavailableError("AGENT_UNAVAILABLE", "dependency-unavailable", requestId);
+    }
   } catch (error) {
     response.destroy();
     if (signal?.aborted === true) return;
