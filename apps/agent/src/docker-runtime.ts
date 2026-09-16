@@ -79,7 +79,7 @@ export interface DockerContainerInspection {
     CapAdd: string[] | null; CapDrop: string[] | null; SecurityOpt: string[] | null;
     AutoRemove: boolean; ReadonlyRootfs: boolean; RestartPolicy: { Name: string; MaximumRetryCount: number };
     Binds?: readonly string[] | null; Mounts?: readonly unknown[] | null; Tmpfs?: Readonly<Record<string, string>> | null;
-    MemorySwap?: number };
+    MemorySwap?: number; Sysctls?: Readonly<Record<string, string>> };
   NetworkSettings: {
     Networks: Record<string, { NetworkID: string; IPAddress?: string; Gateway?: string }> | null;
   };
@@ -301,7 +301,8 @@ const dockerContainerInspectionSchema = z.object({
     AutoRemove: z.boolean(), ReadonlyRootfs: z.boolean(),
     RestartPolicy: z.object({ Name: z.string(), MaximumRetryCount: z.number().int() }),
     Binds: z.array(z.string()).nullable().optional(), Mounts: z.array(z.unknown()).nullable().optional(),
-    Tmpfs: z.record(z.string(), z.string()).nullable().optional(), MemorySwap: z.number().int().optional()
+    Tmpfs: z.record(z.string(), z.string()).nullable().optional(), MemorySwap: z.number().int().optional(),
+    Sysctls: z.record(z.string(), z.string()).optional()
   }),
   NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ NetworkID: z.string(), IPAddress: z.string().optional(), Gateway: z.string().optional() })).nullable() }),
   Mounts: z.array(z.object({ Type: z.string(), Source: z.string(), Destination: z.string(), RW: z.boolean(), Propagation: z.string() }))
