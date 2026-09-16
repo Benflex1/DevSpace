@@ -168,6 +168,8 @@ describe("dedicated rootless Docker boundary", () => {
       .rejects.toThrow("codex-split-user-invalid");
     await expect(engine.createCodexSplitContainer("codex-control-empty-user", splitContainerInput("control", "")))
       .rejects.toThrow("codex-split-user-invalid");
+    await expect(engine.createCodexSplitContainer("codex-control-default-user", splitContainerInput("control", null)))
+      .rejects.toThrow("codex-split-user-invalid");
   });
 
   test("rejects a missing socket and a regular file path", async () => {

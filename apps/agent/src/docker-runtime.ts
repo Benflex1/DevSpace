@@ -597,6 +597,7 @@ function buildCodexSplitContainerRequest(name: string, input: DockerCodexSplitCo
   if (!/^sha256:[0-9a-f]{32,}$/u.test(input.imageId)) throw new Error("codex-split-image-id-invalid");
   const imageReference = input.imageReference ?? input.imageId;
   assertDockerSafeString(imageReference, "codex-split-image-reference-invalid");
+  if (input.role === "control" && input.user === null) throw new Error("codex-split-user-invalid");
   if (input.user !== null) assertDockerSafeString(input.user, "codex-split-user-invalid");
   assertAbsoluteDockerPath(input.workingDirectory, "codex-split-working-directory-invalid");
   if (input.entrypoint.length === 0 || input.command.length === 0) throw new Error("codex-split-command-invalid");
