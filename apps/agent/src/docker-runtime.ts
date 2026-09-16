@@ -283,6 +283,7 @@ export interface DockerExecInspection {
   readonly Running: boolean;
   readonly ExitCode: number | null;
   readonly ContainerID: string;
+  readonly Pid?: number;
 }
 
 const dockerContainerInspectionSchema = z.object({
@@ -319,7 +320,7 @@ const dockerNetworkInspectionSchema = z.object({
 });
 const dockerExecInspectionSchema = z.object({
   ID: z.string().min(1), Running: z.boolean(), ExitCode: z.number().int().nullable(),
-  ContainerID: z.string().min(1)
+  ContainerID: z.string().min(1), Pid: z.number().int().nonnegative().optional()
 });
 const dockerListedContainerSchema = z.object({
   Id: z.string().min(1), Names: z.array(z.string()), Labels: z.record(z.string(), z.string()),
@@ -564,7 +565,7 @@ export class DockerEngineClient {
   }
 
   async inspectExec(execId: string): Promise<DockerExecInspection> {
-    return dockerExecInspectionSchema.parse(await this.json("GET", `/exec/${encodeURIComponent(execId)}/json`));
+    return dockerExecInspectionSchema.parse(await this.json("GET", `/exec/${encodeURIComponent(execId)}/json`)) as unknown as DockerExecInspection;
   }
 
   async topContainer(id: string, psArgs: string): Promise<DockerProcessTable> {
