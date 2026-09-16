@@ -723,3 +723,20 @@ test("worktree administration without an exact durable identity is never removed
   expect([after.dev, after.ino]).toEqual([administration.dev, administration.ino]);
   expect(await readFile(path.join(administrationPath, "gitdir"), "utf8")).toContain(path.join(worktreePath, ".git"));
 });
+
+test("returns the exact owned worktree, repository, and linked-worktree administration", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const binding = await h.managed.codexExecutorGitBinding(projectId, workspaceId);
+  expect(binding).toMatchObject({
+    projectId,
+    workspaceId,
+    worktreePath: h.managed.worktreePath(workspaceId),
+    repositoryPath: h.managed.repositoryPath(projectId)
+  });
+  expect(binding.administrationPath).toContain(`${path.sep}worktrees${path.sep}`);
+  expect(binding.worktreeIdentity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
+  expect(binding.repositoryIdentity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
+  expect(binding.administrationIdentity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
+});

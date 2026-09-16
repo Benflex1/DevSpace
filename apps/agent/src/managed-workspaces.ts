@@ -82,6 +82,7 @@ import { PreviewRuntimeError, PreviewRuntimeManager, readPreviewBaseRegistry, ty
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { createLogger, type StructuredLogger } from "@devspace/diagnostics";
+import type { WorkspaceGitAdministrationBinding } from "./codex-cli-split/native-home.js";
 
 const GIT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -1491,6 +1492,23 @@ export class ManagedWorkspaces {
     const registeredGitFile = (await readFile(path.join(administrativePath, "gitdir"), "utf8")).trim();
     if (path.resolve(registeredGitFile) !== gitFile) throw new Error("worktree-administration-invalid");
     return { path: administrativePath, identity: administration.identity };
+  }
+
+  async codexExecutorGitBinding(projectId: string, workspaceId: string): Promise<WorkspaceGitAdministrationBinding> {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const store = await this.loadStoreOwnership(projectId);
+    const administration = await this.worktreeAdministration(store.repositoryPath, workspace.worktreePath);
+    if (administration === null) throw workspaceConflict(workspaceId);
+    return {
+      projectId,
+      workspaceId,
+      worktreePath: workspace.worktreePath,
+      repositoryPath: store.repositoryPath,
+      administrationPath: administration.path,
+      worktreeIdentity: workspace.identity,
+      repositoryIdentity: store.identity,
+      administrationIdentity: administration.identity
+    };
   }
 
   async createWorkspace(input: CreateWorkspaceData, operationId: string): Promise<void> {
