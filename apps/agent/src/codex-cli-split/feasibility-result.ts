@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { uuidV7Schema } from "@devspace/contracts";
 import type { CodexSplitTransportSecurity } from "./transport.js";
 
 export type CodexSplitFeasibilityOutcome =
@@ -30,17 +31,76 @@ export const codexSplitGateEvidenceSchema = z.strictObject({
 });
 export type CodexSplitGateEvidence = z.infer<typeof codexSplitGateEvidenceSchema>;
 
-function parseEvidence(input: CodexSplitGateEvidence): CodexSplitGateEvidence {
-  const parsed = codexSplitGateEvidenceSchema.safeParse(input);
-  if (!parsed.success) throw new Error("codex-split-feasibility-evidence", { cause: parsed.error });
-  return parsed.data;
+const codexSplitProcessObservationSchema = z.strictObject({
+  role: z.enum(["control", "executor"]),
+  projectProcessCount: z.number().int().min(0).max(4096)
+});
+const codexSplitMountObservationSchema = z.strictObject({
+  role: z.enum(["control", "executor"]),
+  allowedMounts: z.boolean()
+});
+const codexSplitNetworkObservationSchema = z.strictObject({
+  executionNetworkExpectedMembers: z.boolean(),
+  controlEgressExpectedMembers: z.boolean(),
+  controlCodexServiceReachableOnEgress: z.boolean(),
+  executorEndpointReachableOnExecution: z.boolean(),
+  executorEndpointReachableFromControlEgress: z.boolean(),
+  executorInternetReachable: z.boolean(),
+  executorControlEgressGatewayReachable: z.boolean(),
+  executorControlEgressAddressReachable: z.boolean(),
+  executorHostReachable: z.boolean(),
+  executorUnrelatedServiceReachable: z.boolean(),
+  controlForwardingDisabled: z.boolean(),
+  controlRoutingCapabilitiesAbsent: z.boolean(),
+  controlProxyProcessAbsent: z.boolean(),
+  endpointPublished: z.boolean(),
+  hostNetworkListener: z.boolean(),
+  probeComplete: z.boolean(),
+  securityViolation: z.boolean()
+});
+
+/** The bounded, explicitly known extension emitted by the live verifier. */
+export const codexSplitLiveEvidenceSchema = z.strictObject({
+  ...codexSplitGateEvidenceSchema.shape,
+  runId: uuidV7Schema,
+  processObservations: z.array(codexSplitProcessObservationSchema).max(4096),
+  mountObservations: z.array(codexSplitMountObservationSchema).max(16),
+  networkObservations: z.array(codexSplitNetworkObservationSchema).max(16)
+});
+export type CodexSplitLiveGateEvidence = z.infer<typeof codexSplitLiveEvidenceSchema>;
+
+const baseEvidenceKeys = [
+  "admittedCodexVersion", "sections", "transportSecurity", "liveOperatorProof", "physicalHomeSeparation",
+  "noLocalFallback", "controlModelEgressProven", "executorCannotReachControlEgressProven",
+  "controlRoutingDisabledProven", "securityViolation", "incompleteReason", "unsupportedReason", "evidenceVersion"
+] as const;
+const liveEvidenceKeys = new Set(["runId", "processObservations", "mountObservations", "networkObservations"]);
+
+function hasLiveEvidenceExtension(input: unknown): input is Record<string, unknown> {
+  return input !== null && typeof input === "object" && !Array.isArray(input)
+    && [...liveEvidenceKeys].some((key) => Object.prototype.hasOwnProperty.call(input, key));
+}
+
+function parseEvidence(input: unknown): CodexSplitGateEvidence {
+  if (hasLiveEvidenceExtension(input)) {
+    const live = codexSplitLiveEvidenceSchema.safeParse(input);
+    if (!live.success) throw new Error("codex-split-feasibility-evidence", { cause: live.error });
+    const base = codexSplitGateEvidenceSchema.safeParse(Object.fromEntries(
+      baseEvidenceKeys.map((key) => [key, live.data[key]])
+    ));
+    if (!base.success) throw new Error("codex-split-feasibility-evidence", { cause: base.error });
+    return base.data;
+  }
+  const base = codexSplitGateEvidenceSchema.safeParse(input);
+  if (!base.success) throw new Error("codex-split-feasibility-evidence", { cause: base.error });
+  return base.data;
 }
 
 function everyGatePassed(sections: Readonly<Record<CodexSplitGateSection, boolean>>): boolean {
   return Object.values(sections).every((passed) => passed === true);
 }
 
-export function evaluateCodexSplitOutcome(input: CodexSplitGateEvidence): CodexSplitFeasibilityOutcome {
+export function evaluateCodexSplitOutcome(input: unknown): CodexSplitFeasibilityOutcome {
   const evidence = parseEvidence(input);
 
   if (evidence.securityViolation) {

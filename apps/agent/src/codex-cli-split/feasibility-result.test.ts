@@ -1,5 +1,7 @@
 import { expect, test } from "vitest";
 import {
+  codexSplitGateEvidenceSchema,
+  codexSplitLiveEvidenceSchema,
   evaluateCodexSplitOutcome,
   type CodexSplitGateEvidence
 } from "./feasibility-result.js";
@@ -50,8 +52,53 @@ test("returns BLOCKED/INCOMPLETE for absent proof, unsupported transport, or an 
 test("does not treat mocked evidence as live and rejects malformed or secret-looking evidence", () => {
   expect(evaluateCodexSplitOutcome(evidence({ liveOperatorProof: false, transportSecurity: "protocol-authenticated" })))
     .toBe("BLOCKED/INCOMPLETE");
-  expect(() => evaluateCodexSplitOutcome({ ...evidence(), nativeHomeContents: "secret" } as unknown as CodexSplitGateEvidence))
+  expect(() => evaluateCodexSplitOutcome({ ...evidence(), nativeHomeContents: "secret" }))
     .toThrow("feasibility-evidence");
-  expect(() => evaluateCodexSplitOutcome({ ...evidence(), admittedCodexVersion: "0.154.0" } as unknown as CodexSplitGateEvidence))
+  expect(() => evaluateCodexSplitOutcome({ ...evidence(), admittedCodexVersion: "0.154.0" }))
     .toThrow("feasibility-evidence");
+});
+
+test("evaluates a known live-evidence extension without replacing an incomplete result with a schema error", () => {
+  const liveEvidence = {
+    ...evidence({
+      sections: { A: false, B: false, C: false, D: false, E: false, F: false },
+      transportSecurity: "unproven",
+      liveOperatorProof: false,
+      physicalHomeSeparation: false,
+      noLocalFallback: false,
+      controlModelEgressProven: false,
+      executorCannotReachControlEgressProven: false,
+      controlRoutingDisabledProven: false,
+      incompleteReason: "codex-executor-start-failed"
+    }),
+    runId: "018f0f00-0000-7000-8000-000000000004",
+    processObservations: [{ role: "executor", projectProcessCount: 0 }],
+    mountObservations: [{ role: "control", allowedMounts: true }, { role: "executor", allowedMounts: false }],
+    networkObservations: [{
+      executionNetworkExpectedMembers: true,
+      controlEgressExpectedMembers: true,
+      controlCodexServiceReachableOnEgress: false,
+      executorEndpointReachableOnExecution: false,
+      executorEndpointReachableFromControlEgress: false,
+      executorInternetReachable: false,
+      executorControlEgressGatewayReachable: false,
+      executorControlEgressAddressReachable: false,
+      executorHostReachable: false,
+      executorUnrelatedServiceReachable: false,
+      controlForwardingDisabled: true,
+      controlRoutingCapabilitiesAbsent: true,
+      controlProxyProcessAbsent: true,
+      endpointPublished: false,
+      hostNetworkListener: false,
+      probeComplete: false,
+      securityViolation: false
+    }]
+  };
+  expect(() => codexSplitGateEvidenceSchema.parse(liveEvidence)).toThrow();
+  const parsed = codexSplitLiveEvidenceSchema.parse(liveEvidence);
+  expect(parsed.runId).toBe("018f0f00-0000-7000-8000-000000000004");
+  expect(evaluateCodexSplitOutcome(parsed)).toBe("BLOCKED/INCOMPLETE");
+  const unsupported = { ...liveEvidence, unsupportedObservation: true };
+  expect(() => codexSplitLiveEvidenceSchema.parse(unsupported)).toThrow();
+  expect(() => evaluateCodexSplitOutcome(unsupported)).toThrow("feasibility-evidence");
 });
