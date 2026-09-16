@@ -132,11 +132,15 @@ function dockerFor(fixtureValue: Awaited<ReturnType<typeof fixture>>, overrides:
 }
 
 function executorInspection(policy: Awaited<ReturnType<typeof buildCodexProjectExecutorPolicy>>): DockerContainerInspection {
+  const userPolicy = policy.containerUser as unknown;
+  const effectiveUser = typeof userPolicy === "string"
+    ? userPolicy
+    : (userPolicy as { readonly effectiveUser: string }).effectiveUser;
   return {
     Id: "executor-id", Name: "/codex-executor", Image: policy.imageId,
     Config: {
       Labels: { ...policy.labels }, Image: policy.imageReference, WorkingDir: policy.workingDirectory,
-      User: policy.containerUser, Env: Object.entries(policy.environment).map(([name, value]) => `${name}=${value}`),
+      User: effectiveUser, Env: Object.entries(policy.environment).map(([name, value]) => `${name}=${value}`),
       Entrypoint: ["/bin/sh", "-c"], Cmd: ["exec sleep 2147483647"]
     },
     State: { Running: true, Status: "running" },
@@ -180,6 +184,73 @@ test("builds an exact-image executor policy with only workspace, Git, and truste
   expect(policy.environment).not.toHaveProperty("CODEX_HOME");
   expect(policy.mounts).not.toEqual(expect.arrayContaining([expect.objectContaining({ Target: "/codex-home" })]));
   expect(policy.controlEgressAttached).toBe(false);
+});
+
+test("preserves image-default user semantics and encodes the executor request without a user override", async () => {
+  const fixtureValue = await fixture();
+  const policy = await buildCodexProjectExecutorPolicy({
+    docker: dockerFor(fixtureValue), context: fixtureValue.context, git: fixtureValue.git,
+    network: network(), artifact: artifact(), imagePort: 4545
+  });
+  expect(policy.containerUser).toEqual({ mode: "image-default", configuredUser: null, effectiveUser: "" });
+
+  let requestUser: unknown;
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createCodexSplitContainer(_name: string, input: unknown): Promise<string> {
+      requestUser = (input as { readonly user: unknown }).user;
+      return Promise.resolve("executor-id");
+    }
+    override startContainer(): Promise<void> { return Promise.resolve(); }
+    override inspectContainer(): Promise<DockerContainerInspection> { return Promise.resolve(executorInspection(policy)); }
+    override inspectImage(): Promise<DockerImageInspection> { return Promise.resolve(fixtureValue.image); }
+  }();
+  await expect(createCodexProjectExecutor({ docker, policy, name: "codex-executor" })).resolves.toBeDefined();
+  expect(requestUser).toBeNull();
+});
+
+test("preserves explicit user semantics and rejects runtime or executor user mismatches", async () => {
+  const fixtureValue = await fixture();
+  const explicitContext = {
+    ...fixtureValue.context,
+    options: {
+      ...fixtureValue.context.options,
+      developmentEnvironment: { ...fixtureValue.context.options.developmentEnvironment, containerUser: "1000:1000" }
+    }
+  };
+  const explicitContainer = {
+    ...fixtureValue.container,
+    Config: { ...fixtureValue.container.Config, User: "1000:1000" }
+  };
+  const explicitPolicy = await buildCodexProjectExecutorPolicy({
+    docker: dockerFor(fixtureValue, { container: explicitContainer }), context: explicitContext,
+    git: fixtureValue.git, network: network(), artifact: artifact(), imagePort: 4545
+  });
+  expect(explicitPolicy.containerUser).toEqual({ mode: "explicit", configuredUser: "1000:1000", effectiveUser: "1000:1000" });
+  const explicitBinding = {
+    policy: explicitPolicy, containerId: "executor-id", containerName: "codex-executor",
+    endpointHost: "codex-executor" as const, endpointPort: 4545, controlEgressAttached: false as const
+  };
+  expect(() => assertCodexProjectExecutorInspection({
+    container: executorInspection(explicitPolicy), image: fixtureValue.image, binding: explicitBinding
+  })).not.toThrow();
+
+  const defaultPolicy = await buildCodexProjectExecutorPolicy({
+    docker: dockerFor(fixtureValue), context: fixtureValue.context, git: fixtureValue.git,
+    network: network(), artifact: artifact(), imagePort: 4545
+  });
+  const defaultBinding = {
+    policy: defaultPolicy, containerId: "executor-id", containerName: "codex-executor",
+    endpointHost: "codex-executor" as const, endpointPort: 4545, controlEgressAttached: false as const
+  };
+  expect(() => assertCodexProjectExecutorInspection({
+    container: { ...executorInspection(defaultPolicy), Config: { ...executorInspection(defaultPolicy).Config, User: "1000:1000" } },
+    image: fixtureValue.image, binding: defaultBinding
+  })).toThrow("codex-executor-inspection-policy");
+  await expect(buildCodexProjectExecutorPolicy({
+    docker: dockerFor(fixtureValue), context: explicitContext, git: fixtureValue.git,
+    network: network(), artifact: artifact(), imagePort: 4545
+  })).rejects.toThrow("codex-executor-user-runtime");
 });
 
 test("does not create an executor when the exact image or workspace identity is not proven", async () => {

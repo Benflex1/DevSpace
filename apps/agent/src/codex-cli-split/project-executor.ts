@@ -51,7 +51,7 @@ export interface CodexProjectExecutorPolicy {
   readonly artifact: CodexSplitArtifactBinding;
   readonly environment: Readonly<Record<string, string>>;
   readonly workingDirectory: "/workspace";
-  readonly containerUser: string;
+  readonly containerUser: CodexProjectExecutorUserPolicy;
   readonly tmpfs: Readonly<Record<string, string>>;
   readonly labels: Readonly<Record<string, string>>;
   readonly resources: Readonly<{
@@ -62,6 +62,10 @@ export interface CodexProjectExecutorPolicy {
   readonly endpointPort: number;
   readonly controlEgressAttached: false;
 }
+
+export type CodexProjectExecutorUserPolicy =
+  | { readonly mode: "image-default"; readonly configuredUser: null; readonly effectiveUser: string }
+  | { readonly mode: "explicit"; readonly configuredUser: string; readonly effectiveUser: string };
 
 export interface CodexProjectExecutorBinding {
   readonly policy: CodexProjectExecutorPolicy;
@@ -75,6 +79,18 @@ export interface CodexProjectExecutorBinding {
 interface ProjectImageEvidence {
   readonly container: DockerContainerInspection;
   readonly image: DockerImageInspection;
+}
+
+function buildCodexProjectExecutorUserPolicy(input: {
+  readonly configuredUser: string | null;
+  readonly observedUser: string | undefined;
+}): CodexProjectExecutorUserPolicy {
+  const effectiveUser = input.observedUser ?? "";
+  if (input.configuredUser === null) {
+    return { mode: "image-default", configuredUser: null, effectiveUser };
+  }
+  if (input.configuredUser !== effectiveUser) throw new Error("codex-executor-user-runtime");
+  return { mode: "explicit", configuredUser: input.configuredUser, effectiveUser };
 }
 
 function sortedEntries(input: Readonly<Record<string, string>>): readonly (readonly [string, string])[] {
@@ -215,6 +231,10 @@ export async function buildCodexProjectExecutorPolicy(input: {
   await assertExactGitBinding(input.context, input.git);
   const evidence = await inspectExactProjectImage({ docker: input.docker, context: input.context, imageReference: source.imageReference });
   assertCodexArtifactCompatibleWithImage({ artifact: input.artifact, image: evidence.image });
+  const containerUser = buildCodexProjectExecutorUserPolicy({
+    configuredUser: runtimePlan.developmentContainer.containerUser,
+    observedUser: evidence.container.Config.User
+  });
   const networkAttachments = buildCodexSplitNetworkAttachments({ role: "executor", network: input.network });
   assertCodexSplitContainerNetworks({ role: "executor", networks: networkAttachments, expected: input.network });
 
@@ -259,7 +279,7 @@ export async function buildCodexProjectExecutorPolicy(input: {
     artifact: input.artifact,
     environment,
     workingDirectory: "/workspace",
-    containerUser: runtimePlan.developmentContainer.containerUser ?? "",
+    containerUser,
     tmpfs: { "/tmp": EXECUTOR_TMPFS },
     labels,
     resources,
@@ -282,7 +302,7 @@ export async function createCodexProjectExecutor(input: {
       entrypoint: ["/bin/sh", "-c"],
       command: EXECUTOR_COMMAND,
       workingDirectory: input.policy.workingDirectory,
-      user: input.policy.containerUser,
+      user: input.policy.containerUser.mode === "image-default" ? null : input.policy.containerUser.configuredUser,
       environment: input.policy.environment,
       mounts: input.policy.mounts,
       tmpfs: input.policy.tmpfs,
@@ -339,7 +359,7 @@ export function assertCodexProjectExecutorInspection(input: {
   if (container.Id !== binding.containerId || container.Name.replace(/^\//u, "") !== binding.containerName
     || !container.State.Running || container.Image !== policy.imageId || image.Id !== policy.imageId
     || container.Config.Image !== policy.imageReference || container.Config.WorkingDir !== policy.workingDirectory
-    || (container.Config.User ?? "") !== policy.containerUser || !labelsEqual(container.Config.Labels, policy.labels)
+    || (container.Config.User ?? "") !== policy.containerUser.effectiveUser || !labelsEqual(container.Config.Labels, policy.labels)
     || networkNames.length !== 1 || networkNames[0] !== policy.executionNetwork.name
     || networks[policy.executionNetwork.name]?.NetworkID !== policy.executionNetwork.id
     || container.HostConfig.NetworkMode !== policy.executionNetwork.name

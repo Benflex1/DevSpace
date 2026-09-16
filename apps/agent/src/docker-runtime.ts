@@ -129,7 +129,8 @@ export interface DockerCodexSplitContainerInput {
   readonly entrypoint: readonly string[];
   readonly command: readonly string[];
   readonly workingDirectory: string;
-  readonly user: string;
+  /** null means preserve the image's default user; Docker encodes it as an empty User. */
+  readonly user: string | null;
   readonly environment: Readonly<Record<string, string>>;
   readonly mounts: readonly DockerCodexSplitBindMount[];
   readonly tmpfs: Readonly<Record<string, string>>;
@@ -596,7 +597,7 @@ function buildCodexSplitContainerRequest(name: string, input: DockerCodexSplitCo
   if (!/^sha256:[0-9a-f]{32,}$/u.test(input.imageId)) throw new Error("codex-split-image-id-invalid");
   const imageReference = input.imageReference ?? input.imageId;
   assertDockerSafeString(imageReference, "codex-split-image-reference-invalid");
-  assertDockerSafeString(input.user, "codex-split-user-invalid");
+  if (input.user !== null) assertDockerSafeString(input.user, "codex-split-user-invalid");
   assertAbsoluteDockerPath(input.workingDirectory, "codex-split-working-directory-invalid");
   if (input.entrypoint.length === 0 || input.command.length === 0) throw new Error("codex-split-command-invalid");
   for (const argument of [...input.entrypoint, ...input.command]) assertDockerSafeString(argument, "codex-split-command-invalid");
@@ -641,7 +642,7 @@ function buildCodexSplitContainerRequest(name: string, input: DockerCodexSplitCo
     Entrypoint: [...input.entrypoint],
     Cmd: [...input.command],
     WorkingDir: input.workingDirectory,
-    User: input.user,
+    User: input.user ?? "",
     Env: Object.entries(input.environment).sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => `${key}=${value}`),
     Labels: { ...input.labels },

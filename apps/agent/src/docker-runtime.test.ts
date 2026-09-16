@@ -71,6 +71,29 @@ async function listedEngineSocket(): Promise<string> {
   return socket;
 }
 
+function splitContainerInput(role: "control" | "executor", user: string | null) {
+  const execution = { name: "codex-execution", aliases: [`codex-${role}`], role: "execution" as const, defaultRoute: false as const };
+  const controlEgress = { name: "codex-control-egress", aliases: ["codex-control"], role: "control-egress" as const, defaultRoute: true as const };
+  return {
+    role,
+    imageId: `sha256:${"a".repeat(64)}`,
+    entrypoint: ["/bin/sh", "-c"],
+    command: ["exec sleep 2147483647"],
+    workingDirectory: "/workspace",
+    user,
+    environment: {},
+    mounts: [],
+    tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=64m" },
+    networks: role === "executor" ? [execution] : [execution, controlEgress],
+    sysctls: { "net.ipv4.ip_forward": "0" },
+    labels: { "devspace.codex-split": role },
+    cpuMillicores: 1000,
+    memoryBytes: 512 * 1024 * 1024,
+    pidLimit: 128,
+    readOnlyRootfs: false
+  } as unknown as Parameters<DockerEngineClient["createCodexSplitContainer"]>[1];
+}
+
 describe("dedicated rootless Docker boundary", () => {
   test("serializes split containers without published ports or unscoped network access", async () => {
     const fixture = await recordingEngineSocket();
@@ -129,6 +152,22 @@ describe("dedicated rootless Docker boundary", () => {
     expect(parseImagePath(["LANG=C", "PATH=/usr/bin:/bin"])).toBe("/usr/bin:/bin");
     expect(() => parseImagePath(["PATH=/usr/bin", "PATH=/bin"])).toThrow("docker-image-path-duplicate");
     expect(() => parseImagePath(["LANG=C"])).toThrow("docker-image-path-missing");
+  });
+
+  test("encodes image-default users without weakening explicit or control-sidecar validation", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createCodexSplitContainer("codex-executor-default-user", splitContainerInput("executor", null)))
+      .resolves.toBe("container-1");
+    expect(fixture.bodies[0]).toMatchObject({ User: "" });
+
+    await expect(engine.createCodexSplitContainer("codex-executor-explicit-user", splitContainerInput("executor", "1000:1000")))
+      .resolves.toBe("container-1");
+    expect(fixture.bodies[1]).toMatchObject({ User: "1000:1000" });
+    await expect(engine.createCodexSplitContainer("codex-executor-malformed-user", splitContainerInput("executor", "bad\nuser")))
+      .rejects.toThrow("codex-split-user-invalid");
+    await expect(engine.createCodexSplitContainer("codex-control-empty-user", splitContainerInput("control", "")))
+      .rejects.toThrow("codex-split-user-invalid");
   });
 
   test("rejects a missing socket and a regular file path", async () => {
