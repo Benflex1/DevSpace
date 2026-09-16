@@ -43,16 +43,18 @@ function everyGatePassed(sections: Readonly<Record<CodexSplitGateSection, boolea
 export function evaluateCodexSplitOutcome(input: CodexSplitGateEvidence): CodexSplitFeasibilityOutcome {
   const evidence = parseEvidence(input);
 
-  if (evidence.securityViolation || !evidence.physicalHomeSeparation || !evidence.noLocalFallback) {
+  if (evidence.securityViolation) {
     return "FAIL";
   }
+  if (evidence.incompleteReason !== null || evidence.unsupportedReason !== null) {
+    return "BLOCKED/INCOMPLETE";
+  }
+  if (!evidence.physicalHomeSeparation || !evidence.noLocalFallback) return "FAIL";
   if (!everyGatePassed(evidence.sections)
     || !evidence.controlModelEgressProven
     || !evidence.executorCannotReachControlEgressProven
     || !evidence.controlRoutingDisabledProven
     || !evidence.liveOperatorProof
-    || evidence.incompleteReason !== null
-    || evidence.unsupportedReason !== null
     || evidence.transportSecurity === "unproven") {
     return "BLOCKED/INCOMPLETE";
   }

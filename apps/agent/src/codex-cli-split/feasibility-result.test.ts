@@ -43,6 +43,8 @@ test("returns BLOCKED/INCOMPLETE for absent proof, unsupported transport, or an 
   expect(evaluateCodexSplitOutcome(evidence({ controlModelEgressProven: false }))).toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ executorCannotReachControlEgressProven: false }))).toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ controlRoutingDisabledProven: false }))).toBe("BLOCKED/INCOMPLETE");
+  expect(evaluateCodexSplitOutcome(evidence({ physicalHomeSeparation: false, incompleteReason: "preflight-incomplete" })))
+    .toBe("BLOCKED/INCOMPLETE");
 });
 
 test("does not treat mocked evidence as live and rejects malformed or secret-looking evidence", () => {
