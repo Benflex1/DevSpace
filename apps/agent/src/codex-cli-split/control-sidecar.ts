@@ -215,8 +215,27 @@ export async function buildCodexControlSidecarPolicy(input: {
   });
 }
 
-function normalizedEnvironment(environment: readonly string[] | null | undefined): readonly string[] {
-  return [...(environment ?? [])].sort();
+function managedEnvironmentMatches(
+  observed: readonly string[] | null | undefined,
+  expected: Readonly<Record<string, string>>
+): boolean {
+  const values = new Map<string, string[]>();
+  for (const entry of observed ?? []) {
+    const separator = entry.indexOf("=");
+    if (separator < 1) return false;
+    const name = entry.slice(0, separator);
+    const entries = values.get(name) ?? [];
+    entries.push(entry.slice(separator + 1));
+    values.set(name, entries);
+  }
+  return Object.entries(expected).every(([name, value]) => {
+    const entries = values.get(name);
+    return entries?.length === 1 && entries[0] === value;
+  });
+}
+
+function hasCredentialEnvironment(environment: readonly string[] | null | undefined): boolean {
+  return (environment ?? []).some((entry) => /^(?:CODEX_API_KEY|CODEX_ACCESS_TOKEN|CODEX_AUTH_TOKEN|CODEX_REFRESH_TOKEN|OPENAI_API_KEY|OPENAI_ACCESS_TOKEN|OPENAI_AUTH_TOKEN|OPENAI_REFRESH_TOKEN)=/iu.test(entry));
 }
 
 function labelsEqual(left: Readonly<Record<string, string>>, right: Readonly<Record<string, string>>): boolean {
@@ -298,8 +317,6 @@ export function assertCodexControlSidecarInspection(input: {
     Propagation: entry.BindOptions.Propagation
   })));
   const observedMounts = new Set(container.Mounts.map(mountKey));
-  const observedEnvironment = normalizedEnvironment(container.Config.Env);
-  const expectedEnvironment = normalizedEnvironment(Object.entries(policy.environment).map(([name, value]) => `${name}=${value}`));
   if (container.Id !== binding.containerId || container.Name.replace(/^\//u, "") !== binding.containerName
     || container.Image !== binding.imageId || container.Config.Image !== policy.imageReference
     || !container.State.Running || container.Config.WorkingDir !== policy.workingDirectory
@@ -324,7 +341,8 @@ export function assertCodexControlSidecarInspection(input: {
     || container.HostConfig.Memory !== policy.resources.memoryBytes
     || container.HostConfig.PidsLimit !== policy.resources.pidLimit
     || JSON.stringify(container.HostConfig.Tmpfs ?? {}) !== JSON.stringify(policy.tmpfs)
-    || JSON.stringify(observedEnvironment) !== JSON.stringify(expectedEnvironment)
+    || !managedEnvironmentMatches(container.Config.Env, policy.environment)
+    || hasCredentialEnvironment(container.Config.Env)
     || expectedMounts.size !== observedMounts.size || [...expectedMounts].some((entry) => !observedMounts.has(entry))) {
     throw new Error("codex-control-inspection-policy");
   }

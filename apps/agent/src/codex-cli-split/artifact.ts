@@ -1,4 +1,4 @@
-import { lstat, readlink, symlink } from "node:fs/promises";
+import { readlink, symlink } from "node:fs/promises";
 import path from "node:path";
 import {
   resolveCodexExecutionArtifact,

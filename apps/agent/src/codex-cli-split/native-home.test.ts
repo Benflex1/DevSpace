@@ -23,7 +23,8 @@ test("creates and pins a restrictive native home without reading its contents", 
   const binding = await ensureNativeCodexHome({ homePath, ownerUid, ownerGid });
   expect(binding.mountTarget).toBe("/codex-home");
   expect(binding.homePath).toBe(homePath);
-  expect(binding.identity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
+  expect(typeof binding.identity.device).toBe("string");
+  expect(typeof binding.identity.inode).toBe("string");
   const stats = await lstat(homePath);
   expect(stats.isDirectory()).toBe(true);
   expect(stats.isSymbolicLink()).toBe(false);

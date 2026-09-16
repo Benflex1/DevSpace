@@ -546,7 +546,8 @@ export class CodexSplitRuntime {
     uuidV7Schema.parse(input.nativeSessionId);
     const { assembly, record } = await this.currentAssembly(input);
     assertCodexSplitSessionConcurrency(record, input.nativeSessionId);
-    assertCodexSplitHomeIdentity(assembly.home.identity, assembly.home.identity);
+    const knownSession = record.sessions.find((session) => session.nativeSessionId === input.nativeSessionId);
+    if (knownSession !== undefined) assertCodexSplitHomeIdentity(knownSession.homeIdentity, assembly.home.identity);
     const startedAt = this.now();
     const pty = await this.startPty({
       docker: this.docker, control: assembly.control, resumeSessionId: input.nativeSessionId,

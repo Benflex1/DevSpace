@@ -736,7 +736,10 @@ test("returns the exact owned worktree, repository, and linked-worktree administ
     repositoryPath: h.managed.repositoryPath(projectId)
   });
   expect(binding.administrationPath).toContain(`${path.sep}worktrees${path.sep}`);
-  expect(binding.worktreeIdentity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
-  expect(binding.repositoryIdentity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
-  expect(binding.administrationIdentity).toEqual(expect.objectContaining({ device: expect.any(String), inode: expect.any(String) }));
+  expect(typeof binding.worktreeIdentity.device).toBe("string");
+  expect(typeof binding.worktreeIdentity.inode).toBe("string");
+  expect(typeof binding.repositoryIdentity.device).toBe("string");
+  expect(typeof binding.repositoryIdentity.inode).toBe("string");
+  expect(typeof binding.administrationIdentity.device).toBe("string");
+  expect(typeof binding.administrationIdentity.inode).toBe("string");
 });
