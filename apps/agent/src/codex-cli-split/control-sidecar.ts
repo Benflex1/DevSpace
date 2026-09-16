@@ -250,6 +250,7 @@ export async function createCodexControlSidecar(input: {
     containerId = await input.docker.createCodexSplitContainer(input.name, {
       role: "control",
       imageId: image.Id,
+      imageReference: input.policy.imageReference,
       entrypoint: CONTROL_ENTRYPOINT,
       command: CONTROL_COMMAND,
       workingDirectory: input.policy.workingDirectory,

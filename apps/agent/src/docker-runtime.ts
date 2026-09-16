@@ -124,6 +124,8 @@ export type DockerCodexSplitControlEgressAttachment = DockerCodexSplitNetworkAtt
 export interface DockerCodexSplitContainerInput {
   readonly role: "control" | "executor";
   readonly imageId: string;
+  /** The exact immutable/reference string used for Docker's Config.Image. */
+  readonly imageReference?: string;
   readonly entrypoint: readonly string[];
   readonly command: readonly string[];
   readonly workingDirectory: string;
@@ -592,6 +594,8 @@ function assertAbsoluteDockerPath(value: string, error: string): void {
 function buildCodexSplitContainerRequest(name: string, input: DockerCodexSplitContainerInput) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/u.test(name)) throw new Error("codex-split-container-name-invalid");
   if (!/^sha256:[0-9a-f]{32,}$/u.test(input.imageId)) throw new Error("codex-split-image-id-invalid");
+  const imageReference = input.imageReference ?? input.imageId;
+  assertDockerSafeString(imageReference, "codex-split-image-reference-invalid");
   assertDockerSafeString(input.user, "codex-split-user-invalid");
   assertAbsoluteDockerPath(input.workingDirectory, "codex-split-working-directory-invalid");
   if (input.entrypoint.length === 0 || input.command.length === 0) throw new Error("codex-split-command-invalid");
@@ -633,7 +637,7 @@ function buildCodexSplitContainerRequest(name: string, input: DockerCodexSplitCo
     GwPriority: network.defaultRoute ? 100 : 0
   }]));
   return {
-    Image: input.imageId,
+    Image: imageReference,
     Entrypoint: [...input.entrypoint],
     Cmd: [...input.command],
     WorkingDir: input.workingDirectory,

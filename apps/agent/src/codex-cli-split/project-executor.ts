@@ -278,6 +278,7 @@ export async function createCodexProjectExecutor(input: {
     containerId = await input.docker.createCodexSplitContainer(input.name, {
       role: "executor",
       imageId: input.policy.imageId,
+      imageReference: input.policy.imageReference,
       entrypoint: ["/bin/sh", "-c"],
       command: EXECUTOR_COMMAND,
       workingDirectory: input.policy.workingDirectory,
@@ -294,18 +295,22 @@ export async function createCodexProjectExecutor(input: {
       readOnlyRootfs: false
     });
     await input.docker.startContainer(containerId);
+    const binding: CodexProjectExecutorBinding = {
+      policy: input.policy,
+      containerId,
+      containerName: input.name,
+      endpointHost: "codex-executor",
+      endpointPort: input.policy.endpointPort,
+      controlEgressAttached: false
+    };
+    const inspection = await input.docker.inspectContainer(containerId);
+    const image = await input.docker.inspectImage(input.policy.imageId);
+    assertCodexProjectExecutorInspection({ container: inspection, image, binding });
+    return binding;
   } catch (error) {
     if (containerId !== undefined) await input.docker.removeContainer(containerId).catch(() => undefined);
     throw new Error("codex-executor-start-failed", { cause: error });
   }
-  return {
-    policy: input.policy,
-    containerId,
-    containerName: input.name,
-    endpointHost: "codex-executor",
-    endpointPort: input.policy.endpointPort,
-    controlEgressAttached: false
-  };
 }
 
 function normalizedSecurityOptions(options: readonly string[] | null): readonly string[] {

@@ -110,11 +110,7 @@ describe("dedicated rootless Docker boundary", () => {
         PublishAllPorts: false,
         CapAdd: [],
         CapDrop: ["ALL"],
-        SecurityOpt: ["no-new-privileges:true"],
-        Mounts: expect.arrayContaining([
-          { Type: "bind", Source: "/srv/devspace/codex-home", Target: "/codex-home", ReadOnly: false,
-            BindOptions: { Propagation: "rprivate" } }
-        ])
+        SecurityOpt: ["no-new-privileges:true"]
       },
       NetworkingConfig: {
         EndpointsConfig: {
@@ -122,6 +118,11 @@ describe("dedicated rootless Docker boundary", () => {
           "codex-egress": { Aliases: ["codex-control"] }
         }
       }
+    });
+    const hostConfig = request.HostConfig as { readonly Mounts: readonly Record<string, unknown>[] };
+    expect(hostConfig.Mounts).toContainEqual({
+      Type: "bind", Source: "/srv/devspace/codex-home", Target: "/codex-home", ReadOnly: false,
+      BindOptions: { Propagation: "rprivate" }
     });
     expect(JSON.stringify(request)).not.toContain("docker.sock");
     expect(JSON.stringify(request)).not.toContain("agent.sock");

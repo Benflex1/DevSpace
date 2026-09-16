@@ -252,6 +252,8 @@ test("uses the dedicated split-container Docker operation", async () => {
     constructor() { super("/fixture.sock"); }
     override createCodexSplitContainer(_name: string, input: never): Promise<string> { calls.push(input); return Promise.resolve("executor-id"); }
     override startContainer(id: string): Promise<void> { calls.push(id); return Promise.resolve(); }
+    override inspectContainer(): Promise<DockerContainerInspection> { calls.push("inspect"); return Promise.resolve(executorInspection(policy)); }
+    override inspectImage(): Promise<DockerImageInspection> { calls.push("image"); return Promise.resolve(fixtureValue.image); }
   }();
   const fixtureValue = await fixture();
   const policy = await buildCodexProjectExecutorPolicy({
@@ -261,5 +263,5 @@ test("uses the dedicated split-container Docker operation", async () => {
   await expect(createCodexProjectExecutor({ docker, policy, name: "codex-executor" })).resolves.toMatchObject({
     containerId: "executor-id", endpointHost: "codex-executor", endpointPort: 4545, controlEgressAttached: false
   });
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(4);
 });
