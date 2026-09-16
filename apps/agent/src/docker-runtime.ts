@@ -69,7 +69,8 @@ export interface DockerContainerInspection {
   Id: string;
   Name: string;
   Image?: string;
-  Config: { Labels: Record<string, string>; Image?: string; WorkingDir: string; User?: string; Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
+  Config: { Labels: Record<string, string>; Image?: string; WorkingDir: string; User?: string; Env?: readonly string[] | null;
+    Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
   State: { Running: boolean; Status: string };
   HostConfig: { Privileged: boolean; PublishAllPorts: boolean; PidMode: string;
     IpcMode: string; UTSMode: string; UsernsMode: string; CgroupnsMode: string;
@@ -80,7 +81,7 @@ export interface DockerContainerInspection {
     Binds?: readonly string[] | null; Mounts?: readonly unknown[] | null; Tmpfs?: Readonly<Record<string, string>> | null;
     MemorySwap?: number };
   NetworkSettings: {
-    Networks: Record<string, { NetworkID: string }> | null;
+    Networks: Record<string, { NetworkID: string; IPAddress?: string; Gateway?: string }> | null;
   };
   Mounts: Array<{ Type: string; Source: string; Destination: string; RW: boolean; Propagation: string }>;
 }
@@ -91,7 +92,57 @@ export interface DockerImageInspection {
   readonly Config: {
     readonly Entrypoint?: readonly string[] | null;
     readonly Cmd?: readonly string[] | null;
+    readonly Env?: readonly string[] | null;
   };
+}
+
+export interface DockerCodexSplitBindMount {
+  readonly Type: "bind";
+  readonly Source: string;
+  readonly Target: string;
+  readonly ReadOnly: boolean;
+  readonly BindOptions: { readonly Propagation: "rprivate" };
+}
+
+export interface DockerCodexSplitNetworkAttachment {
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly role: "execution" | "control-egress";
+  /** True only for the control-egress attachment; proven by route inspection. */
+  readonly defaultRoute: boolean;
+}
+
+export type DockerCodexSplitExecutionAttachment = DockerCodexSplitNetworkAttachment & {
+  readonly role: "execution";
+  readonly defaultRoute: false;
+};
+export type DockerCodexSplitControlEgressAttachment = DockerCodexSplitNetworkAttachment & {
+  readonly role: "control-egress";
+  readonly defaultRoute: true;
+};
+
+export interface DockerCodexSplitContainerInput {
+  readonly role: "control" | "executor";
+  readonly imageId: string;
+  readonly entrypoint: readonly string[];
+  readonly command: readonly string[];
+  readonly workingDirectory: string;
+  readonly user: string;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly mounts: readonly DockerCodexSplitBindMount[];
+  readonly tmpfs: Readonly<Record<string, string>>;
+  readonly networks: readonly DockerCodexSplitNetworkAttachment[];
+  readonly sysctls: Readonly<Record<string, string>>;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly cpuMillicores: number;
+  readonly memoryBytes: number;
+  readonly pidLimit: number;
+  readonly readOnlyRootfs: boolean;
+}
+
+export interface DockerProcessTable {
+  readonly titles: readonly string[];
+  readonly processes: readonly (readonly string[])[];
 }
 export interface DockerProbeContainerInput {
   readonly imageId: string;
@@ -209,10 +260,23 @@ export function dockerPortBindingsEqual(left: unknown, right: DockerPortBindings
     return false;
   }
 }
+export interface DockerNetworkContainerInspection {
+  readonly Name?: string;
+  readonly EndpointID?: string;
+  readonly IPv4Address?: string;
+  readonly IPv6Address?: string;
+}
 export interface DockerNetworkInspection {
   readonly Id: string;
   readonly Name: string;
   readonly Labels: Record<string, string>;
+  readonly Driver?: string;
+  readonly Internal?: boolean;
+  readonly Attachable?: boolean;
+  readonly Ingress?: boolean;
+  readonly EnableIPv6?: boolean;
+  readonly Options?: Readonly<Record<string, string>>;
+  readonly Containers?: Readonly<Record<string, DockerNetworkContainerInspection>>;
 }
 export interface DockerExecInspection {
   readonly ID: string;
@@ -224,6 +288,7 @@ export interface DockerExecInspection {
 const dockerContainerInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1), Image: z.string().min(1).optional(),
   Config: z.object({ Labels: z.record(z.string(), z.string()), Image: z.string().min(1).optional(), WorkingDir: z.string(), User: z.string().optional(),
+    Env: z.array(z.string()).nullable().optional(),
     Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() }),
   State: z.object({ Running: z.boolean(), Status: z.string() }),
   HostConfig: z.object({
@@ -237,15 +302,20 @@ const dockerContainerInspectionSchema = z.object({
     Binds: z.array(z.string()).nullable().optional(), Mounts: z.array(z.unknown()).nullable().optional(),
     Tmpfs: z.record(z.string(), z.string()).nullable().optional(), MemorySwap: z.number().int().optional()
   }),
-  NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ NetworkID: z.string() })).nullable() }),
+  NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ NetworkID: z.string(), IPAddress: z.string().optional(), Gateway: z.string().optional() })).nullable() }),
   Mounts: z.array(z.object({ Type: z.string(), Source: z.string(), Destination: z.string(), RW: z.boolean(), Propagation: z.string() }))
 });
 const dockerImageInspectionSchema = z.object({
   Id: z.string().min(1), Os: z.string().min(1), Architecture: z.string().min(1),
-  Config: z.object({ Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() })
+  Config: z.object({ Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional(),
+    Env: z.array(z.string()).nullable().optional() })
 });
 const dockerNetworkInspectionSchema = z.object({
-  Id: z.string().min(1), Name: z.string().min(1), Labels: z.record(z.string(), z.string())
+  Id: z.string().min(1), Name: z.string().min(1), Labels: z.record(z.string(), z.string()),
+  Driver: z.string().optional(), Internal: z.boolean().optional(), Attachable: z.boolean().optional(),
+  Ingress: z.boolean().optional(), EnableIPv6: z.boolean().optional(), Options: z.record(z.string(), z.string()).optional(),
+  Containers: z.record(z.string(), z.object({ Name: z.string().optional(), EndpointID: z.string().optional(),
+    IPv4Address: z.string().optional(), IPv6Address: z.string().optional() })).optional()
 });
 const dockerExecInspectionSchema = z.object({
   ID: z.string().min(1), Running: z.boolean(), ExitCode: z.number().int().nullable(),
@@ -320,9 +390,12 @@ export class DockerEngineClient {
     }
   }
 
-  async createNetwork(name: string, labels: Record<string, string>): Promise<string> {
+  async createNetwork(name: string, labels: Record<string, string>, options: {
+    readonly internal?: boolean;
+    readonly attachable?: boolean;
+  } = {}): Promise<string> {
     const response = await this.json<{ Id: string }>("POST", "/networks/create", {
-      Name: name, CheckDuplicate: true, Driver: "bridge", Internal: false, Attachable: false,
+      Name: name, CheckDuplicate: true, Driver: "bridge", Internal: options.internal ?? false, Attachable: options.attachable ?? false,
       Ingress: false, EnableIPv6: false, Options: {}, Labels: labels
     });
     if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("docker-network-id-missing");
@@ -330,7 +403,7 @@ export class DockerEngineClient {
   }
 
   async inspectNetwork(id: string): Promise<DockerNetworkInspection> {
-    return dockerNetworkInspectionSchema.parse(await this.json("GET", `/networks/${encodeURIComponent(id)}`));
+    return dockerNetworkInspectionSchema.parse(await this.json("GET", `/networks/${encodeURIComponent(id)}`)) as DockerNetworkInspection;
   }
 
   async listContainers(): Promise<readonly DockerListedContainer[]> {
@@ -389,6 +462,17 @@ export class DockerEngineClient {
 
   async removeContainer(id: string): Promise<void> {
     await this.request("DELETE", `/containers/${encodeURIComponent(id)}?force=1`, undefined, [204]);
+  }
+
+  async removeNetwork(id: string): Promise<void> {
+    await this.request("DELETE", `/networks/${encodeURIComponent(id)}`, undefined, [204]);
+  }
+
+  async createCodexSplitContainer(name: string, input: DockerCodexSplitContainerInput): Promise<string> {
+    const request = buildCodexSplitContainerRequest(name, input);
+    const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, request);
+    if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("codex-split-container-id-missing");
+    return response.Id;
   }
 
   async createProbeContainer(name: string, input: DockerProbeContainerInput): Promise<string> {
@@ -483,6 +567,122 @@ export class DockerEngineClient {
     return dockerExecInspectionSchema.parse(await this.json("GET", `/exec/${encodeURIComponent(execId)}/json`));
   }
 
+  async topContainer(id: string, psArgs: string): Promise<DockerProcessTable> {
+    if (!/^[A-Za-z0-9 .,_-]{1,128}$/u.test(psArgs)) throw new Error("docker-process-arguments-invalid");
+    const result = z.object({ Titles: z.array(z.string()).max(128), Processes: z.array(z.array(z.string()).max(128)).max(4096) })
+      .parse(await this.json("GET", `/containers/${encodeURIComponent(id)}/top?ps_args=${encodeURIComponent(psArgs)}`));
+    return { titles: result.Titles, processes: result.Processes };
+  }
+
+}
+
+function assertDockerSafeString(value: string, error: string): void {
+  if (value.length === 0 || value.includes("\0") || [...value].some((character) => (character.codePointAt(0) ?? 0) < 32)) {
+    throw new Error(error);
+  }
+}
+
+function assertAbsoluteDockerPath(value: string, error: string): void {
+  assertDockerSafeString(value, error);
+  if (!path.isAbsolute(value)) throw new Error(error);
+}
+
+function buildCodexSplitContainerRequest(name: string, input: DockerCodexSplitContainerInput) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/u.test(name)) throw new Error("codex-split-container-name-invalid");
+  if (!/^sha256:[0-9a-f]{32,}$/u.test(input.imageId)) throw new Error("codex-split-image-id-invalid");
+  assertDockerSafeString(input.user, "codex-split-user-invalid");
+  assertAbsoluteDockerPath(input.workingDirectory, "codex-split-working-directory-invalid");
+  if (input.entrypoint.length === 0 || input.command.length === 0) throw new Error("codex-split-command-invalid");
+  for (const argument of [...input.entrypoint, ...input.command]) assertDockerSafeString(argument, "codex-split-command-invalid");
+  if (input.networks.length === 0 || input.networks.some((network) => network.name === "bridge" || network.name.length === 0)) {
+    throw new Error("codex-split-network-invalid");
+  }
+  const roles = new Set(input.networks.map((network) => network.role));
+  if (input.role === "executor" && (input.networks.length !== 1 || !roles.has("execution"))) {
+    throw new Error("codex-split-executor-network-policy");
+  }
+  if (input.role === "control" && (input.networks.length !== 2 || !roles.has("execution") || !roles.has("control-egress"))) {
+    throw new Error("codex-split-control-network-policy");
+  }
+  if (input.networks.some((network) => network.role === "execution" && network.defaultRoute)
+    || input.networks.some((network) => network.role === "control-egress" && !network.defaultRoute)
+    || (input.role === "executor" && input.networks.some((network) => network.role === "control-egress"))) {
+    throw new Error("codex-split-route-policy");
+  }
+  if (input.sysctls["net.ipv4.ip_forward"] !== "0"
+    || (input.sysctls["net.ipv6.conf.all.forwarding"] !== undefined && input.sysctls["net.ipv6.conf.all.forwarding"] !== "0")) {
+    throw new Error("codex-split-forwarding-policy");
+  }
+  for (const [key, value] of Object.entries(input.environment)) {
+    assertDockerSafeString(key, "codex-split-environment-invalid");
+    assertDockerSafeString(value, "codex-split-environment-invalid");
+  }
+  for (const mount of input.mounts) {
+    assertAbsoluteDockerPath(mount.Source, "codex-split-mount-source-invalid");
+    assertAbsoluteDockerPath(mount.Target, "codex-split-mount-target-invalid");
+    if (mount.Type !== "bind" || mount.BindOptions.Propagation !== "rprivate") throw new Error("codex-split-mount-policy");
+  }
+  for (const network of input.networks) {
+    assertDockerSafeString(network.name, "codex-split-network-invalid");
+    for (const alias of network.aliases) assertDockerSafeString(alias, "codex-split-network-alias-invalid");
+  }
+  const endpointConfig = Object.fromEntries(input.networks.map((network) => [network.name, {
+    Aliases: [...network.aliases],
+    GwPriority: network.defaultRoute ? 100 : 0
+  }]));
+  return {
+    Image: input.imageId,
+    Entrypoint: [...input.entrypoint],
+    Cmd: [...input.command],
+    WorkingDir: input.workingDirectory,
+    User: input.user,
+    Env: Object.entries(input.environment).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key}=${value}`),
+    Labels: { ...input.labels },
+    ExposedPorts: {},
+    HostConfig: {
+      Binds: [],
+      Mounts: input.mounts.map((mount) => ({ Type: mount.Type, Source: mount.Source, Target: mount.Target,
+        ReadOnly: mount.ReadOnly, BindOptions: { Propagation: mount.BindOptions.Propagation } })),
+      Tmpfs: { ...input.tmpfs },
+      NetworkMode: input.networks[0]!.name,
+      PortBindings: {},
+      PublishAllPorts: false,
+      Privileged: false,
+      PidMode: "",
+      IpcMode: "private",
+      UTSMode: "",
+      UsernsMode: "",
+      CgroupnsMode: "private",
+      AutoRemove: false,
+      ReadonlyRootfs: input.readOnlyRootfs,
+      RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      CapAdd: [],
+      CapDrop: ["ALL"],
+      Devices: [],
+      SecurityOpt: ["no-new-privileges:true"],
+      Sysctls: { ...input.sysctls },
+      NanoCpus: input.cpuMillicores * 1_000_000,
+      Memory: input.memoryBytes,
+      MemorySwap: input.memoryBytes,
+      PidsLimit: input.pidLimit
+    },
+    NetworkingConfig: { EndpointsConfig: endpointConfig }
+  } as const;
+}
+
+export function parseImagePath(environment: readonly string[] | null | undefined): string {
+  if (environment === null || environment === undefined) throw new Error("docker-image-path-missing");
+  const matches = environment.filter((entry) => entry.startsWith("PATH="));
+  if (matches.length === 0) throw new Error("docker-image-path-missing");
+  if (matches.length > 1) throw new Error("docker-image-path-duplicate");
+  const value = matches[0]!.slice("PATH=".length);
+  const entries = value.split(":");
+  if (entries.length === 0 || entries.some((entry) => !path.isAbsolute(entry) || entry.length === 0 || entry.includes("\0"))) {
+    throw new Error("docker-image-path-invalid");
+  }
+  if (new Set(entries).size !== entries.length) throw new Error("docker-image-path-duplicate");
+  return value;
 }
 
 export interface EffectiveRuntimeResources { cpuMillicores: number; memoryBytes: number; pidLimit: number }

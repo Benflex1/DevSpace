@@ -3,7 +3,13 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { DockerEngineClient, defaultRootlessDockerSocketPath, effectiveRuntimeResources, readRuntimePolicy } from "./docker-runtime.js";
+import {
+  DockerEngineClient,
+  defaultRootlessDockerSocketPath,
+  effectiveRuntimeResources,
+  parseImagePath,
+  readRuntimePolicy
+} from "./docker-runtime.js";
 
 const directories: string[] = [];
 const servers: http.Server[] = [];
@@ -66,6 +72,64 @@ async function listedEngineSocket(): Promise<string> {
 }
 
 describe("dedicated rootless Docker boundary", () => {
+  test("serializes split containers without published ports or unscoped network access", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    const imageId = `sha256:${"a".repeat(64)}`;
+    await expect(engine.createCodexSplitContainer("codex-control", {
+      role: "control",
+      imageId,
+      entrypoint: ["/bin/sh", "-c"],
+      command: ["exec sleep 2147483647"],
+      workingDirectory: "/workspace",
+      user: "1000:1000",
+      environment: { CODEX_HOME: "/codex-home", HOME: "/codex-home" },
+      mounts: [{ Type: "bind", Source: "/srv/devspace/codex-home", Target: "/codex-home", ReadOnly: false,
+        BindOptions: { Propagation: "rprivate" } }],
+      tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=64m" },
+      networks: [
+        { name: "codex-execution", aliases: ["codex-control"], role: "execution", defaultRoute: false },
+        { name: "codex-egress", aliases: ["codex-control"], role: "control-egress", defaultRoute: true }
+      ],
+      sysctls: { "net.ipv4.ip_forward": "0" },
+      labels: { "devspace.codex-split": "control" },
+      cpuMillicores: 1000,
+      memoryBytes: 512 * 1024 * 1024,
+      pidLimit: 128,
+      readOnlyRootfs: false
+    })).resolves.toBe("container-1");
+    const request = fixture.bodies[0] as Record<string, unknown>;
+    expect(request).toMatchObject({
+      Image: imageId,
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: ["exec sleep 2147483647"],
+      WorkingDir: "/workspace",
+      HostConfig: {
+        NetworkMode: "codex-execution",
+        PortBindings: {},
+        PublishAllPorts: false,
+        CapAdd: [],
+        CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges:true"],
+        Mounts: expect.arrayContaining([
+          { Type: "bind", Source: "/srv/devspace/codex-home", Target: "/codex-home", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } }
+        ])
+      },
+      NetworkingConfig: {
+        EndpointsConfig: {
+          "codex-execution": { Aliases: ["codex-control"] },
+          "codex-egress": { Aliases: ["codex-control"] }
+        }
+      }
+    });
+    expect(JSON.stringify(request)).not.toContain("docker.sock");
+    expect(JSON.stringify(request)).not.toContain("agent.sock");
+    expect(parseImagePath(["LANG=C", "PATH=/usr/bin:/bin"])).toBe("/usr/bin:/bin");
+    expect(() => parseImagePath(["PATH=/usr/bin", "PATH=/bin"])).toThrow("docker-image-path-duplicate");
+    expect(() => parseImagePath(["LANG=C"])).toThrow("docker-image-path-missing");
+  });
+
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
     await expect(new DockerEngineClient(path.join(directory, "missing.sock")).assertRootlessAvailable()).rejects.toBeDefined();
