@@ -123,25 +123,45 @@ DevSpace Agent
   trusted filesystem/Git/rootless-Docker/PTY authority
   knows Agent-private native-home paths but never exposes their contents
         |
-        +----------------------------+
-        |                            |
-        v                            v
-Codex control sidecar          project executor
-  native codex TUI              exact project/runtime image
-  native CODEX_HOME             exact /workspace worktree
-  native auth/session state     exact required Git administration
-  native approvals              project toolchain and Codex exec-server
-  no project mount              no CODEX_HOME or Codex credentials
-  no Docker/Agent socket        no Docker/Agent socket
-  no host namespaces            no unrelated managed state
-        |                            ^
-        +-- authenticated, private -+
-            exec-server transport
+        +--> Codex control sidecar
+        |      native codex TUI
+        |      persistent native CODEX_HOME
+        |      native auth/session/approval state
+        |      execution network (to executor only)
+        |      control-egress network (OpenAI/ChatGPT only)
+        |      no real project mount
+        |      no Docker/Agent socket or host namespace
+        |
+        +--> project executor
+               exact project/runtime image
+               exact /workspace worktree
+               exact required Git administration
+               project toolchain and Codex exec-server
+               execution network only
+               no CODEX_HOME or Codex credentials
+               no Docker/Agent socket or host namespace
+
+execution network
+  internal/private, no published ports
+  control sidecar <---- private exec-server transport ----> project executor
+
+control-egress network
+  dedicated non-internal, no published ports
+  control sidecar ----> OpenAI/ChatGPT authentication and model services
 ```
 
 The Agent is trusted to create, validate, persist, and mount the native home into a
 control sidecar. The security invariant is not that the Agent is unaware of the home;
 the invariant is that Web and project-controlled execution cannot obtain it.
+
+The execution network is a per-workspace private/internal network containing only the
+control sidecar and project executor. It carries the exec-server transport and does not
+provide external project egress. The control-egress network is a separate dedicated
+non-internal network containing only the trusted control sidecar; its upstream path is
+the rootless Docker runtime's configured external gateway/DNS path. The executor is never
+attached to control-egress. The control sidecar has no `NET_ADMIN` or equivalent routing
+capability, IP forwarding, forwarding/NAT process, or proxy process, and cannot relay
+executor traffic from execution to control-egress.
 
 ### Web
 
@@ -184,6 +204,13 @@ The control sidecar is trusted control-plane compute. It contains the real nativ
 TUI and may read/write `/codex-home` because native auth, configuration, and history
 require it. It is not a project execution environment.
 
+It may make outbound OpenAI/ChatGPT authentication and model requests only through the
+dedicated control-egress network. Its execution-network attachment exists only to reach
+the project executor's private exec-server endpoint; execution is not its external model
+path. The control sidecar receives no `NET_ADMIN` or equivalent routing capability, and
+no forwarding, NAT, or proxy process is permitted between its two network attachments.
+The control sidecar must not become a transit router for project processes.
+
 It must not receive:
 
 - the project worktree or Git administration mount;
@@ -218,6 +245,11 @@ managed state, or production directories. If the exec-server requires executor-l
 configuration or scratch state, it remains ephemeral inside that container, contains no
 credentials, and is not a DevSpace-managed home.
 
+The executor is attached only to the private/internal execution network. It is never
+attached to control-egress, receives no external project route, and does not gain
+Internet access through the control sidecar. Any attempt to use the control sidecar as
+an egress router, proxy, or forwarding hop is outside the architecture and must fail.
+
 The exact project image must not be replaced by a generic runner image. If artifact
 compatibility cannot be achieved by injecting a trusted, verified Codex exec-server
 closure into the exact image, the runtime is incompatible and the gate fails.
@@ -241,8 +273,8 @@ Creation is ordered:
 5. Create the control sidecar with only `/codex-home` and trusted Codex/control assets.
 6. Set the control process's remote-only environment configuration before launching
    any native Codex TUI.
-7. Prove the sidecar identity, mounts, network, and process configuration after Docker
-   creation.
+7. Prove the sidecar identity, mounts, both network roles, and process configuration
+   after Docker creation.
 
 The sidecar must not start a TUI until remote-only configuration is complete. It must
 not start a local TUI and attempt to attach an executor later.
@@ -369,6 +401,21 @@ not a browser-facing API. DevSpace must bind it to the exact workspace, executor
 generation, and control-sidecar identity, with bounded connection/readiness timeouts and
 no public listener.
 
+The network roles are separate and must not be conflated with transport authentication:
+
+- The execution network is the private/internal path between the control sidecar and
+  the executor's exec-server. It contains only those two containers, has no published
+  ports, and is not an external model or project-Internet path.
+- The control-egress network is a separate dedicated non-internal path attached only to
+  the trusted control sidecar for native OpenAI/ChatGPT authentication and model
+  traffic. It has no published ports and does not carry the exec-server endpoint.
+
+The executor must not reach the control-egress network, its gateway, or its upstream
+services through the control sidecar. The control sidecar must not forward, NAT, or proxy
+traffic between the networks. No `NET_ADMIN`/equivalent capability, IP forwarding, or
+forwarding/proxy process may be present. Neither network may expose the exec-server to
+the host, browser, public ingress, or unrelated container.
+
 The exact `rust-v0.153.4` source must be treated separately from current upstream:
 
 - the `0.153.4` local listener parses `ws://IP:PORT` and stdio transports and rejects
@@ -380,11 +427,14 @@ The exact `rust-v0.153.4` source must be treated separately from current upstrea
 - current upstream has materially newer transport/authentication and daemon-selection
   behavior, but those properties must not be assumed for the admitted old artifact.
 
-For the `0.153.4` feasibility spike only, a dedicated per-workspace rootless Docker
-network with no published ports may be used to test routing and physical mount
-separation if protocol authentication is unavailable. That lab network must contain only
-the control sidecar and its project executor; it must not silently be treated as the
-production security model. A network-only spike result records:
+For the `0.153.4` feasibility spike only, two dedicated per-workspace rootless Docker
+networks with no published ports may be used to test routing and physical mount
+separation if protocol authentication is unavailable. The internal execution network
+must contain only the control sidecar and its project executor. The separate non-internal
+control-egress network must contain only the control sidecar and must not be Docker's
+default bridge. The executor must never attach to control-egress, and the control
+sidecar must not route between the two networks. This lab topology must not silently be
+treated as the production security model. A network-only spike result records:
 
 ```text
 routing and container separation proven
@@ -634,8 +684,11 @@ native `CODEX_HOME`.
 The project executor may know the remote endpoint it serves and may execute arbitrary
 project code under its own workspace policy. That does not grant access to the control
 sidecar's home. The control sidecar has no inbound Agent/project control socket and no
-project bind mount. The network must not provide a route to host services or unrelated
-workspace state.
+project bind mount. The project execution boundary must not provide a route to host
+services or unrelated workspace state. The trusted control sidecar may use its explicit
+control-egress network for native authentication/model traffic, but that egress must not
+be reachable from the executor and the control sidecar must not forward executor traffic
+to it.
 
 ## Logging, events, and secret boundaries
 
@@ -711,11 +764,14 @@ behavior.
 No Workbench/session migration or structured-path retirement may begin until one
 operator-run gate proves every required condition below against the exact admitted
 Codex artifact and an exact DevSpace project image. The result must be recorded as
-PASS, FAIL, or PASS-WITH-TRANSPORT-BLOCK; the last state is not migration approval.
+PASS, PASS-WITH-TRANSPORT-BLOCK, FAIL, or BLOCKED/INCOMPLETE. A transport-block
+or incomplete result is not migration approval; any later migration still requires
+its own approved lifecycle decision.
 
 Any required project operation observed in the control sidecar, any project-executor
-path to native `CODEX_HOME`, any local fallback, or any unproven zero-mount requirement
-is NO-GO until the design changes.
+path to native `CODEX_HOME`, or any local fallback is NO-GO until the design changes.
+An unproven zero-mount or other empirical condition is `BLOCKED/INCOMPLETE` for the
+experiment and remains NO-GO for migration.
 
 ### A. Control plane
 
@@ -725,6 +781,11 @@ Prove:
 - persistent Agent-private native home with native auth/session files;
 - no real project-workspace or Git-state mount in the control sidecar;
 - no Docker socket, Agent socket, host namespace, host PID, or arbitrary host mount;
+- control-side OpenAI/ChatGPT authentication and model access succeeds through the
+  dedicated control-egress network, while the execution network is not the control
+  sidecar's external model path;
+- the control sidecar has no `NET_ADMIN` or equivalent routing capability, IP forwarding,
+  forwarding/NAT process, or proxy process between its network attachments;
 - bare native `codex` starts in an interactive TUI;
 - the default environment is remote-only, with no local environment available;
 - native approvals appear and complete through the TUI;
@@ -744,6 +805,9 @@ Prove:
 - the executor has no native home, Codex credentials, Agent socket, Docker socket,
   production directory, unrelated managed state, host namespace, or shared credential
   volume;
+- the executor is attached only to the private/internal execution network, has no
+  control-egress attachment or external project route, and cannot obtain Internet
+  access indirectly through the control sidecar;
 - the executor's effective project sandbox is enforced and fails closed.
 
 ### C. Routing
@@ -765,10 +829,17 @@ From the real native TUI, prove that all of these execute/read/write remotely:
 Prove:
 
 - a sentinel file in native `CODEX_HOME` cannot be read by a model-directed executor
-  command through direct path, traversal, symlink, alternate path, environment, or
-  `/proc` tricks;
+  command through direct path, traversal, symlink, alternate path, environment,
+  directory enumeration, or `/proc` tricks;
 - the project executor cannot access the control filesystem or discover a mounted home;
-- no endpoint is published publicly or reachable through host networking;
+- the execution network contains only the control sidecar and executor and is
+  internal/private; the control-egress network contains only the control sidecar and is
+  a separate dedicated non-internal network; neither network publishes ports;
+- the control sidecar reaches the required OpenAI/ChatGPT service through control-egress,
+  while the executor cannot reach the Internet, control-egress gateway, host, unrelated
+  service, or any forwarding/proxy path through the control sidecar;
+- the control sidecar has no forwarding/NAT/proxy capability or process, and its
+  execution attachment reaches only the executor's private exec-server endpoint;
 - exact `0.153.4` transport authentication is recorded if available, including what is
   authenticated, where the secret is held, and how the endpoint is scoped;
 - if authentication is unavailable, the isolated-network result is explicitly marked
@@ -817,14 +888,20 @@ If a forbidden path cannot be made unavailable or fail closed in the effective
 The first experiment should be the smallest two-container proof, not a browser or
 Workbench integration.
 
-1. Start a dedicated rootless Docker network containing only one control sidecar and one
-   project executor. Publish no ports.
+1. Start two dedicated per-workspace rootless Docker networks with no published ports:
+   an internal/private execution network containing only one control sidecar and one
+   project executor, and a separate non-internal control-egress network containing only
+   the control sidecar. Do not use Docker's default `bridge` network. The control sidecar's
+   only external default route is control-egress; the executor has no control-egress
+   attachment or external project route. No forwarding, NAT, or proxy path may connect
+   the two networks.
 2. In the control sidecar, mount a persistent Agent-private native home at
    `/codex-home`, inject only the trusted Codex control artifact, mount no project
    worktree, and provide no Docker/Agent socket.
 3. In the executor, use the exact project image, exact `/workspace` worktree, exact Git
-   administration, verified exec-server artifact, no native home/credentials, and no
-   Docker/Agent socket.
+   administration, verified exec-server artifact, no native home/credentials, no
+   Docker/Agent socket, and the execution network only. Do not grant project tools
+   Internet access through control-egress or through the control sidecar.
 4. Configure the control sidecar with `CODEX_EXEC_SERVER_URL` or an exact remote-only
    `environments.toml` configuration. Reject local and program entries before launch.
 5. Put a random canary only in the native home. Prove with Agent-controlled checks that
@@ -832,7 +909,10 @@ Workbench integration.
 6. Attach a real native TUI and have the operator perform the routing/security checks
    without injected prompts or slash commands.
 7. Inspect process ancestry, executor RPC/process logs, mounts, namespaces, environment
-   values, and network reachability after every check.
+   values, both network memberships, route tables, forwarding capabilities/processes,
+   and network reachability after every check. Prove control-egress reaches the required
+   Codex/OpenAI service while executor probes for the Internet, control-egress gateway,
+   host, unrelated services, and an indirect route through control all fail.
 8. Stop the TUI, record its native session ID, recreate or reconnect the control sidecar
    as appropriate, and run `codex resume NATIVE_SESSION_ID` with the same remote `/workspace` mapping.
 9. Run the negative-path checks and deliberately remove/stale the endpoint. Confirm every
