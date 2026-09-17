@@ -222,6 +222,21 @@ test("inspects exactly two isolated networks and rejects project or routing expo
   })).toThrow("codex-control-inspection-policy");
 });
 
+test("accepts the two expected control networks in either Docker map-key order", async () => {
+  const policy = await buildPolicy();
+  const binding = { policy, containerId: "control-id", containerName: "codex-control", imageId };
+  const base = dockerImageInspection(policy);
+  expect(() => assertCodexControlSidecarInspection({
+    container: {
+      ...base,
+      NetworkSettings: { Networks: {
+        [network.controlEgress.name]: { NetworkID: network.controlEgress.id },
+        [network.execution.name]: { NetworkID: network.execution.id }
+      } }
+    }, binding
+  })).not.toThrow();
+});
+
 test("creates only an inspected explicit control image and preserves native home on failure", async () => {
   const calls: Array<{ readonly kind: string; readonly value: unknown }> = [];
   const policy = await buildPolicy();

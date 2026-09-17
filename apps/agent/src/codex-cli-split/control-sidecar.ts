@@ -318,7 +318,10 @@ export function assertCodexControlSidecarInspection(input: {
   const { container, binding } = input;
   const policy = binding.policy;
   const networks = container.NetworkSettings.Networks ?? {};
-  const networkNames = Object.keys(networks);
+  const expectedNetworkNames = new Set([policy.network.execution.name, policy.network.controlEgress.name]);
+  const observedNetworkNames = Object.keys(networks);
+  const networksMatch = observedNetworkNames.length === expectedNetworkNames.size
+    && observedNetworkNames.every((name) => expectedNetworkNames.has(name));
   const expectedAttachments = buildCodexSplitNetworkAttachments({ role: "control", network: policy.network });
   assertCodexSplitContainerNetworks({
     role: "control",
@@ -334,8 +337,7 @@ export function assertCodexControlSidecarInspection(input: {
     || container.Image !== binding.imageId || container.Config.Image !== policy.imageReference
     || !container.State.Running || container.Config.WorkingDir !== policy.workingDirectory
     || (container.Config.User ?? "") !== policy.containerUser || !labelsEqual(container.Config.Labels, policy.labels)
-    || networkNames.length !== 2 || networkNames[0] !== policy.network.execution.name
-    || networkNames[1] !== policy.network.controlEgress.name
+    || !networksMatch
     || networks[policy.network.execution.name]?.NetworkID !== policy.network.execution.id
     || networks[policy.network.controlEgress.name]?.NetworkID !== policy.network.controlEgress.id
     || container.HostConfig.NetworkMode !== policy.network.execution.name
