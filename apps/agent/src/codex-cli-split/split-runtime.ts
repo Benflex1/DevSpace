@@ -122,6 +122,7 @@ export interface CodexSplitRuntimeAssemblyInput {
 
 export interface CodexSplitRuntimePtyInput {
   readonly control: CodexControlSidecarBinding;
+  readonly appServer: CodexNativeAppServerHandle;
   readonly resumeSessionId: string | null;
   readonly columns: number;
   readonly rows: number;
@@ -540,6 +541,7 @@ export class CodexSplitRuntime {
     this.startPty = dependencies.startPty ?? (async (ptyInput) => await startNativeCodexPty({
       docker: ptyInput.docker,
       control: ptyInput.control,
+      appServer: ptyInput.appServer,
       executablePath: "/opt/devspace/codex-launcher/codex",
       resumeSessionId: ptyInput.resumeSessionId,
       environment: ptyInput.control.policy.environment,
@@ -734,7 +736,10 @@ export class CodexSplitRuntime {
     const { assembly } = await this.currentAssembly(input);
     const before = await snapshotNativeSessionState({ home: assembly.home });
     const startedAt = this.now();
-    const pty = await this.startPty({ docker: this.docker, control: assembly.control, resumeSessionId: null, columns: input.columns, rows: input.rows });
+    const pty = await this.startPty({
+      docker: this.docker, control: assembly.control, appServer: assembly.appServer,
+      resumeSessionId: null, columns: input.columns, rows: input.rows
+    });
     this.observeNewSessionExit({ workspaceId: input.workspaceId, assembly, before, startedAt, pty });
     return pty;
   }
@@ -780,7 +785,7 @@ export class CodexSplitRuntime {
     if (knownSession !== undefined) assertCodexSplitHomeIdentity(knownSession.homeIdentity, assembly.home.identity);
     const startedAt = this.now();
     const pty = await this.startPty({
-      docker: this.docker, control: assembly.control, resumeSessionId: input.nativeSessionId,
+      docker: this.docker, control: assembly.control, appServer: assembly.appServer, resumeSessionId: input.nativeSessionId,
       columns: input.columns, rows: input.rows
     });
     await this.markSession({

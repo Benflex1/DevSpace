@@ -1,7 +1,10 @@
 import type { Duplex } from "node:stream";
 import { uuidV7Schema } from "@devspace/contracts";
 import { DockerEngineClient, type DockerExecInspection } from "../docker-runtime.js";
+import { identitiesEqual, lstatIdentity } from "../private-state.js";
 import type { CodexControlSidecarBinding } from "./control-sidecar.js";
+import { nativeAppServerAgentSocketPath, type CodexNativeAppServerHandle } from "./native-app-server.js";
+import { assertNativeCodexArgv, buildNativeCodexArgv } from "./remote-policy.js";
 
 const EXECUTABLE_PATH = "/opt/devspace/codex-launcher/codex" as const;
 const WORKING_DIRECTORY = "/workspace" as const;
@@ -18,6 +21,7 @@ export interface NativeCodexPty {
   readonly containerId: string;
   readonly execId: string;
   readonly command: readonly string[];
+  readonly logicalArgv: readonly string[];
   readonly workingDirectory: "/workspace";
   readonly stream: Duplex;
   resize(columns: number, rows: number): Promise<void>;
@@ -25,7 +29,7 @@ export interface NativeCodexPty {
 }
 
 function inputKeysAreExact(input: object): boolean {
-  const allowed = new Set(["docker", "control", "executablePath", "resumeSessionId", "environment", "columns", "rows"]);
+  const allowed = new Set(["docker", "control", "appServer", "executablePath", "resumeSessionId", "environment", "columns", "rows"]);
   return Object.keys(input).every((key) => allowed.has(key));
 }
 
@@ -73,6 +77,12 @@ function assertRemoteControl(control: CodexControlSidecarBinding, environment: R
     || remote.endpoint.endpointHost !== "codex-executor"
     || remote.endpoint.endpointUrl !== `ws://codex-executor:${remote.endpoint.endpointPort}`
     || remote.endpoint.security === "unproven"
+    || remote.launchArguments.length !== 0
+    || remote.codeMode.enabled !== true
+    || remote.codeMode.hostEnabled !== true
+    || remote.codeMode.disableInProcessFallback !== true
+    || remote.codeMode.remoteHostUrl !== "http://codex-code-mode-host:4546"
+    || policy.nativeAppServerSocketPath !== "/codex-home/app-server-control/app-server-control.sock"
     || remote.managedPolicy.projectLayerOverrideProof !== "cannot-override"
     || policy.environment.CODEX_HOME !== "/codex-home"
     || policy.environment.HOME !== "/codex-home"
@@ -88,9 +98,60 @@ function assertResumeId(resumeSessionId: string | null): void {
   }
 }
 
+async function assertNativeAppServerAdmission(input: {
+  readonly docker: DockerEngineClient;
+  readonly control: CodexControlSidecarBinding;
+  readonly appServer: CodexNativeAppServerHandle;
+}): Promise<void> {
+  const { control, appServer } = input;
+  const policy = control.policy;
+  const expectedHomeIdentity = `${policy.home.identity.device}:${policy.home.identity.inode}`;
+  if (appServer.controlContainerId !== control.containerId
+    || appServer.socketPath !== policy.nativeAppServerSocketPath
+    || appServer.homeIdentity !== expectedHomeIdentity
+    || appServer.codeModeHostUrl !== policy.remote.codeMode.remoteHostUrl
+    || appServer.transportSecurity !== "private-network-only") {
+    throw new Error("native-pty-app-server");
+  }
+  let inspection: DockerExecInspection;
+  try {
+    inspection = await input.docker.inspectExec(appServer.execId);
+  } catch (error) {
+    throw stageError("native-pty-app-server", error);
+  }
+  if (inspection.ID !== appServer.execId || inspection.ContainerID !== control.containerId
+    || !inspection.Running || inspection.ExitCode !== null || inspection.Pid !== appServer.serverPid) {
+    throw new Error("native-pty-app-server");
+  }
+  const socket = await lstatIdentity(nativeAppServerAgentSocketPath(policy.home.homePath));
+  if (socket === null || socket.stats.isSymbolicLink() || !socket.stats.isSocket()
+    || !identitiesEqual(socket.identity, appServer.socketIdentity)) {
+    throw new Error("native-pty-app-server");
+  }
+  let processes;
+  try {
+    processes = await input.docker.topContainer(control.containerId, "-o pid,args");
+  } catch (error) {
+    throw stageError("native-pty-app-server", error);
+  }
+  const pidIndex = processes.titles.findIndex((title) => title.toLowerCase() === "pid");
+  const argsIndex = processes.titles.findIndex((title) => ["args", "cmd", "command"].includes(title.toLowerCase()));
+  if (pidIndex < 0 || argsIndex < 0) throw new Error("native-pty-app-server");
+  const candidates = processes.processes.filter((row) => (row[argsIndex] ?? "").includes("app-server"));
+  if (candidates.length !== 1 || Number(candidates[0]![pidIndex]) !== appServer.serverPid) {
+    throw new Error("native-pty-app-server");
+  }
+  const args = candidates[0]![argsIndex] ?? "";
+  if (!args.includes("--listen") || !args.includes("unix://")
+    || !args.includes("--code-mode-host") || !args.includes(appServer.codeModeHostUrl)) {
+    throw new Error("native-pty-app-server");
+  }
+}
+
 export async function startNativeCodexPty(input: {
   readonly docker: DockerEngineClient;
   readonly control: CodexControlSidecarBinding;
+  readonly appServer: CodexNativeAppServerHandle;
   readonly executablePath: "/opt/devspace/codex-launcher/codex";
   readonly resumeSessionId: string | null;
   readonly environment: Readonly<Record<string, string>>;
@@ -104,9 +165,10 @@ export async function startNativeCodexPty(input: {
   assertRemoteControl(input.control, input.environment);
   assertResumeId(input.resumeSessionId);
   assertSize(input.columns, input.rows);
-  const command = input.resumeSessionId === null
-    ? [EXECUTABLE_PATH]
-    : [EXECUTABLE_PATH, "resume", input.resumeSessionId];
+  await assertNativeAppServerAdmission({ docker: input.docker, control: input.control, appServer: input.appServer });
+  const logicalArgv = buildNativeCodexArgv(input.resumeSessionId);
+  assertNativeCodexArgv(logicalArgv, input.resumeSessionId);
+  const command = [EXECUTABLE_PATH, ...logicalArgv.slice(1)];
   let execId: string;
   try {
     execId = await input.docker.createExec(input.control.containerId, {
@@ -139,6 +201,7 @@ export async function startNativeCodexPty(input: {
     containerId: input.control.containerId,
     execId,
     command,
+    logicalArgv,
     workingDirectory: WORKING_DIRECTORY,
     stream,
     async resize(columns, rows) {

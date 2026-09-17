@@ -8,7 +8,7 @@ function pty(stream: PassThrough, inspect: () => Promise<DockerExecInspection>):
   return {
     containerId: "control-id",
     execId: "exec-id",
-    command: ["/opt/devspace/codex-launcher/codex"],
+    command: ["/opt/devspace/codex-launcher/codex"], logicalArgv: ["codex"],
     workingDirectory: "/workspace",
     stream,
     resize: () => Promise.resolve(),

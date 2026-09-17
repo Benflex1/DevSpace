@@ -62,7 +62,7 @@ const remote = {
 };
 
 function pty(execId: string): NativeCodexPty {
-  return { containerId: "control-id", execId, command: ["/opt/devspace/codex-launcher/codex"], workingDirectory: "/workspace",
+  return { containerId: "control-id", execId, command: ["/opt/devspace/codex-launcher/codex"], logicalArgv: ["codex"], workingDirectory: "/workspace",
     stream: new PassThrough(), resize: () => Promise.resolve(),
     inspect: () => Promise.resolve({ ID: execId, Running: true, ExitCode: null, ContainerID: "control-id", Pid: 10 }) };
 }
