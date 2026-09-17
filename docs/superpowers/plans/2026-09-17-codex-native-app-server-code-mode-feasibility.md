@@ -71,8 +71,8 @@ The implementation worker must use the pinned `rust-v0.153.4` source already cit
 - Model tool mode selection: `protocol/src/openai_models.rs` (`ToolMode` metadata), `core/src/tools/mod.rs` (model-to-tool selection), and `core/tests/suite/model_runtime_selectors.rs` (`CodeModeOnly` behavior).
 - Code Mode configuration and provider choice: `core/src/config/config_tests.rs`, `core/src/thread_manager.rs`, `code-mode/src/remote_session.rs`, and `code-mode/src/remote_session/connection.rs`.
 - Remote host startup and gRPC transport: `app-server/src/code_mode_host.rs`, `app-server/src/lib.rs`, `code-mode-host/src/main.rs`, `code-mode-host/src/transport.rs`, `code-mode-host/src/grpc_transport.rs`, and `code-mode-protocol/src/grpc/codex.code_mode.v1.proto`.
-- Embedded Code Mode capability surface and callbacks: `code-mode-runtime/src/runtime/globals.rs`, `code-mode-runtime/src/runtime/module_loader.rs`, `code-mode-runtime/src/runtime/callbacks.rs`, `code-mode-runtime/src/v8_init.rs`, `core/src/code_mode/delegate.rs`, and `core/src/code_mode/mod.rs`.
-- Nested tool and execution routing: `core/src/tools/handlers/exec_command.rs`, `core/src/tools/handlers/apply_patch.rs`, `core/src/agents_md.rs`, `core/src/environment_selection.rs`, and `exec-server/src/environment_provider.rs`.
+- Embedded Code Mode capability surface and callbacks: `code-mode-runtime/src/runtime/globals.rs`, `code-mode-runtime/src/runtime/module_loader.rs`, `code-mode-runtime/src/runtime/callbacks.rs`, `code-mode-runtime/src/v8_init.rs`, `codex-rs/core/src/tools/code_mode/delegate.rs`, and `core/src/tools/code_mode/mod.rs`.
+- Nested tool and execution routing: `codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs`, `core/src/tools/handlers/apply_patch.rs`, `core/src/agents_md.rs`, `core/src/environment_selection.rs`, and `exec-server/src/environment_provider.rs`.
 - Native app-server transport/socket and TUI selection: `app-server-transport/src/transport/mod.rs`, `app-server-transport/src/transport/unix_socket.rs`, `tui/src/lib.rs`, and the exact app-server CLI options in `cli/src/main.rs`.
 - Local escape surfaces that must remain rejected: `core/src/tasks/user_shell.rs`, `rmcp-client/src/stdio_server_launcher.rs`, `hooks/src/engine/command_runner.rs`, plugin maintenance paths, and program-executor configuration tests.
 
@@ -559,10 +559,22 @@ The implementation worker must use the pinned `rust-v0.153.4` source already cit
       readonly codeModeHost: "protocol-authenticated" | "private-network-only" | "unproven";
     }
 
+    export type CodexSplitToolModeEvidence =
+      | {
+        readonly kind: "protocol";
+        readonly value: "CodeModeOnly";
+      }
+      | {
+        readonly kind: "pinned-model-metadata-plus-runtime";
+        readonly model: "gpt-6-astra";
+        readonly remoteCodeModeObserved: true;
+      };
+
     export interface CodexSplitModelCompatibilityProof {
       readonly provenance: "real-native-app-server";
       readonly model: "gpt-6-astra";
-      readonly toolMode: "CodeModeOnly";
+      readonly toolModeEvidence: CodexSplitToolModeEvidence;
+      readonly remoteCodeModeObserved: true;
       readonly codeModeProvider: "remote-grpc";
       readonly codeModeHostContainerId: string;
       readonly execServerContainerId: string;
@@ -577,6 +589,7 @@ The implementation worker must use the pinned `rust-v0.153.4` source already cit
     }
     ```
   - Keep known live-only fields explicitly modeled by the live schema and project only the base semantics into `evaluateCodexSplitOutcome`; reject arbitrary unknown properties at the applicable boundary.
+  - Require `remoteCodeModeObserved === true` from runtime evidence for either tool-mode evidence variant. The pinned-model variant is valid only when the requested model is exactly `gpt-6-astra` and the pinned `0.153.4` metadata mapping is recorded; it is not an inference from model narration.
   - Require `realModelProof.provenance === "real-native-app-server"` and `liveOperatorProof.provenance === "real-native-tui"` before either pass state. Treat unobserved/unknown as incomplete, never as success or definitive failure.
 - [ ] **Run GREEN.**
   - Run the focused result/verifier command.
@@ -628,11 +641,29 @@ The implementation worker must use the pinned `rust-v0.153.4` source already cit
 
 - [ ] **Test first — define a minimal test-only native app-server client.**
   - Create `apps/agent/test/codex-native-app-server-probe.test.ts` before `codex-native-app-server-probe.ts`.
-  - Consume the exact Codex `0.153.4` app-server protocol fixtures under `packages/contracts/fixtures/codex-app-server/0.153.4`, `CodexSplitModelCompatibilityProof` from `feasibility-result.ts`, the owned Unix socket from `CodexNativeAppServerHandle`, `CodexCodeModeHostHandle`, `CodexExecServerHandle`, `DockerEngineClient.topContainer`, `inspectExec`, and the A-H evidence types.
+  - Consume `CodexNativeHomeBinding` and `CodexNativeHomeBinding.identity` from `native-home.ts`, `FileIdentity`/identity comparison from `private-state.ts`, `CodexSplitToolModeEvidence` and `CodexSplitModelCompatibilityProof` from `feasibility-result.ts`, the exact Codex `0.153.4` app-server protocol fixtures under `packages/contracts/fixtures/codex-app-server/0.153.4`, the owned Unix socket from `CodexNativeAppServerHandle`, `CodexCodeModeHostHandle`, `CodexExecServerHandle`, `DockerEngineClient.topContainer`, `inspectExec`, and the A-H evidence types.
   - Produce only this test-only interface:
     ```ts
+    export interface CodexNativeAppServerProbeSocket {
+      readonly logicalPath: "/codex-home/app-server-control/app-server-control.sock";
+      readonly agentSocketPath: string;
+      readonly homeIdentity: CodexNativeHomeBinding["identity"];
+      readonly socketIdentity: FileIdentity;
+    }
+
+    export function buildCodexNativeAppServerProbeSocket(
+      home: CodexNativeHomeBinding,
+    ): CodexNativeAppServerProbeSocket;
+
+    export function assertCodexNativeAppServerProbeSocket(input: {
+      readonly home: CodexNativeHomeBinding;
+      readonly socket: CodexNativeAppServerProbeSocket;
+      readonly expectedHomeIdentity: CodexNativeHomeBinding["identity"];
+      readonly expectedSocketIdentity: CodexNativeAppServerProbeSocket["socketIdentity"];
+    }): void;
+
     export interface CodexNativeAppServerModelProbeInput {
-      readonly socketPath: "/codex-home/app-server-control/app-server-control.sock";
+      readonly socket: CodexNativeAppServerProbeSocket;
       readonly model: "gpt-6-astra";
       readonly logicalCwd: "/workspace";
       readonly operation: "pwd" | "git-status" | "read-acceptance-file" | "write-remove-acceptance-file";
@@ -642,7 +673,8 @@ The implementation worker must use the pinned `rust-v0.153.4` source already cit
     export interface CodexNativeAppServerModelProbeEvidence {
       readonly provenance: "real-native-app-server";
       readonly model: "gpt-6-astra";
-      readonly toolMode: "CodeModeOnly";
+      readonly toolModeEvidence: CodexSplitToolModeEvidence;
+      readonly remoteCodeModeObserved: true;
       readonly codeModeProvider: "remote-grpc";
       readonly codeModeHostContainerId: string;
       readonly execServerContainerId: string;
@@ -684,15 +716,16 @@ The implementation worker must use the pinned `rust-v0.153.4` source already cit
       deps: CodexNativeAppServerModelProbeDependencies,
     ): Promise<CodexNativeAppServerModelProbeEvidence & CodexSplitModelCompatibilityProof>;
     ```
-  - Add RED tests for wrong model/tool mode, local provider selection, missing/stale host, missing exec endpoint, approval request, executor process absence, control process appearance, and a fake protocol response attempting to claim remote execution.
+  - Add RED tests for an absolute Agent socket path and correct logical/Agent-visible socket/inode correspondence, a host socket outside the owned home, symlink/path substitution, mismatched home/socket identity, missing/stale socket, wrong model, a protocol with and without a selected ToolMode field, local provider selection, missing/stale host, missing exec endpoint, approval request, executor process absence, control process appearance, and a fake protocol response attempting to claim remote execution.
   - Add a test proving raw transcripts, model output, credentials, and approval decisions are not persisted or returned.
   - Run:
     `pnpm --dir ../.. exec vitest run --project @devspace/agent apps/agent/test/codex-native-app-server-probe.test.ts`
   - Expected RED result: no test-only app-server socket probe exists and no real-model readiness proof is part of the verifier.
 - [ ] **Implement the smallest upstream-native probe.**
-  - Use the exact 0.153.4 app-server Unix-socket framing from `app-server-transport` and the generated fixture schemas for only `initialize`, thread start/resume as required, one bounded turn, and the protocol events needed to identify model metadata/tool mode/provider and completion/approval. Implement the socket client only in this test file pair rather than reusing the structured stdio `CodexJsonlTransport`; do not expose this client as a product API.
+  - Build the `CodexNativeAppServerProbeSocket` from the already-owned `CodexNativeHomeBinding`. The probe runs in the Agent/test namespace, not in the control container. Resolve `agentSocketPath` as the canonical `<homePath>/app-server-control/app-server-control.sock`, prove containment with the existing private-state path/identity helpers, verify that its socket inode corresponds to the control-side logical socket under the bind-mounted home, reject symlinks and swapped inodes, and connect through that Agent-visible path. Pass only the logical path and bounded proof fields into model evidence; never serialize `agentSocketPath`, the host home path, socket contents, or home credentials.
+  - Use the exact 0.153.4 app-server Unix-socket framing from `app-server-transport` and the generated fixture schemas for only `initialize`, thread start/resume as required, one bounded turn, and the protocol events needed to identify model/provider and completion/approval. First inspect the pinned protocol schema for selected ToolMode. When the protocol includes that field, parse `toolModeEvidence: { kind: "protocol", value: "CodeModeOnly" }`. When it does not, emit `toolModeEvidence: { kind: "pinned-model-metadata-plus-runtime", model: "gpt-6-astra", remoteCodeModeObserved: true }` only after the pinned `0.153.4` model metadata mapping and runtime observations both prove the path. Do not invent a protocol field or infer ToolMode from narration. Implement the socket client only in this test file pair rather than reusing the structured stdio `CodexJsonlTransport`; do not expose this client as a product API.
   - Authenticate through the already-owned native home/app-server; if authentication is unavailable, return `BLOCKED/INCOMPLETE` before consuming model quota. Request exactly `gpt-6-astra` and a fixed bounded harmless operation. If native approval is requested, stop with `approval: "required-stop"`; never auto-approve or synthesize a user turn.
-  - Prove remote execution from container/process/runtime evidence: CodeModeOnly metadata, remote gRPC provider identity, Code Mode host process in executor, nested exec-server process in executor, logical `/workspace`, no control project process, no executor home/credentials, and successful operation. Model text claiming execution is not evidence.
+  - Prove remote execution from container/process/runtime evidence: the exact requested model, either accepted ToolMode evidence variant, remote gRPC provider identity, Code Mode host session/cell activity, Code Mode host process in executor, nested callback/tool execution, exec-server activity in executor, logical `/workspace`, no control project process, no executor home/credentials, and successful operation. Model text claiming execution is not evidence.
   - Return `MODEL_REMOTE_COMPATIBLE` only from the real native app-server path with bounded evidence satisfying `CodexSplitModelCompatibilityProof`. The test-only entrypoint passes that proof to the pure result evaluator; production verifier code accepts the serialized proof but does not import the test client. Mocks always return an incomplete/non-ready classification.
 - [ ] **Run GREEN and consume real model quota only here.**
   - Run the focused probe tests and Agent typecheck/changed-file ESLint.
@@ -751,7 +784,7 @@ The implementation worker must keep these checks green at each task boundary and
 | --- | --- | --- |
 | A. Native TUI/app-server authority | Tasks 4, 6, 12 | Owned per-home Unix socket, app-server PID/provenance, exact `[codex]`/`[codex, resume, id]`, no embedded daemon, native PTY/approval/session authority |
 | B. Exact executor/project environment | Tasks 2, 3, 5, 10 | Exact image ID, exact worktree/Git identities, exact toolchain, both native services ready in executor, no home/credential/socket/control-egress |
-| C. Astra CodeModeOnly remote execution | Task 11, projected by Task 12 | Real authenticated `gpt-6-astra`, observed `CodeModeOnly`, remote gRPC host and exec-server process/container evidence, bounded project operation, no control project process |
+| C. Astra CodeModeOnly remote execution | Task 11, projected by Task 12 | Real authenticated `gpt-6-astra`, either protocol ToolMode evidence or pinned-model-metadata-plus-runtime evidence, remote gRPC host and exec-server process/container evidence, bounded project operation, no control project process |
 | D. Physical home/network separation | Tasks 3, 5, 7, 10, 11, 12 | Canary attack matrix, mounts/processes/PIDs, execution network members exactly control+executor, control-egress only control, no forwarding/NAT/proxy/host/unrelated route |
 | E. Native persistence/unqualified resume | Tasks 4, 6, 5, 12 | Persistent home, session provenance, normal TUI exit, exact unqualified resume, continuity and same executor topology, restart evidence |
 | F. Local fallback/escape rejection | Tasks 1, 7, 10, 12 | Effective global/project config proof and negative-path results for every forbidden path; missing/stale services fail closed |
@@ -761,7 +794,7 @@ The implementation worker must keep these checks green at each task boundary and
 ### Readiness progression
 
 1. `INFRASTRUCTURE_READY` is emitted only after the real rootless-Docker preflight completes every automated infrastructure/security/lifecycle check and two consecutive real runs succeed. It does not consume model quota and does not open the TUI.
-2. `MODEL_REMOTE_COMPATIBLE` is emitted only after the real authenticated native app-server probe uses `gpt-6-astra`, observes `CodeModeOnly`, and proves Code Mode plus nested project execution in the executor. An approval request stops the probe.
+2. `MODEL_REMOTE_COMPATIBLE` is emitted only after the real authenticated native app-server probe uses `gpt-6-astra`, records selected ToolMode when the protocol exposes it or the pinned-model-metadata-plus-runtime evidence otherwise, and proves remote Code Mode plus nested project execution in the executor. An approval request stops the probe.
 3. `READY_FOR_OPERATOR_TUI` is emitted only after model compatibility and repeated infrastructure evidence. At this point the human is asked to perform native TUI approvals, session, resume, and other interactive A-H checks.
 4. `PASS`, `PASS-WITH-TRANSPORT-BLOCK`, `FAIL`, and `BLOCKED/INCOMPLETE` are final feasibility outcomes. A preflight, model probe, or operator abort cannot be projected to PASS. No outcome changes the shipped/default structured app-server path.
 
