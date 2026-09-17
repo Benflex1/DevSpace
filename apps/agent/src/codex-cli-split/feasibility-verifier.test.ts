@@ -143,7 +143,7 @@ test("does not treat an unobserved zero process count as a process proof", () =>
 
 test("round-trips the current persisted transport record through endpointFromRecord", () => {
   const record: CodexSplitRuntimeRecord = {
-    version: 1,
+    version: 2,
     projectId: "018f0f00-0000-7000-8000-000000000001",
     workspaceId: "018f0f00-0000-7000-8000-000000000002",
     revisionId: "018f0f00-0000-7000-8000-000000000003",
@@ -157,11 +157,35 @@ test("round-trips the current persisted transport record through endpointFromRec
         id: "egress-id", name: "devspace-codex-egress", role: "control-egress", internal: false, defaultRoute: true
       }
     },
+    artifact: {
+      packageVersion: "0.153.4", closureDigest: "d".repeat(64), nativeCliPath: "/opt/devspace/codex/bin/codex",
+      execServerCapability: "codex-0.153.4-exec-server", appServerCapability: "codex-0.153.4-app-server",
+      codeModeHostCapability: "codex-0.153.4-code-mode-host"
+    },
     executor: {
-      id: "executor-id", imageId: `sha256:${"b".repeat(64)}`,
+      id: "executor-id", imageId: `sha256:${"b".repeat(64)}`, imageReference: "node@sha256:" + "b".repeat(64),
+      imageArchitecture: "amd64", worktreeIdentity: { device: "1", inode: "3" },
+      repositoryIdentity: { device: "1", inode: "4" }, administrationIdentity: { device: "1", inode: "5" },
       endpointUrl: "ws://codex-executor:4545", transportSecurity: "private-network-only"
     },
-    control: { id: "control-id", homeBinding: "owner-default" },
+    execServer: {
+      executorContainerId: "executor-id", execId: "server-exec", endpointUrl: "ws://codex-executor:4545",
+      serverPid: 11, transportSecurity: "private-network-only"
+    },
+    codeModeHost: {
+      executorContainerId: "executor-id", execId: "code-mode-exec", serverPid: 12,
+      host: "codex-code-mode-host", port: 4546, url: "http://codex-code-mode-host:4546",
+      listenUrl: "grpc://0.0.0.0:4546", networkId: "execution-id", transportSecurity: "private-network-only"
+    },
+    control: {
+      id: "control-id", homeBinding: "owner-default", homeIdentity: { device: "1", inode: "2" },
+      appServer: {
+        controlContainerId: "control-id", execId: "app-server-exec", serverPid: 13,
+        socketPath: "/codex-home/app-server-control/app-server-control.sock",
+        socketIdentity: { device: "1", inode: "6" }, homeIdentity: { device: "1", inode: "2" },
+        codeModeHostUrl: "http://codex-code-mode-host:4546", transportSecurity: "private-network-only"
+      }
+    },
     sessions: []
   };
 

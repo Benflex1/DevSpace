@@ -5,6 +5,7 @@ import {
   assertContained,
   durableJsonWriter,
   establishPinnedDirectory,
+  identitiesEqual,
   PrivateStateCorruptionError,
   readRegularFileNoFollow,
   type AtomicJsonWriter
@@ -18,6 +19,7 @@ import {
 import type { ManagedWorkspaces, WorkspaceExecutionContext } from "../managed-workspaces.js";
 import { probeAdmittedCodexVersion } from "./compatibility.js";
 import {
+  assertCodexSplitArtifactCapabilities,
   prepareCodexSplitArtifact,
   type CodexSplitArtifactBinding
 } from "./artifact.js";
@@ -34,10 +36,16 @@ import {
 } from "./network.js";
 import {
   assertCodexExecServerReady,
-  probeCodexExecServerReady,
   startCodexExecServer,
   type CodexExecServerHandle
 } from "./exec-server.js";
+import {
+  assertCodexCodeModeHostReady,
+  buildCodexCodeModeHostPolicy,
+  reattachCodexCodeModeHost,
+  startCodexCodeModeHost,
+  type CodexCodeModeHostHandle
+} from "./code-mode-host.js";
 import {
   createCodexSplitTransportBinding,
   type CodexSplitTransportBinding
@@ -51,8 +59,16 @@ import {
   buildCodexControlSidecarPolicy,
   createCodexControlSidecar,
   assertCodexControlSidecarInspection,
-  type CodexControlSidecarBinding
+  type CodexControlSidecarBinding,
+  type CodexControlSidecarPolicy
 } from "./control-sidecar.js";
+import {
+  assertCodexNativeAppServerReady,
+  buildCodexNativeAppServerPolicy,
+  reattachCodexNativeAppServer,
+  startCodexNativeAppServer,
+  type CodexNativeAppServerHandle
+} from "./native-app-server.js";
 import {
   nativeCodexHomePath,
   ensureNativeCodexHome,
@@ -89,7 +105,9 @@ export interface CodexSplitRuntimeAssembly {
   readonly network: CodexSplitNetworkBinding;
   readonly executor: CodexProjectExecutorBinding;
   readonly transport: CodexSplitTransportBinding;
-  readonly server: CodexExecServerHandle | null;
+  readonly server: CodexExecServerHandle;
+  readonly codeModeHost: CodexCodeModeHostHandle;
+  readonly appServer: CodexNativeAppServerHandle;
   readonly remote: CodexRemoteOnlyConfiguration;
   readonly control: CodexControlSidecarBinding;
 }
@@ -183,16 +201,23 @@ async function buildDefaultAssembly(input: CodexSplitRuntimeAssemblyInput & { re
       docker: input.docker, policy: executorPolicy,
       name: splitResourceName(input.context.workspaceId, input.context.generation, "executor")
     });
+    const executorImage = await input.docker.inspectImage(executorPolicy.imageId);
+    const capabilities = assertCodexSplitArtifactCapabilities({ artifact, image: executorImage });
     const transport = createCodexSplitTransportBinding({
       executor, network, protocolAuthenticationVerified: false, privateNetworkIsolationVerified: true,
       admittedVersion: "0.153.4"
     });
     const server = await startCodexExecServer({ docker: input.docker, executor, transport });
     await assertCodexExecServerReady({ docker: input.docker, handle: server });
+    const codeModeHostPolicy = buildCodexCodeModeHostPolicy({ executor, artifact: capabilities });
+    const codeModeHost = await startCodexCodeModeHost({ docker: input.docker, policy: codeModeHostPolicy });
+    await assertCodexCodeModeHostReady({ docker: input.docker, handle: codeModeHost, policy: codeModeHostPolicy });
     const managedPolicy = await prepareCodexManagedPolicy({
       stateRoot: input.stateRoot, home, endpoint: transport, admittedVersion: "0.153.4"
     });
-    const remote = buildRemoteOnlyConfiguration({ home, endpoint: transport, policy: managedPolicy });
+    const remote = buildRemoteOnlyConfiguration({
+      home, endpoint: transport, policy: managedPolicy, codeModeHostUrl: codeModeHost.endpoint.url
+    });
     const controlPolicy = await buildCodexControlSidecarPolicy({
       imageReference: input.controlImageReference, home, artifact, remote, network
     });
@@ -200,7 +225,13 @@ async function buildDefaultAssembly(input: CodexSplitRuntimeAssemblyInput & { re
       docker: input.docker, policy: controlPolicy,
       name: splitResourceName(input.context.workspaceId, input.context.generation, "control")
     });
-    return { home, artifact, network, executor, transport, server, remote, control };
+    const appServerControl = { ...control.policy, containerId: control.containerId } as CodexControlSidecarPolicy;
+    const appServerPolicy = buildCodexNativeAppServerPolicy({
+      control: appServerControl, artifact: capabilities, codeModeHost: codeModeHost.endpoint
+    });
+    const appServer = await startCodexNativeAppServer({ docker: input.docker, policy: appServerPolicy });
+    await assertCodexNativeAppServerReady({ docker: input.docker, handle: appServer, policy: appServerPolicy });
+    return { home, artifact, network, executor, transport, server, codeModeHost, appServer, remote, control };
   } catch (error) {
     if (control !== null) await input.docker.removeContainer(control.containerId).catch(() => undefined);
     if (executor !== null) await input.docker.removeContainer(executor.containerId).catch(() => undefined);
@@ -210,13 +241,14 @@ async function buildDefaultAssembly(input: CodexSplitRuntimeAssemblyInput & { re
   }
 }
 
-function recordFromAssembly(input: {
+export function recordFromAssembly(input: {
   readonly context: WorkspaceExecutionContext;
+  readonly git: WorkspaceGitAdministrationBinding;
   readonly assembly: CodexSplitRuntimeAssembly;
   readonly sessions: readonly CodexSplitSessionRecord[];
 }): CodexSplitRuntimeRecord {
   return parseCodexSplitRuntimeRecord({
-    version: 1,
+    version: 2,
     projectId: input.context.projectId,
     workspaceId: input.context.workspaceId,
     revisionId: input.context.revisionId,
@@ -232,13 +264,58 @@ function recordFromAssembly(input: {
         role: "control-egress", internal: false, defaultRoute: true
       }
     },
+    artifact: {
+      packageVersion: input.assembly.artifact.packageVersion,
+      closureDigest: input.assembly.artifact.closureDigest,
+      nativeCliPath: input.assembly.artifact.entrypointPath,
+      execServerCapability: "codex-0.153.4-exec-server",
+      appServerCapability: "codex-0.153.4-app-server",
+      codeModeHostCapability: "codex-0.153.4-code-mode-host"
+    },
     executor: {
       id: input.assembly.executor.containerId,
       imageId: input.assembly.executor.policy.imageId,
+      imageReference: input.assembly.executor.policy.imageReference,
+      imageArchitecture: input.assembly.executor.policy.imageArchitecture,
+      worktreeIdentity: input.git.worktreeIdentity,
+      repositoryIdentity: input.git.repositoryIdentity,
+      administrationIdentity: input.git.administrationIdentity,
       endpointUrl: input.assembly.transport.endpointUrl,
       transportSecurity: input.assembly.transport.security
     },
-    control: { id: input.assembly.control.containerId, homeBinding: "owner-default" },
+    execServer: {
+      executorContainerId: input.assembly.server.executorContainerId,
+      execId: input.assembly.server.execId,
+      endpointUrl: input.assembly.server.endpoint.endpointUrl,
+      serverPid: input.assembly.server.serverPid,
+      transportSecurity: input.assembly.transport.security
+    },
+    codeModeHost: {
+      executorContainerId: input.assembly.codeModeHost.executorContainerId,
+      execId: input.assembly.codeModeHost.execId,
+      serverPid: input.assembly.codeModeHost.serverPid,
+      host: input.assembly.codeModeHost.endpoint.host,
+      port: input.assembly.codeModeHost.endpoint.port,
+      url: input.assembly.codeModeHost.endpoint.url,
+      listenUrl: input.assembly.codeModeHost.endpoint.listenUrl,
+      networkId: input.assembly.codeModeHost.endpoint.networkId,
+      transportSecurity: input.assembly.codeModeHost.transportSecurity
+    },
+    control: {
+      id: input.assembly.control.containerId,
+      homeBinding: "owner-default",
+      homeIdentity: input.assembly.home.identity,
+      appServer: {
+        controlContainerId: input.assembly.appServer.controlContainerId,
+        execId: input.assembly.appServer.execId,
+        serverPid: input.assembly.appServer.serverPid,
+        socketPath: input.assembly.appServer.socketPath,
+        socketIdentity: input.assembly.appServer.socketIdentity,
+        homeIdentity: input.assembly.home.identity,
+        codeModeHostUrl: input.assembly.appServer.codeModeHostUrl,
+        transportSecurity: input.assembly.appServer.transportSecurity
+      }
+    },
     sessions: [...input.sessions]
   });
 }
@@ -584,7 +661,7 @@ export class CodexSplitRuntime {
       throw new Error("codex-split-runtime-ambiguous");
     }
     const assembly = await this.assemblyFor(context, git, existing);
-    const record = recordFromAssembly({ context, assembly, sessions: existing?.sessions ?? [] });
+    const record = recordFromAssembly({ context, git, assembly, sessions: existing?.sessions ?? [] });
     await this.save(record);
     return record;
   }
@@ -772,7 +849,7 @@ async function buildDefaultReattachedAssembly(input: {
   const ownerGid = process.getgid?.();
   if (ownerUid === undefined || ownerGid === undefined) throw new Error("codex-split-agent-owner-unavailable");
   const home = await ensureNativeCodexHome({ homePath: nativeCodexHomePath(input.stateRoot), ownerUid, ownerGid });
-  assertCodexSplitHomeIdentity(home.identity, home.identity);
+  assertCodexSplitHomeIdentity(input.record.control.homeIdentity, home.identity);
   const existingExecutorInspection = await input.docker.inspectContainer(input.record.executor.id);
   const artifactMounts = existingExecutorInspection.Mounts.filter((mount) =>
     mount.Type === "bind" && mount.Destination === "/opt/devspace/codex" && !mount.RW);
@@ -810,17 +887,57 @@ async function buildDefaultReattachedAssembly(input: {
   const executorInspection = await input.docker.inspectContainer(executor.containerId);
   const executorImage = await input.docker.inspectImage(executorInspection.Image ?? executorPolicy.imageId);
   assertCodexProjectExecutorInspection({ container: executorInspection, image: executorImage, binding: executor });
-  if (input.record.executor.transportSecurity !== "private-network-only") {
+  const capabilities = assertCodexSplitArtifactCapabilities({ artifact, image: executorImage });
+  if (input.record.artifact.closureDigest !== capabilities.closureDigest
+    || input.record.artifact.nativeCliPath !== capabilities.nativeCliPath
+    || input.record.artifact.execServerCapability !== capabilities.execServerCapability
+    || input.record.artifact.appServerCapability !== capabilities.appServerCapability
+    || input.record.artifact.codeModeHostCapability !== capabilities.codeModeHostCapability
+    || input.record.executor.imageId !== executorPolicy.imageId
+    || input.record.executor.imageReference !== executorPolicy.imageReference
+    || input.record.executor.imageArchitecture !== executorPolicy.imageArchitecture
+    || !identitiesEqual(input.record.executor.worktreeIdentity, input.git.worktreeIdentity)
+    || !identitiesEqual(input.record.executor.repositoryIdentity, input.git.repositoryIdentity)
+    || !identitiesEqual(input.record.executor.administrationIdentity, input.git.administrationIdentity)) {
+    throw new Error("codex-split-runtime-authority");
+  }
+  if (input.record.executor.transportSecurity !== "private-network-only"
+    || input.record.execServer.transportSecurity !== input.record.executor.transportSecurity
+    || input.record.execServer.endpointUrl !== input.record.executor.endpointUrl
+    || input.record.execServer.executorContainerId !== executor.containerId) {
     throw new Error("codex-split-restart-transport-unavailable");
   }
   const transport = createCodexSplitTransportBinding({
     executor, network, protocolAuthenticationVerified: false, privateNetworkIsolationVerified: true,
     admittedVersion: version.version
   });
-  const serverPid = await probeCodexExecServerReady({ docker: input.docker, executor, transport });
-  const server: CodexExecServerHandle = { executorContainerId: executor.containerId, execId: "recovered", endpoint: transport, serverPid };
+  const server: CodexExecServerHandle = {
+    executorContainerId: input.record.execServer.executorContainerId,
+    execId: input.record.execServer.execId,
+    endpoint: transport,
+    serverPid: input.record.execServer.serverPid
+  };
+  await assertCodexExecServerReady({ docker: input.docker, handle: server });
+  const codeModeHostPolicy = buildCodexCodeModeHostPolicy({ executor, artifact: capabilities });
+  const codeModeHost: CodexCodeModeHostHandle = {
+    executorContainerId: input.record.codeModeHost.executorContainerId,
+    execId: input.record.codeModeHost.execId,
+    endpoint: codeModeHostPolicy.endpoint,
+    serverPid: input.record.codeModeHost.serverPid,
+    transportSecurity: input.record.codeModeHost.transportSecurity
+  };
+  if (input.record.codeModeHost.host !== codeModeHost.endpoint.host
+    || input.record.codeModeHost.port !== codeModeHost.endpoint.port
+    || input.record.codeModeHost.url !== codeModeHost.endpoint.url
+    || input.record.codeModeHost.listenUrl !== codeModeHost.endpoint.listenUrl
+    || input.record.codeModeHost.networkId !== codeModeHost.endpoint.networkId) {
+    throw new Error("codex-split-runtime-authority");
+  }
+  await reattachCodexCodeModeHost({ docker: input.docker, handle: codeModeHost, policy: codeModeHostPolicy });
   const managedPolicy = await prepareCodexManagedPolicy({ stateRoot: input.stateRoot, home, endpoint: transport, admittedVersion: version.version });
-  const remote = buildRemoteOnlyConfiguration({ home, endpoint: transport, policy: managedPolicy });
+  const remote = buildRemoteOnlyConfiguration({
+    home, endpoint: transport, policy: managedPolicy, codeModeHostUrl: codeModeHost.endpoint.url
+  });
   const controlPolicy = await buildCodexControlSidecarPolicy({
     imageReference: input.controlImageReference, home, artifact, remote, network
   });
@@ -833,5 +950,27 @@ async function buildDefaultReattachedAssembly(input: {
   };
   const controlInspection = await input.docker.inspectContainer(control.containerId);
   assertCodexControlSidecarInspection({ container: controlInspection, binding: control });
-  return { home, artifact, network, executor, transport, server, remote, control };
+  const appServer = {
+    controlContainerId: input.record.control.appServer.controlContainerId,
+    execId: input.record.control.appServer.execId,
+    serverPid: input.record.control.appServer.serverPid,
+    socketPath: input.record.control.appServer.socketPath,
+    socketIdentity: input.record.control.appServer.socketIdentity,
+    homeIdentity: `${home.identity.device}:${home.identity.inode}`,
+    codeModeHostUrl: input.record.control.appServer.codeModeHostUrl,
+    transportSecurity: input.record.control.appServer.transportSecurity
+  } satisfies CodexNativeAppServerHandle;
+  const appServerControl = { ...control.policy, containerId: control.containerId } as CodexControlSidecarPolicy;
+  const appServerPolicy = buildCodexNativeAppServerPolicy({
+    control: appServerControl, artifact: capabilities, codeModeHost: codeModeHost.endpoint
+  });
+  if (appServer.controlContainerId !== control.containerId
+    || appServer.homeIdentity !== appServerPolicy.homeIdentity
+    || appServer.codeModeHostUrl !== appServerPolicy.codeModeHostUrl
+    || appServer.socketPath !== appServerPolicy.socketPath) {
+    throw new Error("codex-split-runtime-authority");
+  }
+  await reattachCodexNativeAppServer({ docker: input.docker, handle: appServer, policy: appServerPolicy });
+  await assertCodexNativeAppServerReady({ docker: input.docker, handle: appServer, policy: appServerPolicy });
+  return { home, artifact, network, executor, transport, server, codeModeHost, appServer, remote, control };
 }

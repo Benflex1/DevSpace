@@ -1,5 +1,5 @@
 import { PassThrough } from "node:stream";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -8,6 +8,9 @@ import { durableJsonWriter } from "../private-state.js";
 import type { ManagedWorkspaces, WorkspaceExecutionContext } from "../managed-workspaces.js";
 import type { NativeCodexPty } from "./native-pty.js";
 import { CodexSplitRuntime, type CodexSplitRuntimeAssembly, type CodexSplitRuntimeDependencies } from "./split-runtime.js";
+import { parseCodexSplitRuntimeRecord } from "./runtime-record.js";
+import type { CodexCodeModeHostHandle } from "./code-mode-host.js";
+import type { CodexNativeAppServerHandle } from "./native-app-server.js";
 
 const projectId = "018f0f00-0000-7000-8000-000000000001";
 const workspaceId = "018f0f00-0000-7000-8000-000000000002";
@@ -68,11 +71,31 @@ function assembly(): CodexSplitRuntimeAssembly {
   return {
     home,
     network,
-    artifact: {} as never,
+    artifact: {
+      packageVersion: "0.153.4", closureDigest: "a".repeat(64), mountTarget: "/opt/devspace/codex",
+      entrypointPath: "/opt/devspace/codex/bin/codex", launcherPath: "/opt/devspace/codex-launcher/codex",
+      launcherSourceRoot: "/managed/codex-launchers/a", launcherSourcePath: "/managed/codex-launchers/a/codex",
+      staged: {} as never
+    },
     executor: { containerId: "executor-id", containerName: executorName, endpointHost: "codex-executor", endpointPort: 4545,
-      controlEgressAttached: false, policy: { imageId: `sha256:${"b".repeat(64)}`, projectId, workspaceId, generation: 1, executionNetwork: network.execution } } as never,
+      controlEgressAttached: false, policy: {
+        imageId: `sha256:${"b".repeat(64)}`, imageReference: "node@sha256:" + "b".repeat(64), imageArchitecture: "amd64",
+        projectId, workspaceId, generation: 1, executionNetwork: network.execution
+      } } as never,
     transport: endpoint,
     server: { executorContainerId: "executor-id", execId: "server-exec", endpoint, serverPid: 11 },
+    codeModeHost: {
+      executorContainerId: "executor-id", execId: "code-mode-exec", endpoint: {
+        host: "codex-code-mode-host", port: 4546, url: "http://codex-code-mode-host:4546",
+        listenUrl: "grpc://0.0.0.0:4546", networkId: "execution-id"
+      }, serverPid: 12, transportSecurity: "private-network-only"
+    } satisfies CodexCodeModeHostHandle,
+    appServer: {
+      controlContainerId: "control-id", execId: "app-server-exec", serverPid: 13,
+      socketPath: "/codex-home/app-server-control/app-server-control.sock",
+      socketIdentity: { device: "1", inode: "6" }, homeIdentity: "1:2",
+      codeModeHostUrl: "http://codex-code-mode-host:4546", transportSecurity: "private-network-only"
+    } satisfies CodexNativeAppServerHandle,
     remote,
     control: { containerId: "control-id", containerName: controlName, imageId: `sha256:${"c".repeat(64)}`, policy: { remote, home, network } } as never
   };
@@ -150,6 +173,42 @@ test("orders rootless and managed authority before split assembly and persists o
   expect(serialized).not.toContain("registry.example");
 });
 
+test("persists both executor services and the native app-server provenance", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const result = await value.runtime.ensure({ projectId, workspaceId });
+  expect(result).toMatchObject({
+    version: 2,
+    execServer: { executorContainerId: "executor-id", execId: "server-exec", serverPid: 11 },
+    codeModeHost: { executorContainerId: "executor-id", execId: "code-mode-exec", serverPid: 12 },
+    control: { id: "control-id", homeIdentity: home.identity, appServer: {
+      controlContainerId: "control-id", execId: "app-server-exec", serverPid: 13,
+      socketPath: "/codex-home/app-server-control/app-server-control.sock"
+    } }
+  });
+  const persisted = JSON.parse((await readFile(path.join(value.stateRoot, "codex-split", `${workspaceId}.json`))).toString("utf8")) as unknown;
+  expect(parseCodexSplitRuntimeRecord(persisted)).toEqual(result);
+});
+
+test("reattaches a current record without falling back to a partial assembly", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const first = await value.runtime.ensure({ projectId, workspaceId });
+  const reattached = new CodexSplitRuntime({
+    managed: value.managed, docker: value.docker, stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex"
+  }, {
+    reattachAssembly: ({ record }) => {
+      events.push(`reattach:${record.version}`);
+      return Promise.resolve(assembly());
+    },
+    buildAssembly: () => Promise.reject(new Error("unexpected-rebuild"))
+  });
+  const second = await reattached.ensure({ projectId, workspaceId });
+  expect(second).toEqual(first);
+  expect(events).toContain("reattach:2");
+});
+
 test("allows distinct live native sessions, rejects only duplicate live resume, and never starts local execution", async () => {
   const events: string[] = [];
   const value = await fixture(events, (id) => Promise.resolve(pty(id === firstSessionId ? "exec-1" : "exec-2")));
@@ -167,7 +226,7 @@ test("executor loss fails closed and does not create a control project mount", a
   const runtime = value.runtime;
   await runtime.ensure({ projectId, workspaceId });
   const controlMounts = (await runtime.ensure({ projectId, workspaceId })).control;
-  expect(controlMounts).toEqual({ id: "control-id", homeBinding: "owner-default" });
+  expect(controlMounts).toMatchObject({ id: "control-id", homeBinding: "owner-default", appServer: { execId: "app-server-exec" } });
   expect(events.filter((entry) => entry.startsWith("local:")).length).toBe(0);
 });
 

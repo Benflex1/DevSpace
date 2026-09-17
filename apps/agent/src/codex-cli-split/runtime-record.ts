@@ -10,6 +10,8 @@ import type { CodexSplitTransportSecurity } from "./transport.js";
 const dockerIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
 const dockerNameSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_.-]+$/u);
 const imageIdSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
+const positiveIntegerSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const portSchema = positiveIntegerSchema.max(65535);
 const endpointUrlSchema = z.string().regex(/^ws:\/\/codex-executor:[1-9][0-9]{0,4}$/u).refine((value) => {
   const port = Number(value.slice(value.lastIndexOf(":") + 1));
   return Number.isSafeInteger(port) && port >= 1 && port <= 65535;
@@ -19,6 +21,46 @@ const timestampSchema = z.string().datetime({ offset: true });
 const transportSecuritySchema = z.enum([
   "protocol-authenticated", "private-network-only", "unproven"
 ] satisfies readonly CodexSplitTransportSecurity[]);
+const serviceTransportSecuritySchema = z.enum(["protocol-authenticated", "private-network-only"]);
+const codeModeHostUrlSchema = z.string().regex(/^http:\/\/codex-code-mode-host:[1-9][0-9]{0,4}$/u);
+const codeModeHostListenUrlSchema = z.string().regex(/^grpc:\/\/0\.0\.0\.0:[1-9][0-9]{0,4}$/u);
+const appServerSocketPathSchema = z.literal("/codex-home/app-server-control/app-server-control.sock");
+const artifactRecordSchema = z.strictObject({
+  packageVersion: z.literal("0.153.4"),
+  closureDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+  nativeCliPath: z.literal("/opt/devspace/codex/bin/codex"),
+  execServerCapability: z.literal("codex-0.153.4-exec-server"),
+  appServerCapability: z.literal("codex-0.153.4-app-server"),
+  codeModeHostCapability: z.literal("codex-0.153.4-code-mode-host")
+});
+const execServerRecordSchema = z.strictObject({
+  executorContainerId: dockerIdSchema,
+  execId: dockerIdSchema,
+  endpointUrl: endpointUrlSchema,
+  serverPid: positiveIntegerSchema,
+  transportSecurity: serviceTransportSecuritySchema
+});
+const codeModeHostRecordSchema = z.strictObject({
+  executorContainerId: dockerIdSchema,
+  execId: dockerIdSchema,
+  serverPid: positiveIntegerSchema,
+  host: z.literal("codex-code-mode-host"),
+  port: portSchema,
+  url: codeModeHostUrlSchema,
+  listenUrl: codeModeHostListenUrlSchema,
+  networkId: dockerIdSchema,
+  transportSecurity: serviceTransportSecuritySchema
+});
+const appServerRecordSchema = z.strictObject({
+  controlContainerId: dockerIdSchema,
+  execId: dockerIdSchema,
+  serverPid: positiveIntegerSchema,
+  socketPath: appServerSocketPathSchema,
+  socketIdentity: fileIdentitySchema,
+  homeIdentity: fileIdentitySchema,
+  codeModeHostUrl: codeModeHostUrlSchema,
+  transportSecurity: serviceTransportSecuritySchema
+});
 
 export const codexSplitSessionRecordSchema = z.strictObject({
   nativeSessionId: uuidV7Schema,
@@ -83,7 +125,7 @@ export function parseCodexSplitRuntimeResourceReference(input: unknown): CodexSp
 }
 
 export const codexSplitRuntimeRecordSchema = z.strictObject({
-  version: z.literal(1),
+  version: z.literal(2),
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
   revisionId: uuidV7Schema,
@@ -97,13 +139,26 @@ export const codexSplitRuntimeRecordSchema = z.strictObject({
       context.addIssue({ code: "custom", message: "Split network roles must be distinct" });
     }
   }),
+  artifact: artifactRecordSchema,
   executor: z.strictObject({
     id: dockerIdSchema,
     imageId: imageIdSchema,
+    imageReference: z.string().min(1).max(256),
+    imageArchitecture: z.string().min(1).max(64),
+    worktreeIdentity: fileIdentitySchema,
+    repositoryIdentity: fileIdentitySchema,
+    administrationIdentity: fileIdentitySchema,
     endpointUrl: endpointUrlSchema,
     transportSecurity: transportSecuritySchema
   }),
-  control: z.strictObject({ id: dockerIdSchema, homeBinding: z.literal("owner-default") }),
+  execServer: execServerRecordSchema,
+  codeModeHost: codeModeHostRecordSchema,
+  control: z.strictObject({
+    id: dockerIdSchema,
+    homeBinding: z.literal("owner-default"),
+    homeIdentity: fileIdentitySchema,
+    appServer: appServerRecordSchema
+  }),
   sessions: z.array(codexSplitSessionRecordSchema)
 }).superRefine((record, context) => {
   const live = new Set<string>();
@@ -117,6 +172,20 @@ export const codexSplitRuntimeRecordSchema = z.strictObject({
   const endpointPort = Number(record.executor.endpointUrl.slice(record.executor.endpointUrl.lastIndexOf(":") + 1));
   if (!Number.isSafeInteger(endpointPort) || endpointPort < 1 || endpointPort > 65535) {
     context.addIssue({ code: "custom", path: ["executor", "endpointUrl"], message: "Executor endpoint port is invalid" });
+  }
+  if (record.execServer.executorContainerId !== record.executor.id
+    || record.execServer.endpointUrl !== record.executor.endpointUrl
+    || record.execServer.transportSecurity !== record.executor.transportSecurity
+    || record.codeModeHost.executorContainerId !== record.executor.id
+    || record.codeModeHost.networkId !== record.networks.execution.id
+    || record.control.appServer.controlContainerId !== record.control.id
+    || !identitiesEqual(record.control.appServer.homeIdentity, record.control.homeIdentity)
+    || record.control.appServer.codeModeHostUrl !== record.codeModeHost.url) {
+    context.addIssue({ code: "custom", path: ["control"], message: "Split runtime service identity does not match" });
+  }
+  if (record.codeModeHost.url !== `http://codex-code-mode-host:${record.codeModeHost.port}`
+    || record.codeModeHost.listenUrl !== `grpc://0.0.0.0:${record.codeModeHost.port}`) {
+    context.addIssue({ code: "custom", path: ["codeModeHost"], message: "Code Mode host endpoint does not match its port" });
   }
 });
 export type CodexSplitRuntimeRecord = z.infer<typeof codexSplitRuntimeRecordSchema>;
