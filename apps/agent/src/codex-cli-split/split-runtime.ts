@@ -55,6 +55,7 @@ import {
   prepareCodexManagedPolicy,
   type CodexRemoteOnlyConfiguration
 } from "./remote-policy.js";
+import { assertCodexSplitRemoteAdmission } from "./negative-policy.js";
 import {
   buildCodexControlSidecarPolicy,
   createCodexControlSidecar,
@@ -98,6 +99,22 @@ import {
 const EXEC_SERVER_PORT = 4545;
 const CONTROL_ROLE = "codex-control";
 const EXECUTOR_ROLE = "codex-split-executor";
+
+function assertRemoteAssemblyAdmission(input: CodexSplitRuntimeAssembly): void {
+  assertCodexSplitRemoteAdmission({
+    effectivePolicy: {
+      nativeConfig: "managed",
+      projectConfig: "cannot-override",
+      effective: input.remote.codeMode,
+      forbiddenLocalPaths: input.remote.managedPolicy.forbiddenPaths
+    },
+    execServer: input.server,
+    codeModeHost: input.codeModeHost,
+    appServer: input.appServer,
+    forbiddenPaths: [],
+    localEnvironmentAvailable: input.remote.localEnvironmentAvailable
+  });
+}
 
 export interface CodexSplitRuntimeAssembly {
   readonly home: CodexNativeHomeBinding;
@@ -232,7 +249,9 @@ async function buildDefaultAssembly(input: CodexSplitRuntimeAssemblyInput & { re
     });
     const appServer = await startCodexNativeAppServer({ docker: input.docker, policy: appServerPolicy });
     await assertCodexNativeAppServerReady({ docker: input.docker, handle: appServer, policy: appServerPolicy });
-    return { home, artifact, network, executor, transport, server, codeModeHost, appServer, remote, control };
+    const assembly = { home, artifact, network, executor, transport, server, codeModeHost, appServer, remote, control };
+    assertRemoteAssemblyAdmission(assembly);
+    return assembly;
   } catch (error) {
     if (control !== null) await input.docker.removeContainer(control.containerId).catch(() => undefined);
     if (executor !== null) await input.docker.removeContainer(executor.containerId).catch(() => undefined);
@@ -663,6 +682,7 @@ export class CodexSplitRuntime {
       throw new Error("codex-split-runtime-ambiguous");
     }
     const assembly = await this.assemblyFor(context, git, existing);
+    assertRemoteAssemblyAdmission(assembly);
     const record = recordFromAssembly({ context, git, assembly, sessions: existing?.sessions ?? [] });
     await this.save(record);
     return record;
@@ -679,6 +699,7 @@ export class CodexSplitRuntime {
     if (record === null || !contextMatchesRecord(context, record)) throw new Error("codex-split-runtime-authority");
     if (record.sessions.some((session) => session.state === "ambiguous")) throw new Error("codex-split-runtime-ambiguous");
     const assembly = await this.assemblyFor(context, git, record);
+    assertRemoteAssemblyAdmission(assembly);
     return { context, assembly, record };
   }
 
@@ -977,5 +998,7 @@ async function buildDefaultReattachedAssembly(input: {
   }
   await reattachCodexNativeAppServer({ docker: input.docker, handle: appServer, policy: appServerPolicy });
   await assertCodexNativeAppServerReady({ docker: input.docker, handle: appServer, policy: appServerPolicy });
-  return { home, artifact, network, executor, transport, server, codeModeHost, appServer, remote, control };
+  const assembly = { home, artifact, network, executor, transport, server, codeModeHost, appServer, remote, control };
+  assertRemoteAssemblyAdmission(assembly);
+  return assembly;
 }

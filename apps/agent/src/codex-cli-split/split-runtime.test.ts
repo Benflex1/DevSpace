@@ -230,6 +230,19 @@ test("executor loss fails closed and does not create a control project mount", a
   expect(events.filter((entry) => entry.startsWith("local:")).length).toBe(0);
 });
 
+test("rejects an assembly missing a remote service before persisting or starting a PTY", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const runtime = new CodexSplitRuntime({
+    managed: value.managed, docker: value.docker, stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex"
+  }, {
+    buildAssembly: () => Promise.resolve({ ...assembly(), codeModeHost: null } as never)
+  });
+  await expect(runtime.ensure({ projectId, workspaceId })).rejects.toThrow("codex-split-code-mode-host");
+  expect(events.some((entry) => entry.startsWith("pty:"))).toBe(false);
+});
+
 test("stop tears down only the split resources while preserving managed/home state", async () => {
   const events: string[] = [];
   const value = await fixture(events);
