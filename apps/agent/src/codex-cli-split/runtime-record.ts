@@ -38,21 +38,49 @@ export const codexSplitSessionRecordSchema = z.strictObject({
 });
 export type CodexSplitSessionRecord = z.infer<typeof codexSplitSessionRecordSchema>;
 
-const executionNetworkRecordSchema = z.strictObject({
+const executionNetworkRecordShape = {
   id: dockerIdSchema,
   name: dockerNameSchema,
   role: z.literal("execution"),
   internal: z.literal(true),
   defaultRoute: z.literal(false)
-});
+};
+const executionNetworkRecordSchema = z.strictObject(executionNetworkRecordShape);
 
-const controlEgressNetworkRecordSchema = z.strictObject({
+const controlEgressNetworkRecordShape = {
   id: dockerIdSchema,
   name: dockerNameSchema,
   role: z.literal("control-egress"),
   internal: z.literal(false),
   defaultRoute: z.literal(true)
+};
+const controlEgressNetworkRecordSchema = z.strictObject(controlEgressNetworkRecordShape);
+
+/**
+ * This is intentionally not a runtime-record parser. It is the minimum
+ * validated identity needed to clean an incompatible split record after the
+ * full strict record parser has rejected it. Unknown fields are discarded
+ * here and can never become runtime configuration.
+ */
+const codexSplitRuntimeResourceReferenceSchema = z.object({
+  version: z.number().int().positive(),
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  generation: z.number().int().positive(),
+  networks: z.object({
+    execution: z.object(executionNetworkRecordShape),
+    controlEgress: z.object(controlEgressNetworkRecordShape)
+  }),
+  executor: z.object({ id: dockerIdSchema }),
+  control: z.object({ id: dockerIdSchema })
 });
+export type CodexSplitRuntimeResourceReference = z.infer<typeof codexSplitRuntimeResourceReferenceSchema>;
+
+export function parseCodexSplitRuntimeResourceReference(input: unknown): CodexSplitRuntimeResourceReference {
+  const result = codexSplitRuntimeResourceReferenceSchema.safeParse(input);
+  if (!result.success) throw new Error("codex-split-runtime-reference", { cause: result.error });
+  return result.data;
+}
 
 export const codexSplitRuntimeRecordSchema = z.strictObject({
   version: z.literal(1),

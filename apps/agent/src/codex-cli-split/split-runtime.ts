@@ -5,11 +5,13 @@ import {
   assertContained,
   durableJsonWriter,
   establishPinnedDirectory,
-  readStrictJson,
+  PrivateStateCorruptionError,
+  readRegularFileNoFollow,
   type AtomicJsonWriter
 } from "../private-state.js";
 import {
   DockerEngineClient,
+  DockerEngineError,
   type DockerContainerInspection,
   type DockerNetworkInspection
 } from "../docker-runtime.js";
@@ -71,7 +73,9 @@ import {
   assertCodexSplitSessionConcurrency,
   codexSplitRuntimeRecordSchema,
   parseCodexSplitRuntimeRecord,
+  parseCodexSplitRuntimeResourceReference,
   type CodexSplitRuntimeRecord,
+  type CodexSplitRuntimeResourceReference,
   type CodexSplitSessionRecord
 } from "./runtime-record.js";
 
@@ -247,23 +251,44 @@ function contextMatchesRecord(context: WorkspaceExecutionContext, record: CodexS
 
 function assertNetworkResource(
   inspection: DockerNetworkInspection,
-  expected: { readonly id: string; readonly name: string; readonly role: "execution" | "control-egress" }
+  expected: {
+    readonly id: string;
+    readonly name: string;
+    readonly role: "execution" | "control-egress";
+    readonly projectId: string;
+    readonly workspaceId: string;
+    readonly generation: number;
+  }
 ): void {
   if (inspection.Id !== expected.id || inspection.Name !== expected.name
     || inspection.Labels["devspace.managed"] !== "true"
     || inspection.Labels["devspace.codex-split"] !== "true"
-    || inspection.Labels["devspace.resource-role"] !== expected.role) {
+    || inspection.Labels["devspace.project-id"] !== expected.projectId
+    || inspection.Labels["devspace.workspace-id"] !== expected.workspaceId
+    || inspection.Labels["devspace.runtime-generation"] !== String(expected.generation)
+    || inspection.Labels["devspace.resource-role"] !== expected.role
+    || inspection.Name === "bridge"
+    || inspection.Internal !== (expected.role === "execution")) {
     throw new Error("codex-split-runtime-network-ownership");
   }
 }
 
 function assertContainerResource(
   inspection: DockerContainerInspection,
-  expected: { readonly id: string; readonly role: typeof CONTROL_ROLE | typeof EXECUTOR_ROLE }
+  expected: {
+    readonly id: string;
+    readonly name: string;
+    readonly role: typeof CONTROL_ROLE | typeof EXECUTOR_ROLE;
+    readonly workspaceId: string;
+    readonly generation: number;
+  }
 ): void {
   if (inspection.Id !== expected.id || inspection.Config.Labels["devspace.managed"] !== "true"
     || inspection.Config.Labels["devspace.codex-split"] !== "true"
-    || inspection.Config.Labels["devspace.resource-role"] !== expected.role) {
+    || inspection.Config.Labels["devspace.workspace-id"] !== expected.workspaceId
+    || inspection.Config.Labels["devspace.runtime-generation"] !== String(expected.generation)
+    || inspection.Config.Labels["devspace.resource-role"] !== expected.role
+    || inspection.Name.replace(/^\//u, "") !== expected.name) {
     throw new Error("codex-split-runtime-container-ownership");
   }
 }
@@ -291,15 +316,25 @@ async function inspectAssemblyResources(input: {
     input.docker.inspectContainer(input.assembly.executor.containerId),
     input.docker.inspectContainer(input.assembly.control.containerId)
   ]);
-  assertNetworkResource(execution, { ...input.assembly.network.execution, role: "execution" });
-  assertNetworkResource(controlEgress, { ...input.assembly.network.controlEgress, role: "control-egress" });
+  assertNetworkResource(execution, {
+    ...input.assembly.network.execution, role: "execution", projectId: input.assembly.executor.policy.projectId
+  });
+  assertNetworkResource(controlEgress, {
+    ...input.assembly.network.controlEgress, role: "control-egress", projectId: input.assembly.executor.policy.projectId
+  });
   assertNetworkMembers(execution, [
     { id: input.assembly.executor.containerId, name: input.assembly.executor.containerName },
     { id: input.assembly.control.containerId, name: input.assembly.control.containerName }
   ]);
   assertNetworkMembers(controlEgress, [{ id: input.assembly.control.containerId, name: input.assembly.control.containerName }]);
-  assertContainerResource(executor, { id: input.assembly.executor.containerId, role: EXECUTOR_ROLE });
-  assertContainerResource(control, { id: input.assembly.control.containerId, role: CONTROL_ROLE });
+  assertContainerResource(executor, {
+    id: input.assembly.executor.containerId, name: input.assembly.executor.containerName, role: EXECUTOR_ROLE,
+    workspaceId: input.assembly.executor.policy.workspaceId, generation: input.assembly.executor.policy.generation
+  });
+  assertContainerResource(control, {
+    id: input.assembly.control.containerId, name: input.assembly.control.containerName, role: CONTROL_ROLE,
+    workspaceId: input.assembly.network.execution.workspaceId, generation: input.assembly.network.execution.generation
+  });
   const executorNetworks = executor.NetworkSettings.Networks ?? {};
   const controlNetworks = control.NetworkSettings.Networks ?? {};
   if (Object.keys(executorNetworks).length !== 1
@@ -309,6 +344,83 @@ async function inspectAssemblyResources(input: {
     || controlNetworks[input.assembly.network.controlEgress.name]?.NetworkID !== input.assembly.network.controlEgress.id) {
     throw new Error("codex-split-runtime-network-attachment");
   }
+}
+
+function hasDockerNotFoundCause(error: unknown): boolean {
+  if (error instanceof DockerEngineError) return error.statusCode === 404;
+  if (!(error instanceof Error)) return false;
+  const cause = (error as Error & { readonly cause?: unknown }).cause;
+  return cause !== undefined && hasDockerNotFoundCause(cause);
+}
+
+async function inspectOptional<T>(operation: () => Promise<T>): Promise<T | null> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof DockerEngineError && error.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+async function removeOptional(docker: DockerEngineClient, operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    if (!(error instanceof DockerEngineError && error.statusCode === 404)) throw error;
+  }
+}
+
+async function discardStaleRuntimeResources(input: {
+  readonly docker: DockerEngineClient;
+  readonly record: CodexSplitRuntimeResourceReference;
+}): Promise<void> {
+  const { record, docker } = input;
+  const executorName = splitResourceName(record.workspaceId, record.generation, "executor");
+  const controlName = splitResourceName(record.workspaceId, record.generation, "control");
+  const [execution, controlEgress, executor, control] = await Promise.all([
+    inspectOptional(() => docker.inspectNetwork(record.networks.execution.id)),
+    inspectOptional(() => docker.inspectNetwork(record.networks.controlEgress.id)),
+    inspectOptional(() => docker.inspectContainer(record.executor.id)),
+    inspectOptional(() => docker.inspectContainer(record.control.id))
+  ]);
+
+  if (execution !== null) {
+    assertNetworkResource(execution, {
+      ...record.networks.execution, role: "execution", projectId: record.projectId,
+      workspaceId: record.workspaceId, generation: record.generation
+    });
+  }
+  if (controlEgress !== null) {
+    assertNetworkResource(controlEgress, {
+      ...record.networks.controlEgress, role: "control-egress", projectId: record.projectId,
+      workspaceId: record.workspaceId, generation: record.generation
+    });
+  }
+  if (executor !== null) {
+    assertContainerResource(executor, {
+      id: record.executor.id, name: executorName, role: EXECUTOR_ROLE,
+      workspaceId: record.workspaceId, generation: record.generation
+    });
+  }
+  if (control !== null) {
+    assertContainerResource(control, {
+      id: record.control.id, name: controlName, role: CONTROL_ROLE,
+      workspaceId: record.workspaceId, generation: record.generation
+    });
+  }
+
+  const executionMembers = [
+    executor === null ? null : { id: record.executor.id, name: executorName },
+    control === null ? null : { id: record.control.id, name: controlName }
+  ].filter((member): member is { readonly id: string; readonly name: string } => member !== null);
+  const egressMembers = control === null ? [] : [{ id: record.control.id, name: controlName }];
+  if (execution !== null) assertNetworkMembers(execution, executionMembers);
+  if (controlEgress !== null) assertNetworkMembers(controlEgress, egressMembers);
+
+  if (executor !== null) await removeOptional(docker, () => docker.removeContainer(record.executor.id));
+  if (control !== null) await removeOptional(docker, () => docker.removeContainer(record.control.id));
+  if (controlEgress !== null) await removeOptional(docker, () => docker.removeNetwork(record.networks.controlEgress.id));
+  if (execution !== null) await removeOptional(docker, () => docker.removeNetwork(record.networks.execution.id));
 }
 
 function isLive(state: CodexSplitSessionRecord["state"]): boolean {
@@ -373,12 +485,39 @@ export class CodexSplitRuntime {
     this.initialized = true;
   }
 
-  private async load(workspaceId: string): Promise<CodexSplitRuntimeRecord | null> {
+  private async load(workspaceId: string, expectedContext?: WorkspaceExecutionContext): Promise<CodexSplitRuntimeRecord | null> {
+    const filePath = recordPath(this.stateRoot, workspaceId);
+    let parsed: unknown;
     try {
-      return parseCodexSplitRuntimeRecord(await readStrictJson(recordPath(this.stateRoot, workspaceId), codexSplitRuntimeRecordSchema));
+      const file = await readRegularFileNoFollow(filePath, 2 * 1024 * 1024);
+      try {
+        parsed = JSON.parse(file.bytes.toString("utf8")) as unknown;
+      } catch {
+        throw new PrivateStateCorruptionError(filePath, "invalid JSON");
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
+    }
+    try {
+      return parseCodexSplitRuntimeRecord(parsed);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message === "codex-split-session-live" || expectedContext === undefined) throw error;
+      let reference: CodexSplitRuntimeResourceReference;
+      try {
+        reference = parseCodexSplitRuntimeResourceReference(parsed);
+      } catch {
+        throw error;
+      }
+      if (reference.projectId !== expectedContext.projectId || reference.workspaceId !== expectedContext.workspaceId
+        || reference.generation !== expectedContext.generation) {
+        throw new Error("codex-split-runtime-authority", { cause: error });
+      }
+      await discardStaleRuntimeResources({ docker: this.docker, record: reference });
+      await unlink(filePath).catch((unlinkError: NodeJS.ErrnoException) => {
+        if (unlinkError.code !== "ENOENT") throw unlinkError;
+      });
+      return null;
     }
   }
 
@@ -405,12 +544,26 @@ export class CodexSplitRuntime {
     const retained = this.assemblies.get(key);
     if (retained !== undefined) return retained;
     if (existing !== null) {
-      const reattached = await this.reattachAssembly({
-        docker: this.docker, record: existing, context, git, stateRoot: this.stateRoot,
-        controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
-      });
-      this.assemblies.set(key, reattached);
-      return reattached;
+      try {
+        const reattached = await this.reattachAssembly({
+          docker: this.docker, record: existing, context, git, stateRoot: this.stateRoot,
+          controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
+        });
+        this.assemblies.set(key, reattached);
+        return reattached;
+      } catch (error) {
+        if (!hasDockerNotFoundCause(error)) throw error;
+        await discardStaleRuntimeResources({ docker: this.docker, record: existing });
+        await unlink(recordPath(this.stateRoot, existing.workspaceId)).catch((unlinkError: NodeJS.ErrnoException) => {
+          if (unlinkError.code !== "ENOENT") throw unlinkError;
+        });
+        const rebuilt = await this.buildAssembly({
+          docker: this.docker, context, git, stateRoot: this.stateRoot,
+          controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
+        });
+        this.assemblies.set(key, rebuilt);
+        return rebuilt;
+      }
     }
     const created = await this.buildAssembly({
       docker: this.docker, context, git, stateRoot: this.stateRoot,
@@ -425,7 +578,7 @@ export class CodexSplitRuntime {
     uuidV7Schema.parse(input.workspaceId);
     const { context, git } = await this.authoritativeContext(input.projectId, input.workspaceId);
     await this.initialize();
-    const existing = await this.load(input.workspaceId);
+    const existing = await this.load(input.workspaceId, context);
     if (existing !== null && !contextMatchesRecord(context, existing)) throw new Error("codex-split-runtime-authority");
     if (existing !== null && existing.sessions.some((session) => session.state === "ambiguous")) {
       throw new Error("codex-split-runtime-ambiguous");
@@ -443,7 +596,7 @@ export class CodexSplitRuntime {
   }> {
     const { context, git } = await this.authoritativeContext(input.projectId, input.workspaceId);
     await this.initialize();
-    const record = await this.load(input.workspaceId);
+    const record = await this.load(input.workspaceId, context);
     if (record === null || !contextMatchesRecord(context, record)) throw new Error("codex-split-runtime-authority");
     if (record.sessions.some((session) => session.state === "ambiguous")) throw new Error("codex-split-runtime-ambiguous");
     const assembly = await this.assemblyFor(context, git, record);
@@ -580,7 +733,7 @@ export class CodexSplitRuntime {
   async reconcileAfterAgentRestart(input: { readonly projectId: string; readonly workspaceId: string }): Promise<CodexSplitRuntimeRecord> {
     const { context, git } = await this.authoritativeContext(input.projectId, input.workspaceId);
     await this.initialize();
-    const record = await this.load(input.workspaceId);
+    const record = await this.load(input.workspaceId, context);
     if (record === null || !contextMatchesRecord(context, record)) throw new Error("codex-split-runtime-authority");
     try {
       const assembly = await this.reattachAssembly({

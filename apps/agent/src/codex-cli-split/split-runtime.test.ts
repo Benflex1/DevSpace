@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { DockerEngineClient, type DockerContainerInspection, type DockerNetworkInspection } from "../docker-runtime.js";
+import { DockerEngineClient, DockerEngineError, type DockerContainerInspection, type DockerNetworkInspection } from "../docker-runtime.js";
+import { durableJsonWriter } from "../private-state.js";
 import type { ManagedWorkspaces, WorkspaceExecutionContext } from "../managed-workspaces.js";
 import type { NativeCodexPty } from "./native-pty.js";
 import { CodexSplitRuntime, type CodexSplitRuntimeAssembly, type CodexSplitRuntimeDependencies } from "./split-runtime.js";
@@ -36,6 +37,8 @@ const network = {
     controlAlias: "codex-control" as const, executorAttached: false as const, internal: false as const, defaultRoute: true as const,
     publishedPorts: [] as const, defaultBridgeUsed: false as const }
 };
+const executorName = `devspace-codex-${workspaceId.replaceAll("-", "")}-g1-executor`;
+const controlName = `devspace-codex-${workspaceId.replaceAll("-", "")}-g1-control`;
 const endpoint = { endpointUrl: "ws://codex-executor:4545", endpointHost: "codex-executor" as const, endpointPort: 4545,
   security: "private-network-only" as const, authenticationEvidence: "absent" as const, credential: null,
   workspaceId, generation: 1, executionNetworkId: "execution-id" };
@@ -60,32 +63,39 @@ function assembly(): CodexSplitRuntimeAssembly {
     home,
     network,
     artifact: {} as never,
-    executor: { containerId: "executor-id", containerName: "executor", endpointHost: "codex-executor", endpointPort: 4545,
-      controlEgressAttached: false, policy: { imageId: `sha256:${"b".repeat(64)}`, workspaceId, generation: 1, executionNetwork: network.execution } } as never,
+    executor: { containerId: "executor-id", containerName: executorName, endpointHost: "codex-executor", endpointPort: 4545,
+      controlEgressAttached: false, policy: { imageId: `sha256:${"b".repeat(64)}`, projectId, workspaceId, generation: 1, executionNetwork: network.execution } } as never,
     transport: endpoint,
     server: { executorContainerId: "executor-id", execId: "server-exec", endpoint, serverPid: 11 },
     remote,
-    control: { containerId: "control-id", containerName: "control", imageId: `sha256:${"c".repeat(64)}`, policy: { remote, home, network } } as never
+    control: { containerId: "control-id", containerName: controlName, imageId: `sha256:${"c".repeat(64)}`, policy: { remote, home, network } } as never
   };
 }
 
-function docker(events: string[]): DockerEngineClient {
+function docker(events: string[], options: { readonly missing?: ReadonlySet<string>; readonly foreignNetwork?: string } = {}): DockerEngineClient {
   return new class extends DockerEngineClient {
     constructor() { super("/fixture.sock"); }
     override assertRootlessAvailable(): Promise<void> { events.push("rootless"); return Promise.resolve(); }
     override inspectNetwork(id: string): Promise<DockerNetworkInspection> {
+      if (options.missing?.has(id)) return Promise.reject(new DockerEngineError(404, "missing"));
       const isExecution = id === network.execution.id;
       return Promise.resolve({ Id: id, Name: isExecution ? network.execution.name : network.controlEgress.name,
-        Labels: { "devspace.managed": "true", "devspace.codex-split": "true",
-          "devspace.resource-role": isExecution ? "execution" : "control-egress" },
+        Labels: { "devspace.managed": "true", "devspace.codex-split": "true", "devspace.project-id": projectId,
+          "devspace.workspace-id": workspaceId, "devspace.runtime-generation": "1",
+          "devspace.resource-role": options.foreignNetwork === id ? "foreign" : isExecution ? "execution" : "control-egress" },
+        Driver: "bridge", Internal: isExecution ? true : false, Attachable: false, Ingress: false, EnableIPv6: false, Options: {},
         Containers: isExecution
-          ? { "executor-id": { Name: "executor" }, "control-id": { Name: "control" } }
-          : { "control-id": { Name: "control" } } } as DockerNetworkInspection);
+          ? Object.fromEntries(([["executor-id", { Name: executorName }], ["control-id", { Name: controlName }]] as const)
+            .filter(([memberId]) => !options.missing?.has(memberId)))
+          : (options.missing?.has("control-id") ? {} : { "control-id": { Name: controlName } }) } as DockerNetworkInspection);
     }
     override inspectContainer(id: string): Promise<DockerContainerInspection> {
+      if (options.missing?.has(id)) return Promise.reject(new DockerEngineError(404, "missing"));
       const isControl = id === "control-id";
-      return Promise.resolve({ Id: id, Config: { Labels: { "devspace.managed": "true", "devspace.codex-split": "true",
-        "devspace.resource-role": isControl ? "codex-control" : "codex-split-executor" } },
+      return Promise.resolve({ Id: id, Name: isControl ? `/${controlName}` : `/${executorName}`, State: { Running: true, Status: "running" },
+        Config: { Labels: { "devspace.managed": "true", "devspace.codex-split": "true",
+          "devspace.workspace-id": workspaceId, "devspace.runtime-generation": "1",
+          "devspace.resource-role": isControl ? "codex-control" : "codex-split-executor" } },
         NetworkSettings: { Networks: isControl
           ? { [network.execution.name]: { NetworkID: network.execution.id }, [network.controlEgress.name]: { NetworkID: network.controlEgress.id } }
           : { [network.execution.name]: { NetworkID: network.execution.id } } } } as unknown as DockerContainerInspection);
@@ -117,8 +127,9 @@ async function fixture(events: string[], startPty: (sessionId: string | null) =>
       worktreeIdentity: { device: "1", inode: "3" }, repositoryIdentity: { device: "1", inode: "4" }, administrationIdentity: { device: "1", inode: "5" }
     }); }
   } as unknown as ManagedWorkspaces;
-  const runtime = new CodexSplitRuntime({ managed, docker: docker(events), stateRoot, controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex" }, dependencies(events, startPty));
-  return { runtime, stateRoot };
+  const engine = docker(events);
+  const runtime = new CodexSplitRuntime({ managed, docker: engine, stateRoot, controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex" }, dependencies(events, startPty));
+  return { runtime, stateRoot, managed, docker: engine };
 }
 
 test("orders rootless and managed authority before split assembly and persists only opaque runtime state", async () => {
@@ -163,4 +174,65 @@ test("stop tears down only the split resources while preserving managed/home sta
   expect(events).toContain("stop:executor-id");
   expect(events).toContain("remove-network:execution-id");
   expect(events).toContain("remove-network:egress-id");
+});
+
+test("rebuilds only the split runtime when a current recorded Docker resource is gone", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  await value.runtime.ensure({ projectId, workspaceId });
+
+  const reattachedRuntime = new CodexSplitRuntime({
+    managed: value.managed, docker: docker(events, { missing: new Set(["executor-id"]) }), stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex"
+  }, {
+    reattachAssembly: () => Promise.reject(new DockerEngineError(404, "missing")),
+    buildAssembly: () => { events.push("rebuild"); return Promise.resolve(assembly()); },
+    now: () => "2026-09-16T10:00:00.000Z"
+  });
+
+  await expect(reattachedRuntime.ensure({ projectId, workspaceId })).resolves.toMatchObject({ executor: { id: "executor-id" } });
+  expect(events).toContain("remove:control-id");
+  expect(events).toContain("remove-network:egress-id");
+  expect(events).toContain("remove-network:execution-id");
+  expect(events).toContain("rebuild");
+});
+
+test("does not delete or rebuild when a recorded split network is not owned", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  await value.runtime.ensure({ projectId, workspaceId });
+  const reattachedRuntime = new CodexSplitRuntime({
+    managed: value.managed, docker: docker(events, { foreignNetwork: network.execution.id }), stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex"
+  }, {
+    reattachAssembly: () => Promise.reject(new DockerEngineError(404, "missing")),
+    buildAssembly: () => { events.push("rebuild"); return Promise.resolve(assembly()); }
+  });
+
+  await expect(reattachedRuntime.ensure({ projectId, workspaceId })).rejects.toThrow("codex-split-runtime-network-ownership");
+  expect(events).not.toContain("rebuild");
+  expect(events).not.toContain("remove-network:execution-id");
+});
+
+test("invalidates an incompatible split record and rebuilds only after its resources are gone", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const current = await value.runtime.ensure({ projectId, workspaceId });
+  await durableJsonWriter.write(path.join(value.stateRoot, "codex-split", `${workspaceId}.json`), {
+    ...current,
+    unsupportedNewField: "incompatible experimental record"
+  });
+
+  const reattachedRuntime = new CodexSplitRuntime({
+    managed: value.managed,
+    docker: docker(events, { missing: new Set(["execution-id", "egress-id", "executor-id", "control-id"]) }),
+    stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc",
+    codexExecutablePath: "/agent/codex"
+  }, {
+    buildAssembly: () => { events.push("rebuild"); return Promise.resolve(assembly()); }
+  });
+
+  await expect(reattachedRuntime.ensure({ projectId, workspaceId })).resolves.toMatchObject({ workspaceId });
+  expect(events).toContain("rebuild");
 });

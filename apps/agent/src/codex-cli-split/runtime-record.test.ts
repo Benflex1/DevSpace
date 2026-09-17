@@ -4,6 +4,7 @@ import {
   assertCodexSplitSessionConcurrency,
   codexSplitRuntimeRecordSchema,
   parseCodexSplitRuntimeRecord,
+  parseCodexSplitRuntimeResourceReference,
   type CodexSplitRuntimeRecord
 } from "./runtime-record.js";
 
@@ -60,4 +61,25 @@ test("fails closed when the persisted native-home identity changes", () => {
   expect(() => assertCodexSplitHomeIdentity({ device: "1", inode: "2" }, { device: "1", inode: "2" })).not.toThrow();
   expect(() => assertCodexSplitHomeIdentity({ device: "1", inode: "2" }, { device: "1", inode: "3" })).toThrow("home-identity");
   expect(() => assertCodexSplitHomeIdentity({ device: "1", inode: "2" }, { device: "2", inode: "2" })).toThrow("home-identity");
+});
+
+test("parses only validated split resource identity for an incompatible record", () => {
+  expect(parseCodexSplitRuntimeResourceReference({
+    version: 2,
+    projectId: record.projectId,
+    workspaceId: record.workspaceId,
+    generation: record.generation,
+    networks: record.networks,
+    executor: { id: record.executor.id },
+    control: { id: record.control.id },
+    unsupportedNewField: "ignored for cleanup identity only"
+  })).toMatchObject({
+    version: 2,
+    projectId: record.projectId,
+    workspaceId: record.workspaceId,
+    generation: record.generation,
+    executor: { id: record.executor.id },
+    control: { id: record.control.id }
+  });
+  expect(() => parseCodexSplitRuntimeResourceReference({ ...record, control: {} })).toThrow("codex-split-runtime-reference");
 });
