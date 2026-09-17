@@ -174,6 +174,7 @@ test("builds an exact-image executor policy with only workspace, Git, and truste
   expect(policy.imageReference).toBe("node:24-bookworm");
   expect(policy.workingDirectory).toBe("/workspace");
   expect(policy.networkAttachments).toHaveLength(1);
+  expect(policy.codeModeHostPort).toBe(4546);
   expect(policy.mounts).toEqual(expect.arrayContaining([
     expect.objectContaining({ Source: fixtureValue.git.worktreePath, Target: "/workspace", ReadOnly: false }),
     expect.objectContaining({ Source: fixtureValue.git.repositoryPath, Target: fixtureValue.git.repositoryPath, ReadOnly: false }),
@@ -184,6 +185,19 @@ test("builds an exact-image executor policy with only workspace, Git, and truste
   expect(policy.environment).not.toHaveProperty("CODEX_HOME");
   expect(policy.mounts).not.toEqual(expect.arrayContaining([expect.objectContaining({ Target: "/codex-home" })]));
   expect(policy.controlEgressAttached).toBe(false);
+});
+
+test("keeps the Code Mode host on a distinct private service port", async () => {
+  const fixtureValue = await fixture();
+  await expect(buildCodexProjectExecutorPolicy({
+    docker: dockerFor(fixtureValue),
+    context: fixtureValue.context,
+    git: fixtureValue.git,
+    network: network(),
+    artifact: artifact(),
+    imagePort: 4545,
+    codeModeHostPort: 4545
+  })).rejects.toThrow("codex-executor-service-port-conflict");
 });
 
 test("preserves image-default user semantics and encodes the executor request without a user override", async () => {

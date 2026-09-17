@@ -26,6 +26,7 @@ const EXECUTOR_HOME = "/tmp/devspace-codex-home";
 const EXECUTOR_TMP = "/tmp";
 const EXECUTOR_TMPFS = "rw,nosuid,nodev,noexec,size=64m";
 const EXECUTOR_COMMAND = ["exec sleep 2147483647"] as const;
+const CODE_MODE_HOST_PORT = 4546;
 const CODEX_EXECUTOR_ROLE = "codex-split-executor" as const;
 const FORBIDDEN_ENVIRONMENT_NAMES = new Set([
   "CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_AUTH_TOKEN", "CODEX_REFRESH_TOKEN",
@@ -60,6 +61,7 @@ export interface CodexProjectExecutorPolicy {
     readonly pidLimit: number;
   }>;
   readonly endpointPort: number;
+  readonly codeModeHostPort: number;
   readonly controlEgressAttached: false;
 }
 
@@ -213,8 +215,12 @@ export async function buildCodexProjectExecutorPolicy(input: {
   readonly network: CodexSplitNetworkBinding;
   readonly artifact: CodexSplitArtifactBinding;
   readonly imagePort: number;
+  readonly codeModeHostPort?: number;
 }): Promise<CodexProjectExecutorPolicy> {
   assertPort(input.imagePort);
+  const codeModeHostPort = input.codeModeHostPort ?? CODE_MODE_HOST_PORT;
+  assertPort(codeModeHostPort);
+  if (codeModeHostPort === input.imagePort) throw new Error("codex-executor-service-port-conflict");
   const runtimePlan = compileRuntimePlanV1(input.context.options);
   const source = runtimePlan.developmentContainer.source;
   if (source.kind !== "image") throw new Error("codex-executor-source-not-image");
@@ -284,6 +290,7 @@ export async function buildCodexProjectExecutorPolicy(input: {
     labels,
     resources,
     endpointPort: input.imagePort,
+    codeModeHostPort,
     controlEgressAttached: false
   };
 }
