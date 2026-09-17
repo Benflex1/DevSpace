@@ -60,6 +60,8 @@ async function ensureLauncher(input: {
 export async function prepareCodexSplitArtifact(input: {
   readonly configuredPath: string;
   readonly stateRoot: string;
+  /** Existing Agent-owned staging root observed from an owned executor during reattach. */
+  readonly existingStagingRoot?: string;
 }): Promise<CodexSplitArtifactBinding> {
   const configuredPath = absolutePath(input.configuredPath, "codex-artifact-path-invalid");
   const stateRoot = absolutePath(input.stateRoot, "codex-artifact-state-root-invalid");
@@ -68,7 +70,21 @@ export async function prepareCodexSplitArtifact(input: {
   if (artifact.target.os !== "linux" || !hasSandboxHelper(artifact)) {
     throw new Error("codex-artifact-closure-incompatible");
   }
-  const staged = await stageCodexExecutionArtifact({ artifact, stateRoot });
+  const staged = input.existingStagingRoot === undefined
+    ? await stageCodexExecutionArtifact({ artifact, stateRoot })
+    : await (async (): Promise<StagedCodexExecutionArtifact> => {
+      const artifactDirectory = path.join(stateRoot, "codex-artifacts");
+      const stagingRoot = assertContained(artifactDirectory, absolutePath(input.existingStagingRoot!, "codex-artifact-staging-root-invalid"));
+      if (stagingRoot === artifactDirectory) throw new Error("codex-artifact-staging-root-invalid");
+      const reused: StagedCodexExecutionArtifact = {
+        artifact,
+        stagingRoot,
+        entrypointPath: path.join(stagingRoot, ...artifact.entrypoint.relativePath.split("/")),
+        readbackManifestPath: path.join(stagingRoot, "manifest.json")
+      };
+      await verifyStagedCodexExecutionArtifact(reused);
+      return reused;
+    })();
   assertContained(stateRoot, staged.stagingRoot);
   await verifyStagedCodexExecutionArtifact(staged);
   const launcherSourceRoot = path.join(stateRoot, "codex-split-launchers", artifact.closureDigest);

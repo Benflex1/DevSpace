@@ -42,6 +42,19 @@ test("stages only the admitted version and exposes a fixed trusted launcher", as
   expect(JSON.stringify(artifact)).not.toContain("codex-home");
 });
 
+test("reattach reuses and re-verifies the executor's existing staged closure", async () => {
+  const source = await fixture();
+  const initial = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+  const reattached = await prepareCodexSplitArtifact({
+    configuredPath: source.executable,
+    stateRoot: source.state,
+    existingStagingRoot: initial.staged.stagingRoot
+  });
+
+  expect(reattached.staged.stagingRoot).toBe(initial.staged.stagingRoot);
+  expect(reattached.closureDigest).toBe(initial.closureDigest);
+});
+
 test("rejects incompatible image architecture and unsafe Codex arguments", async () => {
   const source = await fixture();
   const artifact = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });

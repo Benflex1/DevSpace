@@ -620,7 +620,15 @@ async function buildDefaultReattachedAssembly(input: {
   if (ownerUid === undefined || ownerGid === undefined) throw new Error("codex-split-agent-owner-unavailable");
   const home = await ensureNativeCodexHome({ homePath: nativeCodexHomePath(input.stateRoot), ownerUid, ownerGid });
   assertCodexSplitHomeIdentity(home.identity, home.identity);
-  const artifact = await prepareCodexSplitArtifact({ configuredPath: input.codexExecutablePath, stateRoot: input.stateRoot });
+  const existingExecutorInspection = await input.docker.inspectContainer(input.record.executor.id);
+  const artifactMounts = existingExecutorInspection.Mounts.filter((mount) =>
+    mount.Type === "bind" && mount.Destination === "/opt/devspace/codex" && !mount.RW);
+  if (artifactMounts.length !== 1) throw new Error("codex-executor-artifact-mount");
+  const artifact = await prepareCodexSplitArtifact({
+    configuredPath: input.codexExecutablePath,
+    stateRoot: input.stateRoot,
+    existingStagingRoot: artifactMounts[0]!.Source
+  });
   const network: CodexSplitNetworkBinding = {
     execution: {
       ...input.record.networks.execution, workspaceId: input.context.workspaceId, generation: input.context.generation,
