@@ -110,7 +110,7 @@ function dockerImageInspection(policy: CodexControlSidecarPolicy, overrides: Par
   return {
     Id: "control-id", Name: "/codex-control", Image: imageId,
     Config: {
-      Labels: policy.labels, Image: policy.imageReference, WorkingDir: "/workspace", User: policy.containerUser,
+      Labels: policy.labels, Image: policy.imageReference, WorkingDir: "/workspace", User: policy.containerUser ?? "",
       Env: Object.entries(policy.environment).map(([name, value]) => `${name}=${value}`),
       Entrypoint: ["/bin/sh", "-c"], Cmd: ["exec sleep 2147483647"]
     },
@@ -143,6 +143,19 @@ async function buildPolicy() {
     imageReference: "ghcr.io/devspace/codex-control:0.153.4", home, artifact, remote, network
   });
 }
+
+test("uses the rootless image-default user for private bind mounts", async () => {
+  const policy = await buildPolicy();
+  expect(policy.containerUser).toBeNull();
+  expect(() => assertCodexControlSidecarInspection({
+    container: dockerImageInspection(policy),
+    binding: { policy, containerId: "control-id", containerName: "codex-control", imageId }
+  })).not.toThrow();
+  expect(() => assertCodexControlSidecarInspection({
+    container: { ...dockerImageInspection(policy), Config: { ...dockerImageInspection(policy).Config, User: "1000:1000" } },
+    binding: { policy, containerId: "control-id", containerName: "codex-control", imageId }
+  })).toThrow("codex-control-inspection-policy");
+});
 
 function causeMessages(error: unknown): string[] {
   const messages: string[] = [];

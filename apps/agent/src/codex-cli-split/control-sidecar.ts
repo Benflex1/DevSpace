@@ -39,7 +39,8 @@ export interface CodexControlSidecarPolicy {
   readonly physicalGitMounts: readonly [];
   readonly forwardingDisabled: true;
   readonly proxyProcesses: readonly [];
-  readonly containerUser: string;
+  /** null preserves the verified control image's Docker image-default user. */
+  readonly containerUser: string | null;
   readonly tmpfs: Readonly<Record<string, string>>;
   readonly labels: Readonly<Record<string, string>>;
   readonly resources: typeof CONTROL_RESOURCES;
@@ -208,7 +209,7 @@ export async function buildCodexControlSidecarPolicy(input: {
     physicalGitMounts: [],
     forwardingDisabled: true,
     proxyProcesses: [],
-    containerUser: `${input.home.ownerUid}:${input.home.ownerGid}`,
+    containerUser: null,
     tmpfs: { ...CONTROL_TMPFS },
     labels: labelsFor({ network: input.network, artifact: input.artifact }),
     resources: CONTROL_RESOURCES
@@ -336,7 +337,7 @@ export function assertCodexControlSidecarInspection(input: {
   if (container.Id !== binding.containerId || container.Name.replace(/^\//u, "") !== binding.containerName
     || container.Image !== binding.imageId || container.Config.Image !== policy.imageReference
     || !container.State.Running || container.Config.WorkingDir !== policy.workingDirectory
-    || (container.Config.User ?? "") !== policy.containerUser || !labelsEqual(container.Config.Labels, policy.labels)
+    || (container.Config.User ?? "") !== (policy.containerUser ?? "") || !labelsEqual(container.Config.Labels, policy.labels)
     || !networksMatch
     || networks[policy.network.execution.name]?.NetworkID !== policy.network.execution.id
     || networks[policy.network.controlEgress.name]?.NetworkID !== policy.network.controlEgress.id
