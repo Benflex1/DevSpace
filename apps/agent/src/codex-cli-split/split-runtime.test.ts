@@ -1,5 +1,5 @@
 import { PassThrough } from "node:stream";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -241,6 +241,25 @@ test("rejects an assembly missing a remote service before persisting or starting
   });
   await expect(runtime.ensure({ projectId, workspaceId })).rejects.toThrow("codex-split-code-mode-host");
   expect(events.some((entry) => entry.startsWith("pty:"))).toBe(false);
+});
+
+test("runs artifact collection only after successful agent-restart reattachment", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const first = await value.runtime.ensure({ projectId, workspaceId });
+  const artifactRoot = path.join(value.stateRoot, "codex-artifacts");
+  const stale = path.join(artifactRoot, `codex-${"d".repeat(64)}-1700000000000-dead`);
+  await mkdir(stale, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(stale, "manifest.json"), JSON.stringify({ closureDigest: "d".repeat(64), entrypointSha256: "e".repeat(64) }), { mode: 0o600 });
+  const reattached = new CodexSplitRuntime({
+    managed: value.managed, docker: value.docker, stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex"
+  }, {
+    reattachAssembly: () => Promise.resolve(assembly()),
+    buildAssembly: () => Promise.reject(new Error("unexpected-rebuild"))
+  });
+  await expect(reattached.reconcileAfterAgentRestart({ projectId, workspaceId })).resolves.toEqual(first);
+  await expect(readFile(path.join(stale, "manifest.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("stop tears down only the split resources while preserving managed/home state", async () => {

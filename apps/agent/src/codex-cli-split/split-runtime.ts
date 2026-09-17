@@ -70,6 +70,7 @@ import {
   startCodexNativeAppServer,
   type CodexNativeAppServerHandle
 } from "./native-app-server.js";
+import { collectStaleCodexSplitArtifacts } from "./artifact-gc.js";
 import {
   nativeCodexHomePath,
   ensureNativeCodexHome,
@@ -99,6 +100,7 @@ import {
 const EXEC_SERVER_PORT = 4545;
 const CONTROL_ROLE = "codex-control";
 const EXECUTOR_ROLE = "codex-split-executor";
+const CODEX_SPLIT_ARTIFACT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 function assertRemoteAssemblyAdmission(input: CodexSplitRuntimeAssembly): void {
   assertCodexSplitRemoteAdmission({
@@ -845,6 +847,15 @@ export class CodexSplitRuntime {
       });
       await inspectAssemblyResources({ docker: this.docker, assembly });
       this.assemblies.set(input.workspaceId, assembly);
+      await collectStaleCodexSplitArtifacts({
+        managedArtifactRoot: path.join(this.stateRoot, "codex-artifacts"),
+        workspaceId: input.workspaceId,
+        currentClosureDigest: assembly.artifact.closureDigest,
+        activeRuntimeRecords: [record],
+        activeOwnedContainerIds: [assembly.executor.containerId],
+        nowMs: Date.now(),
+        maxAgeMs: CODEX_SPLIT_ARTIFACT_MAX_AGE_MS
+      }).catch(() => undefined);
       return record;
     } catch (error) {
       const ambiguous = parseCodexSplitRuntimeRecord({
