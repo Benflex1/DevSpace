@@ -28,6 +28,15 @@ export interface CodexSplitArtifactBinding {
   readonly launcherSourcePath: string;
 }
 
+export interface CodexSplitArtifactCapabilities {
+  readonly nativeCliPath: string;
+  readonly execServerCapability: "codex-0.153.4-exec-server";
+  readonly appServerCapability: "codex-0.153.4-app-server";
+  readonly codeModeHostPath: string;
+  readonly codeModeHostCapability: "codex-0.153.4-code-mode-host";
+  readonly closureDigest: string;
+}
+
 function absolutePath(value: string, code: string): string {
   if (!path.isAbsolute(value) || value.includes("\0")) throw new Error(code);
   return path.resolve(value);
@@ -159,6 +168,37 @@ export function assertCodexArtifactCompatibleWithImage(input: {
     throw new Error("codex-artifact-image-architecture");
   }
   if (!hasSandboxHelper(input.artifact.staged.artifact)) throw new Error("codex-artifact-sandbox-helper-missing");
+}
+
+export function assertCodexSplitArtifactCapabilities(input: {
+  readonly artifact: CodexSplitArtifactBinding;
+  readonly image: DockerImageInspection;
+}): CodexSplitArtifactCapabilities {
+  assertCodexArtifactCompatibleWithImage(input);
+  const { artifact } = input;
+  if (artifact.packageVersion !== "0.153.4"
+    || artifact.closureDigest !== artifact.staged.artifact.closureDigest
+    || !/^[0-9a-f]{64}$/u.test(artifact.closureDigest)
+    || artifact.mountTarget !== "/opt/devspace/codex"
+    || artifact.entrypointPath !== "/opt/devspace/codex/bin/codex") {
+    throw new Error("codex-artifact-native-cli");
+  }
+  const nativeCliEntry = artifact.staged.artifact.entries.find((entry) => entry.relativePath === "bin/codex");
+  if (nativeCliEntry?.kind !== "file" || nativeCliEntry.sha256 === null || (nativeCliEntry.mode & 0o111) === 0) {
+    throw new Error("codex-artifact-native-cli");
+  }
+  const codeModeHostEntry = artifact.staged.artifact.entries.find((entry) => entry.relativePath === "bin/codex-code-mode-host");
+  if (codeModeHostEntry?.kind !== "file" || codeModeHostEntry.sha256 === null || (codeModeHostEntry.mode & 0o111) === 0) {
+    throw new Error("codex-artifact-code-mode-host");
+  }
+  return {
+    nativeCliPath: "/opt/devspace/codex/bin/codex",
+    execServerCapability: "codex-0.153.4-exec-server",
+    appServerCapability: "codex-0.153.4-app-server",
+    codeModeHostPath: "/opt/devspace/codex/bin/codex-code-mode-host",
+    codeModeHostCapability: "codex-0.153.4-code-mode-host",
+    closureDigest: artifact.closureDigest
+  };
 }
 
 export function codexCommand(artifact: CodexSplitArtifactBinding, args: readonly string[]): readonly string[] {

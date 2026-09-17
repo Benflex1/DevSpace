@@ -2,7 +2,13 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { assertCodexArtifactCompatibleWithImage, codexCommand, prepareCodexSplitArtifact } from "./artifact.js";
+import {
+  assertCodexArtifactCompatibleWithImage,
+  assertCodexSplitArtifactCapabilities,
+  codexCommand,
+  prepareCodexSplitArtifact
+} from "./artifact.js";
+import type { DockerImageInspection } from "../docker-runtime.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -82,4 +88,56 @@ test("rejects incompatible image architecture and unsafe Codex arguments", async
     Id: "sha256:image", Os: "linux", Architecture: "arm64", Config: {}
   } })).toThrow("codex-artifact-image-architecture");
   expect(() => codexCommand(artifact, ["--unsafe\0arg"])).toThrow("codex-command-invalid");
+});
+
+test("records every native 0.153.4 service capability from one verified closure", async () => {
+  const source = await fixture();
+  const artifact = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+  const capabilities = assertCodexSplitArtifactCapabilities({
+    artifact,
+    image: { Id: "sha256:image", Os: "linux", Architecture: "amd64", Config: {} }
+  });
+
+  expect(capabilities).toEqual({
+    nativeCliPath: "/opt/devspace/codex/bin/codex",
+    execServerCapability: "codex-0.153.4-exec-server",
+    appServerCapability: "codex-0.153.4-app-server",
+    codeModeHostPath: "/opt/devspace/codex/bin/codex-code-mode-host",
+    codeModeHostCapability: "codex-0.153.4-code-mode-host",
+    closureDigest: artifact.closureDigest
+  });
+  expect(JSON.stringify(capabilities)).not.toMatch(/credential|token|codex-home/iu);
+});
+
+test("rejects a closure without the exact native Code Mode host helper", async () => {
+  const source = await fixture();
+  const artifact = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+  const withoutHost = {
+    ...artifact,
+    staged: {
+      ...artifact.staged,
+      artifact: {
+        ...artifact.staged.artifact,
+        entries: artifact.staged.artifact.entries.filter((entry) => entry.relativePath !== "bin/codex-code-mode-host")
+      }
+    }
+  };
+  expect(() => assertCodexSplitArtifactCapabilities({
+    artifact: withoutHost,
+    image: { Id: "sha256:image", Os: "linux", Architecture: "amd64", Config: {} }
+  })).toThrow("codex-artifact-code-mode-host");
+});
+
+test("rejects a generic or differently-versioned helper closure", async () => {
+  const source = await fixture();
+  const artifact = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+  const image: DockerImageInspection = { Id: "sha256:image", Os: "linux", Architecture: "amd64", Config: {} };
+  expect(() => assertCodexSplitArtifactCapabilities({
+    artifact: { ...artifact, packageVersion: "0.153.5" },
+    image
+  })).toThrow("codex-artifact-version-not-admitted");
+  expect(() => assertCodexSplitArtifactCapabilities({
+    artifact: { ...artifact, entrypointPath: "/opt/devspace/codex/bin/generic-runner" },
+    image
+  })).toThrow("codex-artifact-native-cli");
 });
