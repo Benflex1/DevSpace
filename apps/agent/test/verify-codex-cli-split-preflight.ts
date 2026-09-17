@@ -19,6 +19,7 @@ async function main(): Promise<void> {
   process.stdout.write(`Codex split feasibility preflight: ${result.status}\n`);
   process.stdout.write(`${JSON.stringify({
     status: result.status,
+    ptyProof: result.ptyProof,
     runId: result.evidence.runId,
     sections: result.evidence.sections,
     transportSecurity: result.evidence.transportSecurity,

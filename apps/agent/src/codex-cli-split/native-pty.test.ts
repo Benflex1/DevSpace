@@ -125,3 +125,103 @@ test("rejects a missing remote-only policy before creating a PTY", async () => {
     environment, columns: 80, rows: 24
   })).rejects.toThrow("native-pty-remote-policy");
 });
+
+test("classifies Docker exec creation failures at the create boundary", async () => {
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.reject(new Error("docker-create")); }
+  }();
+  await expect(startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  })).rejects.toThrow("native-pty-exec-create");
+});
+
+test("classifies Docker attach failures at the attach boundary", async () => {
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("exec-id"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.reject(new Error("docker-attach")); }
+  }();
+  await expect(startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  })).rejects.toThrow("native-pty-attach");
+});
+
+test("classifies Docker resize failures at the resize boundary", async () => {
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("exec-id"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
+    override resizeExec(): Promise<void> { return Promise.reject(new Error("docker-resize")); }
+  }();
+  await expect(startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  })).rejects.toThrow("native-pty-resize");
+});
+
+test("classifies Docker exec inspection failures as exec-state failures", async () => {
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("exec-id"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
+    override resizeExec(): Promise<void> { return Promise.resolve(); }
+    override inspectExec(): Promise<DockerExecInspection> { return Promise.reject(new Error("docker-inspect")); }
+  }();
+  const pty = await startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  });
+  await expect(pty.inspect()).rejects.toThrow("native-pty-exec-state");
+});
+
+test("classifies subsequent Docker resize failures at the resize boundary", async () => {
+  let resizeCount = 0;
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("exec-id"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
+    override resizeExec(): Promise<void> {
+      resizeCount += 1;
+      return resizeCount === 1 ? Promise.resolve() : Promise.reject(new Error("docker-resize"));
+    }
+  }();
+  const pty = await startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  });
+  await expect(pty.resize(100, 30)).rejects.toThrow("native-pty-resize");
+});
+
+test("classifies an invalid attached stream at the stream boundary", async () => {
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("exec-id"); }
+    override startExecAttached(): Promise<PassThrough> {
+      return Promise.resolve(undefined as unknown as PassThrough);
+    }
+  }();
+  await expect(startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  })).rejects.toThrow("native-pty-stream");
+});
+
+test("classifies an attached stream identity mismatch as an exec-state failure", async () => {
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("exec-id"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
+    override resizeExec(): Promise<void> { return Promise.resolve(); }
+    override inspectExec(): Promise<DockerExecInspection> {
+      return Promise.resolve({ ID: "other-exec", Running: false, ExitCode: 0, ContainerID: "control-id" });
+    }
+  }();
+  const pty = await startNativeCodexPty({
+    docker, control, executablePath: "/opt/devspace/codex-launcher/codex", resumeSessionId: null,
+    environment, columns: 80, rows: 24
+  });
+  await expect(pty.inspect()).rejects.toThrow("native-pty-exec-state");
+});

@@ -9,6 +9,7 @@
     "codex:bootstrap": "pnpm run build && node dist/codex-bootstrap-cli.js",
     "test": "pnpm --dir ../.. exec vitest run --project @devspace/agent",
     "verify:runtime:real": "pnpm --dir ../.. exec tsx apps/agent/test/verify-real-rootless.ts",
+    "verify:codex:split:pty": "pnpm --dir ../.. exec tsx apps/agent/test/verify-codex-cli-split-pty.ts",
     "verify:codex:split:preflight": "pnpm --dir ../.. exec tsx apps/agent/test/verify-codex-cli-split-preflight.ts",
     "verify:codex:split:real": "pnpm --dir ../.. exec tsx apps/agent/test/verify-codex-cli-split-execution.ts",
     "typecheck": "tsc --project tsconfig.json --pretty false && tsc --project tsconfig.test.json --pretty false",

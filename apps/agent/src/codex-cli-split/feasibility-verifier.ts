@@ -45,6 +45,7 @@ import {
 import { evaluateCodexSplitOutcome, type CodexSplitGateEvidence } from "./feasibility-result.js";
 import type { CodexSplitRuntimeRecord } from "./runtime-record.js";
 import type { NativeCodexPty } from "./native-pty.js";
+import { runCodexSplitPtyProof, type CodexSplitPtyProof } from "./pty-harness.js";
 import {
   discoverNativeSession,
   snapshotNativeSessionState,
@@ -113,6 +114,7 @@ export type CodexSplitPreflightStatus = "READY_FOR_OPERATOR_TUI" | "BLOCKED/INCO
 export interface CodexSplitPreflightResult {
   readonly status: CodexSplitPreflightStatus;
   readonly evidence: CodexSplitLiveEvidence;
+  readonly ptyProof: CodexSplitPtyProof | null;
 }
 
 export interface CodexSplitVerifierServices {
@@ -1029,6 +1031,7 @@ async function runGateInternal(input: {
   readonly ensured: boolean;
   readonly canary: CanaryBinding | null;
   readonly readyForOperatorTui: boolean;
+  readonly ptyProof: CodexSplitPtyProof | null;
 }> {
   const { configuration, operator, services, runId } = input;
   const { docker, managed, runtime, home } = services;
@@ -1037,6 +1040,7 @@ async function runGateInternal(input: {
   const initialProcesses: ProcessObservation[] = [];
   let record: CodexSplitRuntimeRecord | null = null;
   let networkEvidence: NetworkObservation | null = null;
+  let ptyProof: CodexSplitPtyProof | null = null;
   let context: WorkspaceExecutionContext;
   let git: Awaited<ReturnType<ManagedWorkspaces["codexExecutorGitBinding"]>>;
   try {
@@ -1081,7 +1085,7 @@ async function runGateInternal(input: {
           mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
           processObservations: processes,
           networkObservations: [network]
-        }, ensured, canary, readyForOperatorTui: false
+        }, ensured, canary, readyForOperatorTui: false, ptyProof
       };
     }
     if (canaryProbe.status === "unavailable") throw new Error("codex-split-canary-proof-unavailable");
@@ -1093,12 +1097,26 @@ async function runGateInternal(input: {
           physicalHomeSeparation, securityViolation: true,
           mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
           processObservations: processes, networkObservations: [network]
-        }, ensured, canary, readyForOperatorTui: false
+        }, ensured, canary, readyForOperatorTui: false, ptyProof
       };
     }
     if (!network.probeComplete) {
       throw new Error("codex-split-network-proof-incomplete");
     }
+
+    ptyProof = await runCodexSplitPtyProof({
+      docker,
+      runtime,
+      record,
+      projectId: configuration.projectId,
+      workspaceId: configuration.workspaceId,
+      controlEnvironment: {
+        CODEX_HOME: "/codex-home",
+        HOME: "/codex-home",
+        CODEX_EXEC_SERVER_URL: record.executor.endpointUrl
+      },
+      runId
+    });
 
     const preflightControlProjectProcess = processes.some((observation) => observation.role === "control" && observation.projectProcessCount > 0);
     const preflightExecutorProjectProcess = processes.some((observation) => observation.role === "executor" && observation.projectProcessCount > 0);
@@ -1147,8 +1165,10 @@ async function runGateInternal(input: {
     };
     if (input.mode === "preflight") {
       const ready = automatedSections.A && automatedSections.B && automatedSections.D && automatedSections.F
-        && preflightExecutorProjectProcess === false && preflightControlProjectProcess === false;
-      return { evidence: preflightEvidence, ensured, canary, readyForOperatorTui: ready };
+        && preflightExecutorProjectProcess === false && preflightControlProjectProcess === false
+        && ptyProof.genericTtyCycles === 5 && ptyProof.codexVersionTtyCycles === 3
+        && ptyProof.nativePtyStartupCycles === 3;
+      return { evidence: preflightEvidence, ensured, canary, readyForOperatorTui: ready, ptyProof };
     }
     if (operator === null) throw new Error("codex-split-operator-missing");
     operator.printChecklist(buildCodexSplitManualChecklist());
@@ -1202,9 +1222,9 @@ async function runGateInternal(input: {
     const manualResult = await operator.confirmFinalResult();
     const finalEvidence: CodexSplitLiveEvidence = { ...preliminary, liveOperatorProof: manualResult === "PASS", securityViolation: manualResult === "FAIL" };
     if (evaluateCodexSplitOutcome(finalEvidence) === "PASS" || evaluateCodexSplitOutcome(finalEvidence) === "PASS-WITH-TRANSPORT-BLOCK") {
-      return { evidence: finalEvidence, ensured, canary, readyForOperatorTui: false };
+      return { evidence: finalEvidence, ensured, canary, readyForOperatorTui: false, ptyProof };
     }
-    return { evidence: finalEvidence, ensured, canary, readyForOperatorTui: false };
+    return { evidence: finalEvidence, ensured, canary, readyForOperatorTui: false, ptyProof };
   } catch (error) {
     const diagnostic = formatCodexSplitDiagnostic("live-gate", error, "verifier");
     const logger: StructuredLogger = createLogger({ component: "agent", subsystem: "codex-split-verifier" });
@@ -1220,7 +1240,7 @@ async function runGateInternal(input: {
         securityViolation: isSecurityReason(error),
         processObservations: initialProcesses,
         networkObservations: networkEvidence === null ? [] : [networkEvidence]
-      }, ensured, canary, readyForOperatorTui: false
+      }, ensured, canary, readyForOperatorTui: false, ptyProof
     };
   }
 }
@@ -1230,13 +1250,18 @@ async function runCodexSplitVerification(input: {
   readonly operator: CodexSplitOperator | null;
   readonly mode: "operator" | "preflight";
   readonly services?: CodexSplitVerifierServices;
-}): Promise<{ readonly evidence: CodexSplitLiveEvidence; readonly readyForOperatorTui: boolean }> {
+}): Promise<{
+  readonly evidence: CodexSplitLiveEvidence;
+  readonly readyForOperatorTui: boolean;
+  readonly ptyProof: CodexSplitPtyProof | null;
+}> {
   const runId = uuidv7();
   let services: CodexSplitVerifierServices | undefined;
   let ensured = false;
   let canary: CanaryBinding | null = null;
   let evidence: CodexSplitLiveEvidence;
   let readyForOperatorTui = false;
+  let ptyProof: CodexSplitPtyProof | null = null;
   try {
     services = input.services ?? await createVerifierServices(input.configuration);
     const result = await runGateInternal({ ...input, services, runId });
@@ -1244,6 +1269,7 @@ async function runCodexSplitVerification(input: {
     ensured = result.ensured;
     canary = result.canary;
     readyForOperatorTui = result.readyForOperatorTui;
+    ptyProof = result.ptyProof;
   } catch (error) {
     const diagnostic = formatCodexSplitDiagnostic("setup", error, "verifier");
     process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
@@ -1264,7 +1290,7 @@ async function runCodexSplitVerification(input: {
     evidence = { ...evidence, incompleteReason: "cleanup-failed" };
     readyForOperatorTui = false;
   }
-  return { evidence, readyForOperatorTui };
+  return { evidence, readyForOperatorTui, ptyProof };
 }
 
 export async function runCodexSplitFeasibilityGate(input: {
@@ -1283,7 +1309,8 @@ export async function runCodexSplitFeasibilityPreflight(input: {
   const result = await runCodexSplitVerification({ ...input, operator: null, mode: "preflight" });
   return {
     status: result.readyForOperatorTui ? "READY_FOR_OPERATOR_TUI" : "BLOCKED/INCOMPLETE",
-    evidence: result.evidence
+    evidence: result.evidence,
+    ptyProof: result.ptyProof
   };
 }
 

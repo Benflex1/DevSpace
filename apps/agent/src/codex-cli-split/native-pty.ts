@@ -10,6 +10,10 @@ const MAX_COLUMNS = 1_000;
 const MIN_ROWS = 1;
 const MAX_ROWS = 500;
 
+function stageError(reason: string, cause?: unknown): Error {
+  return cause === undefined ? new Error(reason) : new Error(reason, { cause });
+}
+
 export interface NativeCodexPty {
   readonly containerId: string;
   readonly execId: string;
@@ -103,22 +107,34 @@ export async function startNativeCodexPty(input: {
   const command = input.resumeSessionId === null
     ? [EXECUTABLE_PATH]
     : [EXECUTABLE_PATH, "resume", input.resumeSessionId];
-  const execId = await input.docker.createExec(input.control.containerId, {
-    command,
-    workingDirectory: WORKING_DIRECTORY,
-    environment: input.environment,
-    attachStdin: true,
-    tty: true
-  });
+  let execId: string;
+  try {
+    execId = await input.docker.createExec(input.control.containerId, {
+      command,
+      workingDirectory: WORKING_DIRECTORY,
+      environment: input.environment,
+      attachStdin: true,
+      tty: true
+    });
+  } catch (error) {
+    throw stageError("native-pty-exec-create", error);
+  }
   let stream: Duplex | undefined;
   try {
     stream = await input.docker.startExecAttached(execId, true);
+  } catch (error) {
+    throw stageError("native-pty-attach", error);
+  }
+  if (stream === undefined || typeof stream.destroy !== "function" || typeof stream.on !== "function") {
+    stream?.destroy();
+    throw stageError("native-pty-stream");
+  }
+  try {
     await input.docker.resizeExec(execId, input.columns, input.rows);
   } catch (error) {
-    stream?.destroy();
-    throw new Error("native-pty-start-failed", { cause: error });
+    stream.destroy();
+    throw stageError("native-pty-resize", error);
   }
-  if (stream === undefined) throw new Error("native-pty-start-failed");
   return {
     containerId: input.control.containerId,
     execId,
@@ -127,12 +143,21 @@ export async function startNativeCodexPty(input: {
     stream,
     async resize(columns, rows) {
       assertSize(columns, rows);
-      await input.docker.resizeExec(execId, columns, rows);
+      try {
+        await input.docker.resizeExec(execId, columns, rows);
+      } catch (error) {
+        throw stageError("native-pty-resize", error);
+      }
     },
     async inspect() {
-      const inspection = await input.docker.inspectExec(execId);
+      let inspection: DockerExecInspection;
+      try {
+        inspection = await input.docker.inspectExec(execId);
+      } catch (error) {
+        throw stageError("native-pty-exec-state", error);
+      }
       if (inspection.ID !== execId || inspection.ContainerID !== input.control.containerId) {
-        throw new Error("native-pty-identity");
+        throw stageError("native-pty-exec-state");
       }
       return inspection;
     }
