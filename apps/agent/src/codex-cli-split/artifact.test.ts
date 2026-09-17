@@ -55,6 +55,26 @@ test("reattach reuses and re-verifies the executor's existing staged closure", a
   expect(reattached.closureDigest).toBe(initial.closureDigest);
 });
 
+test("fresh split preparation reuses an existing verified staged closure", async () => {
+  const source = await fixture();
+  const initial = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+  const fresh = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+
+  expect(fresh.staged.stagingRoot).toBe(initial.staged.stagingRoot);
+  expect(fresh.closureDigest).toBe(initial.closureDigest);
+});
+
+test("fresh split preparation ignores an invalid staged closure", async () => {
+  const source = await fixture();
+  const initial = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+  await writeFile(path.join(initial.staged.stagingRoot, "stale-entry"), "stale");
+
+  const fresh = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });
+
+  expect(fresh.staged.stagingRoot).not.toBe(initial.staged.stagingRoot);
+  expect(fresh.closureDigest).toBe(initial.closureDigest);
+});
+
 test("rejects incompatible image architecture and unsafe Codex arguments", async () => {
   const source = await fixture();
   const artifact = await prepareCodexSplitArtifact({ configuredPath: source.executable, stateRoot: source.state });

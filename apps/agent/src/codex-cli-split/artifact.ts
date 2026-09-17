@@ -1,6 +1,7 @@
-import { readlink, symlink } from "node:fs/promises";
+import { readdir, readlink, symlink } from "node:fs/promises";
 import path from "node:path";
 import {
+  CodexArtifactIdentityError,
   resolveCodexExecutionArtifact,
   stageCodexExecutionArtifact,
   verifyStagedCodexExecutionArtifact,
@@ -11,7 +12,8 @@ import { architectureCompatible } from "../codex-app-server/probe-runtime.js";
 import {
   assertContained,
   establishPinnedDirectory,
-  lstatIdentity
+  lstatIdentity,
+  PrivateStateCorruptionError
 } from "../private-state.js";
 import type { DockerImageInspection } from "../docker-runtime.js";
 
@@ -57,6 +59,50 @@ async function ensureLauncher(input: {
   return launcher;
 }
 
+function isStaleStagedArtifact(error: unknown): boolean {
+  if (error instanceof CodexArtifactIdentityError || error instanceof PrivateStateCorruptionError) return true;
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
+async function reuseVerifiedStagedArtifact(input: {
+  readonly artifact: CodexExecutionArtifact;
+  readonly artifactDirectory: string;
+}): Promise<StagedCodexExecutionArtifact | null> {
+  let entries;
+  try {
+    entries = await readdir(input.artifactDirectory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+
+  const prefix = `codex-${input.artifact.closureDigest}-`;
+  const candidateNames = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix)
+      && /^codex-[0-9a-f]+-[0-9]+-[0-9a-f]+$/u.test(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+
+  for (const candidateName of candidateNames) {
+    const stagingRoot = assertContained(input.artifactDirectory, path.join(input.artifactDirectory, candidateName));
+    const candidate: StagedCodexExecutionArtifact = {
+      artifact: input.artifact,
+      stagingRoot,
+      entrypointPath: path.join(stagingRoot, ...input.artifact.entrypoint.relativePath.split("/")),
+      readbackManifestPath: path.join(stagingRoot, "manifest.json")
+    };
+    try {
+      await verifyStagedCodexExecutionArtifact(candidate);
+      return candidate;
+    } catch (error) {
+      if (isStaleStagedArtifact(error)) continue;
+      throw error;
+    }
+  }
+  return null;
+}
+
 export async function prepareCodexSplitArtifact(input: {
   readonly configuredPath: string;
   readonly stateRoot: string;
@@ -70,10 +116,11 @@ export async function prepareCodexSplitArtifact(input: {
   if (artifact.target.os !== "linux" || !hasSandboxHelper(artifact)) {
     throw new Error("codex-artifact-closure-incompatible");
   }
+  const artifactDirectory = path.join(stateRoot, "codex-artifacts");
   const staged = input.existingStagingRoot === undefined
-    ? await stageCodexExecutionArtifact({ artifact, stateRoot })
+    ? await reuseVerifiedStagedArtifact({ artifact, artifactDirectory })
+      ?? await stageCodexExecutionArtifact({ artifact, stateRoot })
     : await (async (): Promise<StagedCodexExecutionArtifact> => {
-      const artifactDirectory = path.join(stateRoot, "codex-artifacts");
       const stagingRoot = assertContained(artifactDirectory, absolutePath(input.existingStagingRoot!, "codex-artifact-staging-root-invalid"));
       if (stagingRoot === artifactDirectory) throw new Error("codex-artifact-staging-root-invalid");
       const reused: StagedCodexExecutionArtifact = {
