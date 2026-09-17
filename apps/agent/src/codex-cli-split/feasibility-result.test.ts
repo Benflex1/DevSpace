@@ -72,7 +72,7 @@ test("evaluates a known live-evidence extension without replacing an incomplete 
       incompleteReason: "codex-executor-start-failed"
     }),
     runId: "018f0f00-0000-7000-8000-000000000004",
-    processObservations: [{ role: "executor", projectProcessCount: 0 }],
+    processObservations: [{ role: "executor", projectProcessCount: 0, observationComplete: false }],
     mountObservations: [{ role: "control", allowedMounts: true }, { role: "executor", allowedMounts: false }],
     networkObservations: [{
       executionNetworkExpectedMembers: true,
@@ -101,4 +101,41 @@ test("evaluates a known live-evidence extension without replacing an incomplete 
   const unsupported = { ...liveEvidence, unsupportedObservation: true };
   expect(() => codexSplitLiveEvidenceSchema.parse(unsupported)).toThrow();
   expect(() => evaluateCodexSplitOutcome(unsupported)).toThrow("feasibility-evidence");
+});
+
+test("keeps incomplete process and network probes distinct from a proven clean result", () => {
+  const incomplete = {
+    ...evidence({
+      sections: { A: false, B: false, C: false, D: false, E: false, F: false },
+      liveOperatorProof: false,
+      incompleteReason: "preflight-incomplete"
+    }),
+    runId: "018f0f00-0000-7000-8000-000000000005",
+    processObservations: [{ role: "control", projectProcessCount: 0, observationComplete: false }],
+    mountObservations: [],
+    networkObservations: [{
+      executionNetworkExpectedMembers: false,
+      controlEgressExpectedMembers: false,
+      controlCodexServiceReachableOnEgress: false,
+      executorEndpointReachableOnExecution: false,
+      executorEndpointReachableFromControlEgress: false,
+      executorInternetReachable: false,
+      executorControlEgressGatewayReachable: false,
+      executorControlEgressAddressReachable: false,
+      executorHostReachable: false,
+      executorUnrelatedServiceReachable: false,
+      controlForwardingDisabled: false,
+      controlRoutingCapabilitiesAbsent: false,
+      controlProxyProcessAbsent: false,
+      endpointPublished: false,
+      hostNetworkListener: false,
+      probeComplete: false,
+      securityViolation: false
+    }]
+  };
+
+  const parsed = codexSplitLiveEvidenceSchema.parse(incomplete);
+  expect(parsed.processObservations[0]?.observationComplete).toBe(false);
+  expect(parsed.networkObservations[0]?.probeComplete).toBe(false);
+  expect(evaluateCodexSplitOutcome(parsed)).toBe("BLOCKED/INCOMPLETE");
 });

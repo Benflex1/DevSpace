@@ -81,6 +81,7 @@ export interface CodexSplitLiveEvidence extends CodexSplitGateEvidence {
   readonly processObservations: readonly {
     readonly role: "control" | "executor";
     readonly projectProcessCount: number;
+    readonly observationComplete: boolean;
   }[];
   readonly mountObservations: readonly {
     readonly role: "control" | "executor";
@@ -105,6 +106,13 @@ export interface CodexSplitLiveEvidence extends CodexSplitGateEvidence {
     readonly probeComplete: boolean;
     readonly securityViolation: boolean;
   }[];
+}
+
+export type CodexSplitPreflightStatus = "READY_FOR_OPERATOR_TUI" | "BLOCKED/INCOMPLETE";
+
+export interface CodexSplitPreflightResult {
+  readonly status: CodexSplitPreflightStatus;
+  readonly evidence: CodexSplitLiveEvidence;
 }
 
 export interface CodexSplitVerifierServices {
@@ -139,6 +147,7 @@ function canaryBasename(canaryPath: string): string {
 interface ProcessObservation {
   readonly role: "control" | "executor";
   readonly projectProcessCount: number;
+  readonly observationComplete: boolean;
 }
 
 interface NetworkObservation {
@@ -489,13 +498,19 @@ async function observeProcesses(docker: DockerEngineClient, record: CodexSplitRu
   const observations: ProcessObservation[] = [];
   for (const [role, id] of [["control", record.control.id], ["executor", record.executor.id]] as const) {
     try {
-      const table = await docker.topContainer(id, "pid,args");
-      observations.push({ role, projectProcessCount: projectProcessCount(table, role) });
+      const table = await docker.topContainer(id, "-o pid,args");
+      observations.push({ role, projectProcessCount: projectProcessCount(table, role), observationComplete: true });
     } catch {
-      observations.push({ role, projectProcessCount: 0 });
+      observations.push({ role, projectProcessCount: 0, observationComplete: false });
     }
   }
   return observations;
+}
+
+export function hasCompleteProcessObservations(observations: readonly ProcessObservation[]): boolean {
+  return observations.length > 0
+    && new Set(observations.map((observation) => observation.role)).size === 2
+    && observations.every((observation) => observation.observationComplete);
 }
 
 async function observeDuringAttach(input: {
@@ -589,6 +604,32 @@ async function createCanary(home: CodexNativeHomeBinding, runId: string): Promis
   return { path: canaryPath, containerPath: `/codex-home/${name}`, identity: observed.identity };
 }
 
+export function buildCodexSplitCanaryProbeScript(input: {
+  readonly canaryPath: string;
+  readonly linkPath: string;
+  readonly basename: string;
+}): string {
+  const canary = shellQuote(input.canaryPath);
+  const quotedLink = shellQuote(input.linkPath);
+  const basename = shellQuote(input.basename);
+  return [
+    "set -eu",
+    `rm -f -- ${quotedLink}`,
+    `test ! -r ${canary}`,
+    `test ! -r ${shellQuote(`/workspace/../codex-home/${input.basename}`)}`,
+    `ln -s -- ${canary} ${quotedLink}`,
+    `test ! -r ${quotedLink}`,
+    `test ! -r ${shellQuote(`/proc/1/root${input.canaryPath}`)}`,
+    `! (command -v find >/dev/null 2>&1 && find / -xdev -type f -name ${basename} -print -quit | grep -q .)`,
+    `! (command -v find >/dev/null 2>&1 && find / -xdev -path ${shellQuote(`*/${input.basename}`)} -print -quit | grep -q .)`,
+    `! (command -v env >/dev/null 2>&1 && env | grep -q 'CODEX_HOME=')`,
+    `! (command -v tr >/dev/null 2>&1 && tr '\\0' '\\n' </proc/1/environ | grep -q 'CODEX_HOME=')`,
+    `test ! -r ${shellQuote(`/opt/codex-home/${input.basename}`)}`,
+    `test ! -r ${shellQuote(`/home/codex/${input.basename}`)}`,
+    `rm -f -- ${quotedLink}`
+  ].join("; ");
+}
+
 async function verifyCanaryIsolation(input: {
   readonly docker: DockerEngineClient;
   readonly executorId: string;
@@ -596,26 +637,8 @@ async function verifyCanaryIsolation(input: {
   readonly runId: string;
 }): Promise<ProbeResult> {
   const link = `/workspace/.devspace-codex-canary-link-${input.runId}`;
-  const canary = shellQuote(input.canary.containerPath);
   const basename = canaryBasename(input.canary.path);
-  const quotedLink = shellQuote(link);
-  const script = [
-    "set -eu",
-    `rm -f -- ${quotedLink}`,
-    `test ! -r ${canary}`,
-    `test ! -r ${shellQuote(`/workspace/../codex-home/${basename}`)}`,
-    `ln -s -- ${canary} ${quotedLink}`,
-    `test ! -r ${quotedLink}`,
-    `test ! -r ${shellQuote(`/proc/1/root${input.canary.containerPath}`)}`,
-    `test ! -r ${shellQuote(`/proc/1/environ`)}`,
-    `! (command -v find >/dev/null 2>&1 && find / -xdev -type f -name ${shellQuote(basename)} -print -quit | grep -q .)`,
-    `! (command -v find >/dev/null 2>&1 && find / -xdev -path ${shellQuote(`*/${basename}`)} -print -quit | grep -q .)`,
-    `! (command -v env >/dev/null 2>&1 && env | grep -q 'CODEX_HOME=')`,
-    `! (command -v tr >/dev/null 2>&1 && tr '\\0' '\\n' </proc/1/environ | grep -q 'CODEX_HOME=')`,
-    `test ! -r ${shellQuote(`/opt/codex-home/${basename}`)}`,
-    `test ! -r ${shellQuote(`/home/codex/${basename}`)}`,
-    `rm -f -- ${quotedLink}`
-  ].join("; ");
+  const script = buildCodexSplitCanaryProbeScript({ canaryPath: input.canary.containerPath, linkPath: link, basename });
   return await runShellProbe(input.docker, input.executorId, script);
 }
 
@@ -629,6 +652,12 @@ function controlForwardingDisabled(control: DockerContainerInspection): boolean 
 }
 
 export function hasNoExternalDefaultRoute(routeOutput: string, executionGateway: string | undefined): boolean {
+  const procDefaultGateways = procIpv4DefaultGateways(routeOutput);
+  if (procDefaultGateways !== null) {
+    if (procDefaultGateways.length === 0) return true;
+    const expected = procIpv4Gateway(executionGateway);
+    return expected !== null && procDefaultGateways.every((gateway) => gateway === expected);
+  }
   const defaultRoutes = routeOutput.split(/\r?\n/u).filter((line) => /^\s*default(?:\s|$)/u.test(line));
   if (defaultRoutes.length === 0) return true;
   if (!isIpv4Address(executionGateway)) return false;
@@ -636,13 +665,64 @@ export function hasNoExternalDefaultRoute(routeOutput: string, executionGateway:
   return defaultRoutes.every((line) => expectedRoute.test(line));
 }
 
+function procIpv4Gateway(value: string | undefined): string | null {
+  if (!isIpv4Address(value)) return null;
+  return value.split(".").map((part) => Number(part).toString(16).padStart(2, "0")).reverse().join("").toUpperCase();
+}
+
+function procIpv4DefaultGateways(routeOutput: string): readonly string[] | null {
+  const lines = routeOutput.split(/\r?\n/u);
+  const headerIndex = lines.findIndex((line) => /^\s*Iface\s+Destination\s+Gateway\b/u.test(line));
+  if (headerIndex < 0) return null;
+  const defaults: string[] = [];
+  for (const line of lines.slice(headerIndex + 1)) {
+    if (line.trim() === "") continue;
+    const fields = line.trim().split(/\s+/u);
+    if (fields.length < 3 || !/^[0-9A-Fa-f]{8}$/u.test(fields[1]!) || !/^[0-9A-Fa-f]{8}$/u.test(fields[2]!)) return null;
+    if (fields[1]!.toUpperCase() === "00000000") defaults.push(fields[2]!.toUpperCase());
+  }
+  return defaults;
+}
+
+export function hasExpectedDefaultRoute(routeOutput: string, expectedGateway: string | undefined): boolean {
+  const expected = procIpv4Gateway(expectedGateway);
+  if (expected === null) return false;
+  const procDefaultGateways = procIpv4DefaultGateways(routeOutput);
+  if (procDefaultGateways !== null) return procDefaultGateways.length > 0 && procDefaultGateways.every((gateway) => gateway === expected);
+  const defaultRoutes = routeOutput.split(/\r?\n/u).filter((line) => /^\s*default(?:\s|$)/u.test(line));
+  const expectedRoute = new RegExp(`^\\s*default\\s+via\\s+${escapeRegExp(expectedGateway!)}(?:\\s|$)`, "u");
+  return defaultRoutes.length > 0 && defaultRoutes.every((line) => expectedRoute.test(line));
+}
+
+export function hasNoExternallyReachableTcpListener(socketOutput: string): boolean {
+  let sawTable = false;
+  for (const line of socketOutput.split(/\r?\n/u)) {
+    if (/^\s*sl\s+local_address\b/iu.test(line)) {
+      sawTable = true;
+      continue;
+    }
+    if (!sawTable || line.trim() === "") continue;
+    const fields = line.trim().split(/\s+/u);
+    if (fields.length < 4) return false;
+    if (fields[3] !== "0A") continue;
+    const address = fields[1]!.split(":", 1)[0]!.toUpperCase();
+    const loopback = address.length === 8
+      ? address.endsWith("7F")
+      : address === "00000000000000000000000001000000" || address === "00000000000000000000000000000001";
+    if (!loopback) return false;
+  }
+  return sawTable;
+}
+
 async function controlDefaultRouteProof(docker: DockerEngineClient, control: DockerContainerInspection, egressGateway: string | undefined): Promise<ProbeResult> {
   if (!isIpv4Address(egressGateway)) return unavailableProbe();
-  const result = await runContainerCommand({ docker, containerId: control.Id, command: ["/bin/sh", "-c", "if ! command -v ip >/dev/null 2>&1; then exit 125; fi; ip route"] }).catch(() => null);
+  const result = await runContainerCommand({
+    docker, containerId: control.Id,
+    command: ["/bin/sh", "-c", "if command -v ip >/dev/null 2>&1; then ip route; elif [ -r /proc/net/route ]; then cat /proc/net/route; else exit 125; fi"]
+  }).catch(() => null);
   if (result === null || result.exitCode === 125) return unavailableProbe();
   if (result.exitCode !== 0) return { status: "unavailable", exitCode: result.exitCode };
-  const expectedRoute = result.stdout.split("\n").some((line) => new RegExp(`^default\\s+via\\s+${escapeRegExp(egressGateway)}\\b`, "u").test(line));
-  return { status: expectedRoute ? "pass" : "fail", exitCode: result.exitCode };
+  return { status: hasExpectedDefaultRoute(result.stdout, egressGateway) ? "pass" : "fail", exitCode: result.exitCode };
 }
 
 async function executorExternalRouteAbsent(
@@ -654,7 +734,7 @@ async function executorExternalRouteAbsent(
     const result = await runContainerCommand({
       docker,
       containerId: executorId,
-      command: ["/bin/sh", "-c", "if ! command -v ip >/dev/null 2>&1; then exit 125; fi; ip route"]
+      command: ["/bin/sh", "-c", "if command -v ip >/dev/null 2>&1; then ip route; elif [ -r /proc/net/route ]; then cat /proc/net/route; else exit 125; fi"]
     });
     if (result.exitCode === 125) return { status: "unavailable", exitCode: result.exitCode };
     if (result.exitCode !== 0) return { status: "unavailable", exitCode: result.exitCode };
@@ -665,6 +745,15 @@ async function executorExternalRouteAbsent(
   } catch {
     return { status: "unavailable", exitCode: null };
   }
+}
+
+async function controlListenerProof(docker: DockerEngineClient, controlId: string): Promise<ProbeResult> {
+  const result = await runContainerCommand({
+    docker, containerId: controlId,
+    command: ["/bin/sh", "-c", "if [ -r /proc/net/tcp ] && [ -r /proc/net/tcp6 ]; then cat /proc/net/tcp; cat /proc/net/tcp6; else exit 125; fi"]
+  }).catch(() => null);
+  if (result === null || result.exitCode === 125 || result.exitCode !== 0) return unavailableProbe();
+  return { status: hasNoExternallyReachableTcpListener(result.stdout) ? "pass" : "fail", exitCode: result.exitCode };
 }
 
 async function collectNetworkEvidence(input: {
@@ -740,15 +829,14 @@ async function collectNetworkEvidence(input: {
   const executorUnrelated = await runReachabilityProbe({
     docker: input.docker, containerId: input.executor.Id, target: "http://devspace-unrelated-service:80", expectedReachable: false
   });
-  const controlProcesses = await input.docker.topContainer(input.control.Id, "pid,args").catch(() => null);
+  const controlProcesses = await input.docker.topContainer(input.control.Id, "-o pid,args").catch(() => null);
   const controlProxyAbsent = controlProcesses !== null
     && !controlProcesses.processes.some((process) => process.some((field) => CONTROL_PROXY_PATTERN.test(field)));
   const noPublishedPorts = Object.keys(input.control.HostConfig.PortBindings ?? {}).length === 0
     && Object.keys(input.executor.HostConfig.PortBindings ?? {}).length === 0;
   const controlRoute = await controlDefaultRouteProof(input.docker, input.control, egressGateway);
   const executorNoExternalDefault = await executorExternalRouteAbsent(input.docker, input.executor.Id, executorExecution?.Gateway);
-  const controlListener = await runShellProbe(input.docker, input.control.Id,
-    "if command -v ss >/dev/null 2>&1; then ! ss -H -lnt | grep -q .; elif command -v netstat >/dev/null 2>&1; then ! netstat -lnt | tail -n +3 | grep -q .; else exit 125; fi");
+  const controlListener = await controlListenerProof(input.docker, input.control.Id);
   const probes = [
     controlEndpoint, controlEgressEndpoint, model, executorInternet, executorEgressGateway,
     executorControlEgressAddress, executorHost, executorUnrelated, controlRoute, executorNoExternalDefault, controlListener
@@ -932,10 +1020,16 @@ async function createVerifierServices(configuration: CodexSplitVerifyConfigurati
 
 async function runGateInternal(input: {
   readonly configuration: CodexSplitVerifyConfiguration;
-  readonly operator: CodexSplitOperator;
+  readonly operator: CodexSplitOperator | null;
   readonly services: CodexSplitVerifierServices;
   readonly runId: string;
-}): Promise<{ readonly evidence: CodexSplitLiveEvidence; readonly ensured: boolean; readonly canary: CanaryBinding | null }> {
+  readonly mode: "operator" | "preflight";
+}): Promise<{
+  readonly evidence: CodexSplitLiveEvidence;
+  readonly ensured: boolean;
+  readonly canary: CanaryBinding | null;
+  readonly readyForOperatorTui: boolean;
+}> {
   const { configuration, operator, services, runId } = input;
   const { docker, managed, runtime, home } = services;
   let ensured = false;
@@ -949,6 +1043,10 @@ async function runGateInternal(input: {
     await probeAdmittedCodexVersion({ executablePath: configuration.codexExecutablePath });
     record = await runtime.ensure({ projectId: configuration.projectId, workspaceId: configuration.workspaceId });
     ensured = true;
+    if (input.mode === "preflight") {
+      await runtime.reconcileAfterAgentRestart({ projectId: configuration.projectId, workspaceId: configuration.workspaceId });
+      record = await runtime.ensure({ projectId: configuration.projectId, workspaceId: configuration.workspaceId });
+    }
     context = await managed.executionContext(configuration.projectId, configuration.workspaceId);
     git = await managed.codexExecutorGitBinding(configuration.projectId, configuration.workspaceId);
     canary = await createCanary(home, runId);
@@ -983,7 +1081,7 @@ async function runGateInternal(input: {
           mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
           processObservations: processes,
           networkObservations: [network]
-        }, ensured, canary
+        }, ensured, canary, readyForOperatorTui: false
       };
     }
     if (canaryProbe.status === "unavailable") throw new Error("codex-split-canary-proof-unavailable");
@@ -995,12 +1093,64 @@ async function runGateInternal(input: {
           physicalHomeSeparation, securityViolation: true,
           mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
           processObservations: processes, networkObservations: [network]
-        }, ensured, canary
+        }, ensured, canary, readyForOperatorTui: false
       };
     }
     if (!network.probeComplete) {
       throw new Error("codex-split-network-proof-incomplete");
     }
+
+    const preflightControlProjectProcess = processes.some((observation) => observation.role === "control" && observation.projectProcessCount > 0);
+    const preflightExecutorProjectProcess = processes.some((observation) => observation.role === "executor" && observation.projectProcessCount > 0);
+    const preflightProcessProofComplete = hasCompleteProcessObservations(processes);
+    const preflightNegativePathsPassed = staticConfig.passed && canaryProbe.status === "pass" && !network.endpointPublished;
+    const automatedSections: CodexSplitGateEvidence["sections"] = {
+      A: controlHardened && physicalHomeSeparation && network.controlCodexServiceReachableOnEgress
+        && !preflightControlProjectProcess && preflightProcessProofComplete,
+      B: executorHardened && executorImageExact && physicalHomeSeparation && network.executionNetworkExpectedMembers
+        && preflightProcessProofComplete,
+      C: false,
+      D: network.executionNetworkExpectedMembers && network.controlEgressExpectedMembers
+        && network.controlCodexServiceReachableOnEgress && network.executorEndpointReachableOnExecution
+        && !network.executorEndpointReachableFromControlEgress && !network.executorInternetReachable
+        && !network.executorControlEgressGatewayReachable && !network.executorControlEgressAddressReachable
+        && !network.executorHostReachable && !network.executorUnrelatedServiceReachable
+        && network.controlForwardingDisabled && network.controlRoutingCapabilitiesAbsent && network.controlProxyProcessAbsent
+        && !network.endpointPublished && !network.hostNetworkListener && network.probeComplete,
+      E: false,
+      F: preflightNegativePathsPassed
+    };
+    const preflightEvidence: CodexSplitLiveEvidence = {
+      runId,
+      admittedCodexVersion: "0.153.4",
+      sections: automatedSections,
+      transportSecurity: record.executor.transportSecurity,
+      liveOperatorProof: false,
+      physicalHomeSeparation,
+      noLocalFallback: preflightNegativePathsPassed,
+      controlModelEgressProven: network.controlCodexServiceReachableOnEgress,
+      executorCannotReachControlEgressProven: !network.executorInternetReachable
+        && !network.executorControlEgressGatewayReachable && !network.executorControlEgressAddressReachable
+        && !network.executorHostReachable && !network.executorUnrelatedServiceReachable,
+      controlRoutingDisabledProven: network.controlForwardingDisabled
+        && network.controlRoutingCapabilitiesAbsent && network.controlProxyProcessAbsent,
+      securityViolation: false,
+      incompleteReason: "operator-tui-required",
+      unsupportedReason: null,
+      evidenceVersion: 1,
+      processObservations: processes,
+      mountObservations: [
+        { role: "control", allowedMounts: allowedControlMounts(control, home) },
+        { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }
+      ],
+      networkObservations: [network]
+    };
+    if (input.mode === "preflight") {
+      const ready = automatedSections.A && automatedSections.B && automatedSections.D && automatedSections.F
+        && preflightExecutorProjectProcess === false && preflightControlProjectProcess === false;
+      return { evidence: preflightEvidence, ensured, canary, readyForOperatorTui: ready };
+    }
+    if (operator === null) throw new Error("codex-split-operator-missing");
     operator.printChecklist(buildCodexSplitManualChecklist());
     const before = await snapshotNativeSessionState({ home });
     const pty = await runtime.startNewSession({ projectId: configuration.projectId, workspaceId: configuration.workspaceId, columns: 120, rows: 40 });
@@ -1014,13 +1164,16 @@ async function runGateInternal(input: {
     const currentHome = await lstatIdentity(home.homePath);
     if (currentHome === null || !identitiesEqual(currentHome.identity, home.identity)) throw new Error("codex-split-home-identity");
     const allProcesses = [...processes, ...first.observations, ...resumed.observations];
+    const attachProcessProofComplete = hasCompleteProcessObservations([...first.observations, ...resumed.observations]);
     const controlProjectProcess = allProcesses.some((observation) => observation.role === "control" && observation.projectProcessCount > 0);
     const executorProjectProcess = allProcesses.some((observation) => observation.role === "executor" && observation.projectProcessCount > 0);
     const negativePathsPassed = staticConfig.passed && canaryProbe.status === "pass" && !network.endpointPublished;
     const sections: CodexSplitGateEvidence["sections"] = {
-      A: controlHardened && physicalHomeSeparation && network.controlCodexServiceReachableOnEgress && !controlProjectProcess,
-      B: executorHardened && executorImageExact && physicalHomeSeparation && network.executionNetworkExpectedMembers,
-      C: executorProjectProcess && !controlProjectProcess,
+      A: controlHardened && physicalHomeSeparation && network.controlCodexServiceReachableOnEgress
+        && !controlProjectProcess && hasCompleteProcessObservations(allProcesses),
+      B: executorHardened && executorImageExact && physicalHomeSeparation && network.executionNetworkExpectedMembers
+        && hasCompleteProcessObservations(allProcesses),
+      C: executorProjectProcess && !controlProjectProcess && attachProcessProofComplete,
       D: network.executionNetworkExpectedMembers && network.controlEgressExpectedMembers
         && network.controlCodexServiceReachableOnEgress && network.executorEndpointReachableOnExecution
         && !network.executorEndpointReachableFromControlEgress && !network.executorInternetReachable
@@ -1049,9 +1202,9 @@ async function runGateInternal(input: {
     const manualResult = await operator.confirmFinalResult();
     const finalEvidence: CodexSplitLiveEvidence = { ...preliminary, liveOperatorProof: manualResult === "PASS", securityViolation: manualResult === "FAIL" };
     if (evaluateCodexSplitOutcome(finalEvidence) === "PASS" || evaluateCodexSplitOutcome(finalEvidence) === "PASS-WITH-TRANSPORT-BLOCK") {
-      return { evidence: finalEvidence, ensured, canary };
+      return { evidence: finalEvidence, ensured, canary, readyForOperatorTui: false };
     }
-    return { evidence: finalEvidence, ensured, canary };
+    return { evidence: finalEvidence, ensured, canary, readyForOperatorTui: false };
   } catch (error) {
     const diagnostic = formatCodexSplitDiagnostic("live-gate", error, "verifier");
     const logger: StructuredLogger = createLogger({ component: "agent", subsystem: "codex-split-verifier" });
@@ -1067,27 +1220,30 @@ async function runGateInternal(input: {
         securityViolation: isSecurityReason(error),
         processObservations: initialProcesses,
         networkObservations: networkEvidence === null ? [] : [networkEvidence]
-      }, ensured, canary
+      }, ensured, canary, readyForOperatorTui: false
     };
   }
 }
 
-export async function runCodexSplitFeasibilityGate(input: {
+async function runCodexSplitVerification(input: {
   readonly configuration: CodexSplitVerifyConfiguration;
-  readonly operator: CodexSplitOperator;
+  readonly operator: CodexSplitOperator | null;
+  readonly mode: "operator" | "preflight";
   readonly services?: CodexSplitVerifierServices;
-}): Promise<CodexSplitLiveEvidence> {
+}): Promise<{ readonly evidence: CodexSplitLiveEvidence; readonly readyForOperatorTui: boolean }> {
   const runId = uuidv7();
   let services: CodexSplitVerifierServices | undefined;
   let ensured = false;
   let canary: CanaryBinding | null = null;
   let evidence: CodexSplitLiveEvidence;
+  let readyForOperatorTui = false;
   try {
     services = input.services ?? await createVerifierServices(input.configuration);
     const result = await runGateInternal({ ...input, services, runId });
     evidence = result.evidence;
     ensured = result.ensured;
     canary = result.canary;
+    readyForOperatorTui = result.readyForOperatorTui;
   } catch (error) {
     const diagnostic = formatCodexSplitDiagnostic("setup", error, "verifier");
     process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
@@ -1104,8 +1260,31 @@ export async function runCodexSplitFeasibilityGate(input: {
       cleanupFailed = true;
     }
   }
-  if (cleanupFailed && !evidence.securityViolation) evidence = { ...evidence, incompleteReason: "cleanup-failed" };
-  return evidence;
+  if (cleanupFailed && !evidence.securityViolation) {
+    evidence = { ...evidence, incompleteReason: "cleanup-failed" };
+    readyForOperatorTui = false;
+  }
+  return { evidence, readyForOperatorTui };
+}
+
+export async function runCodexSplitFeasibilityGate(input: {
+  readonly configuration: CodexSplitVerifyConfiguration;
+  readonly operator: CodexSplitOperator;
+  readonly services?: CodexSplitVerifierServices;
+}): Promise<CodexSplitLiveEvidence> {
+  const result = await runCodexSplitVerification({ ...input, mode: "operator" });
+  return result.evidence;
+}
+
+export async function runCodexSplitFeasibilityPreflight(input: {
+  readonly configuration: CodexSplitVerifyConfiguration;
+  readonly services?: CodexSplitVerifierServices;
+}): Promise<CodexSplitPreflightResult> {
+  const result = await runCodexSplitVerification({ ...input, operator: null, mode: "preflight" });
+  return {
+    status: result.readyForOperatorTui ? "READY_FOR_OPERATOR_TUI" : "BLOCKED/INCOMPLETE",
+    evidence: result.evidence
+  };
 }
 
 export function createCodexSplitTerminalOperator(): CodexSplitOperator {

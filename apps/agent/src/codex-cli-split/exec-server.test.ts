@@ -66,8 +66,9 @@ function dockerFixture(options: {
   readonly readinessInspections?: readonly DockerExecInspection[];
   readonly execIds?: readonly string[];
   readonly topProcessTables?: readonly DockerProcessTable[];
-} = {}): { readonly docker: DockerEngineClient; readonly calls: unknown[] } {
+} = {}): { readonly docker: DockerEngineClient; readonly calls: unknown[]; readonly topArguments: string[] } {
   const calls: unknown[] = [];
+  const topArguments: string[] = [];
   let execCount = 0;
   let serverInspectionCount = 0;
   let readinessInspectionCount = 0;
@@ -88,13 +89,14 @@ function dockerFixture(options: {
       const scripted = options.readinessInspections?.[Math.min(readinessInspectionCount++, (options.readinessInspections?.length ?? 1) - 1)];
       return Promise.resolve(scripted ?? options.readinessInspection ?? inspection({ ID: execId, Running: false, ExitCode: 0, Pid: 0 }));
     }
-    override topContainer(): Promise<DockerProcessTable> {
+    override topContainer(_containerId: string, psArgs: string): Promise<DockerProcessTable> {
+      topArguments.push(psArgs);
       const scripted = options.topProcessTables?.[Math.min(topProcessCount++, (options.topProcessTables?.length ?? 1) - 1)];
       return Promise.resolve(scripted ?? { titles: ["PID", "ARGS"], processes: [["123", "codex exec-server"]] });
     }
     override stopContainer(id: string): Promise<void> { calls.push(id); return Promise.resolve(); }
   }();
-  return { docker, calls };
+  return { docker, calls, topArguments };
 }
 
 test("starts the verified exec-server only inside the executor", async () => {
@@ -211,6 +213,13 @@ test("reattaches with the same bounded readiness semantics", async () => {
   });
   const request = { docker: fixture.docker, executor, transport, readiness: readinessOptions() };
   await expect(probeCodexExecServerReady(request)).resolves.toBe(123);
+});
+
+test("uses Docker's explicit ps output format for process observations", async () => {
+  const fixture = dockerFixture({ execIds: ["ready-exec"] });
+  await expect(probeCodexExecServerReady({ docker: fixture.docker, executor, transport, readiness: readinessOptions() }))
+    .resolves.toBe(123);
+  expect(fixture.topArguments).toEqual(["-o pid,args", "-o pid,args", "-o pid,args", "-o pid,args"]);
 });
 
 test("rejects an endpoint with the wrong executor identity or control-egress network", async () => {

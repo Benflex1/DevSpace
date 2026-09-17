@@ -302,14 +302,14 @@ export async function probeCodexExecServerReady(input: {
 }): Promise<number> {
   assertServerEndpoint(input.executor, input.transport);
   assertServerNetwork(input.executor, input.transport);
-  const processes = await input.docker.topContainer(input.executor.containerId, "pid,args");
+  const processes = await input.docker.topContainer(input.executor.containerId, "-o pid,args");
   const serverPid = processServerPid(processes);
   await runReadyProbe({
     ...input,
     server: {
       assertAlive: async () => {
         try {
-          const currentProcesses = await input.docker.topContainer(input.executor.containerId, "pid,args");
+          const currentProcesses = await input.docker.topContainer(input.executor.containerId, "-o pid,args");
           if (processServerPid(currentProcesses) !== serverPid) throw new Error("codex-exec-server-process");
         } catch (error) {
           if (error instanceof Error && error.message === "codex-exec-server-process") throw error;

@@ -4,14 +4,19 @@ import path from "node:path";
 import { expect, test } from "vitest";
 import {
   CODEX_SPLIT_VERIFY_ENV,
+  buildCodexSplitCanaryProbeScript,
   buildCodexSplitManualChecklist,
   createCodexSplitTerminalOperator,
   endpointFromRecord,
   formatCodexSplitDiagnostic,
+  hasCompleteProcessObservations,
+  hasExpectedDefaultRoute,
   hasNoExternalDefaultRoute,
+  hasNoExternallyReachableTcpListener,
   parseCodexSplitOperatorAnswer,
   parseCodexSplitVerifyEnvironment,
   runCodexSplitFeasibilityGate,
+  runCodexSplitFeasibilityPreflight,
   type CodexSplitVerifierServices
 } from "./feasibility-verifier.js";
 import { DockerEngineClient } from "../docker-runtime.js";
@@ -90,6 +95,50 @@ test("accepts an internal-only executor default route but rejects an external ro
   expect(hasNoExternalDefaultRoute("172.30.0.0/16 dev eth0", "172.30.0.1")).toBe(true);
   expect(hasNoExternalDefaultRoute("default via 10.0.0.1 dev eth0", "172.30.0.1")).toBe(false);
   expect(hasNoExternalDefaultRoute("default dev eth0", "172.30.0.1")).toBe(false);
+});
+
+test("parses procfs IPv4 routes for control and executor route proofs", () => {
+  const procRoutes = [
+    "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT",
+    "eth0\t00000000\t01001EAC\t0003\t0\t0\t0\t00000000\t0\t0\t0",
+    "eth0\t00001EAC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0"
+  ].join("\n");
+  expect(hasExpectedDefaultRoute(procRoutes, "172.30.0.1")).toBe(true);
+  expect(hasNoExternalDefaultRoute(procRoutes, "172.30.0.1")).toBe(true);
+  expect(hasExpectedDefaultRoute(procRoutes, "172.30.1.1")).toBe(false);
+  expect(hasNoExternalDefaultRoute(procRoutes, "172.30.1.1")).toBe(false);
+});
+
+test("treats loopback proc listeners as local but rejects wildcard listeners", () => {
+  const procSockets = [
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+    "   0: 0B00007F:95A3 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 2 0000000000000000 100 0 0 10 0",
+    "   1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2 2 0000000000000000 100 0 0 10 0"
+  ].join("\n");
+  expect(hasNoExternallyReachableTcpListener(procSockets)).toBe(true);
+  expect(hasNoExternallyReachableTcpListener(procSockets.replace("0B00007F", "00000000"))).toBe(false);
+});
+
+test("canary probe checks proc environment contents without requiring proc to be unreadable", () => {
+  const script = buildCodexSplitCanaryProbeScript({
+    canaryPath: "/codex-home/sentinel",
+    linkPath: "/workspace/.sentinel-link",
+    basename: "sentinel"
+  });
+  expect(script).not.toContain("test ! -r '/proc/1/environ'");
+  expect(script).toContain("tr '\\0' '\\n' </proc/1/environ");
+  expect(script).toContain("/proc/1/root/codex-home/sentinel");
+});
+
+test("does not treat an unobserved zero process count as a process proof", () => {
+  expect(hasCompleteProcessObservations([
+    { role: "control", projectProcessCount: 0, observationComplete: false },
+    { role: "executor", projectProcessCount: 0, observationComplete: true }
+  ])).toBe(false);
+  expect(hasCompleteProcessObservations([
+    { role: "control", projectProcessCount: 0, observationComplete: true },
+    { role: "executor", projectProcessCount: 0, observationComplete: true }
+  ])).toBe(true);
 });
 
 test("round-trips the current persisted transport record through endpointFromRecord", () => {
@@ -215,6 +264,46 @@ test("does not attach the TUI when the runtime preflight fails", async () => {
     expect(attached).toBe(false);
     expect(evidence.incompleteReason).toBe("codex-split-test-preflight");
     expect(evidence.securityViolation).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight mode stops before any operator or native TUI interaction", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-codex-verifier-preflight-mode-"));
+  try {
+    const executablePath = path.join(root, "codex");
+    await writeFile(executablePath, "#!/bin/sh\nprintf 'codex-cli 0.153.4\\n'\n", { mode: 0o700 });
+    await chmod(executablePath, 0o700);
+    const managed = new ManagedWorkspaces({
+      projects: path.join(root, "projects"), workspaces: path.join(root, "workspaces"), state: path.join(root, "state")
+    });
+    const docker = new DockerEngineClient(path.join(root, "docker.sock"));
+    class FailingRuntime extends CodexSplitRuntime {
+      override ensure(_input: { readonly projectId: string; readonly workspaceId: string }): Promise<CodexSplitRuntimeRecord> {
+        return Promise.reject(new Error("codex-split-test-preflight-mode"));
+      }
+    }
+    const services: CodexSplitVerifierServices = {
+      docker,
+      managed,
+      runtime: new FailingRuntime({
+        managed, docker, stateRoot: path.join(root, "state"),
+        controlImageReference: validEnvironment.DEVSPACE_CODEX_CONTROL_IMAGE_REFERENCE!, codexExecutablePath: executablePath
+      }),
+      home: {
+        accountBinding: "owner-default", homePath: path.join(root, "native-home"), mountTarget: "/codex-home",
+        identity: { device: "1", inode: "2" }, ownerUid: 1000, ownerGid: 1000
+      } satisfies CodexNativeHomeBinding
+    };
+
+    const result = await runCodexSplitFeasibilityPreflight({
+      configuration: parseCodexSplitVerifyEnvironment({ ...validEnvironment, DEVSPACE_CODEX_EXECUTABLE_PATH: executablePath }),
+      services
+    });
+
+    expect(result.status).toBe("BLOCKED/INCOMPLETE");
+    expect(result.evidence.incompleteReason).toBe("codex-split-test-preflight-mode");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

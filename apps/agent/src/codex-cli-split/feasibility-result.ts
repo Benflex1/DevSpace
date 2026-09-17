@@ -33,7 +33,8 @@ export type CodexSplitGateEvidence = z.infer<typeof codexSplitGateEvidenceSchema
 
 const codexSplitProcessObservationSchema = z.strictObject({
   role: z.enum(["control", "executor"]),
-  projectProcessCount: z.number().int().min(0).max(4096)
+  projectProcessCount: z.number().int().min(0).max(4096),
+  observationComplete: z.boolean()
 });
 const codexSplitMountObservationSchema = z.strictObject({
   role: z.enum(["control", "executor"]),
