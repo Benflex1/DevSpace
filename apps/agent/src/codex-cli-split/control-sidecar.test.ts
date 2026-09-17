@@ -175,6 +175,7 @@ function causeMessages(error: unknown): string[] {
 
 test("builds a control policy with only native home and trusted read-only assets", async () => {
   const policy = await buildPolicy();
+  expect(policy.nativeAppServerSocketPath).toBe("/codex-home/app-server-control/app-server-control.sock");
   expect(policy.environment).toEqual(remote.environment);
   expect(policy.workingDirectory).toBe("/workspace");
   expect(policy.physicalWorkspaceMounts).toEqual([]);

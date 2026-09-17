@@ -12,6 +12,7 @@ import {
   buildCodexSplitNetworkAttachments,
   type CodexSplitNetworkBinding
 } from "./network.js";
+import { APP_SERVER_CONTROL_SOCKET_PATH } from "./native-app-server.js";
 import type { CodexNativeHomeBinding } from "./native-home.js";
 import type { CodexRemoteOnlyConfiguration } from "./remote-policy.js";
 
@@ -25,6 +26,7 @@ const IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 export interface CodexControlSidecarPolicy {
   readonly imageReference: string;
   readonly home: CodexNativeHomeBinding;
+  readonly nativeAppServerSocketPath: typeof APP_SERVER_CONTROL_SOCKET_PATH;
   readonly artifact: CodexSplitArtifactBinding;
   readonly remote: CodexRemoteOnlyConfiguration;
   readonly network: CodexSplitNetworkBinding;
@@ -129,6 +131,7 @@ function assertRemotePolicy(input: {
   ) {
     throw new Error("codex-control-working-directory");
   }
+  if (remote.codeMode.remoteHostUrl.length === 0) throw new Error("codex-control-code-mode-host");
   if (remote.environmentId !== "remote"
     || remote.localEnvironmentAvailable !== false || remote.unifiedExecRequired !== true
     || remote.managedPolicy.mechanism !== "0.153.4-managed-requirements"
@@ -198,6 +201,7 @@ export async function buildCodexControlSidecarPolicy(input: {
   return Promise.resolve({
     imageReference,
     home: input.home,
+    nativeAppServerSocketPath: APP_SERVER_CONTROL_SOCKET_PATH,
     artifact: input.artifact,
     remote: input.remote,
     network: input.network,
