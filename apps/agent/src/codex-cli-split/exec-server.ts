@@ -7,6 +7,23 @@ import { codexCommand } from "./artifact.js";
 import type { CodexProjectExecutorBinding } from "./project-executor.js";
 import type { CodexSplitTransportBinding } from "./transport.js";
 
+const EXEC_SERVER_READY_DEADLINE_MS = 10_000;
+const EXEC_SERVER_READY_POLL_INTERVAL_MS = 50;
+
+export interface CodexExecServerReadinessOptions {
+  readonly deadlineMs?: number;
+  readonly pollIntervalMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+interface ResolvedReadinessOptions {
+  readonly deadlineMs: number;
+  readonly pollIntervalMs: number;
+  readonly now: () => number;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+}
+
 function readyProbe(port: number): readonly string[] {
   return [
     "/bin/sh", "-c",
@@ -64,6 +81,86 @@ function discardStream(stream: Duplex): void {
   stream.resume();
 }
 
+function resolveReadinessOptions(input: CodexExecServerReadinessOptions | undefined): ResolvedReadinessOptions {
+  const deadlineMs = input?.deadlineMs ?? EXEC_SERVER_READY_DEADLINE_MS;
+  const pollIntervalMs = input?.pollIntervalMs ?? EXEC_SERVER_READY_POLL_INTERVAL_MS;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 60_000
+    || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 5_000) {
+    throw new Error("codex-exec-server-readiness-options");
+  }
+  return {
+    deadlineMs,
+    pollIntervalMs,
+    now: input?.now ?? Date.now,
+    sleep: input?.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
+  };
+}
+
+function assertReadinessProbeInspection(
+  inspection: DockerExecInspection,
+  executor: CodexProjectExecutorBinding,
+  probeId: string
+): void {
+  if (inspection.ID !== probeId || inspection.ContainerID !== executor.containerId
+    || (inspection.Running && inspection.ExitCode !== null)
+    || (!inspection.Running && inspection.ExitCode === null)) {
+    throw new Error("codex-exec-server-probe");
+  }
+}
+
+interface ExecServerLiveness {
+  readonly assertAlive: () => Promise<void>;
+}
+
+async function runReadyProbeAttempt(input: {
+  readonly docker: DockerEngineClient;
+  readonly executor: CodexProjectExecutorBinding;
+  readonly transport: CodexSplitTransportBinding;
+  readonly server: ExecServerLiveness;
+  readonly readiness: ResolvedReadinessOptions;
+  readonly deadline: number;
+}): Promise<boolean> {
+  let probeId: string;
+  try {
+    probeId = await input.docker.createExec(input.executor.containerId, {
+      command: readyProbe(input.transport.endpointPort), workingDirectory: "/", environment: {}, attachStdin: false, tty: false
+    });
+  } catch (error) {
+    throw new Error("codex-exec-server-probe", { cause: error });
+  }
+  let stream: Duplex | undefined;
+  try {
+    try {
+      stream = await input.docker.startExecAttached(probeId, false);
+    } catch (error) {
+      throw new Error("codex-exec-server-probe", { cause: error });
+    }
+    discardStream(stream);
+    for (;;) {
+      await input.server.assertAlive();
+      let inspection: DockerExecInspection;
+      try {
+        inspection = await input.docker.inspectExec(probeId);
+      } catch (error) {
+        throw new Error("codex-exec-server-probe", { cause: error });
+      }
+      assertReadinessProbeInspection(inspection, input.executor, probeId);
+      if (!inspection.Running) {
+        if (inspection.ExitCode === 0) {
+          await input.server.assertAlive();
+          return true;
+        }
+        return false;
+      }
+      const remaining = input.deadline - input.readiness.now();
+      if (remaining <= 0) return false;
+      await input.readiness.sleep(Math.min(input.readiness.pollIntervalMs, remaining));
+    }
+  } finally {
+    stream?.destroy();
+  }
+}
+
 export async function startCodexExecServer(input: {
   readonly docker: DockerEngineClient;
   readonly executor: CodexProjectExecutorBinding;
@@ -105,21 +202,20 @@ async function runReadyProbe(input: {
   readonly docker: DockerEngineClient;
   readonly executor: CodexProjectExecutorBinding;
   readonly transport: CodexSplitTransportBinding;
+  readonly server: ExecServerLiveness;
+  readonly readiness?: CodexExecServerReadinessOptions;
 }): Promise<void> {
-  const probeId = await input.docker.createExec(input.executor.containerId, {
-    command: readyProbe(input.transport.endpointPort), workingDirectory: "/", environment: {}, attachStdin: false, tty: false
-  });
-  const stream = await input.docker.startExecAttached(probeId, false);
-  discardStream(stream);
-  const inspection = await input.docker.inspectExec(probeId).catch((error) => {
-    stream.destroy();
-    throw new Error("codex-exec-server-not-ready", { cause: error });
-  });
-  stream.destroy();
-  if (inspection.ID !== probeId || inspection.ContainerID !== input.executor.containerId
-    || inspection.Running || inspection.ExitCode !== 0) {
-    throw new Error("codex-exec-server-not-ready");
+  const readiness = resolveReadinessOptions(input.readiness);
+  const deadline = readiness.now() + readiness.deadlineMs;
+  while (readiness.now() < deadline) {
+    await input.server.assertAlive();
+    if (await runReadyProbeAttempt({ ...input, readiness, deadline })) return;
+    await input.server.assertAlive();
+    const remaining = deadline - readiness.now();
+    if (remaining <= 0) break;
+    await readiness.sleep(Math.min(readiness.pollIntervalMs, remaining));
   }
+  throw new Error("codex-exec-server-not-ready");
 }
 
 /** Revalidates an existing executor-side server after Agent restart without creating a second server. */
@@ -127,24 +223,40 @@ export async function probeCodexExecServerReady(input: {
   readonly docker: DockerEngineClient;
   readonly executor: CodexProjectExecutorBinding;
   readonly transport: CodexSplitTransportBinding;
+  readonly readiness?: CodexExecServerReadinessOptions;
 }): Promise<number> {
   assertServerEndpoint(input.executor, input.transport);
   assertServerNetwork(input.executor, input.transport);
   const processes = await input.docker.topContainer(input.executor.containerId, "pid,args");
   const serverPid = processServerPid(processes);
-  await runReadyProbe(input);
+  await runReadyProbe({
+    ...input,
+    server: {
+      assertAlive: async () => {
+        try {
+          const currentProcesses = await input.docker.topContainer(input.executor.containerId, "pid,args");
+          if (processServerPid(currentProcesses) !== serverPid) throw new Error("codex-exec-server-process");
+        } catch (error) {
+          if (error instanceof Error && error.message === "codex-exec-server-process") throw error;
+          throw new Error("codex-exec-server-process", { cause: error });
+        }
+      }
+    }
+  });
   return serverPid;
 }
 
 export async function assertCodexExecServerReady(input: {
   readonly docker: DockerEngineClient;
   readonly handle: CodexExecServerHandle;
+  readonly readiness?: CodexExecServerReadinessOptions;
 }): Promise<void> {
-  const serverInspection = await input.docker.inspectExec(input.handle.execId);
-  assertServerInspection(serverInspection, {
+  const serverExecutor = {
     containerId: input.handle.executorContainerId,
     policy: { workingDirectory: "/workspace" }
-  } as CodexProjectExecutorBinding, input.handle.execId, input.handle.serverPid);
+  } as CodexProjectExecutorBinding;
+  const serverInspection = await input.docker.inspectExec(input.handle.execId);
+  assertServerInspection(serverInspection, serverExecutor, input.handle.execId, input.handle.serverPid);
   await runReadyProbe({
     docker: input.docker,
     executor: {
@@ -153,7 +265,19 @@ export async function assertCodexExecServerReady(input: {
         workspaceId: input.handle.endpoint.workspaceId, generation: input.handle.endpoint.generation,
         executionNetwork: { id: input.handle.endpoint.executionNetworkId } }
     } as CodexProjectExecutorBinding,
-    transport: input.handle.endpoint
+    transport: input.handle.endpoint,
+    ...(input.readiness === undefined ? {} : { readiness: input.readiness }),
+    server: {
+      assertAlive: async () => {
+        let inspection: DockerExecInspection;
+        try {
+          inspection = await input.docker.inspectExec(input.handle.execId);
+        } catch (error) {
+          throw new Error("codex-exec-server-process", { cause: error });
+        }
+        assertServerInspection(inspection, serverExecutor, input.handle.execId, input.handle.serverPid);
+      }
+    }
   });
 }
 
