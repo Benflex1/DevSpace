@@ -362,7 +362,7 @@ async function inspectOptional<T>(operation: () => Promise<T>): Promise<T | null
   }
 }
 
-async function removeOptional(docker: DockerEngineClient, operation: () => Promise<void>): Promise<void> {
+async function removeOptional(operation: () => Promise<void>): Promise<void> {
   try {
     await operation();
   } catch (error) {
@@ -417,10 +417,10 @@ async function discardStaleRuntimeResources(input: {
   if (execution !== null) assertNetworkMembers(execution, executionMembers);
   if (controlEgress !== null) assertNetworkMembers(controlEgress, egressMembers);
 
-  if (executor !== null) await removeOptional(docker, () => docker.removeContainer(record.executor.id));
-  if (control !== null) await removeOptional(docker, () => docker.removeContainer(record.control.id));
-  if (controlEgress !== null) await removeOptional(docker, () => docker.removeNetwork(record.networks.controlEgress.id));
-  if (execution !== null) await removeOptional(docker, () => docker.removeNetwork(record.networks.execution.id));
+  if (executor !== null) await removeOptional(() => docker.removeContainer(record.executor.id));
+  if (control !== null) await removeOptional(() => docker.removeContainer(record.control.id));
+  if (controlEgress !== null) await removeOptional(() => docker.removeNetwork(record.networks.controlEgress.id));
+  if (execution !== null) await removeOptional(() => docker.removeNetwork(record.networks.execution.id));
 }
 
 function isLive(state: CodexSplitSessionRecord["state"]): boolean {
