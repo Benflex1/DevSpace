@@ -42,7 +42,13 @@ import {
   prepareCodexManagedPolicy,
   type CodexManagedPolicyBinding
 } from "./remote-policy.js";
-import { evaluateCodexSplitOutcome, type CodexSplitGateEvidence } from "./feasibility-result.js";
+import {
+  evaluateCodexSplitOutcome,
+  type CodexSplitGateEvidence,
+  type CodexSplitLiveGateEvidence,
+  type CodexSplitReadinessState,
+  type CodexSplitTransportEvidence
+} from "./feasibility-result.js";
 import type { CodexSplitRuntimeRecord } from "./runtime-record.js";
 import type { NativeCodexPty } from "./native-pty.js";
 import { runCodexSplitPtyProof, type CodexSplitPtyProof } from "./pty-harness.js";
@@ -77,39 +83,8 @@ export interface CodexSplitOperator {
   confirmFinalResult(): Promise<"PASS" | "FAIL">;
 }
 
-export interface CodexSplitLiveEvidence extends CodexSplitGateEvidence {
-  readonly runId: string;
-  readonly processObservations: readonly {
-    readonly role: "control" | "executor";
-    readonly projectProcessCount: number;
-    readonly observationComplete: boolean;
-  }[];
-  readonly mountObservations: readonly {
-    readonly role: "control" | "executor";
-    readonly allowedMounts: boolean;
-  }[];
-  readonly networkObservations: readonly {
-    readonly executionNetworkExpectedMembers: boolean;
-    readonly controlEgressExpectedMembers: boolean;
-    readonly controlCodexServiceReachableOnEgress: boolean;
-    readonly executorEndpointReachableOnExecution: boolean;
-    readonly executorEndpointReachableFromControlEgress: boolean;
-    readonly executorInternetReachable: boolean;
-    readonly executorControlEgressGatewayReachable: boolean;
-    readonly executorControlEgressAddressReachable: boolean;
-    readonly executorHostReachable: boolean;
-    readonly executorUnrelatedServiceReachable: boolean;
-    readonly controlForwardingDisabled: boolean;
-    readonly controlRoutingCapabilitiesAbsent: boolean;
-    readonly controlProxyProcessAbsent: boolean;
-    readonly endpointPublished: boolean;
-    readonly hostNetworkListener: boolean;
-    readonly probeComplete: boolean;
-    readonly securityViolation: boolean;
-  }[];
-}
-
-export type CodexSplitPreflightStatus = "READY_FOR_OPERATOR_TUI" | "BLOCKED/INCOMPLETE";
+export type CodexSplitLiveEvidence = CodexSplitLiveGateEvidence;
+export type CodexSplitPreflightStatus = CodexSplitReadinessState;
 
 export interface CodexSplitPreflightResult {
   readonly status: CodexSplitPreflightStatus;
@@ -938,12 +913,31 @@ export function formatCodexSplitDiagnostic(
   return { phase: phase.slice(0, 64), reasonCode: safeReason(error), exceptionClass, resourceRole, stackContext };
 }
 
+function transportEvidenceForRecord(record: CodexSplitRuntimeRecord): CodexSplitTransportEvidence {
+  return {
+    execServer: record.execServer.transportSecurity,
+    codeModeHost: record.codeModeHost.transportSecurity
+  };
+}
+
+function aggregateTransportSecurity(transport: CodexSplitTransportEvidence): CodexSplitRuntimeRecord["executor"]["transportSecurity"] {
+  if (transport.execServer === "unproven" || transport.codeModeHost === "unproven") return "unproven";
+  if (transport.execServer === "private-network-only" || transport.codeModeHost === "private-network-only") {
+    return "private-network-only";
+  }
+  return "protocol-authenticated";
+}
+
 function baseEvidence(runId: string, reason: string | null = "preflight-incomplete"): CodexSplitLiveEvidence {
   return {
     runId,
     admittedCodexVersion: "0.153.4",
-    sections: { A: false, B: false, C: false, D: false, E: false, F: false },
+    sections: { A: false, B: false, C: false, D: false, E: false, F: false, G: false, H: false },
     transportSecurity: "unproven",
+    transportEvidence: { execServer: "unproven", codeModeHost: "unproven" },
+    readiness: "BLOCKED/INCOMPLETE",
+    realModelProof: null,
+    operatorProof: null,
     liveOperatorProof: false,
     physicalHomeSeparation: false,
     noLocalFallback: false,
@@ -953,7 +947,7 @@ function baseEvidence(runId: string, reason: string | null = "preflight-incomple
     securityViolation: false,
     incompleteReason: reason,
     unsupportedReason: null,
-    evidenceVersion: 1,
+    evidenceVersion: 2,
     processObservations: [],
     mountObservations: [],
     networkObservations: []
@@ -1078,12 +1072,13 @@ async function runGateInternal(input: {
       return {
         evidence: {
           ...baseEvidence(runId, null),
-          transportSecurity: record.executor.transportSecurity,
+          transportSecurity: aggregateTransportSecurity(transportEvidenceForRecord(record)),
+          transportEvidence: transportEvidenceForRecord(record),
           physicalHomeSeparation,
           noLocalFallback: false,
           securityViolation: true,
           mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
-          processObservations: processes,
+          processObservations: [...processes],
           networkObservations: [network]
         }, ensured, canary, readyForOperatorTui: false, ptyProof
       };
@@ -1093,10 +1088,12 @@ async function runGateInternal(input: {
       || network.endpointPublished || network.hostNetworkListener || network.securityViolation) {
       return {
         evidence: {
-          ...baseEvidence(runId, null), transportSecurity: record.executor.transportSecurity,
+          ...baseEvidence(runId, null),
+          transportSecurity: aggregateTransportSecurity(transportEvidenceForRecord(record)),
+          transportEvidence: transportEvidenceForRecord(record),
           physicalHomeSeparation, securityViolation: true,
           mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
-          processObservations: processes, networkObservations: [network]
+          processObservations: [...processes], networkObservations: [network]
         }, ensured, canary, readyForOperatorTui: false, ptyProof
       };
     }
@@ -1136,13 +1133,20 @@ async function runGateInternal(input: {
         && network.controlForwardingDisabled && network.controlRoutingCapabilitiesAbsent && network.controlProxyProcessAbsent
         && !network.endpointPublished && !network.hostNetworkListener && network.probeComplete,
       E: false,
-      F: preflightNegativePathsPassed
+      F: preflightNegativePathsPassed,
+      G: aggregateTransportSecurity(transportEvidenceForRecord(record)) !== "unproven",
+      H: ptyProof.genericTtyCycles === 5 && ptyProof.codexVersionTtyCycles === 3 && ptyProof.nativePtyStartupCycles === 3
     };
+    const preflightTransportEvidence = transportEvidenceForRecord(record);
     const preflightEvidence: CodexSplitLiveEvidence = {
       runId,
       admittedCodexVersion: "0.153.4",
       sections: automatedSections,
-      transportSecurity: record.executor.transportSecurity,
+      transportSecurity: aggregateTransportSecurity(preflightTransportEvidence),
+      transportEvidence: preflightTransportEvidence,
+      readiness: "READY_FOR_OPERATOR_TUI",
+      realModelProof: null,
+      operatorProof: null,
       liveOperatorProof: false,
       physicalHomeSeparation,
       noLocalFallback: preflightNegativePathsPassed,
@@ -1155,8 +1159,8 @@ async function runGateInternal(input: {
       securityViolation: false,
       incompleteReason: "operator-tui-required",
       unsupportedReason: null,
-      evidenceVersion: 1,
-      processObservations: processes,
+      evidenceVersion: 2,
+      processObservations: [...processes],
       mountObservations: [
         { role: "control", allowedMounts: allowedControlMounts(control, home) },
         { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }
@@ -1203,10 +1207,15 @@ async function runGateInternal(input: {
         && network.controlRoutingCapabilitiesAbsent && network.controlProxyProcessAbsent && !network.endpointPublished
         && !network.hostNetworkListener && network.probeComplete,
       E: currentHome !== null && identitiesEqual(currentHome.identity, home.identity),
-      F: negativePathsPassed
+      F: negativePathsPassed,
+      G: aggregateTransportSecurity(transportEvidenceForRecord(record)) !== "unproven",
+      H: false
     };
+    const operatorTransportEvidence = transportEvidenceForRecord(record);
     const preliminary: CodexSplitLiveEvidence = {
-      runId, admittedCodexVersion: "0.153.4", sections, transportSecurity: record.executor.transportSecurity,
+      runId, admittedCodexVersion: "0.153.4", sections,
+      transportSecurity: aggregateTransportSecurity(operatorTransportEvidence), transportEvidence: operatorTransportEvidence,
+      readiness: "READY_FOR_OPERATOR_TUI", realModelProof: null, operatorProof: null,
       liveOperatorProof: false, physicalHomeSeparation, noLocalFallback: negativePathsPassed,
       controlModelEgressProven: network.controlCodexServiceReachableOnEgress,
       executorCannotReachControlEgressProven: !network.executorInternetReachable && !network.executorControlEgressGatewayReachable
@@ -1214,7 +1223,7 @@ async function runGateInternal(input: {
         && !network.executorUnrelatedServiceReachable,
       controlRoutingDisabledProven: network.controlForwardingDisabled && network.controlRoutingCapabilitiesAbsent
         && network.controlProxyProcessAbsent,
-      securityViolation: false, incompleteReason: null, unsupportedReason: null, evidenceVersion: 1,
+      securityViolation: false, incompleteReason: null, unsupportedReason: null, evidenceVersion: 2,
       processObservations: allProcesses,
       mountObservations: [{ role: "control", allowedMounts: allowedControlMounts(control, home) }, { role: "executor", allowedMounts: allowedExecutorMounts(executor, context, git) }],
       networkObservations: [network]
@@ -1236,7 +1245,10 @@ async function runGateInternal(input: {
     return {
       evidence: {
         ...baseEvidence(runId, reason === "codex-split-operator-aborted" ? "operator-aborted" : reason),
-        ...(record === null ? {} : { transportSecurity: record.executor.transportSecurity }),
+        ...(record === null ? {} : {
+          transportSecurity: aggregateTransportSecurity(transportEvidenceForRecord(record)),
+          transportEvidence: transportEvidenceForRecord(record)
+        }),
         securityViolation: isSecurityReason(error),
         processObservations: initialProcesses,
         networkObservations: networkEvidence === null ? [] : [networkEvidence]

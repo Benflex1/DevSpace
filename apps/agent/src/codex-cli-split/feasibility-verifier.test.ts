@@ -288,6 +288,11 @@ test("does not attach the TUI when the runtime preflight fails", async () => {
     expect(attached).toBe(false);
     expect(evidence.incompleteReason).toBe("codex-split-test-preflight");
     expect(evidence.securityViolation).toBe(false);
+    expect(evidence.sections).toEqual({ A: false, B: false, C: false, D: false, E: false, F: false, G: false, H: false });
+    expect(evidence.readiness).toBe("BLOCKED/INCOMPLETE");
+    expect(evidence.transportEvidence).toEqual({ execServer: "unproven", codeModeHost: "unproven" });
+    expect(evidence.realModelProof).toBeNull();
+    expect(evidence.operatorProof).toBeNull();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -328,6 +333,9 @@ test("preflight mode stops before any operator or native TUI interaction", async
 
     expect(result.status).toBe("BLOCKED/INCOMPLETE");
     expect(result.evidence.incompleteReason).toBe("codex-split-test-preflight-mode");
+    expect(result.evidence.readiness).toBe("BLOCKED/INCOMPLETE");
+    expect(result.evidence.realModelProof).toBeNull();
+    expect(result.evidence.operatorProof).toBeNull();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

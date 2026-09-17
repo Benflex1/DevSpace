@@ -3,14 +3,37 @@ import {
   codexSplitGateEvidenceSchema,
   codexSplitLiveEvidenceSchema,
   evaluateCodexSplitOutcome,
-  type CodexSplitGateEvidence
+  type CodexSplitGateEvidence,
+  type CodexSplitModelCompatibilityProof
 } from "./feasibility-result.js";
+
+const modelProof: CodexSplitModelCompatibilityProof = {
+  provenance: "real-native-app-server",
+  model: "gpt-6-astra",
+  toolModeEvidence: { kind: "protocol", value: "CodeModeOnly" },
+  remoteCodeModeObserved: true,
+  codeModeProvider: "remote-grpc",
+  codeModeHostContainerId: "executor-id",
+  execServerContainerId: "executor-id",
+  logicalCwd: "/workspace",
+  controlProjectProcessCount: 0,
+  executorProjectProcessCount: 1,
+  codeModeHostProcessObserved: true,
+  execServerProcessObserved: true,
+  nestedProjectExecObserved: true,
+  operationCompleted: true,
+  executorHasNativeHome: false
+};
 
 function evidence(overrides: Partial<CodexSplitGateEvidence> = {}): CodexSplitGateEvidence {
   return {
     admittedCodexVersion: "0.153.4",
-    sections: { A: true, B: true, C: true, D: true, E: true, F: true },
+    sections: { A: true, B: true, C: true, D: true, E: true, F: true, G: true, H: true },
     transportSecurity: "protocol-authenticated",
+    transportEvidence: { execServer: "protocol-authenticated", codeModeHost: "protocol-authenticated" },
+    readiness: "READY_FOR_OPERATOR_TUI",
+    realModelProof: modelProof,
+    operatorProof: { provenance: "real-native-tui" },
     liveOperatorProof: true,
     physicalHomeSeparation: true,
     noLocalFallback: true,
@@ -20,14 +43,17 @@ function evidence(overrides: Partial<CodexSplitGateEvidence> = {}): CodexSplitGa
     securityViolation: false,
     incompleteReason: null,
     unsupportedReason: null,
-    evidenceVersion: 1,
+    evidenceVersion: 2,
     ...overrides
   };
 }
 
 test("returns PASS only for complete live evidence with authenticated transport", () => {
   expect(evaluateCodexSplitOutcome(evidence())).toBe("PASS");
-  expect(evaluateCodexSplitOutcome(evidence({ transportSecurity: "private-network-only" }))).toBe("PASS-WITH-TRANSPORT-BLOCK");
+  expect(evaluateCodexSplitOutcome(evidence({
+    transportSecurity: "private-network-only",
+    transportEvidence: { execServer: "private-network-only", codeModeHost: "private-network-only" }
+  }))).toBe("PASS-WITH-TRANSPORT-BLOCK");
 });
 
 test("returns FAIL before incomplete when a security invariant is disproven", () => {
@@ -39,14 +65,58 @@ test("returns FAIL before incomplete when a security invariant is disproven", ()
 test("returns BLOCKED/INCOMPLETE for absent proof, unsupported transport, or an incomplete section", () => {
   expect(evaluateCodexSplitOutcome(evidence({ liveOperatorProof: false }))).toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ incompleteReason: "operator-aborted" }))).toBe("BLOCKED/INCOMPLETE");
-  expect(evaluateCodexSplitOutcome(evidence({ transportSecurity: "unproven" }))).toBe("BLOCKED/INCOMPLETE");
-  expect(evaluateCodexSplitOutcome(evidence({ sections: { A: true, B: true, C: true, D: false, E: true, F: true } })))
+  expect(evaluateCodexSplitOutcome(evidence({
+    transportSecurity: "unproven",
+    transportEvidence: { execServer: "unproven", codeModeHost: "unproven" }
+  }))).toBe("BLOCKED/INCOMPLETE");
+  expect(evaluateCodexSplitOutcome(evidence({ sections: { A: true, B: true, C: true, D: false, E: true, F: true, G: true, H: true } })))
     .toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ controlModelEgressProven: false }))).toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ executorCannotReachControlEgressProven: false }))).toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ controlRoutingDisabledProven: false }))).toBe("BLOCKED/INCOMPLETE");
   expect(evaluateCodexSplitOutcome(evidence({ physicalHomeSeparation: false, incompleteReason: "preflight-incomplete" })))
     .toBe("BLOCKED/INCOMPLETE");
+});
+
+test("requires real model compatibility and native operator provenance for either pass state", () => {
+  expect(evaluateCodexSplitOutcome(evidence({ realModelProof: null }))).toBe("BLOCKED/INCOMPLETE");
+  expect(evaluateCodexSplitOutcome(evidence({ operatorProof: null, liveOperatorProof: false }))).toBe("BLOCKED/INCOMPLETE");
+  expect(evaluateCodexSplitOutcome(evidence({ readiness: "INFRASTRUCTURE_READY", realModelProof: null, operatorProof: null, liveOperatorProof: false })))
+    .toBe("BLOCKED/INCOMPLETE");
+  expect(evaluateCodexSplitOutcome(evidence({
+    transportEvidence: { execServer: "private-network-only", codeModeHost: "private-network-only" },
+    transportSecurity: "private-network-only"
+  }))).toBe("PASS-WITH-TRANSPORT-BLOCK");
+});
+
+test("keeps unknown network observations distinct from proven negative observations", () => {
+  const liveEvidence = {
+    ...evidence(),
+    runId: "018f0f00-0000-7000-8000-000000000006",
+    processObservations: [],
+    mountObservations: [],
+    networkObservations: [{
+      executionNetworkExpectedMembers: null,
+      controlEgressExpectedMembers: null,
+      controlCodexServiceReachableOnEgress: null,
+      executorEndpointReachableOnExecution: null,
+      executorEndpointReachableFromControlEgress: null,
+      executorInternetReachable: null,
+      executorControlEgressGatewayReachable: null,
+      executorControlEgressAddressReachable: null,
+      executorHostReachable: null,
+      executorUnrelatedServiceReachable: null,
+      controlForwardingDisabled: null,
+      controlRoutingCapabilitiesAbsent: null,
+      controlProxyProcessAbsent: null,
+      endpointPublished: null,
+      hostNetworkListener: null,
+      probeComplete: false,
+      securityViolation: null
+    }]
+  };
+  expect(codexSplitLiveEvidenceSchema.parse(liveEvidence).networkObservations[0]?.controlForwardingDisabled).toBeNull();
+  expect(evaluateCodexSplitOutcome(liveEvidence)).toBe("PASS");
 });
 
 test("does not treat mocked evidence as live and rejects malformed or secret-looking evidence", () => {
@@ -61,7 +131,7 @@ test("does not treat mocked evidence as live and rejects malformed or secret-loo
 test("evaluates a known live-evidence extension without replacing an incomplete result with a schema error", () => {
   const liveEvidence = {
     ...evidence({
-      sections: { A: false, B: false, C: false, D: false, E: false, F: false },
+      sections: { A: false, B: false, C: false, D: false, E: false, F: false, G: false, H: false },
       transportSecurity: "unproven",
       liveOperatorProof: false,
       physicalHomeSeparation: false,
@@ -106,7 +176,7 @@ test("evaluates a known live-evidence extension without replacing an incomplete 
 test("keeps incomplete process and network probes distinct from a proven clean result", () => {
   const incomplete = {
     ...evidence({
-      sections: { A: false, B: false, C: false, D: false, E: false, F: false },
+      sections: { A: false, B: false, C: false, D: false, E: false, F: false, G: false, H: false },
       liveOperatorProof: false,
       incompleteReason: "preflight-incomplete"
     }),
