@@ -8,6 +8,7 @@ const ADMITTED_CODEX_VERSION = "0.153.4" as const;
 const CODEX_HOME_TARGET = "/codex-home" as const;
 const LOGICAL_CWD = "/workspace" as const;
 const REMOTE_ENVIRONMENT_ID = "remote" as const;
+export const CODEX_CODE_MODE_HOST_URL = "http://codex-code-mode-host:4546" as const;
 const REQUIREMENTS_TARGET = "/etc/codex/requirements.toml" as const;
 const POLICY_FILE_MODE = 0o600;
 const MAX_POLICY_BYTES = 16 * 1024;
@@ -18,6 +19,10 @@ const FORBIDDEN_LOCAL_PATHS = [
   "unified-exec-disabled",
   "missing-endpoint",
   "stale-endpoint",
+  "code-mode-host-missing",
+  "code-mode-host-stale",
+  "code-mode-fallback-enabled",
+  "embedded-app-server",
   "command-hooks",
   "legacy-notify",
   "local-mcp-stdio",
@@ -44,9 +49,14 @@ codex_hooks = false
 plugins = false
 remote_plugin = false
 apps = false
-code_mode = false
-code_mode_host = false
 use_legacy_landlock = false
+
+[features.code_mode]
+enabled = true
+
+[features.code_mode_host]
+enabled = true
+disable_in_process_fallback = true
 
 [mcp_servers]
 `;
@@ -57,6 +67,10 @@ export type CodexForbiddenLocalPath =
   | "unified-exec-disabled"
   | "missing-endpoint"
   | "stale-endpoint"
+  | "code-mode-host-missing"
+  | "code-mode-host-stale"
+  | "code-mode-fallback-enabled"
+  | "embedded-app-server"
   | "command-hooks"
   | "legacy-notify"
   | "local-mcp-stdio"
@@ -82,9 +96,16 @@ export interface CodexManagedPolicyBinding {
   readonly projectLayerOverrideProof: "cannot-override" | "overrides" | "unproven";
 }
 
+export interface CodexCodeModeConfiguration {
+  readonly enabled: true;
+  readonly hostEnabled: true;
+  readonly disableInProcessFallback: true;
+  readonly remoteHostUrl: string;
+}
+
 export interface CodexRemoteOnlyConfiguration {
   readonly environment: Readonly<Record<string, string>>;
-  readonly launchArguments: readonly ["-c", "notify=[]"];
+  readonly launchArguments: readonly [];
   readonly managedPolicy: CodexManagedPolicyBinding;
   readonly endpoint: CodexSplitTransportBinding;
   readonly environmentId: "remote";
@@ -92,6 +113,14 @@ export interface CodexRemoteOnlyConfiguration {
   readonly workspaceRoots: readonly ["/workspace"];
   readonly localEnvironmentAvailable: false;
   readonly unifiedExecRequired: true;
+  readonly codeMode: CodexCodeModeConfiguration;
+}
+
+export interface CodexEffectivePolicyProof {
+  readonly nativeConfig: "managed";
+  readonly projectConfig: "cannot-override";
+  readonly effective: CodexCodeModeConfiguration;
+  readonly forbiddenLocalPaths: readonly CodexForbiddenLocalPath[];
 }
 
 function absolutePath(value: string, errorCode: string): string {
@@ -199,6 +228,38 @@ function assertPolicyEndpointUrl(endpointUrl: string): void {
   }
 }
 
+function assertCodeModeHostUrl(endpointUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpointUrl);
+  } catch {
+    throw new Error("codex-policy-code-mode-host-invalid");
+  }
+  if (parsed.protocol !== "http:"
+    || parsed.hostname !== "codex-code-mode-host"
+    || !parsed.port
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.pathname !== "/"
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || `${parsed.protocol}//${parsed.hostname}:${parsed.port}` !== endpointUrl
+    || !Number.isSafeInteger(Number(parsed.port))
+    || Number(parsed.port) < 1
+    || Number(parsed.port) > 65535) {
+    throw new Error("codex-policy-code-mode-host-invalid");
+  }
+}
+
+function assertCodeModeConfiguration(codeMode: CodexCodeModeConfiguration): void {
+  if (codeMode.enabled !== true
+    || codeMode.hostEnabled !== true
+    || codeMode.disableInProcessFallback !== true) {
+    throw new Error("codex-policy-code-mode-fallback-enabled");
+  }
+  assertCodeModeHostUrl(codeMode.remoteHostUrl);
+}
+
 function assertManagedPolicyShape(policy: CodexManagedPolicyBinding): void {
   if (policy.mechanism !== "0.153.4-managed-requirements"
     || policy.mountTarget !== REQUIREMENTS_TARGET
@@ -267,20 +328,112 @@ export function buildRemoteOnlyConfiguration(input: {
   readonly home: CodexNativeHomeBinding;
   readonly endpoint: CodexSplitTransportBinding;
   readonly policy: CodexManagedPolicyBinding;
+  readonly codeModeHostUrl?: string;
 }): CodexRemoteOnlyConfiguration {
   assertNativeHomeBinding(input.home);
   assertManagedPolicyBinding(input.policy, input.endpoint);
+  const remoteHostUrl = input.codeModeHostUrl ?? CODEX_CODE_MODE_HOST_URL;
+  assertCodeModeHostUrl(remoteHostUrl);
   return {
     environment: { ...input.policy.environment },
-    launchArguments: ["-c", "notify=[]"],
+    launchArguments: [],
     managedPolicy: input.policy,
     endpoint: input.endpoint,
     environmentId: REMOTE_ENVIRONMENT_ID,
     logicalCwd: LOGICAL_CWD,
     workspaceRoots: [LOGICAL_CWD],
     localEnvironmentAvailable: false,
-    unifiedExecRequired: true
+    unifiedExecRequired: true,
+    codeMode: {
+      enabled: true,
+      hostEnabled: true,
+      disableInProcessFallback: true,
+      remoteHostUrl
+    }
   };
+}
+
+function containsAny(config: string, patterns: readonly RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(config));
+}
+
+function assertManagedCodeModeConfig(config: string, role: "native" | "project"): void {
+  const prefix = role === "native" ? "codex-policy-native" : "codex-policy-project";
+  if (!/(?:^|[\r\n])\s*unified_exec\s*=\s*true\b/imu.test(config)
+    || !/(?:^|[\r\n])\s*\[features\.code_mode\]\s*[\r\n]+\s*enabled\s*=\s*true\b/imu.test(config)
+    || !/(?:^|[\r\n])\s*\[features\.code_mode_host\]\s*[\r\n]+\s*enabled\s*=\s*true\b/imu.test(config)
+    || !/(?:^|[\r\n])\s*disable_in_process_fallback\s*=\s*true\b/imu.test(config)) {
+    throw new Error(`${prefix}-code-mode-policy`);
+  }
+  if (containsAny(config, [
+    /(?:^|[\r\n])\s*code_mode\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*code_mode_host\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*disable_in_process_fallback\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*use_in_process_fallback\s*=\s*true\b/imu,
+    /(?:^|[\r\n])\s*environment_id\s*=\s*["']local["']/imu,
+    /(?:^|[\r\n])\s*CODEX_EXEC_SERVER_URL\s*=\s*["'](?:none|\s*)["']/imu
+  ])) {
+    throw new Error(`${prefix}-code-mode-policy`);
+  }
+}
+
+function assertProjectLayerCannotOverride(config: string): void {
+  if (config.trim() === "") return;
+  if (containsAny(config, [
+    /(?:^|[\r\n])\s*(?:unified_exec|experimental_use_unified_exec_tool)\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*code_mode\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*code_mode_host\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*disable_in_process_fallback\s*=\s*false\b/imu,
+    /(?:^|[\r\n])\s*allow_login_shell\s*=\s*true\b/imu,
+    /(?:^|[\r\n])\s*notify\s*=/imu,
+    /(?:^|[\r\n])\s*hooks\s*=/imu,
+    /(?:^|[\r\n])\s*\[+hooks[^\]]*\]/imu,
+    /(?:^|[\r\n])\s*(?:program\s*=|\[+environments[^\]]*\])/imu,
+    /(?:^|[\r\n])\s*\[+mcp_servers[^\]]*\]/imu,
+    /(?:^|[\r\n])\s*mcp_servers\s*=/imu,
+    /(?:^|[\r\n])\s*(?:plugins\s*=\s*true|\[+plugins[^\]]*\])/imu,
+    /(?:^|[\r\n])\s*sandbox_mode\s*=\s*["']danger-full-access["']/imu,
+    /(?:^|[\r\n])\s*use_legacy_landlock\s*=\s*true\b/imu,
+    /(?:^|[\r\n])\s*CODEX_EXEC_SERVER_URL\s*=\s*["'](?:none|\s*)["']/imu,
+    /(?:^|[\r\n])\s*(?:app_server|app-server|shared_daemon|daemon)\s*[=.]/imu,
+    /\/shell\b/iu
+  ])) {
+    throw new Error("codex-policy-project-override");
+  }
+}
+
+export function assertEffectiveCodexPolicy(input: {
+  readonly nativeConfigText: string;
+  readonly projectConfigTexts: readonly string[];
+  readonly expected: CodexCodeModeConfiguration;
+}): CodexEffectivePolicyProof {
+  assertCodeModeConfiguration(input.expected);
+  assertManagedCodeModeConfig(input.nativeConfigText, "native");
+  for (const projectConfigText of input.projectConfigTexts) assertProjectLayerCannotOverride(projectConfigText);
+  return {
+    nativeConfig: "managed",
+    projectConfig: "cannot-override",
+    effective: { ...input.expected },
+    forbiddenLocalPaths: FORBIDDEN_LOCAL_PATHS
+  };
+}
+
+export function buildNativeCodexArgv(resumeSessionId: string | null): readonly string[] {
+  if (resumeSessionId === null) return ["codex"];
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(resumeSessionId)) {
+    throw new Error("codex-native-argv");
+  }
+  return ["codex", "resume", resumeSessionId];
+}
+
+export function assertNativeCodexArgv(
+  argv: readonly string[],
+  expectedResumeSessionId: string | null,
+): void {
+  const expected = buildNativeCodexArgv(expectedResumeSessionId);
+  if (argv.length !== expected.length || argv.some((value, index) => value !== expected[index])) {
+    throw new Error("codex-native-argv");
+  }
 }
 
 function configHas(config: string, pattern: RegExp): boolean {

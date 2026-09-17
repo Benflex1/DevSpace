@@ -44,12 +44,18 @@ const endpoint = { endpointUrl: "ws://codex-executor:4545", endpointHost: "codex
   workspaceId, generation: 1, executionNetworkId: "execution-id" };
 const remote = {
   environment: { CODEX_HOME: "/codex-home", HOME: "/codex-home", CODEX_EXEC_SERVER_URL: endpoint.endpointUrl },
-  launchArguments: ["-c", "notify=[]"] as const,
+  launchArguments: [] as const,
   managedPolicy: { mechanism: "0.153.4-managed-requirements" as const, requirementsPath: "/agent/policy.toml",
     mountTarget: "/etc/codex/requirements.toml" as const, environment: { CODEX_HOME: "/codex-home", HOME: "/codex-home", CODEX_EXEC_SERVER_URL: endpoint.endpointUrl },
     forbiddenPaths: [] as const, projectLayerOverrideProof: "cannot-override" as const },
   endpoint, environmentId: "remote" as const, logicalCwd: "/workspace" as const, workspaceRoots: ["/workspace"] as ["/workspace"],
-  localEnvironmentAvailable: false as const, unifiedExecRequired: true as const
+  localEnvironmentAvailable: false as const, unifiedExecRequired: true as const,
+  codeMode: {
+    enabled: true as const,
+    hostEnabled: true as const,
+    disableInProcessFallback: true as const,
+    remoteHostUrl: "http://codex-code-mode-host:4546"
+  }
 };
 
 function pty(execId: string): NativeCodexPty {

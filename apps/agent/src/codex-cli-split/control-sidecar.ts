@@ -138,7 +138,7 @@ function assertRemotePolicy(input: {
     || remote.managedPolicy.environment.CODEX_HOME !== remote.environment.CODEX_HOME
     || remote.managedPolicy.environment.HOME !== remote.environment.HOME
     || remote.managedPolicy.environment.CODEX_EXEC_SERVER_URL !== remote.environment.CODEX_EXEC_SERVER_URL
-    || remote.launchArguments.length !== 2 || remote.launchArguments[0] !== "-c" || remote.launchArguments[1] !== "notify=[]"
+    || remote.launchArguments.length !== 0
     || Object.keys(remote.environment).some((name) => !["CODEX_HOME", "HOME", "CODEX_EXEC_SERVER_URL"].includes(name))) {
     throw new Error("codex-control-remote-policy");
   }

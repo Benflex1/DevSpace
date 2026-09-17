@@ -6,9 +6,12 @@ import type { CodexNativeHomeBinding } from "./native-home.js";
 import {
   assertForbiddenProjectConfiguration,
   assertNativeHomeEnvironmentOverride,
+  assertEffectiveCodexPolicy,
+  assertNativeCodexArgv,
   buildRemoteOnlyConfiguration,
+  buildNativeCodexArgv,
   prepareCodexManagedPolicy,
-  type CodexForbiddenLocalPath,
+  type CodexCodeModeConfiguration,
   type CodexManagedPolicyBinding
 } from "./remote-policy.js";
 import type { CodexSplitTransportBinding } from "./transport.js";
@@ -51,6 +54,7 @@ function policy(requirementsPath = "/srv/state/requirements.toml"): CodexManaged
     },
     forbiddenPaths: [
       "local-environment", "shell", "unified-exec-disabled", "missing-endpoint", "stale-endpoint",
+      "code-mode-host-missing", "code-mode-host-stale", "code-mode-fallback-enabled", "embedded-app-server",
       "command-hooks", "legacy-notify", "local-mcp-stdio", "local-http-helper",
       "unsafe-plugin-maintenance", "program-executor", "shared-app-server-daemon",
       "danger-full-access", "sandbox-bypass", "remote-local-fallback"
@@ -60,6 +64,13 @@ function policy(requirementsPath = "/srv/state/requirements.toml"): CodexManaged
 }
 
 describe("Codex split remote-only policy", () => {
+  const codeMode: CodexCodeModeConfiguration = {
+    enabled: true,
+    hostEnabled: true,
+    disableInProcessFallback: true,
+    remoteHostUrl: "http://codex-code-mode-host:4546"
+  };
+
   test("materializes an exact managed requirements file without a recursive home deny", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "devspace-remote-policy-"));
     roots.push(root);
@@ -98,7 +109,70 @@ describe("Codex split remote-only policy", () => {
     expect(configuration.workspaceRoots).toEqual(["/workspace"]);
     expect(configuration.localEnvironmentAvailable).toBe(false);
     expect(configuration.unifiedExecRequired).toBe(true);
-    expect(configuration.launchArguments).toEqual(["-c", "notify=[]"]);
+    expect(configuration.codeMode).toEqual(codeMode);
+    expect(configuration.launchArguments).toEqual([]);
+  });
+
+  test("requires the exact remote Code Mode managed requirements", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-remote-policy-code-mode-"));
+    roots.push(root);
+    const binding = await prepareCodexManagedPolicy({
+      stateRoot: root,
+      home,
+      endpoint,
+      admittedVersion: "0.153.4"
+    });
+    const contents = await readFile(binding.requirementsPath, "utf8");
+    expect(contents).toContain("[features.code_mode]");
+    expect(contents).toContain("enabled = true");
+    expect(contents).toContain("[features.code_mode_host]");
+    expect(contents).toContain("disable_in_process_fallback = true");
+    expect(contents).not.toContain("code_mode = false");
+    expect(contents).not.toContain("code_mode_host = false");
+  });
+
+  test.each([
+    [null, ["codex"]],
+    ["018f0f00-0000-7000-8000-000000000003", ["codex", "resume", "018f0f00-0000-7000-8000-000000000003"]]
+  ] as const)("builds the exact native argv for %s", (resumeSessionId, expected) => {
+    expect(buildNativeCodexArgv(resumeSessionId)).toEqual(expected);
+    expect(() => assertNativeCodexArgv(expected, resumeSessionId)).not.toThrow();
+  });
+
+  test.each([
+    ["codex", ["-c", "notify=[]"]],
+    ["codex", ["--remote", "http://example.invalid"]],
+    ["codex", ["--profile", "default"]],
+    ["codex", ["--strict-config"]],
+    ["codex", ["--enable", "foo"]],
+    ["codex", ["--disable", "foo"]]
+  ] as const)("rejects native launch override %s", (command, suffix) => {
+    expect(() => assertNativeCodexArgv([command, ...suffix], null)).toThrow("codex-native-argv");
+  });
+
+  test("does not accept diagnostic notify override as default-daemon evidence", () => {
+    expect(() => assertNativeCodexArgv(["codex", "-c", "notify=[]"], null)).toThrow("codex-native-argv");
+  });
+
+  test("rejects a project layer that attempts to override the trusted Code Mode policy", () => {
+    expect(() => assertEffectiveCodexPolicy({
+      nativeConfigText: "[features.code_mode]\nenabled = true\n[features.code_mode_host]\nenabled = true\ndisable_in_process_fallback = true",
+      projectConfigTexts: [
+        "[features]\nunified_exec = false\n[features.code_mode_host]\nenabled = false\ndisable_in_process_fallback = false\n[hooks]\nnotify = [\"sh\"]\n[mcp_servers.bad]\ncommand = \"node\"\n[environments.local]\nprogram = \"/bin/sh\"\nsandbox_mode = \"danger-full-access\"\nCODEX_EXEC_SERVER_URL = \"none\""
+      ],
+      expected: codeMode
+    })).toThrow(/codex-policy/u);
+  });
+
+  test("accepts only a complete trusted effective Code Mode policy", () => {
+    const proof = assertEffectiveCodexPolicy({
+      nativeConfigText: "[features]\nunified_exec = true\n[features.code_mode]\nenabled = true\n[features.code_mode_host]\nenabled = true\ndisable_in_process_fallback = true",
+      projectConfigTexts: ["model = \"gpt-6-astra\"\n"],
+      expected: codeMode
+    });
+    expect(proof.nativeConfig).toBe("managed");
+    expect(proof.projectConfig).toBe("cannot-override");
+    expect(proof.effective).toEqual(codeMode);
   });
 
   test("rejects missing, empty, stale, and disabled executor endpoint configuration", () => {
@@ -130,7 +204,7 @@ describe("Codex split remote-only policy", () => {
     })).toThrow("stale-endpoint");
   });
 
-  const forbiddenFixtures: Readonly<Record<Exclude<CodexForbiddenLocalPath, "missing-endpoint" | "stale-endpoint">, string>> = {
+  const forbiddenFixtures: Readonly<Record<string, string>> = {
     "local-environment": "[environments]\ninclude_local = true",
     shell: "# /shell local escape",
     "unified-exec-disabled": "[features]\nunified_exec = false",
@@ -151,7 +225,7 @@ describe("Codex split remote-only policy", () => {
       .toThrow(forbiddenPath);
   });
 
-  const globalForbiddenFixtures: Readonly<Record<Exclude<CodexForbiddenLocalPath, "missing-endpoint" | "stale-endpoint">, {
+  const globalForbiddenFixtures: Readonly<Record<string, {
     readonly homeConfig: string | null;
     readonly environmentToml: string | null;
   }>> = {

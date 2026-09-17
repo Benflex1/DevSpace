@@ -92,14 +92,20 @@ const managedPolicy: CodexManagedPolicyBinding = {
 
 const remote: CodexRemoteOnlyConfiguration = {
   environment: { ...managedPolicy.environment },
-  launchArguments: ["-c", "notify=[]"],
+  launchArguments: [],
   managedPolicy,
   endpoint,
   environmentId: "remote",
   logicalCwd: "/workspace",
   workspaceRoots: ["/workspace"],
   localEnvironmentAvailable: false,
-  unifiedExecRequired: true
+  unifiedExecRequired: true,
+  codeMode: {
+    enabled: true,
+    hostEnabled: true,
+    disableInProcessFallback: true,
+    remoteHostUrl: "http://codex-code-mode-host:4546"
+  }
 };
 
 const image: DockerImageInspection = {
