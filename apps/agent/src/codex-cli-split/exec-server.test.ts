@@ -111,12 +111,22 @@ test("starts the verified exec-server only inside the executor", async () => {
 
 test("requires an executing server with a stable PID and rejects a stale process", async () => {
   const fixture = dockerFixture({ serverInspection: inspection({ Pid: 0 }) });
-  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport })).rejects.toThrow("codex-exec-server-process");
+  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions(2) }))
+    .rejects.toThrow("codex-exec-server-startup-timeout");
 });
 
 test("waits through a transient pre-running server state before accepting it", async () => {
   const fixture = dockerFixture({ serverInspections: [
     inspection({ Running: false, ExitCode: null, Pid: undefined }),
+    inspection()
+  ] });
+  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions() }))
+    .resolves.toMatchObject({ execId: "server-exec", serverPid: 123 });
+});
+
+test("waits through a running exec that has not received a stable PID", async () => {
+  const fixture = dockerFixture({ serverInspections: [
+    inspection({ Running: true, ExitCode: null, Pid: undefined }),
     inspection()
   ] });
   await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions() }))

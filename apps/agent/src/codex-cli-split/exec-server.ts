@@ -144,6 +144,8 @@ function inspectStartingServer(
     if (inspection.ExitCode === null) return null;
     throw new CodexExecServerExitedBeforeReadyError(inspection.ExitCode);
   }
+  if (inspection.ExitCode !== null) throw new Error("codex-exec-server-process");
+  if (inspection.Pid === undefined || !Number.isSafeInteger(inspection.Pid) || inspection.Pid < 1) return null;
   return assertServerInspection(inspection, executor, execId);
 }
 
