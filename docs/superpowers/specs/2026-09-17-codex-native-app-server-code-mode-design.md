@@ -191,9 +191,10 @@ ID, or checklist into the TUI.
 The TUI is not configured with a remote Code Mode host directly. In `0.153.4`
 the native TUI's supported remote target is an app-server endpoint. The TUI
 must discover the Agent-owned app-server through the native default Unix socket
-when invoked as bare `codex` or `codex resume NATIVE_SESSION_ID`. An explicit
-`--remote` invocation may be used as a diagnostic comparison, but it does not
-satisfy the unqualified-resume acceptance target.
+when invoked as bare `codex` or `codex resume NATIVE_SESSION_ID`. The normal
+acceptance path has zero CLI configuration or launch overrides. An explicit
+`--remote` invocation may be used only as a separately labeled diagnostic
+comparison; it does not satisfy the unqualified-resume acceptance target.
 
 ### Native app-server process
 
@@ -218,7 +219,10 @@ executor entry and not project execution.
 The app-server must be started with Code Mode host support enabled in the
 effective configuration and with the remote host URL supplied to the native
 app-server option. A missing or stale remote provider is a startup failure. The
-app-server must not silently use its default local provider.
+app-server must not silently use its default local provider. Hook, notify,
+Unified Exec, local-environment, and sandbox restrictions must come from the
+trusted managed/persistent configuration consumed during app-server and TUI
+bootstrap; they must not be smuggled into the normal TUI argv.
 
 ### Project executor
 
@@ -367,8 +371,21 @@ codex resume NATIVE_SESSION_ID
 Before either command, the Agent has already ensured the correctly owned native
 app-server is listening at the default socket in the same persistent home.
 The TUI's native implicit-daemon probe must select that socket. The command
-must not contain `--remote`, a DevSpace-specific resume verb, a conversation
-payload, or a hidden input sequence.
+argv is exactly `[codex]` for a new session or
+`[codex, resume, NATIVE_SESSION_ID]` for resume. It must contain no `-c` or
+`--config`, `--enable` or `--disable`, profile selection, `--remote`,
+`--strict-config`, or any other launch option that prevents implicit local
+daemon reuse. A diagnostic invocation containing `-c notify=[]` is explicitly
+non-acceptance evidence and is not equivalent to the zero-override path.
+
+The preflight must record the actual process argv and default-socket selection:
+`[codex]` for a new session and `[codex, resume, NATIVE_SESSION_ID]` for a
+resume. It must reject any extra CLI token and must prove that the native
+default-socket daemon, not an embedded app-server, handled the launch.
+
+If a mandatory restriction can be enforced only by adding a TUI CLI override,
+the unqualified-resume requirement is `BLOCKED/INCOMPLETE`; the launch is not
+silently relaxed.
 
 For a new session, native Codex creates the session/thread and persists its
 history in the native home. The Agent observes only provider-owned identity
@@ -672,10 +689,23 @@ production conversation authority and cannot replace the native TUI gate.
 The managed native profile for this experiment has these required effective
 properties:
 
-```text
+```toml
+[features]
 unified_exec = true
-code_mode = true
-code_mode_host = true
+
+[features.code_mode]
+enabled = true
+
+[features.code_mode_host]
+enabled = true
+disable_in_process_fallback = true
+```
+
+The equivalent managed requirements must produce the same effective values;
+the exact 0.153.4 `config.toml` shape above is the source-backed form. The
+runtime also requires:
+
+```text
 CODEX_EXEC_SERVER_URL = exact private executor exec-server endpoint
 app-server --code-mode-host = exact private executor Code Mode gRPC endpoint
 local environment = unavailable
@@ -689,11 +719,14 @@ The app-server's Code Mode provider must be the explicit remote gRPC provider.
 process-owned provider in a TUI-created or embedded app-server. The Agent must
 inspect the actual app-server process configuration and provider readiness.
 
-For `CodeMode` models that are not `CodeModeOnly`, the managed profile must
-also disable in-process fallback if that exact `0.153.4` setting is available.
-`CodeModeOnly` itself must never fall back to direct tools. If the old artifact
-cannot enforce remote-only behavior for all admitted model tool modes, the
-profile is unavailable rather than selectively trusting a model.
+`disable_in_process_fallback = true` is mandatory for this experiment. It is
+the exact `0.153.4` fail-closed setting under `[features.code_mode_host]`, and
+must be effective for every native app-server process. `CodeModeOnly` itself
+must never fall back to direct tools. Missing/stale remote Code Mode host
+configuration must fail before or during the turn; it must never degrade to a
+local provider or direct/local execution. If the old artifact cannot enforce
+these values for all admitted model tool modes, the profile is unavailable
+rather than selectively trusting a model.
 
 The managed configuration is enforced against both native/global home layers
 and project-controlled `.codex` layers. A project layer may not re-enable:
@@ -861,8 +894,11 @@ Prove:
   namespace, or unrelated managed state;
 - native app-server process uses remote `--code-mode-host` and the exact
   `CODEX_EXEC_SERVER_URL`;
+- effective configuration has CodeModeHost enabled and
+  `disable_in_process_fallback = true`;
 - app-server listens on the default home-derived Unix socket;
-- bare `codex` selects that socket instead of an embedded/local app-server;
+- bare `codex` has exactly `[codex]` argv and selects that socket instead of an
+  embedded/local app-server;
 - control reaches native authentication/model services through control-egress;
 - control has no forwarding, NAT, proxy, or routing capability;
 - native approval/session surfaces remain usable without DevSpace injection;
@@ -935,7 +971,8 @@ Prove, from a real native session:
 1. normal native TUI session creation persists provider-owned state;
 2. normal TUI exit does not remove the home or app-server authority;
 3. the native ID is identified passively;
-4. a new PTY runs exactly `codex resume NATIVE_SESSION_ID`;
+4. a new PTY runs exactly `[codex, resume, NATIVE_SESSION_ID]` with no CLI
+   configuration or launch overrides;
 5. conversation continuity is native, not reconstructed by DevSpace;
 6. the same home/account authority, default app-server socket, remote Code
    Mode provider, exec endpoint, and logical `/workspace` are restored;
@@ -1120,6 +1157,7 @@ All links below point to the pinned `rust-v0.153.4` commit
 | Model metadata and feature-based tool-mode selection; only non-only CodeMode may fall back to direct | [`core/src/tools/mod.rs:68-90`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/tools/mod.rs#L68-L90) |
 | CodeModeOnly fail-closed selector behavior and hidden direct shell tools | [`core/tests/suite/model_runtime_selectors.rs:228-265`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/tests/suite/model_runtime_selectors.rs#L228-L265) |
 | Feature meanings for Code Mode, Code Mode Host, Code Mode Only, and Unified Exec | [`features/src/lib.rs:91-126`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/features/src/lib.rs#L91-L126) |
+| Exact `[features.code_mode_host]` TOML shape and `disable_in_process_fallback` resolution | [`core/src/config/config_tests.rs:589-624`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/config/config_tests.rs#L589-L624) |
 | Local process-owned versus disabled Code Mode provider | [`core/src/thread_manager.rs:463-470`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/thread_manager.rs#L463-L470), [`code-mode/src/remote_session.rs:35-120`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/code-mode/src/remote_session.rs#L35-L120) |
 | Local host process spawn and inherited process boundary | [`code-mode/src/remote_session/connection.rs:155-196`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/code-mode/src/remote_session/connection.rs#L155-L196) |
 | Native app-server `--code-mode-host` option and Unix listen option | [`cli/src/main.rs:545-565`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/cli/src/main.rs#L545-L565), [`cli/src/main.rs:1245-1298`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/cli/src/main.rs#L1245-L1298) |
