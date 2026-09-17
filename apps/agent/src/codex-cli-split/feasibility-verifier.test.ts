@@ -6,6 +6,7 @@ import {
   CODEX_SPLIT_VERIFY_ENV,
   buildCodexSplitManualChecklist,
   createCodexSplitTerminalOperator,
+  endpointFromRecord,
   formatCodexSplitDiagnostic,
   hasNoExternalDefaultRoute,
   parseCodexSplitOperatorAnswer,
@@ -17,7 +18,7 @@ import { DockerEngineClient } from "../docker-runtime.js";
 import { ManagedWorkspaces } from "../managed-workspaces.js";
 import { CodexSplitRuntime } from "./split-runtime.js";
 import type { CodexNativeHomeBinding } from "./native-home.js";
-import type { CodexSplitRuntimeRecord } from "./runtime-record.js";
+import { parseCodexSplitRuntimeRecord, type CodexSplitRuntimeRecord } from "./runtime-record.js";
 
 const digest = "a".repeat(64);
 const validEnvironment: NodeJS.ProcessEnv = {
@@ -89,6 +90,74 @@ test("accepts an internal-only executor default route but rejects an external ro
   expect(hasNoExternalDefaultRoute("172.30.0.0/16 dev eth0", "172.30.0.1")).toBe(true);
   expect(hasNoExternalDefaultRoute("default via 10.0.0.1 dev eth0", "172.30.0.1")).toBe(false);
   expect(hasNoExternalDefaultRoute("default dev eth0", "172.30.0.1")).toBe(false);
+});
+
+test("round-trips the current persisted transport record through endpointFromRecord", () => {
+  const record: CodexSplitRuntimeRecord = {
+    version: 1,
+    projectId: "018f0f00-0000-7000-8000-000000000001",
+    workspaceId: "018f0f00-0000-7000-8000-000000000002",
+    revisionId: "018f0f00-0000-7000-8000-000000000003",
+    runtimePlanHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    generation: 1,
+    networks: {
+      execution: {
+        id: "execution-id", name: "devspace-codex-execution", role: "execution", internal: true, defaultRoute: false
+      },
+      controlEgress: {
+        id: "egress-id", name: "devspace-codex-egress", role: "control-egress", internal: false, defaultRoute: true
+      }
+    },
+    executor: {
+      id: "executor-id", imageId: `sha256:${"b".repeat(64)}`,
+      endpointUrl: "ws://codex-executor:4545", transportSecurity: "private-network-only"
+    },
+    control: { id: "control-id", homeBinding: "owner-default" },
+    sessions: []
+  };
+
+  const reloaded = parseCodexSplitRuntimeRecord(JSON.parse(JSON.stringify(record)) as unknown);
+  const endpoint = endpointFromRecord(reloaded);
+
+  expect(endpoint).toMatchObject({
+    endpointUrl: record.executor.endpointUrl,
+    endpointHost: "codex-executor",
+    endpointPort: 4545,
+    security: "private-network-only",
+    authenticationEvidence: "absent",
+    credential: null,
+    workspaceId: record.workspaceId,
+    generation: record.generation,
+    executionNetworkId: record.networks.execution.id
+  });
+});
+
+test("rejects an incompatible persisted transport record before endpoint reconstruction", () => {
+  const record = {
+    version: 1,
+    projectId: "018f0f00-0000-7000-8000-000000000001",
+    workspaceId: "018f0f00-0000-7000-8000-000000000002",
+    revisionId: "018f0f00-0000-7000-8000-000000000003",
+    runtimePlanHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    generation: 1,
+    networks: {
+      execution: {
+        id: "execution-id", name: "devspace-codex-execution", role: "execution", internal: true, defaultRoute: false
+      },
+      controlEgress: {
+        id: "egress-id", name: "devspace-codex-egress", role: "control-egress", internal: false, defaultRoute: true
+      }
+    },
+    executor: {
+      id: "executor-id", imageId: `sha256:${"b".repeat(64)}`,
+      endpointUrl: "ws://codex-executor:4545", transportSecurity: "private-network-only",
+      staleEndpoint: true
+    },
+    control: { id: "control-id", homeBinding: "owner-default" },
+    sessions: []
+  };
+
+  expect(() => parseCodexSplitRuntimeRecord(record)).toThrow("codex-split-runtime-record");
 });
 
 test("requires an explicit final operator answer", () => {

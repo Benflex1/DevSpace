@@ -24,6 +24,20 @@ export interface CodexSplitTransportBinding {
   readonly executionNetworkId: string;
 }
 
+/**
+ * The transport validator only needs the executor's identity and network
+ * policy. Keeping that boundary explicit lets persisted runtime records
+ * reconstruct the same security-relevant view without pretending to contain
+ * the full Docker creation policy.
+ */
+export interface CodexSplitTransportExecutor {
+  readonly endpointHost: "codex-executor";
+  readonly endpointPort: number;
+  readonly controlEgressAttached: false;
+  readonly policy: Pick<CodexProjectExecutorBinding["policy"],
+    "workspaceId" | "generation" | "executionNetwork" | "networkAttachments">;
+}
+
 function validPort(port: number): boolean {
   return Number.isSafeInteger(port) && port >= 1 && port <= 65535;
 }
@@ -40,7 +54,7 @@ export function classifyCodexSplitTransport(input: {
 }
 
 export function createCodexSplitTransportBinding(input: {
-  readonly executor: CodexProjectExecutorBinding;
+  readonly executor: CodexSplitTransportExecutor;
   readonly network: CodexSplitNetworkBinding;
   readonly protocolAuthenticationVerified: boolean;
   readonly privateNetworkIsolationVerified: boolean;
@@ -78,7 +92,7 @@ export function createCodexSplitTransportBinding(input: {
 export function assertCodexSplitTransportBinding(input: {
   readonly transport: CodexSplitTransportBinding;
   readonly network: CodexSplitNetworkBinding;
-  readonly executor: CodexProjectExecutorBinding;
+  readonly executor: CodexSplitTransportExecutor;
 }): void {
   const { transport, network, executor } = input;
   const expectedUrl = `ws://codex-executor:${executor.endpointPort}`;

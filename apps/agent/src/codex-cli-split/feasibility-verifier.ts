@@ -30,7 +30,12 @@ import { ManagedWorkspaces, type ManagedWorkspaceRoots, type WorkspaceExecutionC
 import { probeAdmittedCodexVersion } from "./compatibility.js";
 import { ensureNativeCodexHome, nativeCodexHomePath, type CodexNativeHomeBinding } from "./native-home.js";
 import { CodexSplitRuntime } from "./split-runtime.js";
-import { createCodexSplitTransportBinding, type CodexSplitTransportBinding } from "./transport.js";
+import {
+  createCodexSplitTransportBinding,
+  type CodexSplitTransportBinding,
+  type CodexSplitTransportExecutor
+} from "./transport.js";
+import { buildCodexSplitNetworkAttachments, type CodexSplitNetworkBinding } from "./network.js";
 import {
   assertForbiddenProjectConfiguration,
   assertNativeHomeEnvironmentOverride,
@@ -516,24 +521,32 @@ async function observeDuringAttach(input: {
   }
 }
 
-function endpointFromRecord(record: CodexSplitRuntimeRecord): CodexSplitTransportBinding {
+export function endpointFromRecord(record: CodexSplitRuntimeRecord): CodexSplitTransportBinding {
   const port = Number(record.executor.endpointUrl.slice(record.executor.endpointUrl.lastIndexOf(":") + 1));
+  if (record.executor.transportSecurity !== "private-network-only") {
+    throw new Error("codex-split-runtime-transport-state");
+  }
+  const network: CodexSplitNetworkBinding = {
+    execution: { ...record.networks.execution, workspaceId: record.workspaceId, generation: record.generation,
+      controlAlias: "codex-control", executorAlias: "codex-executor", publishedPorts: [] },
+    controlEgress: { ...record.networks.controlEgress, workspaceId: record.workspaceId, generation: record.generation,
+      controlAlias: "codex-control", executorAttached: false, publishedPorts: [], defaultBridgeUsed: false }
+  };
+  const executor: CodexSplitTransportExecutor = {
+    endpointHost: "codex-executor", endpointPort: port, controlEgressAttached: false,
+    policy: {
+      workspaceId: record.workspaceId,
+      generation: record.generation,
+      executionNetwork: network.execution,
+      networkAttachments: buildCodexSplitNetworkAttachments({ role: "executor", network })
+    }
+  };
   return createCodexSplitTransportBinding({
-    executor: {
-      containerId: record.executor.id, containerName: "codex-executor", endpointHost: "codex-executor", endpointPort: port,
-      controlEgressAttached: false,
-      policy: { workspaceId: record.workspaceId, generation: record.generation, executionNetwork: { id: record.networks.execution.id } }
-    } as never,
-    network: {
-      execution: { ...record.networks.execution, workspaceId: record.workspaceId, generation: record.generation,
-        controlAlias: "codex-control", executorAlias: "codex-executor", publishedPorts: [] },
-      controlEgress: { ...record.networks.controlEgress, workspaceId: record.workspaceId, generation: record.generation,
-        controlAlias: "codex-control", executorAttached: false, publishedPorts: [], defaultBridgeUsed: false }
-    },
-    protocolAuthenticationVerified: record.executor.transportSecurity === "protocol-authenticated",
-    privateNetworkIsolationVerified: record.executor.transportSecurity !== "unproven",
+    executor, network,
+    protocolAuthenticationVerified: false,
+    privateNetworkIsolationVerified: true,
     admittedVersion: "0.153.4",
-    credential: record.executor.transportSecurity === "protocol-authenticated" ? { delivery: "control-only-environment", target: "CODEX_EXEC_SERVER_TOKEN", fingerprint: `sha256:${"0".repeat(64)}` } : null
+    credential: null
   });
 }
 
