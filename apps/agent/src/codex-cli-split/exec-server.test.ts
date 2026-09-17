@@ -33,11 +33,23 @@ const transport: CodexSplitTransportBinding = {
   workspaceId: executionNetwork.workspaceId, generation: 1, executionNetworkId: executionNetwork.id
 };
 
-function inspection(overrides: Partial<DockerExecInspection> = {}): DockerExecInspection {
-  return { ID: "server-exec", Running: true, ExitCode: null, ContainerID: "executor-id", Pid: 123, ...overrides };
+type InspectionOverrides = Omit<Partial<DockerExecInspection>, "Pid"> & { readonly Pid?: number | undefined };
+
+function inspection(overrides: InspectionOverrides = {}): DockerExecInspection {
+  return { ID: "server-exec", Running: true, ExitCode: null, ContainerID: "executor-id", Pid: 123, ...overrides } as DockerExecInspection;
 }
 
 function readinessOptions(deadlineMs = 5) {
+  let currentTime = 0;
+  return {
+    deadlineMs,
+    pollIntervalMs: 1,
+    now: () => currentTime,
+    sleep: (milliseconds: number) => { currentTime += milliseconds; return Promise.resolve(); }
+  };
+}
+
+function startupOptions(deadlineMs = 5) {
   let currentTime = 0;
   return {
     deadlineMs,
@@ -98,6 +110,33 @@ test("starts the verified exec-server only inside the executor", async () => {
 test("requires an executing server with a stable PID and rejects a stale process", async () => {
   const fixture = dockerFixture({ serverInspection: inspection({ Pid: 0 }) });
   await expect(startCodexExecServer({ docker: fixture.docker, executor, transport })).rejects.toThrow("codex-exec-server-process");
+});
+
+test("waits through a transient pre-running server state before accepting it", async () => {
+  const fixture = dockerFixture({ serverInspections: [
+    inspection({ Running: false, ExitCode: null, Pid: undefined }),
+    inspection()
+  ] });
+  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions() }))
+    .resolves.toMatchObject({ execId: "server-exec", serverPid: 123 });
+});
+
+test("classifies a server that exits before reaching a running state", async () => {
+  const fixture = dockerFixture({ serverInspection: inspection({ Running: false, ExitCode: 17, Pid: undefined }) });
+  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions() }))
+    .rejects.toMatchObject({ message: "codex-exec-server-exited-before-ready", exitCode: 17 });
+});
+
+test("rejects a malformed server exec identity without treating it as a transition", async () => {
+  const fixture = dockerFixture({ serverInspection: inspection({ ID: "unexpected-exec" }) });
+  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions() }))
+    .rejects.toThrow("codex-exec-server-identity");
+});
+
+test("bounds a server startup transition that never reaches running", async () => {
+  const fixture = dockerFixture({ serverInspection: inspection({ Running: false, ExitCode: null, Pid: undefined }) });
+  await expect(startCodexExecServer({ docker: fixture.docker, executor, transport, startup: startupOptions(2) }))
+    .rejects.toThrow("codex-exec-server-startup-timeout");
 });
 
 test("checks the executor-local readyz endpoint and fails on a non-ready probe", async () => {

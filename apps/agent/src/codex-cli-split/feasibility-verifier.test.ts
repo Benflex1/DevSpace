@@ -73,6 +73,17 @@ test("prints the manual checklist outside the TUI and bounds diagnostics without
   expect(String(diagnostic.stackContext).length).toBeLessThanOrEqual(1024);
 });
 
+test("includes bounded safe cause reasons in live diagnostics", () => {
+  const error = new Error("codex-control-start-failed", {
+    cause: new Error("codex-control-container-start", { cause: new Error("token=PRIVATE") })
+  });
+  const diagnostic = formatCodexSplitDiagnostic("live-gate", error, "control");
+  expect(diagnostic.stackContext).toContain("CAUSE_1: codex-control-container-start");
+  expect(diagnostic.stackContext).toContain("CAUSE_2: unexpected-failure");
+  expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE");
+  expect(String(diagnostic.stackContext).length).toBeLessThanOrEqual(1024);
+});
+
 test("accepts an internal-only executor default route but rejects an external route", () => {
   expect(hasNoExternalDefaultRoute("default via 172.30.0.1 dev eth0\n172.30.0.0/16 dev eth0", "172.30.0.1")).toBe(true);
   expect(hasNoExternalDefaultRoute("172.30.0.0/16 dev eth0", "172.30.0.1")).toBe(true);

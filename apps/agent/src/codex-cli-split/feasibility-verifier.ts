@@ -806,6 +806,16 @@ function safeReason(error: unknown): string {
   return /^[a-z0-9][a-z0-9./_-]{0,95}$/u.test(message) ? message : "unexpected-failure";
 }
 
+function safeCauseContext(error: unknown): readonly string[] {
+  const lines: string[] = [];
+  let current: unknown = error instanceof Error ? (error as Error & { readonly cause?: unknown }).cause : undefined;
+  for (let depth = 1; depth <= 4 && current !== undefined; depth += 1) {
+    lines.push(`CAUSE_${depth}: ${safeReason(current)}`);
+    current = current instanceof Error ? (current as Error & { readonly cause?: unknown }).cause : undefined;
+  }
+  return lines;
+}
+
 export function formatCodexSplitDiagnostic(
   phase: string,
   error: unknown,
@@ -813,10 +823,13 @@ export function formatCodexSplitDiagnostic(
 ): CodexSplitDiagnostic {
   const exceptionClass = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.name) ? error.name : "Error";
   const stack = error instanceof Error ? error.stack ?? error.message : "unexpected-failure";
-  const stackContext = redactSensitiveText(stack)
-    .split("\n")
-    .slice(0, 8)
-    .map((line) => line.replace(/\/(?:[^\s/]+\/){1,}[^\s]*/gu, "[PATH]"))
+  const stackContext = [
+    ...redactSensitiveText(stack)
+      .split("\n")
+      .slice(0, 8)
+      .map((line) => line.replace(/\/(?:[^\s/]+\/){1,}[^\s]*/gu, "[PATH]")),
+    ...safeCauseContext(error)
+  ]
     .join("\n")
     .slice(0, 1024);
   return { phase: phase.slice(0, 64), reasonCode: safeReason(error), exceptionClass, resourceRole, stackContext };

@@ -144,6 +144,16 @@ async function buildPolicy() {
   });
 }
 
+function causeMessages(error: unknown): string[] {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    messages.push(current.message);
+    current = (current as Error & { readonly cause?: unknown }).cause;
+  }
+  return messages;
+}
+
 test("builds a control policy with only native home and trusted read-only assets", async () => {
   const policy = await buildPolicy();
   expect(policy.environment).toEqual(remote.environment);
@@ -255,4 +265,53 @@ test("removes a mismatched control container without deleting the native home", 
   await expect(createCodexControlSidecar({ docker, policy, name: "codex-control" }))
     .rejects.toThrow("codex-control-start-failed");
   expect(calls).toEqual(["ensure", "image", "create", "start", "inspect", "remove:control-id"]);
+});
+
+test("retains a bounded stage cause for every control-sidecar startup boundary", async () => {
+  const policy = await buildPolicy();
+  const cases = [
+    { stage: "codex-control-image-resolution", failure: "ensure-image-failed" },
+    { stage: "codex-control-image-inspection", failure: "inspect-image-failed" },
+    { stage: "codex-control-artifact-compatibility", failure: "codex-artifact-image-architecture" },
+    { stage: "codex-control-container-create", failure: "create-container-failed" },
+    { stage: "codex-control-container-start", failure: "start-container-failed" },
+    { stage: "codex-control-container-inspection", failure: "inspect-container-failed" },
+    { stage: "codex-control-inspection-policy", failure: "codex-control-inspection-policy" }
+  ] as const;
+
+  for (const currentCase of cases) {
+    const docker = new class extends DockerEngineClient {
+      constructor() { super("/fixture.sock"); }
+      override ensureImage(): Promise<void> {
+        if (currentCase.stage === "codex-control-image-resolution") throw new Error(currentCase.failure);
+        return Promise.resolve();
+      }
+      override inspectImage(): Promise<DockerImageInspection> {
+        if (currentCase.stage === "codex-control-image-inspection") throw new Error(currentCase.failure);
+        if (currentCase.stage === "codex-control-artifact-compatibility") return Promise.resolve({ ...image, Architecture: "arm64" });
+        return Promise.resolve(image);
+      }
+      override createCodexSplitContainer(): Promise<string> {
+        if (currentCase.stage === "codex-control-container-create") throw new Error(currentCase.failure);
+        return Promise.resolve("control-id");
+      }
+      override startContainer(): Promise<void> {
+        if (currentCase.stage === "codex-control-container-start") throw new Error(currentCase.failure);
+        return Promise.resolve();
+      }
+      override inspectContainer(): Promise<DockerContainerInspection> {
+        if (currentCase.stage === "codex-control-container-inspection") throw new Error(currentCase.failure);
+        if (currentCase.stage === "codex-control-inspection-policy") {
+          return Promise.resolve({ ...dockerImageInspection(policy), Config: {
+            ...dockerImageInspection(policy).Config, WorkingDir: "/wrong"
+          } });
+        }
+        return Promise.resolve(dockerImageInspection(policy));
+      }
+      override removeContainer(): Promise<void> { return Promise.resolve(); }
+    }();
+
+    const error = await createCodexControlSidecar({ docker, policy, name: "codex-control" }).catch((caught: unknown) => caught);
+    expect(causeMessages(error)).toEqual(["codex-control-start-failed", currentCase.stage, currentCase.failure]);
+  }
 });

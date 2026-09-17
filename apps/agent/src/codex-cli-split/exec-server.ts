@@ -9,8 +9,17 @@ import type { CodexSplitTransportBinding } from "./transport.js";
 
 const EXEC_SERVER_READY_DEADLINE_MS = 10_000;
 const EXEC_SERVER_READY_POLL_INTERVAL_MS = 50;
+const EXEC_SERVER_STARTUP_DEADLINE_MS = 1_000;
+const EXEC_SERVER_STARTUP_POLL_INTERVAL_MS = 25;
 
 export interface CodexExecServerReadinessOptions {
+  readonly deadlineMs?: number;
+  readonly pollIntervalMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+export interface CodexExecServerStartupOptions {
   readonly deadlineMs?: number;
   readonly pollIntervalMs?: number;
   readonly now?: () => number;
@@ -68,7 +77,10 @@ function assertServerInspection(
   execId: string,
   expectedPid?: number
 ): number {
-  if (inspection.ID !== execId || inspection.ContainerID !== executor.containerId || !inspection.Running
+  if (inspection.ID !== execId || inspection.ContainerID !== executor.containerId) {
+    throw new Error("codex-exec-server-identity");
+  }
+  if (!inspection.Running
     || inspection.ExitCode !== null || inspection.Pid === undefined || !Number.isSafeInteger(inspection.Pid) || inspection.Pid < 1
     || (expectedPid !== undefined && inspection.Pid !== expectedPid)) {
     throw new Error("codex-exec-server-process");
@@ -76,17 +88,27 @@ function assertServerInspection(
   return inspection.Pid;
 }
 
+class CodexExecServerExitedBeforeReadyError extends Error {
+  constructor(readonly exitCode: number) {
+    super("codex-exec-server-exited-before-ready");
+    this.name = "CodexExecServerExitedBeforeReadyError";
+  }
+}
+
 function discardStream(stream: Duplex): void {
   stream.on("error", () => undefined);
   stream.resume();
 }
 
-function resolveReadinessOptions(input: CodexExecServerReadinessOptions | undefined): ResolvedReadinessOptions {
-  const deadlineMs = input?.deadlineMs ?? EXEC_SERVER_READY_DEADLINE_MS;
-  const pollIntervalMs = input?.pollIntervalMs ?? EXEC_SERVER_READY_POLL_INTERVAL_MS;
+function resolveTimingOptions(input: CodexExecServerReadinessOptions | CodexExecServerStartupOptions | undefined, defaults: {
+  readonly deadlineMs: number;
+  readonly pollIntervalMs: number;
+}, errorCode: string): ResolvedReadinessOptions {
+  const deadlineMs = input?.deadlineMs ?? defaults.deadlineMs;
+  const pollIntervalMs = input?.pollIntervalMs ?? defaults.pollIntervalMs;
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 60_000
     || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 5_000) {
-    throw new Error("codex-exec-server-readiness-options");
+    throw new Error(errorCode);
   }
   return {
     deadlineMs,
@@ -94,6 +116,53 @@ function resolveReadinessOptions(input: CodexExecServerReadinessOptions | undefi
     now: input?.now ?? Date.now,
     sleep: input?.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
   };
+}
+
+function resolveReadinessOptions(input: CodexExecServerReadinessOptions | undefined): ResolvedReadinessOptions {
+  return resolveTimingOptions(input, {
+    deadlineMs: EXEC_SERVER_READY_DEADLINE_MS,
+    pollIntervalMs: EXEC_SERVER_READY_POLL_INTERVAL_MS
+  }, "codex-exec-server-readiness-options");
+}
+
+function resolveStartupOptions(input: CodexExecServerStartupOptions | undefined): ResolvedReadinessOptions {
+  return resolveTimingOptions(input, {
+    deadlineMs: EXEC_SERVER_STARTUP_DEADLINE_MS,
+    pollIntervalMs: EXEC_SERVER_STARTUP_POLL_INTERVAL_MS
+  }, "codex-exec-server-startup-options");
+}
+
+function inspectStartingServer(
+  inspection: DockerExecInspection,
+  executor: CodexProjectExecutorBinding,
+  execId: string
+): number | null {
+  if (inspection.ID !== execId || inspection.ContainerID !== executor.containerId) {
+    throw new Error("codex-exec-server-identity");
+  }
+  if (!inspection.Running) {
+    if (inspection.ExitCode === null) return null;
+    throw new CodexExecServerExitedBeforeReadyError(inspection.ExitCode);
+  }
+  return assertServerInspection(inspection, executor, execId);
+}
+
+async function observeStartingServer(input: {
+  readonly docker: DockerEngineClient;
+  readonly executor: CodexProjectExecutorBinding;
+  readonly execId: string;
+  readonly startup?: CodexExecServerStartupOptions;
+}): Promise<number> {
+  const startup = resolveStartupOptions(input.startup);
+  const deadline = startup.now() + startup.deadlineMs;
+  for (;;) {
+    const inspection = await input.docker.inspectExec(input.execId);
+    const serverPid = inspectStartingServer(inspection, input.executor, input.execId);
+    if (serverPid !== null) return serverPid;
+    const remaining = deadline - startup.now();
+    if (remaining <= 0) throw new Error("codex-exec-server-startup-timeout");
+    await startup.sleep(Math.min(startup.pollIntervalMs, remaining));
+  }
 }
 
 function assertReadinessProbeInspection(
@@ -165,6 +234,7 @@ export async function startCodexExecServer(input: {
   readonly docker: DockerEngineClient;
   readonly executor: CodexProjectExecutorBinding;
   readonly transport: CodexSplitTransportBinding;
+  readonly startup?: CodexExecServerStartupOptions;
 }): Promise<CodexExecServerHandle> {
   assertServerEndpoint(input.executor, input.transport);
   assertServerNetwork(input.executor, input.transport);
@@ -176,10 +246,15 @@ export async function startCodexExecServer(input: {
   try {
     stream = await input.docker.startExecAttached(execId, false);
     discardStream(stream);
-    const inspection = await input.docker.inspectExec(execId);
-    const serverPid = assertServerInspection(inspection, input.executor, execId);
+    const serverPid = await observeStartingServer({
+      docker: input.docker, executor: input.executor, execId,
+      ...(input.startup === undefined ? {} : { startup: input.startup })
+    });
     return { executorContainerId: input.executor.containerId, execId, endpoint: input.transport, serverPid };
   } catch (error) {
+    if (error instanceof Error && [
+      "codex-exec-server-identity", "codex-exec-server-exited-before-ready", "codex-exec-server-startup-timeout"
+    ].includes(error.message)) throw error;
     throw new Error("codex-exec-server-process", { cause: error });
   }
 }

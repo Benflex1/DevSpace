@@ -255,6 +255,14 @@ function assertForwardingInspection(container: DockerContainerInspection): void 
   }
 }
 
+async function controlStartupStage<T>(stage: string, operation: () => T | PromiseLike<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new Error(stage, { cause: error });
+  }
+}
+
 export async function createCodexControlSidecar(input: {
   readonly docker: DockerEngineClient;
   readonly policy: CodexControlSidecarPolicy;
@@ -262,11 +270,16 @@ export async function createCodexControlSidecar(input: {
 }): Promise<CodexControlSidecarBinding> {
   let containerId: string | undefined;
   try {
-    await input.docker.ensureImage(input.policy.imageReference);
-    const image = await input.docker.inspectImage(input.policy.imageReference);
-    if (!IMAGE_ID_PATTERN.test(image.Id) || image.Os !== "linux") throw new Error("codex-control-image-invalid");
-    assertCodexArtifactCompatibleWithImage({ artifact: input.policy.artifact, image });
-    containerId = await input.docker.createCodexSplitContainer(input.name, {
+    await controlStartupStage("codex-control-image-resolution", () => input.docker.ensureImage(input.policy.imageReference));
+    const image = await controlStartupStage("codex-control-image-inspection", async () => {
+      const inspected = await input.docker.inspectImage(input.policy.imageReference);
+      if (!IMAGE_ID_PATTERN.test(inspected.Id) || inspected.Os !== "linux") throw new Error("codex-control-image-invalid");
+      return inspected;
+    });
+    await controlStartupStage("codex-control-artifact-compatibility", () => {
+      assertCodexArtifactCompatibleWithImage({ artifact: input.policy.artifact, image });
+    });
+    containerId = await controlStartupStage("codex-control-container-create", () => input.docker.createCodexSplitContainer(input.name, {
       role: "control",
       imageId: image.Id,
       imageReference: input.policy.imageReference,
@@ -284,13 +297,13 @@ export async function createCodexControlSidecar(input: {
       memoryBytes: input.policy.resources.memoryBytes,
       pidLimit: input.policy.resources.pidLimit,
       readOnlyRootfs: false
-    });
-    await input.docker.startContainer(containerId);
+    }));
+    await controlStartupStage("codex-control-container-start", () => input.docker.startContainer(containerId!));
     const binding: CodexControlSidecarBinding = {
       policy: input.policy, containerId, containerName: input.name, imageId: image.Id
     };
-    const inspection = await input.docker.inspectContainer(containerId);
-    assertCodexControlSidecarInspection({ container: inspection, binding });
+    const inspection = await controlStartupStage("codex-control-container-inspection", () => input.docker.inspectContainer(containerId!));
+    await controlStartupStage("codex-control-inspection-policy", () => assertCodexControlSidecarInspection({ container: inspection, binding }));
     return binding;
   } catch (error) {
     if (containerId !== undefined) await input.docker.removeContainer(containerId).catch(() => undefined);
