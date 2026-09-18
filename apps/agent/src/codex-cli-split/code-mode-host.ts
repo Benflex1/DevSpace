@@ -7,6 +7,8 @@ import type { CodexSplitArtifactCapabilities } from "./artifact.js";
 
 const READY_DEADLINE_MS = 10_000;
 const READY_POLL_INTERVAL_MS = 50;
+const STARTUP_DEADLINE_MS = 1_000;
+const STARTUP_POLL_INTERVAL_MS = 25;
 const CODE_MODE_HOST_NAME = "codex-code-mode-host" as const;
 const CODE_MODE_HOST_LISTEN_HOST = "0.0.0.0" as const;
 
@@ -43,6 +45,13 @@ interface TimingOptions {
   readonly pollIntervalMs: number;
   readonly now: () => number;
   readonly sleep: (milliseconds: number) => Promise<void>;
+}
+
+export interface CodexCodeModeHostStartupOptions {
+  readonly deadlineMs?: number;
+  readonly pollIntervalMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
 function stageError(reason: string, cause?: unknown): Error {
@@ -158,6 +167,42 @@ function assertHostInspection(
   return inspection.Pid;
 }
 
+function inspectStartingHost(
+  inspection: DockerExecInspection,
+  policy: CodexCodeModeHostPolicy,
+  execId: string
+): number | null {
+  if (inspection.ID !== execId || inspection.ContainerID !== policy.executorContainerId) {
+    throw new Error("codex-code-mode-host-process");
+  }
+  if (!inspection.Running) {
+    if (inspection.ExitCode === null) return null;
+    throw new Error("codex-code-mode-host-exited-before-ready");
+  }
+  if (inspection.ExitCode !== null) throw new Error("codex-code-mode-host-process");
+  if (inspection.Pid === undefined || inspection.Pid === 0) return null;
+  if (!Number.isSafeInteger(inspection.Pid) || inspection.Pid < 0) throw new Error("codex-code-mode-host-process");
+  return inspection.Pid;
+}
+
+async function observeStartingHost(input: {
+  readonly docker: DockerEngineClient;
+  readonly policy: CodexCodeModeHostPolicy;
+  readonly execId: string;
+  readonly startup?: CodexCodeModeHostStartupOptions;
+}): Promise<number> {
+  const limits = startupTiming(input.startup);
+  const deadline = limits.now() + limits.deadlineMs;
+  for (;;) {
+    const inspection = await input.docker.inspectExec(input.execId);
+    const pid = inspectStartingHost(inspection, input.policy, input.execId);
+    if (pid !== null) return pid;
+    const remaining = deadline - limits.now();
+    if (remaining <= 0) throw new Error("codex-code-mode-host-startup-timeout");
+    await limits.sleep(Math.min(limits.pollIntervalMs, remaining));
+  }
+}
+
 function timing(input: {
   readonly deadlineMs?: number;
   readonly pollIntervalMs?: number;
@@ -178,12 +223,26 @@ function timing(input: {
   };
 }
 
+function startupTiming(input: CodexCodeModeHostStartupOptions | undefined): TimingOptions {
+  const deadlineMs = input?.deadlineMs ?? STARTUP_DEADLINE_MS;
+  const pollIntervalMs = input?.pollIntervalMs ?? STARTUP_POLL_INTERVAL_MS;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 60_000
+    || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 5_000) {
+    throw new Error("codex-code-mode-host-startup-options");
+  }
+  return {
+    deadlineMs,
+    pollIntervalMs,
+    now: input?.now ?? Date.now,
+    sleep: input?.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
+  };
+}
+
 function readinessProbe(port: number): readonly string[] {
   return [
     "/bin/sh", "-c",
-    "if command -v curl >/dev/null 2>&1; then exec curl --fail --silent --show-error --http2-prior-knowledge "
-      + "-H 'content-type: application/grpc' -H 'te: trailers' --data-binary "
-      + "$(printf '\\000\\000\\000\\000\\000') http://127.0.0.1:$1/grpc.health.v1.Health/Check >/dev/null; "
+    "if command -v curl >/dev/null 2>&1; then exec curl --fail --silent --show-error "
+      + "http://127.0.0.1:$1/healthz >/dev/null; "
       + "else exit 127; fi",
     "devspace-codex-code-mode-ready", String(port)
   ];
@@ -225,6 +284,7 @@ async function assertHandle(input: {
 export async function startCodexCodeModeHost(input: {
   readonly docker: DockerEngineClient;
   readonly policy: CodexCodeModeHostPolicy;
+  readonly startup?: CodexCodeModeHostStartupOptions;
 }): Promise<CodexCodeModeHostHandle> {
   assertPolicy(input.policy);
   let execId: string;
@@ -247,8 +307,10 @@ export async function startCodexCodeModeHost(input: {
     throw stageError("codex-code-mode-host-attach", error);
   }
   try {
-    const inspection = await input.docker.inspectExec(execId);
-    const serverPid = assertHostInspection(inspection, input.policy, execId);
+    const serverPid = await observeStartingHost({
+      docker: input.docker, policy: input.policy, execId,
+      ...(input.startup === undefined ? {} : { startup: input.startup })
+    });
     return {
       executorContainerId: input.policy.executorContainerId,
       execId,
@@ -257,7 +319,9 @@ export async function startCodexCodeModeHost(input: {
       transportSecurity: "private-network-only"
     };
   } catch (error) {
-    if (error instanceof Error && ["codex-code-mode-host-process", "codex-code-mode-host-exited-before-ready"].includes(error.message)) {
+    if (error instanceof Error && [
+      "codex-code-mode-host-process", "codex-code-mode-host-exited-before-ready", "codex-code-mode-host-startup-timeout"
+    ].includes(error.message)) {
       throw error;
     }
     throw stageError("codex-code-mode-host-process", error);

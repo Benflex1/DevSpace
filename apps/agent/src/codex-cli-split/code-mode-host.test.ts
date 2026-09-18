@@ -71,32 +71,44 @@ function policy(overrides: Partial<CodexCodeModeHostPolicy> = {}): CodexCodeMode
   };
 }
 
-function inspection(id: string, overrides: Partial<DockerExecInspection> = {}): DockerExecInspection {
+function inspection(
+  id: string,
+  overrides: Partial<Omit<DockerExecInspection, "Pid">> & { readonly Pid?: number | undefined } = {}
+): DockerExecInspection {
+  const pid = Object.hasOwn(overrides, "Pid") ? overrides.Pid : 42;
+  const { Pid: _ignoredPid, ...rest } = overrides;
   return {
     ID: id,
     Running: true,
     ExitCode: null,
     ContainerID: executorContainerId,
-    Pid: 42,
-    ...overrides
+    ...rest,
+    ...(pid === undefined ? {} : { Pid: pid })
   };
 }
 
 function dockerFixture(options: {
   readonly hostInspection?: DockerExecInspection;
+  readonly hostInspections?: readonly DockerExecInspection[];
   readonly probeInspections?: readonly DockerExecInspection[];
 } = {}): DockerEngineClient & { readonly commands: readonly (readonly string[])[] } {
   const commands: string[][] = [];
   let probeIndex = 0;
+  let hostIndex = 0;
   const client = new (class extends DockerEngineClient {
     constructor() { super("/fixture.sock"); }
     override createExec(_containerId: string, input: { readonly command: readonly string[] }): Promise<string> {
       commands.push([...input.command]);
-      return Promise.resolve(input.command.some((part) => part.includes("grpc.health.v1.Health")) ? "probe-exec" : "host-exec");
+      return Promise.resolve(input.command.some((part) => part.includes("/healthz")) ? "probe-exec" : "host-exec");
     }
     override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
     override inspectExec(id: string): Promise<DockerExecInspection> {
-      if (id === "host-exec") return Promise.resolve(options.hostInspection ?? inspection(id));
+      if (id === "host-exec") {
+        const observed = options.hostInspections?.[Math.min(hostIndex++, (options.hostInspections?.length ?? 1) - 1)]
+          ?? options.hostInspection
+          ?? inspection(id);
+        return Promise.resolve({ ...observed, ID: id });
+      }
       const observed = options.probeInspections?.[Math.min(probeIndex++, (options.probeInspections?.length ?? 1) - 1)]
         ?? inspection(id, { Running: false, ExitCode: 0 });
       return Promise.resolve({ ...observed, ID: id });
@@ -123,6 +135,60 @@ test("starts the host only with a valid executor process", async () => {
     serverPid: 42,
     transportSecurity: "private-network-only"
   });
+});
+
+test("waits through a Docker exec transition before accepting the host process", async () => {
+  const docker = dockerFixture({ hostInspections: [
+    inspection("host-exec", { Running: false, ExitCode: null }),
+    inspection("host-exec")
+  ] });
+  let now = 0;
+  await expect(startCodexCodeModeHost({
+    docker,
+    policy: policy(),
+    startup: {
+      deadlineMs: 10,
+      pollIntervalMs: 1,
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); }
+    }
+  })).resolves.toMatchObject({ serverPid: 42 });
+});
+
+test("waits while Docker reports a running exec without a PID", async () => {
+  const docker = dockerFixture({ hostInspections: [
+    inspection("host-exec", { Pid: undefined }),
+    inspection("host-exec")
+  ] });
+  let now = 0;
+  await expect(startCodexCodeModeHost({
+    docker,
+    policy: policy(),
+    startup: {
+      deadlineMs: 10,
+      pollIntervalMs: 1,
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); }
+    }
+  })).resolves.toMatchObject({ serverPid: 42 });
+});
+
+test("waits while Docker reports a non-positive transient PID", async () => {
+  const docker = dockerFixture({ hostInspections: [
+    inspection("host-exec", { Pid: 0 }),
+    inspection("host-exec")
+  ] });
+  let now = 0;
+  await expect(startCodexCodeModeHost({
+    docker,
+    policy: policy(),
+    startup: {
+      deadlineMs: 10,
+      pollIntervalMs: 1,
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); }
+    }
+  })).resolves.toMatchObject({ serverPid: 42 });
 });
 
 test("rejects missing helper, malformed listener, credentials, or control egress", async () => {
@@ -152,7 +218,7 @@ test("rejects wrong network, PID, container, and terminal process state", async 
     policy: policy({ endpoint: { ...endpoint, networkId: "wrong" } })
   })).rejects.toThrow("codex-code-mode-host-network");
   await expect(startCodexCodeModeHost({
-    docker: dockerFixture({ hostInspection: inspection("host-exec", { Pid: 0 }) }),
+    docker: dockerFixture({ hostInspection: inspection("host-exec", { Pid: -1 }) }),
     policy: policy()
   })).rejects.toThrow("codex-code-mode-host-process");
   await expect(startCodexCodeModeHost({
@@ -186,7 +252,8 @@ test("uses a bounded native gRPC readiness probe rather than exec-server readyz"
     now: () => now,
     sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); }
   });
-  expect(docker.commands.some((command) => command.some((part) => part.includes("grpc.health.v1.Health")))).toBe(true);
+  expect(docker.commands.some((command) => command.some((part) => part.includes("/healthz")))).toBe(true);
+  expect(docker.commands.some((command) => command.some((part) => part.includes("grpc.health.v1.Health")))).toBe(false);
   expect(docker.commands.flat()).not.toContain("/readyz");
 });
 

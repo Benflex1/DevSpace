@@ -375,21 +375,11 @@ export async function runCodexSplitCodexVersionTtySmoke(input: {
   });
 }
 
-async function restartControlContainer(input: { readonly docker: DockerEngineClient; readonly containerId: string }): Promise<void> {
-  try {
-    await input.docker.stopContainer(input.containerId);
-    await input.docker.startContainer(input.containerId);
-  } catch (error) {
-    throw stageError("native-pty-exit", error);
-  }
-}
-
 async function runNativePtyStartupSmoke(input: {
   readonly docker: DockerEngineClient;
   readonly runtime: Pick<CodexSplitRuntime, "startNewSession">;
   readonly projectId: string;
   readonly workspaceId: string;
-  readonly controlContainerId: string;
   readonly timing?: CodexPtyTiming;
 }): Promise<void> {
   const pty = await input.runtime.startNewSession({
@@ -406,7 +396,6 @@ async function runNativePtyStartupSmoke(input: {
     if (error instanceof Error && /^(?:native-pty-|codex-)/u.test(error.message)) throw error;
     throw stageError("native-pty-exit", error);
   }
-  await restartControlContainer({ docker: input.docker, containerId: input.controlContainerId });
 }
 
 export async function runCodexSplitPtyProof(input: {
@@ -441,7 +430,6 @@ export async function runCodexSplitPtyProof(input: {
       runtime: input.runtime,
       projectId: input.projectId,
       workspaceId: input.workspaceId,
-      controlContainerId: input.record.control.id,
       ...(input.timing === undefined ? {} : { timing: input.timing })
     });
   }

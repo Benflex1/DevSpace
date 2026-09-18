@@ -102,7 +102,8 @@ async function socketServer(socketPath: string): Promise<net.Server> {
   return server;
 }
 
-  function dockerFixture(policy: CodexNativeAppServerPolicy): DockerEngineClient {
+function dockerFixture(policy: CodexNativeAppServerPolicy, inspections: readonly DockerExecInspection[] = []): DockerEngineClient {
+  let inspectionIndex = 0;
   return new class extends DockerEngineClient {
     constructor() { super("/fixture.sock"); }
     override createExec(): Promise<string> { return Promise.resolve("app-server-exec"); }
@@ -111,7 +112,9 @@ async function socketServer(socketPath: string): Promise<net.Server> {
       return Promise.resolve(new PassThrough());
     }
     override inspectExec(id: string): Promise<DockerExecInspection> {
-      return Promise.resolve(inspection(id, policy.controlContainerId));
+      const observed = inspections[ Math.min(inspectionIndex++, Math.max(inspections.length - 1, 0)) ]
+        ?? inspection(id, policy.controlContainerId);
+      return Promise.resolve({ ...observed, ID: id, ContainerID: policy.controlContainerId });
     }
   }();
 }
@@ -143,6 +146,42 @@ test("starts and validates a native app-server on the private home socket", asyn
     transportSecurity: "private-network-only"
   });
   await expect(assertCodexNativeAppServerReady({ docker: dockerFixture(policy), handle, policy })).resolves.toBeUndefined();
+});
+
+test("waits through a Docker exec transition before accepting the app-server", async () => {
+  const home = await homeFixture();
+  const policy = buildCodexNativeAppServerPolicy({ control: control(home), artifact, codeModeHost });
+  const docker = dockerFixture(policy, [
+    inspection("app-server-exec", policy.controlContainerId, { Running: false, ExitCode: null }),
+    inspection("app-server-exec", policy.controlContainerId)
+  ]);
+  let now = 0;
+  await expect(startCodexNativeAppServer({
+    docker,
+    policy,
+    deadlineMs: 10,
+    pollIntervalMs: 1,
+    now: () => now,
+    sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); }
+  })).resolves.toMatchObject({ serverPid: 72 });
+});
+
+test("waits through a running exec with a transitional zero pid", async () => {
+  const home = await homeFixture();
+  const policy = buildCodexNativeAppServerPolicy({ control: control(home), artifact, codeModeHost });
+  const docker = dockerFixture(policy, [
+    inspection("app-server-exec", policy.controlContainerId, { Pid: 0 }),
+    inspection("app-server-exec", policy.controlContainerId, { Pid: 72 })
+  ]);
+  let now = 0;
+  await expect(startCodexNativeAppServer({
+    docker,
+    policy,
+    deadlineMs: 10,
+    pollIntervalMs: 1,
+    now: () => now,
+    sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); }
+  })).resolves.toMatchObject({ serverPid: 72 });
 });
 
 test("rejects a missing or mismatched remote Code Mode host", async () => {
@@ -205,5 +244,42 @@ test("rejects a server that exits or never creates the default socket", async ()
       return Promise.resolve(inspection("app-server-exec", policy.controlContainerId, { Running: false, ExitCode: 1, Pid: 72 }));
     }
   }();
-  await expect(startCodexNativeAppServer({ docker, policy, deadlineMs: 2, pollIntervalMs: 1 })).rejects.toThrow("codex-app-server-process");
+  await expect(startCodexNativeAppServer({ docker, policy, deadlineMs: 2, pollIntervalMs: 1 })).rejects.toThrow("codex-app-server-exited-before-ready");
+});
+
+test("classifies a running app-server inspection without a positive pid", async () => {
+  const home = await homeFixture();
+  const policy = buildCodexNativeAppServerPolicy({ control: control(home), artifact, codeModeHost });
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("app-server-exec"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
+    override inspectExec(): Promise<DockerExecInspection> {
+      return Promise.resolve(inspection("app-server-exec", policy.controlContainerId, { Pid: -1 }));
+    }
+  }();
+  const failure = await startCodexNativeAppServer({ docker, policy, deadlineMs: 2, pollIntervalMs: 1 })
+    .catch((error: unknown) => error);
+  expect(failure).toMatchObject({ message: "codex-app-server-process" });
+  expect((failure as Error & { readonly cause?: Error }).cause).toMatchObject({ message: "server-pid-invalid" });
+});
+
+test("reports an app-server that exits while its socket is becoming ready", async () => {
+  const home = await homeFixture();
+  const policy = buildCodexNativeAppServerPolicy({ control: control(home), artifact, codeModeHost });
+  let inspections = 0;
+  const docker = new class extends DockerEngineClient {
+    constructor() { super("/fixture.sock"); }
+    override createExec(): Promise<string> { return Promise.resolve("app-server-exec"); }
+    override startExecAttached(): Promise<PassThrough> { return Promise.resolve(new PassThrough()); }
+    override inspectExec(): Promise<DockerExecInspection> {
+      inspections += 1;
+      return Promise.resolve(inspections === 1
+        ? inspection("app-server-exec", policy.controlContainerId)
+        : inspection("app-server-exec", policy.controlContainerId, { Running: false, ExitCode: 1, Pid: 72 }));
+    }
+  }();
+  const failure = await startCodexNativeAppServer({ docker, policy, deadlineMs: 2, pollIntervalMs: 1 }).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ message: "codex-app-server-exited-before-ready" });
+  expect((failure as Error & { readonly cause?: Error }).cause).toMatchObject({ message: "exit-1" });
 });

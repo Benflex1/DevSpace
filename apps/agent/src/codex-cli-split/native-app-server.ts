@@ -194,23 +194,76 @@ function discardStream(stream: Duplex): void {
   stream.resume();
 }
 
+function serverExitedBeforeReady(inspection: DockerExecInspection): Error {
+  const exitCode = Number.isSafeInteger(inspection.ExitCode) && inspection.ExitCode !== null
+    && inspection.ExitCode >= 0 && inspection.ExitCode <= 255
+    ? String(inspection.ExitCode)
+    : "unknown";
+  return new Error("codex-app-server-exited-before-ready", { cause: new Error(`exit-${exitCode}`) });
+}
+
+function serverProcessState(reason: "identity" | "pid-invalid"): Error {
+  return new Error("codex-app-server-process", { cause: new Error(`server-${reason}`) });
+}
+
 function assertServerInspection(inspection: DockerExecInspection, policy: CodexNativeAppServerPolicy, execId: string, expectedPid?: number): number {
-  if (inspection.ID !== execId || inspection.ContainerID !== policy.controlContainerId) throw new Error("codex-app-server-process");
-  if (!inspection.Running || inspection.ExitCode !== null
-    || inspection.Pid === undefined || !Number.isSafeInteger(inspection.Pid) || inspection.Pid < 1
-    || (expectedPid !== undefined && inspection.Pid !== expectedPid)) {
+  if (inspection.ID !== execId || inspection.ContainerID !== policy.controlContainerId) throw serverProcessState("identity");
+  if (!inspection.Running || inspection.ExitCode !== null) {
+    if (inspection.ExitCode !== null) throw serverExitedBeforeReady(inspection);
     throw new Error("codex-app-server-process");
   }
+  if (inspection.Pid === undefined || !Number.isSafeInteger(inspection.Pid) || inspection.Pid < 1
+    || (expectedPid !== undefined && inspection.Pid !== expectedPid)) throw serverProcessState("pid-invalid");
   return inspection.Pid;
 }
 
-async function waitForSocket(input: {
+function inspectStartingServer(
+  inspection: DockerExecInspection,
+  policy: CodexNativeAppServerPolicy,
+  execId: string
+): number | null {
+  if (inspection.ID !== execId || inspection.ContainerID !== policy.controlContainerId) {
+    throw serverProcessState("identity");
+  }
+  if (!inspection.Running) {
+    if (inspection.ExitCode === null) return null;
+    throw serverExitedBeforeReady(inspection);
+  }
+  if (inspection.ExitCode !== null) throw serverExitedBeforeReady(inspection);
+  if (inspection.Pid === undefined || inspection.Pid === 0) return null;
+  if (!Number.isSafeInteger(inspection.Pid) || inspection.Pid < 1) throw serverProcessState("pid-invalid");
+  return inspection.Pid;
+}
+
+async function observeStartingServer(input: {
+  readonly docker: DockerEngineClient;
   readonly policy: CodexNativeAppServerPolicy;
+  readonly execId: string;
+  readonly deadline: number;
+  readonly timing: TimingOptions;
+}): Promise<number> {
+  for (;;) {
+    const inspection = await input.docker.inspectExec(input.execId);
+    const pid = inspectStartingServer(inspection, input.policy, input.execId);
+    if (pid !== null) return pid;
+    const remaining = input.deadline - input.timing.now();
+    if (remaining <= 0) throw new Error("codex-app-server-startup-timeout");
+    await input.timing.sleep(Math.min(input.timing.pollIntervalMs, remaining));
+  }
+}
+
+async function waitForSocket(input: {
+  readonly docker: DockerEngineClient;
+  readonly policy: CodexNativeAppServerPolicy;
+  readonly execId: string;
+  readonly serverPid: number;
   readonly deadline: number;
   readonly timing: TimingOptions;
 }): Promise<{ readonly identity: FileIdentity }> {
   const socketPath = nativeAppServerAgentSocketPath(input.policy.controlHomePath);
   for (;;) {
+    const inspection = await input.docker.inspectExec(input.execId);
+    assertServerInspection(inspection, input.policy, input.execId, input.serverPid);
     const observed = await lstatIdentity(socketPath);
     if (observed !== null && observed.stats.isSocket() && !observed.stats.isSymbolicLink()) return { identity: observed.identity };
     const remaining = input.deadline - input.timing.now();
@@ -239,6 +292,8 @@ export async function startCodexNativeAppServer(input: {
   readonly policy: CodexNativeAppServerPolicy;
   readonly deadlineMs?: number;
   readonly pollIntervalMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }): Promise<CodexNativeAppServerHandle> {
   assertPolicy(input.policy);
   await assertHome(input.policy);
@@ -265,9 +320,12 @@ export async function startCodexNativeAppServer(input: {
   }
   const deadline = options.now() + options.deadlineMs;
   try {
-    const initial = await input.docker.inspectExec(execId);
-    const serverPid = assertServerInspection(initial, input.policy, execId);
-    const socket = await waitForSocket({ policy: input.policy, deadline, timing: options });
+    const serverPid = await observeStartingServer({
+      docker: input.docker, policy: input.policy, execId, deadline, timing: options
+    });
+    const socket = await waitForSocket({
+      docker: input.docker, policy: input.policy, execId, serverPid, deadline, timing: options
+    });
     return {
       controlContainerId: input.policy.controlContainerId,
       execId,
@@ -279,7 +337,10 @@ export async function startCodexNativeAppServer(input: {
       transportSecurity: "private-network-only"
     };
   } catch (error) {
-    if (error instanceof Error && ["codex-app-server-process", "codex-app-server-socket-not-ready"].includes(error.message)) throw error;
+    if (error instanceof Error && [
+      "codex-app-server-process", "codex-app-server-exited-before-ready",
+      "codex-app-server-socket-not-ready", "codex-app-server-startup-timeout"
+    ].includes(error.message)) throw error;
     throw new Error("codex-app-server-process", { cause: error });
   }
 }
