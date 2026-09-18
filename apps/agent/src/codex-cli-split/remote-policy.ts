@@ -67,6 +67,8 @@ enabled = true
 disable_in_process_fallback = true
 `;
 
+const OTEL_TRACE_PATH = "/v1/traces" as const;
+
 export type CodexForbiddenLocalPath =
   | "local-environment"
   | "shell"
@@ -167,17 +169,48 @@ function assertNativeHomeBinding(home: CodexNativeHomeBinding): void {
   }
 }
 
-function policyDirectory(stateRoot: string, endpoint: CodexSplitTransportBinding): string {
+function assertVerifierOtelTraceExporterEndpoint(value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("codex-policy-otel-endpoint");
+  }
+  if (parsed.protocol !== "http:"
+    || parsed.hostname !== "127.0.0.1"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.pathname !== OTEL_TRACE_PATH
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || !Number.isSafeInteger(Number(parsed.port))
+    || Number(parsed.port) < 1
+    || Number(parsed.port) > 65535) {
+    throw new Error("codex-policy-otel-endpoint");
+  }
+}
+
+function policyDirectory(
+  stateRoot: string,
+  endpoint: CodexSplitTransportBinding,
+  otelTraceExporterEndpoint?: string
+): string {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(endpoint.workspaceId)) {
     throw new Error("codex-policy-workspace-id-invalid");
   }
   if (!Number.isSafeInteger(endpoint.generation) || endpoint.generation < 1) {
     throw new Error("codex-policy-generation-invalid");
   }
+  const verifierSuffix = otelTraceExporterEndpoint === undefined ? "" : "-otel";
   return assertContained(
     stateRoot,
-    path.join(stateRoot, "codex-split-policies", `${endpoint.workspaceId}-g${endpoint.generation}-${POLICY_COMPOSITION_NAMESPACE}`)
+    path.join(stateRoot, "codex-split-policies", `${endpoint.workspaceId}-g${endpoint.generation}-${POLICY_COMPOSITION_NAMESPACE}${verifierSuffix}`)
   );
+}
+
+function managedConfigText(otelTraceExporterEndpoint?: string): string {
+  if (otelTraceExporterEndpoint === undefined) return MANAGED_CONFIG_TOML;
+  return `${MANAGED_CONFIG_TOML}\n[otel]\ntrace_exporter = { otlp-http = { endpoint = "${otelTraceExporterEndpoint}", protocol = "json" } }\n`;
 }
 
 async function writePinnedPolicy(filePath: string, expectedText: string): Promise<void> {
@@ -310,17 +343,22 @@ export async function prepareCodexManagedPolicy(input: {
   readonly home: CodexNativeHomeBinding;
   readonly endpoint: CodexSplitTransportBinding;
   readonly admittedVersion: "0.153.4";
+  /** Verifier-only loopback OTLP endpoint; omitted for normal runtime behavior. */
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<CodexManagedPolicyBinding> {
   if (input.admittedVersion !== ADMITTED_CODEX_VERSION) throw new Error("codex-policy-version-not-admitted");
   const stateRoot = absolutePath(input.stateRoot, "codex-policy-state-root-invalid");
   assertNativeHomeBinding(input.home);
   assertAdmittedEndpoint(input.endpoint);
-  const directory = policyDirectory(stateRoot, input.endpoint);
+  if (input.otelTraceExporterEndpoint !== undefined) {
+    assertVerifierOtelTraceExporterEndpoint(input.otelTraceExporterEndpoint);
+  }
+  const directory = policyDirectory(stateRoot, input.endpoint, input.otelTraceExporterEndpoint);
   await establishPinnedDirectory(directory);
   const requirementsPath = assertContained(directory, path.join(directory, "requirements.toml"));
   const managedConfigPath = assertContained(directory, path.join(directory, "managed_config.toml"));
   await writePinnedPolicy(requirementsPath, MANAGED_REQUIREMENTS_TOML);
-  await writePinnedPolicy(managedConfigPath, MANAGED_CONFIG_TOML);
+  await writePinnedPolicy(managedConfigPath, managedConfigText(input.otelTraceExporterEndpoint));
   const policy: CodexManagedPolicyBinding = {
     mechanism: "0.153.4-managed-requirements",
     requirementsPath,

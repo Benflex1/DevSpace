@@ -12,6 +12,7 @@ import {
 } from "./codex-native-app-server-probe.js";
 import { ensureNativeCodexHome, type CodexNativeHomeBinding } from "../src/codex-cli-split/native-home.js";
 import { lstatIdentity } from "../src/private-state.js";
+import type { CodexNativeRemoteCodeModeEvidenceInput } from "./codex-native-remote-code-mode-evidence.js";
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -58,6 +59,69 @@ function connection(messages: readonly Readonly<Record<string, unknown>>[]): Cod
   };
 }
 
+const CORRELATION_TRACE_ID = "0123456789abcdef0123456789abcdef";
+
+function correlationEvidence(input: {
+  readonly model: "gpt-6-astra" | "gpt-5.6-luna";
+  readonly threadId: string;
+  readonly turnId: string;
+}): CodexNativeRemoteCodeModeEvidenceInput {
+  return {
+    model: input.model,
+    toolModeEvidence: {
+      kind: "pinned-model-metadata-plus-runtime",
+      model: input.model,
+      remoteCodeModeObserved: true
+    },
+    threadId: input.threadId,
+    turnId: input.turnId,
+    grpcExecutionId: "execution-1",
+    codeModeHostContainerId: "executor-1",
+    execServerContainerId: "executor-1",
+    codeModeTiming: {
+      threadId: input.threadId,
+      turnId: input.turnId,
+      callId: "call-exec-1",
+      cellId: "cell-1",
+      toolName: "exec",
+      cwd: "/workspace",
+      hostCompleted: true,
+      aborted: false
+    },
+    remoteProvider: {
+      provider: "remote-grpc",
+      sessionId: "session-1",
+      executionId: "execution-1",
+      callId: "call-exec-1",
+      cellId: "cell-1",
+      invocationId: "invocation-1",
+      traceId: CORRELATION_TRACE_ID,
+      callbackCompleted: true
+    },
+    nestedTool: {
+      cellId: "cell-1",
+      runtimeToolCallId: "runtime-call-1",
+      toolName: "exec",
+      traceId: CORRELATION_TRACE_ID,
+      dispatchCompleted: true
+    },
+    execProcess: {
+      traceId: CORRELATION_TRACE_ID,
+      processId: "process-1",
+      executorContainerId: "executor-1",
+      cwd: "/workspace",
+      exitCode: 0,
+      closed: true,
+      failed: false
+    },
+    turnCompleted: true,
+    controlProjectProcessCount: 0,
+    executorProjectProcessCount: 1,
+    executorHasNativeHome: false,
+    executorHasCredentials: false
+  };
+}
+
 function dependencies(messages: readonly Readonly<Record<string, unknown>>[], overrides: Partial<CodexNativeAppServerModelProbeDependencies> = {}): CodexNativeAppServerModelProbeDependencies {
   return {
     connect: () => Promise.resolve(connection(messages)),
@@ -66,8 +130,12 @@ function dependencies(messages: readonly Readonly<Record<string, unknown>>[], ov
       projectProcessCount: 1,
       codeModeHostProcessCount: 1,
       execServerProcessCount: 1,
-      hasNativeHome: false
+      hasNativeHome: false,
+      hasCredentials: false,
+      codeModeHostContainerId: "executor-1",
+      execServerContainerId: "executor-1"
     }),
+    observeRemoteCodeModeEvidence: ({ model, threadId, turnId }) => Promise.resolve(correlationEvidence({ model, threadId, turnId })),
     now: () => 0,
     sleep: () => Promise.resolve(),
     ...overrides
@@ -86,28 +154,6 @@ const protocolPreamble = [
   { method: "thread/environment/connected", params: { threadId: "thread-1", environmentId: "remote" } },
   { id: 3, result: { turn: { id: "turn-1" } } },
   { method: "item/started", params: { item: { id: "code-mode-1", type: "dynamicToolCall", namespace: "code_mode", tool: "execute", status: "inProgress", arguments: {} } } },
-  { method: "item/started", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "inProgress", commandActions: [], source: "unifiedExecStartup" } } },
-  { method: "item/completed", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "completed", exitCode: 0, commandActions: [], source: "unifiedExecStartup" } } },
-  { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } }
-];
-
-const functionCallCodeModeProtocolPreamble = [
-  { id: 1, result: { userAgent: "codex" } },
-  { id: 2, result: { thread: { id: "thread-1" } } },
-  { method: "thread/environment/connected", params: { threadId: "thread-1", environmentId: "remote" } },
-  { id: 3, result: { turn: { id: "turn-1" } } },
-  { method: "item/completed", params: { item: { id: "code-mode-1", type: "functionCallOutput", name: "exec", namespace: null, output: { type: "text", text: "bounded" } } } },
-  { method: "item/started", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "inProgress", commandActions: [], source: "unifiedExecStartup" } } },
-  { method: "item/completed", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "completed", exitCode: 0, commandActions: [], source: "unifiedExecStartup" } } },
-  { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } }
-];
-
-const functionCallStartedCodeModeProtocolPreamble = [
-  { id: 1, result: { userAgent: "codex" } },
-  { id: 2, result: { thread: { id: "thread-1" } } },
-  { method: "thread/environment/connected", params: { threadId: "thread-1", environmentId: "remote" } },
-  { id: 3, result: { turn: { id: "turn-1" } } },
-  { method: "item/started", params: { item: { id: "code-mode-1", type: "functionCall", name: "exec", arguments: "{}", status: "inProgress" } } },
   { method: "item/started", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "inProgress", commandActions: [], source: "unifiedExecStartup" } } },
   { method: "item/completed", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "completed", exitCode: 0, commandActions: [], source: "unifiedExecStartup" } } },
   { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } }
@@ -166,27 +212,20 @@ describe("Codex native app-server model probe", () => {
     const { socket } = await validSocket();
     const result = await runCodexNativeAppServerModelProbe({
       socket, model: "gpt-5.6-luna", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
-    }, dependencies(functionCallCodeModeProtocolPreamble));
+    }, dependencies(protocolPreamble));
     expect(result.model).toBe("gpt-5.6-luna");
     expect(result.toolModeEvidence).toEqual({
       kind: "pinned-model-metadata-plus-runtime", model: "gpt-5.6-luna", remoteCodeModeObserved: true
     });
   });
 
-  it("recognizes the native Code Mode exec function output without a ToolMode field", async () => {
+  it("does not use app-server item notifications as the Code Mode authority", async () => {
     const { socket } = await validSocket();
-    const result = await runCodexNativeAppServerModelProbe({
+    await expect(runCodexNativeAppServerModelProbe({
       socket, model: "gpt-6-astra", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
-    }, dependencies(functionCallCodeModeProtocolPreamble));
-    expect(result.remoteCodeModeObserved).toBe(true);
-  });
-
-  it("recognizes the native Code Mode exec function call without a ToolMode field", async () => {
-    const { socket } = await validSocket();
-    const result = await runCodexNativeAppServerModelProbe({
-      socket, model: "gpt-5.6-luna", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
-    }, dependencies(functionCallStartedCodeModeProtocolPreamble));
-    expect(result.remoteCodeModeObserved).toBe(true);
+    }, dependencies(protocolPreamble, { observeRemoteCodeModeEvidence: () => Promise.resolve(null) }))).rejects.toThrow(
+      "codex-native-code-mode-correlation-invalid"
+    );
   });
 
   it("stops without approving a server approval request", async () => {
@@ -211,7 +250,7 @@ describe("Codex native app-server model probe", () => {
     await expect(runCodexNativeAppServerModelProbe({
       socket, model: "gpt-6-astra", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
     }, dependencies(protocolPreamble, {
-      inspectExecutor: () => Promise.resolve({ projectProcessCount: 0, codeModeHostProcessCount: 1, execServerProcessCount: 1, hasNativeHome: false })
+      inspectExecutor: () => Promise.resolve({ projectProcessCount: 0, codeModeHostProcessCount: 1, execServerProcessCount: 1, hasNativeHome: false, hasCredentials: false, codeModeHostContainerId: "executor-1", execServerContainerId: "executor-1" })
     }))).rejects.toThrow("codex-model-probe-executor-project-process");
   });
 
@@ -225,5 +264,6 @@ describe("Codex native app-server model probe", () => {
     expect(JSON.stringify(result)).not.toContain("approvalId");
     expect(result).not.toHaveProperty("transcript");
     expect(result).not.toHaveProperty("modelOutput");
+    expect(result).not.toHaveProperty("agentSocketPath");
   });
 });

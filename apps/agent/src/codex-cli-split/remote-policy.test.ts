@@ -169,6 +169,30 @@ describe("Codex split remote-only policy", () => {
     expect(contents).not.toContain("code_mode_host = false");
   });
 
+  test("adds verifier-only OTLP tracing only for an exact control-loopback endpoint", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-remote-policy-otel-"));
+    roots.push(root);
+    const binding = await prepareCodexManagedPolicy({
+      stateRoot: root,
+      home,
+      endpoint,
+      admittedVersion: "0.153.4",
+      otelTraceExporterEndpoint: "http://127.0.0.1:43180/v1/traces"
+    });
+    expect(binding.requirementsPath).toContain("-otel");
+    const managedConfig = await readFile(binding.managedConfigPath, "utf8");
+    expect(managedConfig).toContain("[otel]");
+    expect(managedConfig).toContain("trace_exporter");
+    expect(managedConfig).toContain("http://127.0.0.1:43180/v1/traces");
+    await expect(prepareCodexManagedPolicy({
+      stateRoot: root,
+      home,
+      endpoint,
+      admittedVersion: "0.153.4",
+      otelTraceExporterEndpoint: "http://codex-control:43180/v1/traces"
+    })).rejects.toThrow("codex-policy-otel-endpoint");
+  });
+
   test.each([
     [null, ["codex"]],
     ["018f0f00-0000-7000-8000-000000000003", ["codex", "resume", "018f0f00-0000-7000-8000-000000000003"]]

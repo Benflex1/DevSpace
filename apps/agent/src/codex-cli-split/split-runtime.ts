@@ -137,6 +137,8 @@ export interface CodexSplitRuntimeAssemblyInput {
   readonly stateRoot: string;
   readonly controlImageReference: string;
   readonly codexExecutablePath: string;
+  /** Verifier-only native OTLP endpoint; omitted for normal runtime behavior. */
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }
 
 export interface CodexSplitRuntimePtyInput {
@@ -163,6 +165,8 @@ export interface CodexSplitRuntimeDependencies {
     readonly stateRoot: string;
     readonly controlImageReference: string;
     readonly codexExecutablePath: string;
+    /** Verifier-only native OTLP endpoint; omitted for normal runtime behavior. */
+    readonly otelTraceExporterEndpoint?: string | undefined;
   }) => Promise<CodexSplitRuntimeAssembly>;
   readonly startPty?: (input: CodexSplitRuntimePtyInput & { readonly docker: DockerEngineClient }) => Promise<NativeCodexPty>;
   readonly now?: () => string;
@@ -233,7 +237,8 @@ async function buildDefaultAssembly(input: CodexSplitRuntimeAssemblyInput & { re
     const codeModeHost = await startCodexCodeModeHost({ docker: input.docker, policy: codeModeHostPolicy });
     await assertCodexCodeModeHostReady({ docker: input.docker, handle: codeModeHost, policy: codeModeHostPolicy });
     const managedPolicy = await prepareCodexManagedPolicy({
-      stateRoot: input.stateRoot, home, endpoint: transport, admittedVersion: "0.153.4"
+      stateRoot: input.stateRoot, home, endpoint: transport, admittedVersion: "0.153.4",
+      otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
     });
     const remote = buildRemoteOnlyConfiguration({
       home, endpoint: transport, policy: managedPolicy, codeModeHostUrl: codeModeHost.endpoint.url
@@ -539,6 +544,7 @@ export class CodexSplitRuntime {
     readonly stateRoot: string;
     readonly controlImageReference: string;
     readonly codexExecutablePath: string;
+    readonly otelTraceExporterEndpoint?: string | undefined;
   }) => Promise<CodexSplitRuntimeAssembly>;
   private readonly startPty: (input: CodexSplitRuntimePtyInput & { readonly docker: DockerEngineClient }) => Promise<NativeCodexPty>;
   private readonly now: () => string;
@@ -550,6 +556,8 @@ export class CodexSplitRuntime {
     readonly stateRoot: string;
     readonly controlImageReference: string;
     readonly codexExecutablePath: string;
+    /** Verifier-only native OTLP endpoint; omitted for normal runtime behavior. */
+    readonly otelTraceExporterEndpoint?: string | undefined;
   }, dependencies: CodexSplitRuntimeDependencies = {}) {
     this.managed = input.managed;
     this.docker = input.docker;
@@ -557,6 +565,7 @@ export class CodexSplitRuntime {
     this.runtimeStateRoot = splitStateRoot(this.stateRoot);
     this.controlImageReference = input.controlImageReference;
     this.codexExecutablePath = input.codexExecutablePath;
+    this.otelTraceExporterEndpoint = input.otelTraceExporterEndpoint;
     this.buildAssembly = dependencies.buildAssembly ?? buildDefaultAssembly;
     this.reattachAssembly = dependencies.reattachAssembly ?? buildDefaultReattachedAssembly;
     this.startPty = dependencies.startPty ?? (async (ptyInput) => await startNativeCodexPty({
@@ -578,6 +587,7 @@ export class CodexSplitRuntime {
   private readonly stateRoot: string;
   private readonly controlImageReference: string;
   private readonly codexExecutablePath: string;
+  private readonly otelTraceExporterEndpoint: string | undefined;
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -647,7 +657,9 @@ export class CodexSplitRuntime {
       try {
         const reattached = await this.reattachAssembly({
           docker: this.docker, record: existing, context, git, stateRoot: this.stateRoot,
-          controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
+          controlImageReference: this.controlImageReference,
+          codexExecutablePath: this.codexExecutablePath,
+          otelTraceExporterEndpoint: this.otelTraceExporterEndpoint
         });
         this.assemblies.set(key, reattached);
         return reattached;
@@ -659,7 +671,9 @@ export class CodexSplitRuntime {
         });
         const rebuilt = await this.buildAssembly({
           docker: this.docker, context, git, stateRoot: this.stateRoot,
-          controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
+          controlImageReference: this.controlImageReference,
+          codexExecutablePath: this.codexExecutablePath,
+          otelTraceExporterEndpoint: this.otelTraceExporterEndpoint
         });
         this.assemblies.set(key, rebuilt);
         return rebuilt;
@@ -667,7 +681,9 @@ export class CodexSplitRuntime {
     }
     const created = await this.buildAssembly({
       docker: this.docker, context, git, stateRoot: this.stateRoot,
-      controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
+      controlImageReference: this.controlImageReference,
+      codexExecutablePath: this.codexExecutablePath,
+      otelTraceExporterEndpoint: this.otelTraceExporterEndpoint
     });
     this.assemblies.set(key, created);
     return created;
@@ -879,6 +895,7 @@ async function buildDefaultReattachedAssembly(input: {
   readonly stateRoot: string;
   readonly controlImageReference: string;
   readonly codexExecutablePath: string;
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<CodexSplitRuntimeAssembly> {
   const version = await probeAdmittedCodexVersion({ executablePath: input.codexExecutablePath });
   if (version.version !== "0.153.4") throw new Error("codex-split-restart-version");
@@ -971,7 +988,13 @@ async function buildDefaultReattachedAssembly(input: {
     throw new Error("codex-split-runtime-authority");
   }
   await reattachCodexCodeModeHost({ docker: input.docker, handle: codeModeHost, policy: codeModeHostPolicy });
-  const managedPolicy = await prepareCodexManagedPolicy({ stateRoot: input.stateRoot, home, endpoint: transport, admittedVersion: version.version });
+  const managedPolicy = await prepareCodexManagedPolicy({
+    stateRoot: input.stateRoot,
+    home,
+    endpoint: transport,
+    admittedVersion: version.version,
+    otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+  });
   const remote = buildRemoteOnlyConfiguration({
     home, endpoint: transport, policy: managedPolicy, codeModeHostUrl: codeModeHost.endpoint.url
   });

@@ -994,7 +994,10 @@ async function discoverNativeSessionEventually(input: {
   throw lastCandidateError ?? new Error("codex-session-candidate-count");
 }
 
-async function createVerifierServices(configuration: CodexSplitVerifyConfiguration): Promise<CodexSplitVerifierServices> {
+async function createVerifierServices(
+  configuration: CodexSplitVerifyConfiguration,
+  otelTraceExporterEndpoint?: string
+): Promise<CodexSplitVerifierServices> {
   const docker = new DockerEngineClient(configuration.dockerSocketPath);
   await docker.assertRootlessAvailable();
   const roots: ManagedWorkspaceRoots = {
@@ -1007,7 +1010,8 @@ async function createVerifierServices(configuration: CodexSplitVerifyConfigurati
   const runtime = new CodexSplitRuntime({
     managed, docker, stateRoot: roots.state,
     controlImageReference: configuration.controlImageReference,
-    codexExecutablePath: configuration.codexExecutablePath
+    codexExecutablePath: configuration.codexExecutablePath,
+    otelTraceExporterEndpoint
   });
   const uid = process.getuid?.();
   const gid = process.getgid?.();
@@ -1022,6 +1026,7 @@ async function runGateInternal(input: {
   readonly services: CodexSplitVerifierServices;
   readonly runId: string;
   readonly mode: "operator" | "preflight";
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<{
   readonly evidence: CodexSplitLiveEvidence;
   readonly ensured: boolean;
@@ -1268,6 +1273,8 @@ async function runCodexSplitVerification(input: {
   readonly mode: "operator" | "preflight";
   readonly retainOnSuccess?: boolean;
   readonly services?: CodexSplitVerifierServices;
+  /** Test-only loopback OTLP endpoint used to prepare a future model probe. */
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<{
   readonly evidence: CodexSplitLiveEvidence;
   readonly readyForOperatorTui: boolean;
@@ -1283,7 +1290,7 @@ async function runCodexSplitVerification(input: {
   let lifecyclePath: CodexSplitPreflightLifecycle = "unknown";
   let ptyProof: CodexSplitPtyProof | null = null;
   try {
-    services = input.services ?? await createVerifierServices(input.configuration);
+    services = input.services ?? await createVerifierServices(input.configuration, input.otelTraceExporterEndpoint);
     const persistedRecord = await lstatIdentity(path.join(
       input.configuration.managedRoot, "state", "codex-split", `${input.configuration.workspaceId}.json`
     ));
@@ -1333,6 +1340,8 @@ export async function runCodexSplitFeasibilityPreflight(input: {
   readonly configuration: CodexSplitVerifyConfiguration;
   readonly retainOnSuccess?: boolean;
   readonly services?: CodexSplitVerifierServices;
+  /** Test-only loopback OTLP endpoint used to prepare a future model probe. */
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<CodexSplitPreflightResult> {
   const result = await runCodexSplitVerification({ ...input, operator: null, mode: "preflight" });
   return {

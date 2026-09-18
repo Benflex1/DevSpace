@@ -24,10 +24,22 @@ import {
 } from "../src/codex-cli-split/feasibility-verifier.js";
 import { probeAdmittedCodexVersion } from "../src/codex-cli-split/compatibility.js";
 import { lstatIdentity } from "../src/private-state.js";
+import {
+  CODEX_NATIVE_OTEL_COLLECTOR_MARKER,
+  CODEX_NATIVE_OTEL_TRACE_EXPORTER_ENDPOINT,
+  startCodexNativeOtelCollector,
+  type CodexNativeOtelCollectorHandle
+} from "./codex-native-otel-collector.js";
+import {
+  projectCodexNativeRemoteCodeModeEvidence,
+  type CodexNativeOtelSpanObservation
+} from "./codex-native-remote-code-mode-evidence.js";
 
 const OPERATION = "pwd" as const;
 const MAX_DIAGNOSTIC_REASON_LENGTH = 128;
 const INFRASTRUCTURE_BLOCKED = "BLOCKED/INCOMPLETE" as const;
+const CORRELATION_TIMEOUT_MS = 15_000;
+const CORRELATION_POLL_MS = 100;
 
 function requestedModel(): CodexNativeAppServerProbeModel {
   const model = process.env.DEVSPACE_CODEX_VERIFY_MODEL;
@@ -50,7 +62,20 @@ function isInfrastructureCommand(command: string): boolean {
   return /(?:^|[/ ])(?:sh|sleep|pause|tini)(?:$| )/iu.test(command)
     || command.includes("/opt/devspace/codex-launcher/codex app-server")
     || command.includes("/opt/devspace/codex/bin/codex-code-mode-host")
-    || command.includes("/opt/devspace/codex/bin/codex exec-server");
+    || command.includes("/opt/devspace/codex/bin/codex exec-server")
+    || (command.includes("node -e") && command.trimEnd().endsWith(` ${CODEX_NATIVE_OTEL_COLLECTOR_MARKER}`));
+}
+
+const EXECUTOR_CREDENTIAL_ENVIRONMENT_NAMES = new Set([
+  "CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_AUTH_TOKEN", "CODEX_REFRESH_TOKEN",
+  "OPENAI_API_KEY", "OPENAI_ACCESS_TOKEN", "OPENAI_AUTH_TOKEN", "OPENAI_REFRESH_TOKEN"
+]);
+
+function hasExecutorCredentials(environment: readonly string[] | null | undefined): boolean {
+  return (environment ?? []).some((entry) => {
+    const separator = entry.indexOf("=");
+    return separator > 0 && EXECUTOR_CREDENTIAL_ENVIRONMENT_NAMES.has(entry.slice(0, separator));
+  });
 }
 
 function projectProcessCount(table: DockerProcessTable): number {
@@ -71,6 +96,92 @@ function inspectResourceProcessState(input: {
   return projectProcessCount(input.table);
 }
 
+function boundedSpanAttribute(span: CodexNativeOtelSpanObservation, name: string): string {
+  const value = span.attributes[name];
+  if (typeof value !== "string" || value.length === 0 || value.length > 256
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)) {
+    throw new Error("codex-model-probe-otel-correlation");
+  }
+  return value;
+}
+
+function spanByName(spans: readonly CodexNativeOtelSpanObservation[], name: CodexNativeOtelSpanObservation["name"]): CodexNativeOtelSpanObservation {
+  const matches = spans.filter((span) => span.name === name);
+  if (matches.length !== 1) throw new Error("codex-model-probe-otel-correlation");
+  return matches[0]!;
+}
+
+async function observeRemoteCodeModeEvidence(input: {
+  readonly collector: CodexNativeOtelCollectorHandle;
+  readonly model: CodexNativeAppServerProbeModel;
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly selectedToolMode: "CodeModeOnly" | null;
+  readonly controlProjectProcessCount: number;
+  readonly executorProjectProcessCount: number;
+  readonly codeModeHostContainerId: string;
+  readonly execServerContainerId: string;
+}): Promise<unknown> {
+  const toolModeEvidence = input.selectedToolMode === "CodeModeOnly"
+    ? { kind: "protocol" as const, value: "CodeModeOnly" as const }
+    : {
+      kind: "pinned-model-metadata-plus-runtime" as const,
+      model: input.model,
+      remoteCodeModeObserved: true as const
+    };
+  const deadline = Date.now() + CORRELATION_TIMEOUT_MS;
+  let observations: CodexNativeOtelSpanObservation[] = [];
+  let lastReason = "codex-model-probe-remote-code-mode-unobserved";
+  for (;;) {
+    observations = observations.concat(input.collector.takeObservations());
+    const requiredNames = new Set(observations.map((span) => span.name));
+    if (requiredNames.size === 4) {
+      try {
+        const execute = spanByName(observations, "code_mode.grpc.execute");
+        const callback = spanByName(observations, "code_mode.grpc.callback");
+        const process = spanByName(observations, "codex.exec_server.process");
+        const projection = projectCodexNativeRemoteCodeModeEvidence({
+          model: input.model,
+          toolModeEvidence,
+          threadId: input.threadId,
+          turnId: input.turnId,
+          codeModeHostContainerId: input.codeModeHostContainerId,
+          execServerContainerId: input.execServerContainerId,
+          codeModeTiming: {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            callId: boundedSpanAttribute(execute, "call_id"),
+            cellId: boundedSpanAttribute(callback, "cell.id"),
+            toolName: "exec",
+            cwd: "/workspace",
+            hostCompleted: true,
+            aborted: false
+          },
+          spans: observations,
+          execProcess: {
+            executorContainerId: input.execServerContainerId,
+            cwd: "/workspace",
+            exitCode: boundedSpanAttribute(process, "result") === "success" ? 0 : 1,
+            closed: true,
+            failed: boundedSpanAttribute(process, "result") !== "success"
+          },
+          turnCompleted: true,
+          controlProjectProcessCount: input.controlProjectProcessCount,
+          executorProjectProcessCount: input.executorProjectProcessCount,
+          executorHasNativeHome: false,
+          executorHasCredentials: false
+        });
+        if (projection.readiness === "MODEL_CORRELATION_OBSERVER_READY") return projection.evidence;
+        lastReason = projection.reason;
+      } catch (error) {
+        lastReason = error instanceof Error ? error.message : "codex-model-probe-otel-correlation";
+      }
+    }
+    if (Date.now() >= deadline) throw new Error(lastReason);
+    await new Promise<void>((resolve) => setTimeout(resolve, CORRELATION_POLL_MS));
+  }
+}
+
 async function main(): Promise<void> {
   const runId = uuidv7();
   let configuration: ReturnType<typeof parseCodexSplitVerifyEnvironment>;
@@ -84,6 +195,7 @@ async function main(): Promise<void> {
 
   const docker = new DockerEngineClient(configuration.dockerSocketPath);
   let runtime: CodexSplitRuntime | null = null;
+  let collector: CodexNativeOtelCollectorHandle | null = null;
   let ensured = false;
   try {
     await docker.assertRootlessAvailable();
@@ -101,10 +213,12 @@ async function main(): Promise<void> {
       docker,
       stateRoot: roots.state,
       controlImageReference: configuration.controlImageReference,
-      codexExecutablePath: configuration.codexExecutablePath
+      codexExecutablePath: configuration.codexExecutablePath,
+      otelTraceExporterEndpoint: CODEX_NATIVE_OTEL_TRACE_EXPORTER_ENDPOINT
     });
     const record = await runtime.ensure({ projectId: configuration.projectId, workspaceId: configuration.workspaceId });
     ensured = true;
+    collector = await startCodexNativeOtelCollector({ docker, controlContainerId: record.control.id });
     const uid = process.getuid?.();
     const gid = process.getgid?.();
     if (uid === undefined || gid === undefined) throw new Error("codex-model-probe-agent-owner");
@@ -132,6 +246,7 @@ async function main(): Promise<void> {
     const executorHasNativeHome = executorInspection.Mounts.some((mount) => mount.Destination === home.mountTarget)
       || (executorInspection.Config.Env ?? []).some((entry) => entry.startsWith("CODEX_HOME=") || entry.startsWith("HOME=/codex-home"));
     if (executorHasNativeHome) throw new Error("codex-model-probe-executor-home");
+    if (hasExecutorCredentials(executorInspection.Config.Env)) throw new Error("codex-model-probe-executor-credentials");
     const initialControlProjectProcesses = inspectResourceProcessState({
       container: controlInspection,
       table: controlTable,
@@ -175,15 +290,21 @@ async function main(): Promise<void> {
         const hasHome = container.Mounts.some((mount) => mount.Destination === home.mountTarget)
           || (container.Config.Env ?? []).some((entry) => entry.startsWith("CODEX_HOME=") || entry.startsWith("HOME=/codex-home"));
         if (hasHome) throw new Error("codex-model-probe-executor-home");
+        if (hasExecutorCredentials(container.Config.Env)) throw new Error("codex-model-probe-executor-credentials");
         return {
           projectProcessCount: inspectResourceProcessState({ container, table }),
           codeModeHostProcessCount: codeModeHost.Running && codeModeHost.ExitCode === null ? 1 : 0,
           execServerProcessCount: execServer.Running && execServer.ExitCode === null ? 1 : 0,
           hasNativeHome: false as const,
+          hasCredentials: false as const,
           codeModeHostContainerId: record.codeModeHost.executorContainerId,
           execServerContainerId: record.execServer.executorContainerId
         };
       },
+      observeRemoteCodeModeEvidence: (observation) => observeRemoteCodeModeEvidence({
+        collector: collector!,
+        ...observation
+      }),
       now: Date.now,
       sleep: (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
     });
@@ -203,6 +324,8 @@ async function main(): Promise<void> {
       nestedProjectExecObserved: evidence.nestedProjectExecObserved,
       operationCompleted: evidence.operationCompleted,
       executorHasNativeHome: evidence.executorHasNativeHome,
+      executorHasCredentials: evidence.executorHasCredentials,
+      correlationEvidence: evidence.correlationEvidence,
       approval: evidence.approval,
       transportSecurity: {
         execServer: record.execServer.transportSecurity,
@@ -219,6 +342,7 @@ async function main(): Promise<void> {
     }) + "\n");
     process.exitCode = 1;
   } finally {
+    collector?.close();
     if (ensured && runtime !== null) {
       await runtime.stop({ projectId: configuration.projectId, workspaceId: configuration.workspaceId }).catch((error: unknown) => {
         process.stderr.write(`${JSON.stringify(formatCodexSplitDiagnostic("cleanup", error, "verifier"))}\n`);

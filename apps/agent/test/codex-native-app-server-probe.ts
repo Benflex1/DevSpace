@@ -8,6 +8,11 @@ import {
   type FileIdentity
 } from "../src/private-state.js";
 import type { CodexNativeHomeBinding } from "../src/codex-cli-split/native-home.js";
+import {
+  evaluateCodexNativeRemoteCodeModeEvidence,
+  type CodexNativeRemoteCodeModeCorrelationEvaluation,
+  type CodexNativeRemoteCodeModeEvidence
+} from "./codex-native-remote-code-mode-evidence.js";
 
 const LOGICAL_SOCKET_PATH = "/codex-home/app-server-control/app-server-control.sock" as const;
 const SOCKET_RELATIVE_PATH = "app-server-control/app-server-control.sock" as const;
@@ -124,7 +129,9 @@ export interface CodexNativeAppServerModelProbeEvidence {
   readonly nestedProjectExecObserved: true;
   readonly operationCompleted: true;
   readonly executorHasNativeHome: false;
+  readonly executorHasCredentials: false;
   readonly approval: "not-requested" | "required-stop";
+  readonly correlationEvidence: CodexNativeRemoteCodeModeEvidence;
 }
 
 type CodexNativeAppServerModelCompatibilityProof = Omit<CodexNativeAppServerModelProbeEvidence, "approval">;
@@ -146,15 +153,25 @@ export interface CodexNativeAppServerModelProbeDependencies {
     readonly codeModeHostProcessCount: number;
     readonly execServerProcessCount: number;
     readonly hasNativeHome: false;
-    readonly codeModeHostContainerId?: string;
-    readonly execServerContainerId?: string;
+    readonly hasCredentials: false;
+    readonly codeModeHostContainerId: string;
+    readonly execServerContainerId: string;
   }>;
+  readonly observeRemoteCodeModeEvidence: (input: {
+    readonly model: CodexNativeAppServerProbeModel;
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly selectedToolMode: "CodeModeOnly" | null;
+    readonly controlProjectProcessCount: number;
+    readonly executorProjectProcessCount: number;
+    readonly codeModeHostContainerId: string;
+    readonly execServerContainerId: string;
+  }) => Promise<unknown>;
   readonly now: () => number;
   readonly sleep: (milliseconds: number) => Promise<void>;
 }
 
 type ProbeMessage = Readonly<Record<string, unknown>>;
-type ExecutorObservation = Awaited<ReturnType<CodexNativeAppServerModelProbeDependencies["inspectExecutor"]>>;
 
 function safeString(value: unknown, reason: string): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 256 || value.includes("\0")) throw new Error(reason);
@@ -169,11 +186,6 @@ function responseId(message: ProbeMessage): string | number | null {
 function paramsOf(message: ProbeMessage): ProbeMessage {
   const params = message.params;
   return params !== null && typeof params === "object" && !Array.isArray(params) ? params as ProbeMessage : {};
-}
-
-function itemOf(message: ProbeMessage): ProbeMessage | null {
-  const item = paramsOf(message).item;
-  return item !== null && typeof item === "object" && !Array.isArray(item) ? item as ProbeMessage : null;
 }
 
 function errorReason(message: ProbeMessage): string | null {
@@ -206,9 +218,6 @@ function isApprovalRequest(method: string): boolean {
 
 interface RuntimeObservations {
   remoteEnvironment: boolean;
-  codeModeCell: boolean;
-  nestedExec: boolean;
-  operationCompleted: boolean;
   selectedToolMode: "CodeModeOnly" | null;
   executorProjectProcessCount: number;
   codeModeHostProcessObserved: boolean;
@@ -227,22 +236,6 @@ async function observeRuntime(
   if (method === "thread/environment/connected") observations.remoteEnvironment = true;
   const direct = directToolMode(message);
   if (direct !== null) observations.selectedToolMode = direct;
-  const item = itemOf(message);
-  if (item !== null) {
-    if (item.type === "dynamicToolCall"
-      || (item.type === "functionCall" && item.name === "exec")
-      || (item.type === "functionCallOutput" && item.name === "exec" && (item.namespace === null || item.namespace === undefined))) {
-      observations.codeModeCell = true;
-    }
-    if (item.type === "commandExecution") {
-      const cwd = item.cwd;
-      const source = item.source;
-      if (cwd === "/workspace" && (source === "unifiedExecStartup" || source === "unifiedExecInteraction")) {
-        observations.nestedExec = true;
-        if (item.status === "completed" && item.exitCode === 0) observations.operationCompleted = true;
-      }
-    }
-  }
   const executor = await deps.inspectExecutor();
   if (executor.hasNativeHome !== false) throw new Error("codex-model-probe-executor-home");
   if (executor.codeModeHostProcessCount < 1) throw new Error("codex-model-probe-code-mode-host-process");
@@ -315,20 +308,20 @@ export async function runCodexNativeAppServerModelProbe(
   if (controlBefore.appServerProcessCount < 1) throw new Error("codex-model-probe-app-server-process");
   const executorBefore = await deps.inspectExecutor();
   if (executorBefore.hasNativeHome !== false) throw new Error("codex-model-probe-executor-home");
+  if (executorBefore.hasCredentials !== false) throw new Error("codex-model-probe-executor-credentials");
   if (executorBefore.codeModeHostProcessCount < 1) throw new Error("codex-model-probe-code-mode-host-process");
   if (executorBefore.execServerProcessCount < 1) throw new Error("codex-model-probe-exec-server-process");
   const deadline = deps.now() + input.timeoutMs;
   const observations: RuntimeObservations = {
     remoteEnvironment: false,
-    codeModeCell: false,
-    nestedExec: false,
-    operationCompleted: false,
     selectedToolMode: null,
     executorProjectProcessCount: 0,
     codeModeHostProcessObserved: true,
     execServerProcessObserved: true
   };
   const connection = await deps.connect(input.socket.agentSocketPath);
+  let threadId: string | undefined;
+  let completedTurnId: string | undefined;
   try {
     await request(connection, 1, {
       id: 1,
@@ -344,7 +337,7 @@ export async function runCodexNativeAppServerModelProbe(
       method: "thread/start",
       params: { model: input.model, cwd: input.logicalCwd, ephemeral: true }
     }, observations, deadline, deps);
-    const threadId = threadIdFromResponse(threadResponse);
+    threadId = threadIdFromResponse(threadResponse);
     await request(connection, 3, {
       id: 3,
       method: "turn/start",
@@ -364,46 +357,70 @@ export async function runCodexNativeAppServerModelProbe(
         if (turn === null || typeof turn !== "object" || Array.isArray(turn) || (turn as ProbeMessage).status !== "completed") {
           throw new Error("codex-model-probe-turn-failed");
         }
+        completedTurnId = safeString((turn as ProbeMessage).id, "codex-model-probe-turn-failed");
         break;
       }
     }
   } finally {
     await connection.close().catch(() => undefined);
   }
+  if (threadId === undefined || completedTurnId === undefined) throw new Error("codex-model-probe-turn-failed");
   const controlAfter = await deps.inspectControl();
   const executorAfter = await deps.inspectExecutor();
   if (controlAfter.projectProcessCount !== 0) throw new Error("codex-model-probe-control-project-process");
   if (controlAfter.appServerProcessCount < 1) throw new Error("codex-model-probe-app-server-process");
   if (executorAfter.hasNativeHome !== false) throw new Error("codex-model-probe-executor-home");
+  if (executorAfter.hasCredentials !== false) throw new Error("codex-model-probe-executor-credentials");
   if (executorAfter.codeModeHostProcessCount < 1) throw new Error("codex-model-probe-code-mode-host-process");
   if (executorAfter.execServerProcessCount < 1) throw new Error("codex-model-probe-exec-server-process");
+  if (!observations.remoteEnvironment) throw new Error("codex-model-probe-remote-environment-unobserved");
   observations.executorProjectProcessCount = Math.max(observations.executorProjectProcessCount, executorAfter.projectProcessCount);
-  if (!observations.remoteEnvironment || !observations.codeModeCell) throw new Error("codex-model-probe-remote-code-mode-unobserved");
-  if (!observations.nestedExec || !observations.operationCompleted) throw new Error("codex-model-probe-remote-exec-unobserved");
   if (observations.executorProjectProcessCount < 1) throw new Error("codex-model-probe-executor-project-process");
-  const toolModeEvidence: CodexNativeAppServerProbeToolModeEvidence = observations.selectedToolMode === "CodeModeOnly"
-    ? { kind: "protocol", value: "CodeModeOnly" }
-    : { kind: "pinned-model-metadata-plus-runtime", model: input.model, remoteCodeModeObserved: true };
-  const executorObservation: ExecutorObservation = executorAfter;
-  const codeModeHostContainerId = executorObservation.codeModeHostContainerId ?? "observed-executor";
-  const execServerContainerId = executorObservation.execServerContainerId ?? "observed-executor";
+  const correlationInput = await deps.observeRemoteCodeModeEvidence({
+    model: input.model,
+    threadId,
+    turnId: completedTurnId,
+    selectedToolMode: observations.selectedToolMode,
+    controlProjectProcessCount: controlAfter.projectProcessCount,
+    executorProjectProcessCount: observations.executorProjectProcessCount,
+    codeModeHostContainerId: executorAfter.codeModeHostContainerId,
+    execServerContainerId: executorAfter.execServerContainerId
+  });
+  const correlation: CodexNativeRemoteCodeModeCorrelationEvaluation = evaluateCodexNativeRemoteCodeModeEvidence(correlationInput);
+  if (correlation.readiness !== "MODEL_CORRELATION_OBSERVER_READY") throw new Error(correlation.reason);
+  if (observations.selectedToolMode !== null
+    && (correlation.evidence.toolModeEvidence.kind !== "protocol"
+      || correlation.evidence.toolModeEvidence.value !== observations.selectedToolMode)) {
+    throw new Error("codex-model-probe-tool-mode-evidence-mismatch");
+  }
+  if (correlation.evidence.model !== input.model
+    || correlation.evidence.threadId !== threadId
+    || correlation.evidence.turnId !== completedTurnId
+    || correlation.evidence.controlProjectProcessCount !== controlAfter.projectProcessCount
+    || correlation.evidence.executorProjectProcessCount < observations.executorProjectProcessCount) {
+    throw new Error("codex-model-probe-remote-correlation-mismatch");
+  }
+  const correlationEvidence = correlation.evidence;
+  const toolModeEvidence: CodexNativeAppServerProbeToolModeEvidence = correlationEvidence.toolModeEvidence;
   return {
     provenance: "real-native-app-server",
-    model: input.model,
+    model: correlationEvidence.model,
     toolModeEvidence,
     remoteCodeModeObserved: true,
     codeModeProvider: "remote-grpc",
-    codeModeHostContainerId,
-    execServerContainerId,
+    codeModeHostContainerId: correlationEvidence.codeModeHostContainerId,
+    execServerContainerId: correlationEvidence.execServerContainerId,
     logicalCwd: "/workspace",
-    controlProjectProcessCount: 0,
-    executorProjectProcessCount: observations.executorProjectProcessCount,
+    controlProjectProcessCount: controlAfter.projectProcessCount,
+    executorProjectProcessCount: correlationEvidence.executorProjectProcessCount,
     codeModeHostProcessObserved: true,
     execServerProcessObserved: true,
     nestedProjectExecObserved: true,
     operationCompleted: true,
     executorHasNativeHome: false,
-    approval: "not-requested"
+    executorHasCredentials: false,
+    approval: "not-requested",
+    correlationEvidence
   };
 }
 

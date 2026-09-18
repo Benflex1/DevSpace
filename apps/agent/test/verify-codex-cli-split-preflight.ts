@@ -3,6 +3,7 @@ import {
   parseCodexSplitVerifyEnvironment,
   runCodexSplitFeasibilityPreflight
 } from "../src/codex-cli-split/feasibility-verifier.js";
+import { CODEX_NATIVE_OTEL_TRACE_EXPORTER_ENDPOINT } from "./codex-native-otel-collector.js";
 
 async function main(): Promise<void> {
   let configuration;
@@ -37,7 +38,11 @@ async function main(): Promise<void> {
     networkObservations: result.evidence.networkObservations
   });
 
-  const first = await runCodexSplitFeasibilityPreflight({ configuration, retainOnSuccess: true });
+  const first = await runCodexSplitFeasibilityPreflight({
+    configuration,
+    retainOnSuccess: true,
+    otelTraceExporterEndpoint: CODEX_NATIVE_OTEL_TRACE_EXPORTER_ENDPOINT
+  });
   process.stdout.write(`Codex split infrastructure preflight #1: ${first.status}\n`);
   process.stdout.write(`${JSON.stringify(summarize(first))}\n`);
   if (first.status !== "INFRASTRUCTURE_READY") {
@@ -45,7 +50,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const second = await runCodexSplitFeasibilityPreflight({ configuration, retainOnSuccess: false });
+  const second = await runCodexSplitFeasibilityPreflight({
+    configuration,
+    retainOnSuccess: false,
+    otelTraceExporterEndpoint: CODEX_NATIVE_OTEL_TRACE_EXPORTER_ENDPOINT
+  });
   process.stdout.write(`Codex split infrastructure preflight #2: ${second.status}\n`);
   process.stdout.write(`${JSON.stringify(summarize(second))}\n`);
   if (second.status !== "INFRASTRUCTURE_READY" || first.lifecyclePath !== "fresh-create"
