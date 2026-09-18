@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -47,6 +47,8 @@ function policy(requirementsPath = "/srv/state/requirements.toml"): CodexManaged
     mechanism: "0.153.4-managed-requirements",
     requirementsPath,
     mountTarget: "/etc/codex/requirements.toml",
+    managedConfigPath: "/srv/state/managed_config.toml",
+    managedConfigMountTarget: "/etc/codex/managed_config.toml",
     environment: {
       CODEX_HOME: "/codex-home",
       HOME: "/codex-home",
@@ -84,6 +86,7 @@ describe("Codex split remote-only policy", () => {
 
     expect(binding.mechanism).toBe("0.153.4-managed-requirements");
     expect(binding.mountTarget).toBe("/etc/codex/requirements.toml");
+    expect(binding.managedConfigMountTarget).toBe("/etc/codex/managed_config.toml");
     expect(binding.projectLayerOverrideProof).toBe("cannot-override");
     expect(contents).toContain('allowed_sandbox_modes = ["read-only", "workspace-write"]');
     expect(contents).toContain("allow_managed_hooks_only = true");
@@ -92,8 +95,44 @@ describe("Codex split remote-only policy", () => {
     expect(contents).toContain("plugins = false");
     expect(contents).toContain("remote_plugin = false");
     expect(contents).toContain("use_legacy_landlock = false");
+    expect(contents).toContain("code_mode = true");
+    expect(contents).toContain("code_mode_host = true");
+    expect(contents).not.toContain("[features.code_mode]");
+    expect(contents).not.toContain("[features.code_mode_host]");
     expect(contents).toContain("[mcp_servers]");
     expect(contents).not.toContain("/codex-home/**");
+    const managedConfig = await readFile(binding.managedConfigPath, "utf8");
+    expect(managedConfig).toContain("[features.code_mode]");
+    expect(managedConfig).toContain("enabled = true");
+    expect(managedConfig).toContain("[features.code_mode_host]");
+    expect(managedConfig).toContain("disable_in_process_fallback = true");
+  });
+
+  test("does not reuse the stale bare-TUI policy directory for the app-server composition", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-remote-policy-stale-"));
+    roots.push(root);
+    const staleDirectory = path.join(root, "codex-split-policies", `${workspaceId}-g${endpoint.generation}`);
+    await mkdir(staleDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(staleDirectory, "requirements.toml"), "[features]\ncode_mode = false\n", { mode: 0o600 });
+    const previousCompositionDirectory = path.join(
+      root,
+      "codex-split-policies",
+      `${workspaceId}-g${endpoint.generation}-native-app-server-code-mode-v1`
+    );
+    await mkdir(previousCompositionDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(previousCompositionDirectory, "requirements.toml"), "[features.code_mode]\nenabled = true\n", { mode: 0o600 });
+
+    const binding = await prepareCodexManagedPolicy({
+      stateRoot: root,
+      home,
+      endpoint,
+      admittedVersion: "0.153.4"
+    });
+
+    expect(binding.requirementsPath).not.toBe(path.join(staleDirectory, "requirements.toml"));
+    expect(binding.requirementsPath).not.toBe(path.join(previousCompositionDirectory, "requirements.toml"));
+    expect(await readFile(binding.requirementsPath, "utf8")).toContain("code_mode_host = true");
+    expect(await readFile(path.join(staleDirectory, "requirements.toml"), "utf8")).toContain("code_mode = false");
   });
 
   test("binds the native home to a remote-only logical workspace", () => {
@@ -123,10 +162,9 @@ describe("Codex split remote-only policy", () => {
       admittedVersion: "0.153.4"
     });
     const contents = await readFile(binding.requirementsPath, "utf8");
-    expect(contents).toContain("[features.code_mode]");
-    expect(contents).toContain("enabled = true");
-    expect(contents).toContain("[features.code_mode_host]");
-    expect(contents).toContain("disable_in_process_fallback = true");
+    expect(contents).toContain("code_mode = true");
+    expect(contents).toContain("code_mode_host = true");
+    expect(contents).not.toContain("disable_in_process_fallback");
     expect(contents).not.toContain("code_mode = false");
     expect(contents).not.toContain("code_mode_host = false");
   });

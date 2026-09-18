@@ -25,6 +25,7 @@ const remote = {
   managedPolicy: {
     mechanism: "0.153.4-managed-requirements" as const,
     requirementsPath: "/etc/codex/requirements.toml", mountTarget: "/etc/codex/requirements.toml" as const,
+    managedConfigPath: "/etc/codex/managed_config.toml", managedConfigMountTarget: "/etc/codex/managed_config.toml" as const,
     environment, forbiddenPaths: [] as const, projectLayerOverrideProof: "cannot-override" as const
   },
   endpoint, environmentId: "remote", logicalCwd: "/workspace" as const, workspaceRoots: ["/workspace"] as ["/workspace"],

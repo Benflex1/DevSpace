@@ -50,6 +50,7 @@ const remote = {
   launchArguments: [] as const,
   managedPolicy: { mechanism: "0.153.4-managed-requirements" as const, requirementsPath: "/agent/policy.toml",
     mountTarget: "/etc/codex/requirements.toml" as const, environment: { CODEX_HOME: "/codex-home", HOME: "/codex-home", CODEX_EXEC_SERVER_URL: endpoint.endpointUrl },
+    managedConfigPath: "/agent/managed_config.toml", managedConfigMountTarget: "/etc/codex/managed_config.toml" as const,
     forbiddenPaths: [] as const, projectLayerOverrideProof: "cannot-override" as const },
   endpoint, environmentId: "remote" as const, logicalCwd: "/workspace" as const, workspaceRoots: ["/workspace"] as ["/workspace"],
   localEnvironmentAvailable: false as const, unifiedExecRequired: true as const,

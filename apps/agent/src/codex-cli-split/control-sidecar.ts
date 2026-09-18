@@ -138,6 +138,8 @@ function assertRemotePolicy(input: {
     || remote.managedPolicy.projectLayerOverrideProof !== "cannot-override"
     || remote.managedPolicy.mountTarget !== "/etc/codex/requirements.toml"
     || !path.isAbsolute(remote.managedPolicy.requirementsPath)
+    || remote.managedPolicy.managedConfigMountTarget !== "/etc/codex/managed_config.toml"
+    || !path.isAbsolute(remote.managedPolicy.managedConfigPath)
     || remote.managedPolicy.environment.CODEX_HOME !== remote.environment.CODEX_HOME
     || remote.managedPolicy.environment.HOME !== remote.environment.HOME
     || remote.managedPolicy.environment.CODEX_EXEC_SERVER_URL !== remote.environment.CODEX_EXEC_SERVER_URL
@@ -146,7 +148,9 @@ function assertRemotePolicy(input: {
     throw new Error("codex-control-remote-policy");
   }
   if (path.resolve(remote.managedPolicy.requirementsPath) === path.resolve(home.homePath)
-    || pathIsWithin(home.homePath, remote.managedPolicy.requirementsPath)) {
+    || pathIsWithin(home.homePath, remote.managedPolicy.requirementsPath)
+    || path.resolve(remote.managedPolicy.managedConfigPath) === path.resolve(home.homePath)
+    || pathIsWithin(home.homePath, remote.managedPolicy.managedConfigPath)) {
     throw new Error("codex-control-policy-home-overlap");
   }
 }
@@ -191,12 +195,15 @@ export async function buildCodexControlSidecarPolicy(input: {
   const networkAttachments = buildCodexSplitNetworkAttachments({ role: "control", network: input.network });
   assertCodexSplitContainerNetworks({ role: "control", networks: networkAttachments, expected: input.network });
   const policyFile = absolutePath(input.remote.managedPolicy.requirementsPath, "codex-control-policy-path-invalid");
+  const managedConfigFile = absolutePath(input.remote.managedPolicy.managedConfigPath, "codex-control-managed-config-path-invalid");
   assertNotWithinHome(input.home, policyFile, "codex-control-policy-home-overlap");
+  assertNotWithinHome(input.home, managedConfigFile, "codex-control-policy-home-overlap");
   const mounts = [
     mount(input.home.homePath, "/codex-home", false),
     mount(input.artifact.staged.stagingRoot, "/opt/devspace/codex", true),
     mount(input.artifact.launcherSourceRoot, "/opt/devspace/codex-launcher", true),
-    mount(policyFile, "/etc/codex/requirements.toml", true)
+    mount(policyFile, "/etc/codex/requirements.toml", true),
+    mount(managedConfigFile, "/etc/codex/managed_config.toml", true)
   ] as const satisfies readonly DockerCodexSplitBindMount[];
   return Promise.resolve({
     imageReference,

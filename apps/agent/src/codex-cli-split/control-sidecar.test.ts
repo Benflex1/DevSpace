@@ -77,6 +77,8 @@ const managedPolicy: CodexManagedPolicyBinding = {
   mechanism: "0.153.4-managed-requirements",
   requirementsPath: "/srv/devspace/codex-policies/workspace/requirements.toml",
   mountTarget: "/etc/codex/requirements.toml",
+  managedConfigPath: "/srv/devspace/codex-policies/workspace/managed_config.toml",
+  managedConfigMountTarget: "/etc/codex/managed_config.toml",
   environment: {
     CODEX_HOME: "/codex-home",
     HOME: "/codex-home",
@@ -185,6 +187,7 @@ test("builds a control policy with only native home and trusted read-only assets
     expect.objectContaining({ Source: artifact.staged.stagingRoot, Target: "/opt/devspace/codex", ReadOnly: true }),
     expect.objectContaining({ Source: artifact.launcherSourceRoot, Target: "/opt/devspace/codex-launcher", ReadOnly: true }),
     expect.objectContaining({ Source: managedPolicy.requirementsPath, Target: "/etc/codex/requirements.toml", ReadOnly: true })
+    , expect.objectContaining({ Source: managedPolicy.managedConfigPath, Target: "/etc/codex/managed_config.toml", ReadOnly: true })
   ]));
   expect(policy.mounts).not.toEqual(expect.arrayContaining([
     expect.objectContaining({ Target: "/workspace" }),

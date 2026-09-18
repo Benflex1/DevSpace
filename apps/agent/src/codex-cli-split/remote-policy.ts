@@ -10,6 +10,8 @@ const LOGICAL_CWD = "/workspace" as const;
 const REMOTE_ENVIRONMENT_ID = "remote" as const;
 export const CODEX_CODE_MODE_HOST_URL = "http://codex-code-mode-host:4546" as const;
 const REQUIREMENTS_TARGET = "/etc/codex/requirements.toml" as const;
+const MANAGED_CONFIG_TARGET = "/etc/codex/managed_config.toml" as const;
+const POLICY_COMPOSITION_NAMESPACE = "native-app-server-code-mode-v2" as const;
 const POLICY_FILE_MODE = 0o600;
 const MAX_POLICY_BYTES = 16 * 1024;
 
@@ -50,15 +52,19 @@ plugins = false
 remote_plugin = false
 apps = false
 use_legacy_landlock = false
+code_mode = true
+code_mode_host = true
 
+[mcp_servers]
+`;
+
+const MANAGED_CONFIG_TOML = `# Agent-owned Codex split effective configuration for admitted Codex ${ADMITTED_CODEX_VERSION}.
 [features.code_mode]
 enabled = true
 
 [features.code_mode_host]
 enabled = true
 disable_in_process_fallback = true
-
-[mcp_servers]
 `;
 
 export type CodexForbiddenLocalPath =
@@ -91,6 +97,8 @@ export interface CodexManagedPolicyBinding {
   readonly mechanism: CodexManagedPolicyMechanism;
   readonly requirementsPath: string;
   readonly mountTarget: "/etc/codex/requirements.toml";
+  readonly managedConfigPath: string;
+  readonly managedConfigMountTarget: "/etc/codex/managed_config.toml";
   readonly environment: Readonly<Record<string, string>>;
   readonly forbiddenPaths: readonly CodexForbiddenLocalPath[];
   readonly projectLayerOverrideProof: "cannot-override" | "overrides" | "unproven";
@@ -168,12 +176,12 @@ function policyDirectory(stateRoot: string, endpoint: CodexSplitTransportBinding
   }
   return assertContained(
     stateRoot,
-    path.join(stateRoot, "codex-split-policies", `${endpoint.workspaceId}-g${endpoint.generation}`)
+    path.join(stateRoot, "codex-split-policies", `${endpoint.workspaceId}-g${endpoint.generation}-${POLICY_COMPOSITION_NAMESPACE}`)
   );
 }
 
-async function writePinnedPolicy(filePath: string): Promise<void> {
-  const expected = Buffer.from(MANAGED_REQUIREMENTS_TOML, "utf8");
+async function writePinnedPolicy(filePath: string, expectedText: string): Promise<void> {
+  const expected = Buffer.from(expectedText, "utf8");
   const existing = await lstatIdentity(filePath);
   if (existing !== null) {
     if (!existing.stats.isFile() || existing.stats.isSymbolicLink()
@@ -265,6 +273,9 @@ function assertManagedPolicyShape(policy: CodexManagedPolicyBinding): void {
     || policy.mountTarget !== REQUIREMENTS_TARGET
     || !path.isAbsolute(policy.requirementsPath)
     || policy.requirementsPath.includes("\0")
+    || policy.managedConfigMountTarget !== MANAGED_CONFIG_TARGET
+    || !path.isAbsolute(policy.managedConfigPath)
+    || policy.managedConfigPath.includes("\0")
     || policy.projectLayerOverrideProof !== "cannot-override"
     || !hasAllForbiddenPaths(policy.forbiddenPaths)
     || policy.environment.CODEX_HOME !== CODEX_HOME_TARGET
@@ -307,11 +318,15 @@ export async function prepareCodexManagedPolicy(input: {
   const directory = policyDirectory(stateRoot, input.endpoint);
   await establishPinnedDirectory(directory);
   const requirementsPath = assertContained(directory, path.join(directory, "requirements.toml"));
-  await writePinnedPolicy(requirementsPath);
+  const managedConfigPath = assertContained(directory, path.join(directory, "managed_config.toml"));
+  await writePinnedPolicy(requirementsPath, MANAGED_REQUIREMENTS_TOML);
+  await writePinnedPolicy(managedConfigPath, MANAGED_CONFIG_TOML);
   const policy: CodexManagedPolicyBinding = {
     mechanism: "0.153.4-managed-requirements",
     requirementsPath,
     mountTarget: REQUIREMENTS_TARGET,
+    managedConfigPath,
+    managedConfigMountTarget: MANAGED_CONFIG_TARGET,
     environment: {
       CODEX_HOME: CODEX_HOME_TARGET,
       HOME: CODEX_HOME_TARGET,
