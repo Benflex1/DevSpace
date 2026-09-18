@@ -8,15 +8,23 @@ import {
   type FileIdentity
 } from "../src/private-state.js";
 import type { CodexNativeHomeBinding } from "../src/codex-cli-split/native-home.js";
-import type {
-  CodexSplitModelCompatibilityProof,
-  CodexSplitToolModeEvidence
-} from "../src/codex-cli-split/feasibility-result.js";
 
 const LOGICAL_SOCKET_PATH = "/codex-home/app-server-control/app-server-control.sock" as const;
 const SOCKET_RELATIVE_PATH = "app-server-control/app-server-control.sock" as const;
 const MAX_PROTOCOL_MESSAGE_BYTES = 512 * 1024;
-const PINNED_CODE_MODE_MODEL = "gpt-6-astra" as const;
+
+export type CodexNativeAppServerProbeModel = "gpt-6-astra" | "gpt-5.6-luna";
+type CodexNativeAppServerProbeToolModeEvidence =
+  | { readonly kind: "protocol"; readonly value: "CodeModeOnly" }
+  | {
+    readonly kind: "pinned-model-metadata-plus-runtime";
+    readonly model: CodexNativeAppServerProbeModel;
+    readonly remoteCodeModeObserved: true;
+  };
+
+const ADMITTED_CODE_MODE_MODELS: ReadonlySet<CodexNativeAppServerProbeModel> = new Set([
+  "gpt-6-astra", "gpt-5.6-luna"
+]);
 
 export interface CodexNativeAppServerProbeSocket {
   readonly logicalPath: typeof LOGICAL_SOCKET_PATH;
@@ -94,7 +102,7 @@ export function assertCodexNativeAppServerProbeSocket(input: {
 
 export interface CodexNativeAppServerModelProbeInput {
   readonly socket: CodexNativeAppServerProbeSocket;
-  readonly model: typeof PINNED_CODE_MODE_MODEL;
+  readonly model: CodexNativeAppServerProbeModel;
   readonly logicalCwd: "/workspace";
   readonly operation: "pwd" | "git-status" | "read-acceptance-file" | "write-remove-acceptance-file";
   readonly timeoutMs: number;
@@ -102,8 +110,8 @@ export interface CodexNativeAppServerModelProbeInput {
 
 export interface CodexNativeAppServerModelProbeEvidence {
   readonly provenance: "real-native-app-server";
-  readonly model: typeof PINNED_CODE_MODE_MODEL;
-  readonly toolModeEvidence: CodexSplitToolModeEvidence;
+  readonly model: CodexNativeAppServerProbeModel;
+  readonly toolModeEvidence: CodexNativeAppServerProbeToolModeEvidence;
   readonly remoteCodeModeObserved: true;
   readonly codeModeProvider: "remote-grpc";
   readonly codeModeHostContainerId: string;
@@ -118,6 +126,8 @@ export interface CodexNativeAppServerModelProbeEvidence {
   readonly executorHasNativeHome: false;
   readonly approval: "not-requested" | "required-stop";
 }
+
+type CodexNativeAppServerModelCompatibilityProof = Omit<CodexNativeAppServerModelProbeEvidence, "approval">;
 
 export interface CodexNativeAppServerProbeConnection {
   readonly send: (request: Readonly<Record<string, unknown>>) => Promise<void>;
@@ -220,6 +230,7 @@ async function observeRuntime(
   const item = itemOf(message);
   if (item !== null) {
     if (item.type === "dynamicToolCall"
+      || (item.type === "functionCall" && item.name === "exec")
       || (item.type === "functionCallOutput" && item.name === "exec" && (item.namespace === null || item.namespace === undefined))) {
       observations.codeModeCell = true;
     }
@@ -293,8 +304,8 @@ function threadIdFromResponse(message: ProbeMessage): string {
 export async function runCodexNativeAppServerModelProbe(
   input: CodexNativeAppServerModelProbeInput,
   deps: CodexNativeAppServerModelProbeDependencies
-): Promise<CodexNativeAppServerModelProbeEvidence & CodexSplitModelCompatibilityProof> {
-  if (input.model !== PINNED_CODE_MODE_MODEL) throw new Error("codex-model-probe-model");
+): Promise<CodexNativeAppServerModelProbeEvidence & CodexNativeAppServerModelCompatibilityProof> {
+  if (!ADMITTED_CODE_MODE_MODELS.has(input.model)) throw new Error("codex-model-probe-model");
   if (input.logicalCwd !== "/workspace") throw new Error("codex-model-probe-cwd");
   if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 120_000) {
     throw new Error("codex-model-probe-timeout");
@@ -331,7 +342,7 @@ export async function runCodexNativeAppServerModelProbe(
     const threadResponse = await request(connection, 2, {
       id: 2,
       method: "thread/start",
-      params: { model: PINNED_CODE_MODE_MODEL, cwd: input.logicalCwd, ephemeral: true }
+      params: { model: input.model, cwd: input.logicalCwd, ephemeral: true }
     }, observations, deadline, deps);
     const threadId = threadIdFromResponse(threadResponse);
     await request(connection, 3, {
@@ -340,7 +351,7 @@ export async function runCodexNativeAppServerModelProbe(
       params: {
         threadId,
         input: [{ type: "text", text: operationPrompt(input.operation) }],
-        model: PINNED_CODE_MODE_MODEL,
+        model: input.model,
         cwd: input.logicalCwd
       }
     }, observations, deadline, deps);
@@ -370,15 +381,15 @@ export async function runCodexNativeAppServerModelProbe(
   if (!observations.remoteEnvironment || !observations.codeModeCell) throw new Error("codex-model-probe-remote-code-mode-unobserved");
   if (!observations.nestedExec || !observations.operationCompleted) throw new Error("codex-model-probe-remote-exec-unobserved");
   if (observations.executorProjectProcessCount < 1) throw new Error("codex-model-probe-executor-project-process");
-  const toolModeEvidence: CodexSplitToolModeEvidence = observations.selectedToolMode === "CodeModeOnly"
+  const toolModeEvidence: CodexNativeAppServerProbeToolModeEvidence = observations.selectedToolMode === "CodeModeOnly"
     ? { kind: "protocol", value: "CodeModeOnly" }
-    : { kind: "pinned-model-metadata-plus-runtime", model: PINNED_CODE_MODE_MODEL, remoteCodeModeObserved: true };
+    : { kind: "pinned-model-metadata-plus-runtime", model: input.model, remoteCodeModeObserved: true };
   const executorObservation: ExecutorObservation = executorAfter;
   const codeModeHostContainerId = executorObservation.codeModeHostContainerId ?? "observed-executor";
   const execServerContainerId = executorObservation.execServerContainerId ?? "observed-executor";
   return {
     provenance: "real-native-app-server",
-    model: PINNED_CODE_MODE_MODEL,
+    model: input.model,
     toolModeEvidence,
     remoteCodeModeObserved: true,
     codeModeProvider: "remote-grpc",

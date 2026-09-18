@@ -102,6 +102,17 @@ const functionCallCodeModeProtocolPreamble = [
   { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } }
 ];
 
+const functionCallStartedCodeModeProtocolPreamble = [
+  { id: 1, result: { userAgent: "codex" } },
+  { id: 2, result: { thread: { id: "thread-1" } } },
+  { method: "thread/environment/connected", params: { threadId: "thread-1", environmentId: "remote" } },
+  { id: 3, result: { turn: { id: "turn-1" } } },
+  { method: "item/started", params: { item: { id: "code-mode-1", type: "functionCall", name: "exec", arguments: "{}", status: "inProgress" } } },
+  { method: "item/started", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "inProgress", commandActions: [], source: "unifiedExecStartup" } } },
+  { method: "item/completed", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "completed", exitCode: 0, commandActions: [], source: "unifiedExecStartup" } } },
+  { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } }
+];
+
 describe("Codex native app-server model probe", () => {
   it("maps the logical socket to the owned Agent-visible socket and inode", async () => {
     const { home, socket } = await validSocket();
@@ -151,11 +162,30 @@ describe("Codex native app-server model probe", () => {
     expect(result.nestedProjectExecObserved).toBe(true);
   });
 
+  it("accepts the admitted Luna CodeModeOnly model identity", async () => {
+    const { socket } = await validSocket();
+    const result = await runCodexNativeAppServerModelProbe({
+      socket, model: "gpt-5.6-luna", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
+    }, dependencies(functionCallCodeModeProtocolPreamble));
+    expect(result.model).toBe("gpt-5.6-luna");
+    expect(result.toolModeEvidence).toEqual({
+      kind: "pinned-model-metadata-plus-runtime", model: "gpt-5.6-luna", remoteCodeModeObserved: true
+    });
+  });
+
   it("recognizes the native Code Mode exec function output without a ToolMode field", async () => {
     const { socket } = await validSocket();
     const result = await runCodexNativeAppServerModelProbe({
       socket, model: "gpt-6-astra", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
     }, dependencies(functionCallCodeModeProtocolPreamble));
+    expect(result.remoteCodeModeObserved).toBe(true);
+  });
+
+  it("recognizes the native Code Mode exec function call without a ToolMode field", async () => {
+    const { socket } = await validSocket();
+    const result = await runCodexNativeAppServerModelProbe({
+      socket, model: "gpt-5.6-luna", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
+    }, dependencies(functionCallStartedCodeModeProtocolPreamble));
     expect(result.remoteCodeModeObserved).toBe(true);
   });
 

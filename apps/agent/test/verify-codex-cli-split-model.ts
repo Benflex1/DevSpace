@@ -15,7 +15,8 @@ import {
   assertCodexNativeAppServerProbeSocket,
   buildCodexNativeAppServerProbeSocket,
   createCodexNativeAppServerProbeConnection,
-  runCodexNativeAppServerModelProbe
+  runCodexNativeAppServerModelProbe,
+  type CodexNativeAppServerProbeModel
 } from "./codex-native-app-server-probe.js";
 import {
   formatCodexSplitDiagnostic,
@@ -27,6 +28,12 @@ import { lstatIdentity } from "../src/private-state.js";
 const OPERATION = "pwd" as const;
 const MAX_DIAGNOSTIC_REASON_LENGTH = 128;
 const INFRASTRUCTURE_BLOCKED = "BLOCKED/INCOMPLETE" as const;
+
+function requestedModel(): CodexNativeAppServerProbeModel {
+  const model = process.env.DEVSPACE_CODEX_VERIFY_MODEL;
+  if (model !== "gpt-5.6-luna" && model !== "gpt-6-astra") throw new Error("codex-model-probe-model");
+  return model;
+}
 
 function boundedReason(error: unknown): string {
   const value = error instanceof Error ? error.message : "codex-model-probe-unexpected-failure";
@@ -107,6 +114,7 @@ async function main(): Promise<void> {
       ownerGid: gid
     });
     const socket = buildCodexNativeAppServerProbeSocket(home);
+    const model = requestedModel();
     const currentSocket = await lstatIdentity(socket.agentSocketPath);
     if (currentSocket === null) throw new Error("codex-model-probe-socket-missing");
     assertCodexNativeAppServerProbeSocket({
@@ -136,7 +144,7 @@ async function main(): Promise<void> {
     }
     const evidence = await runCodexNativeAppServerModelProbe({
       socket,
-      model: "gpt-6-astra",
+      model,
       logicalCwd: "/workspace",
       operation: OPERATION,
       timeoutMs: 120_000
