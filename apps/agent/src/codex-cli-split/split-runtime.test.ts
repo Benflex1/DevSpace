@@ -263,6 +263,47 @@ test("runs artifact collection only after successful agent-restart reattachment"
   await expect(readFile(path.join(stale, "manifest.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+test("forwards the verifier OTEL endpoint during agent-restart reconciliation", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const first = await value.runtime.ensure({ projectId, workspaceId });
+  const received: Array<string | undefined> = [];
+  const reattached = new CodexSplitRuntime({
+    managed: value.managed, docker: value.docker, stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex",
+    otelTraceExporterEndpoint: "http://127.0.0.1:43180/v1/traces"
+  }, {
+    reattachAssembly: (input) => {
+      received.push(input.otelTraceExporterEndpoint);
+      return Promise.resolve(assembly());
+    },
+    buildAssembly: () => Promise.reject(new Error("unexpected-rebuild"))
+  });
+
+  await expect(reattached.reconcileAfterAgentRestart({ projectId, workspaceId })).resolves.toEqual(first);
+  expect(received).toEqual(["http://127.0.0.1:43180/v1/traces"]);
+});
+
+test("omits the verifier OTEL endpoint during normal agent-restart reconciliation", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  const first = await value.runtime.ensure({ projectId, workspaceId });
+  const received: Array<string | undefined> = [];
+  const reattached = new CodexSplitRuntime({
+    managed: value.managed, docker: value.docker, stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex"
+  }, {
+    reattachAssembly: (input) => {
+      received.push(input.otelTraceExporterEndpoint);
+      return Promise.resolve(assembly());
+    },
+    buildAssembly: () => Promise.reject(new Error("unexpected-rebuild"))
+  });
+
+  await expect(reattached.reconcileAfterAgentRestart({ projectId, workspaceId })).resolves.toEqual(first);
+  expect(received).toEqual([undefined]);
+});
+
 test("stop tears down only the split resources while preserving managed/home state", async () => {
   const events: string[] = [];
   const value = await fixture(events);

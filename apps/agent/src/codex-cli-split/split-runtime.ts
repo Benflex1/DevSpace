@@ -859,7 +859,8 @@ export class CodexSplitRuntime {
     try {
       const assembly = await this.reattachAssembly({
         docker: this.docker, record, context, git, stateRoot: this.stateRoot,
-        controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath
+        controlImageReference: this.controlImageReference, codexExecutablePath: this.codexExecutablePath,
+        otelTraceExporterEndpoint: this.otelTraceExporterEndpoint
       });
       await inspectAssemblyResources({ docker: this.docker, assembly });
       this.assemblies.set(input.workspaceId, assembly);
