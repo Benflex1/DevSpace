@@ -163,8 +163,10 @@ export function buildCodexSplitNetworkAttachments(input: {
   readonly role: "control" | "executor";
   readonly network: CodexSplitNetworkBinding;
 }): readonly DockerCodexSplitNetworkAttachment[] {
-  const executionAlias = input.role === "control" ? "codex-control" : "codex-executor";
-  const execution = attachment("execution", input.network.execution.name, [executionAlias], false) as DockerCodexSplitExecutionAttachment;
+  const executionAliases = input.role === "control"
+    ? ["codex-control"]
+    : ["codex-executor", "codex-code-mode-host"];
+  const execution = attachment("execution", input.network.execution.name, executionAliases, false) as DockerCodexSplitExecutionAttachment;
   if (input.role === "executor") return [execution];
   const egress = attachment("control-egress", input.network.controlEgress.name, ["codex-control"], true) as DockerCodexSplitControlEgressAttachment;
   return [execution, egress];

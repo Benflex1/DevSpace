@@ -57,7 +57,10 @@ test("creates and binds separate execution and control-egress networks", async (
   expect(network.controlEgress.name).not.toBe("bridge");
   expect(buildCodexSplitNetworkAttachments({ role: "control", network })).toHaveLength(2);
   expect(buildCodexSplitNetworkAttachments({ role: "executor", network })).toHaveLength(1);
-  expect(buildCodexSplitNetworkAttachments({ role: "executor", network })[0]?.role).toBe("execution");
+  expect(buildCodexSplitNetworkAttachments({ role: "executor", network })[0]).toMatchObject({
+    role: "execution",
+    aliases: ["codex-executor", "codex-code-mode-host"]
+  });
 });
 
 test("rejects role attachment drift and network inspection drift", async () => {
