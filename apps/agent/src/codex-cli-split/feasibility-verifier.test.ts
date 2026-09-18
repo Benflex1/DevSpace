@@ -332,6 +332,7 @@ test("preflight mode stops before any operator or native TUI interaction", async
     });
 
     expect(result.status).toBe("BLOCKED/INCOMPLETE");
+    expect(result.lifecyclePath).toBe("fresh-create");
     expect(result.evidence.incompleteReason).toBe("codex-split-test-preflight-mode");
     expect(result.evidence.readiness).toBe("BLOCKED/INCOMPLETE");
     expect(result.evidence.realModelProof).toBeNull();

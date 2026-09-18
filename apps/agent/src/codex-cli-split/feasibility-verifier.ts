@@ -84,10 +84,12 @@ export interface CodexSplitOperator {
 }
 
 export type CodexSplitLiveEvidence = CodexSplitLiveGateEvidence;
-export type CodexSplitPreflightStatus = CodexSplitReadinessState;
+export type CodexSplitPreflightStatus = Extract<CodexSplitReadinessState, "INFRASTRUCTURE_READY" | "BLOCKED/INCOMPLETE">;
+export type CodexSplitPreflightLifecycle = "fresh-create" | "persisted-reattach" | "unknown";
 
 export interface CodexSplitPreflightResult {
   readonly status: CodexSplitPreflightStatus;
+  readonly lifecyclePath: CodexSplitPreflightLifecycle;
   readonly evidence: CodexSplitLiveEvidence;
   readonly ptyProof: CodexSplitPtyProof | null;
 }
@@ -152,7 +154,7 @@ const PROBE_TIMEOUT_MS = 15_000;
 const SESSION_DISCOVERY_ATTEMPTS = 20;
 const SESSION_DISCOVERY_DELAY_MS = 250;
 const CONTROL_ALLOWED_MOUNT_TARGETS = new Set([
-  "/codex-home", "/opt/devspace/codex", "/opt/devspace/codex-launcher", "/etc/codex/requirements.toml"
+  "/codex-home", "/opt/devspace/codex", "/opt/devspace/codex-launcher", "/etc/codex/requirements.toml", "/etc/codex/managed_config.toml"
 ]);
 const EXECUTOR_ALLOWED_MOUNT_TARGETS = new Set([
   "/workspace", "/opt/devspace/codex", "/opt/devspace/codex-launcher"
@@ -1144,7 +1146,7 @@ async function runGateInternal(input: {
       sections: automatedSections,
       transportSecurity: aggregateTransportSecurity(preflightTransportEvidence),
       transportEvidence: preflightTransportEvidence,
-      readiness: "READY_FOR_OPERATOR_TUI",
+      readiness: "BLOCKED/INCOMPLETE",
       realModelProof: null,
       operatorProof: null,
       liveOperatorProof: false,
@@ -1157,7 +1159,7 @@ async function runGateInternal(input: {
       controlRoutingDisabledProven: network.controlForwardingDisabled
         && network.controlRoutingCapabilitiesAbsent && network.controlProxyProcessAbsent,
       securityViolation: false,
-      incompleteReason: "operator-tui-required",
+      incompleteReason: "preflight-incomplete",
       unsupportedReason: null,
       evidenceVersion: 2,
       processObservations: [...processes],
@@ -1172,7 +1174,10 @@ async function runGateInternal(input: {
         && preflightExecutorProjectProcess === false && preflightControlProjectProcess === false
         && ptyProof.genericTtyCycles === 5 && ptyProof.codexVersionTtyCycles === 3
         && ptyProof.nativePtyStartupCycles === 3;
-      return { evidence: preflightEvidence, ensured, canary, readyForOperatorTui: ready, ptyProof };
+      const readinessEvidence: CodexSplitLiveEvidence = ready
+        ? { ...preflightEvidence, readiness: "INFRASTRUCTURE_READY", incompleteReason: null }
+        : preflightEvidence;
+      return { evidence: readinessEvidence, ensured, canary, readyForOperatorTui: ready, ptyProof };
     }
     if (operator === null) throw new Error("codex-split-operator-missing");
     operator.printChecklist(buildCodexSplitManualChecklist());
@@ -1261,10 +1266,12 @@ async function runCodexSplitVerification(input: {
   readonly configuration: CodexSplitVerifyConfiguration;
   readonly operator: CodexSplitOperator | null;
   readonly mode: "operator" | "preflight";
+  readonly retainOnSuccess?: boolean;
   readonly services?: CodexSplitVerifierServices;
 }): Promise<{
   readonly evidence: CodexSplitLiveEvidence;
   readonly readyForOperatorTui: boolean;
+  readonly lifecyclePath: CodexSplitPreflightLifecycle;
   readonly ptyProof: CodexSplitPtyProof | null;
 }> {
   const runId = uuidv7();
@@ -1273,9 +1280,14 @@ async function runCodexSplitVerification(input: {
   let canary: CanaryBinding | null = null;
   let evidence: CodexSplitLiveEvidence;
   let readyForOperatorTui = false;
+  let lifecyclePath: CodexSplitPreflightLifecycle = "unknown";
   let ptyProof: CodexSplitPtyProof | null = null;
   try {
     services = input.services ?? await createVerifierServices(input.configuration);
+    const persistedRecord = await lstatIdentity(path.join(
+      input.configuration.managedRoot, "state", "codex-split", `${input.configuration.workspaceId}.json`
+    ));
+    lifecyclePath = persistedRecord === null ? "fresh-create" : "persisted-reattach";
     const result = await runGateInternal({ ...input, services, runId });
     evidence = result.evidence;
     ensured = result.ensured;
@@ -1292,17 +1304,20 @@ async function runCodexSplitVerification(input: {
     try { await cleanupCanary(canary); } catch { cleanupFailed = true; }
   }
   if (ensured && services !== undefined) {
-    try {
-      await services.runtime.stop({ projectId: input.configuration.projectId, workspaceId: input.configuration.workspaceId });
-    } catch {
-      cleanupFailed = true;
+    const retainRuntime = input.mode === "preflight" && input.retainOnSuccess === true && readyForOperatorTui && !cleanupFailed;
+    if (!retainRuntime) {
+      try {
+        await services.runtime.stop({ projectId: input.configuration.projectId, workspaceId: input.configuration.workspaceId });
+      } catch {
+        cleanupFailed = true;
+      }
     }
   }
   if (cleanupFailed && !evidence.securityViolation) {
     evidence = { ...evidence, incompleteReason: "cleanup-failed" };
     readyForOperatorTui = false;
   }
-  return { evidence, readyForOperatorTui, ptyProof };
+  return { evidence, readyForOperatorTui, lifecyclePath, ptyProof };
 }
 
 export async function runCodexSplitFeasibilityGate(input: {
@@ -1316,11 +1331,13 @@ export async function runCodexSplitFeasibilityGate(input: {
 
 export async function runCodexSplitFeasibilityPreflight(input: {
   readonly configuration: CodexSplitVerifyConfiguration;
+  readonly retainOnSuccess?: boolean;
   readonly services?: CodexSplitVerifierServices;
 }): Promise<CodexSplitPreflightResult> {
   const result = await runCodexSplitVerification({ ...input, operator: null, mode: "preflight" });
   return {
-    status: result.readyForOperatorTui ? "READY_FOR_OPERATOR_TUI" : "BLOCKED/INCOMPLETE",
+    status: result.readyForOperatorTui ? "INFRASTRUCTURE_READY" : "BLOCKED/INCOMPLETE",
+    lifecyclePath: result.lifecyclePath,
     evidence: result.evidence,
     ptyProof: result.ptyProof
   };

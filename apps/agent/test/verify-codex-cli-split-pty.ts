@@ -25,7 +25,7 @@ async function main(): Promise<void> {
     securityViolation: result.evidence.securityViolation,
     incompleteReason: result.evidence.incompleteReason
   })}\n`);
-  if (result.status !== "READY_FOR_OPERATOR_TUI") process.exitCode = 1;
+  if (result.status !== "INFRASTRUCTURE_READY") process.exitCode = 1;
 }
 
 void main().catch((error: unknown) => {
