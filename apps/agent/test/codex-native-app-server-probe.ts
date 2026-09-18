@@ -294,6 +294,19 @@ function threadIdFromResponse(message: ProbeMessage): string {
   return safeString((thread as ProbeMessage).id, "codex-model-probe-thread-response");
 }
 
+function assertRemoteEnvironmentReady(message: ProbeMessage): void {
+  const result = message.result;
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("codex-model-probe-environment-status-invalid");
+  }
+  const status = (result as ProbeMessage).status;
+  if (status === "ready") return;
+  if (status === "pending" || status === "disconnected" || status === "unknown") {
+    throw new Error(`codex-model-probe-environment-status-${status}`);
+  }
+  throw new Error("codex-model-probe-environment-status-invalid");
+}
+
 export async function runCodexNativeAppServerModelProbe(
   input: CodexNativeAppServerModelProbeInput,
   deps: CodexNativeAppServerModelProbeDependencies
@@ -361,6 +374,12 @@ export async function runCodexNativeAppServerModelProbe(
         break;
       }
     }
+    const environmentStatus = await request(connection, 4, {
+      id: 4,
+      method: "environment/status",
+      params: { environmentId: "remote" }
+    }, observations, deadline, deps);
+    assertRemoteEnvironmentReady(environmentStatus);
   } finally {
     await connection.close().catch(() => undefined);
   }
@@ -373,7 +392,6 @@ export async function runCodexNativeAppServerModelProbe(
   if (executorAfter.hasCredentials !== false) throw new Error("codex-model-probe-executor-credentials");
   if (executorAfter.codeModeHostProcessCount < 1) throw new Error("codex-model-probe-code-mode-host-process");
   if (executorAfter.execServerProcessCount < 1) throw new Error("codex-model-probe-exec-server-process");
-  if (!observations.remoteEnvironment) throw new Error("codex-model-probe-remote-environment-unobserved");
   observations.executorProjectProcessCount = Math.max(observations.executorProjectProcessCount, executorAfter.projectProcessCount);
   if (observations.executorProjectProcessCount < 1) throw new Error("codex-model-probe-executor-project-process");
   const correlationInput = await deps.observeRemoteCodeModeEvidence({

@@ -47,10 +47,10 @@ async function socketFixture(home: CodexNativeHomeBinding): Promise<{ readonly s
   return { socketPath, close: async () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
-function connection(messages: readonly Readonly<Record<string, unknown>>[]): CodexNativeAppServerProbeConnection {
+function connection(messages: readonly Readonly<Record<string, unknown>>[], sent: Readonly<Record<string, unknown>>[] = []): CodexNativeAppServerProbeConnection {
   const queue = [...messages];
   return {
-    send(): Promise<void> { return Promise.resolve(); },
+    send(request): Promise<void> { sent.push(request); return Promise.resolve(); },
     receive(): Promise<Readonly<Record<string, unknown>>> {
       const message = queue.shift();
       return message === undefined ? Promise.reject(new Error("probe-test-message-exhausted")) : Promise.resolve(message);
@@ -156,7 +156,8 @@ const protocolPreamble = [
   { method: "item/started", params: { item: { id: "code-mode-1", type: "dynamicToolCall", namespace: "code_mode", tool: "execute", status: "inProgress", arguments: {} } } },
   { method: "item/started", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "inProgress", commandActions: [], source: "unifiedExecStartup" } } },
   { method: "item/completed", params: { item: { id: "command-1", type: "commandExecution", command: "pwd", cwd: "/workspace", status: "completed", exitCode: 0, commandActions: [], source: "unifiedExecStartup" } } },
-  { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } }
+  { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } },
+  { id: 4, result: { status: "ready" } }
 ];
 
 describe("Codex native app-server model probe", () => {
@@ -187,6 +188,27 @@ describe("Codex native app-server model probe", () => {
   it("rejects a missing or stale socket", async () => {
     const home = await homeFixture();
     expect(() => buildCodexNativeAppServerProbeSocket(home)).toThrow("codex-model-probe-socket-missing");
+  });
+
+  it("uses environment/status when the connected lifecycle notification is not replayed", async () => {
+    const { socket } = await validSocket();
+    const sent: Readonly<Record<string, unknown>>[] = [];
+    const messages = [
+      { id: 1, result: { userAgent: "codex" } },
+      { id: 2, result: { thread: { id: "thread-1" } } },
+      { id: 3, result: { turn: { id: "turn-1" } } },
+      { method: "turn/completed", params: { turn: { id: "turn-1", status: "completed" } } },
+      { id: 4, result: { status: "ready" } }
+    ] as const;
+    const result = await runCodexNativeAppServerModelProbe({
+      socket, model: "gpt-5.6-luna", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
+    }, {
+      ...dependencies(messages),
+      connect: () => Promise.resolve(connection(messages, sent))
+    });
+
+    expect(result.model).toBe("gpt-5.6-luna");
+    expect(sent).toContainEqual({ id: 4, method: "environment/status", params: { environmentId: "remote" } });
   });
 
   it("rejects a non-Astra model before connecting", async () => {
