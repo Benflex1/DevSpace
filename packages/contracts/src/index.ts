@@ -100,6 +100,7 @@ export {
 } from "./f10-endpoints.js";
 export * from "./terminal.js";
 export * from "./ai-sessions.js";
+export * from "./harness.js";
 export * from "./github-app.js";
 export * from "./github-app-endpoints.js";
 export * from "./provider-adapters/codex-app-server.js";
