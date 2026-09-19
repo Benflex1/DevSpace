@@ -434,6 +434,26 @@ export class ExecutionManager {
     });
   }
 
+  async createHarness(input: {
+    projectId: string;
+    workspaceId: string;
+    processId: string;
+    terminalId: string;
+    command: readonly string[];
+    environment: Readonly<Record<string, string>>;
+  }): Promise<void> {
+    const context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId);
+    if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
+      resource: { type: "terminal", id: input.terminalId }, action: "create"
+    });
+    await this.createExec(context, {
+      kind: "terminal", processId: input.processId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
+      successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
+      environment: { TERM: "xterm-256color", ...input.environment }, attachStdin: true, tty: true, operationId: null
+    });
+  }
+
   private findProcess(projectId: string, workspaceId: string, processId: string): LiveExecution {
     const live = this.executions.get(uuidV7Schema.parse(processId));
     if (live === undefined) throw processNotFound(processId);

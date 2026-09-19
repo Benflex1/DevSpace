@@ -673,3 +673,44 @@ test("initial attachment persistence failure closes before releasing ownership a
   expect(live?.attachment).toBeNull();
   expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
 });
+
+test("createHarness execs structured argv with CODEX_HOME only on that exec", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-exec-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const created: Array<{ command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean }> = [];
+  const engine = {
+    createExec: async (_containerId: string, input: {
+      command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
+    }) => {
+      created.push(input);
+      return `exec-${created.length}`;
+    },
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  await manager.initialize();
+  const harnessTerminalId = "018f0f00-0000-7000-8000-0000000000aa";
+  await manager.createHarness({
+    projectId: id, workspaceId, processId: harnessTerminalId, terminalId: harnessTerminalId,
+    command: ["codex", "resume", "thread-1"],
+    environment: { CODEX_HOME: "/opt/devspace/harness-home" }
+  });
+  expect(created[0]).toMatchObject({
+    command: ["codex", "resume", "thread-1"],
+    workingDirectory: "/workspace",
+    tty: true,
+    environment: { TERM: "xterm-256color", CODEX_HOME: "/opt/devspace/harness-home" }
+  });
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(created[1]).toMatchObject({
+    command: ["/bin/sh"],
+    environment: { TERM: "xterm-256color" }
+  });
+  expect(created[1]!.environment.CODEX_HOME).toBeUndefined();
+});
