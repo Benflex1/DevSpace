@@ -233,6 +233,16 @@ test("reattach requires the same home/socket/process identity", async () => {
   })).rejects.toThrow("codex-app-server-identity");
 });
 
+test("does not treat a rewritten verifier policy as app-server telemetry identity", async () => {
+  const home = await homeFixture();
+  const policy = buildCodexNativeAppServerPolicy({ control: control(home), artifact, codeModeHost });
+  expect(policy.command).toEqual([
+    "/opt/devspace/codex-launcher/codex", "app-server", "--listen", "unix://", "--code-mode-host", codeModeHost.url
+  ]);
+  expect(policy.environment).not.toHaveProperty("OTEL_EXPORTER_OTLP_ENDPOINT");
+  expect(JSON.stringify(policy.environment)).not.toContain("43180");
+});
+
 test("rejects a server that exits or never creates the default socket", async () => {
   const home = await homeFixture();
   const policy = buildCodexNativeAppServerPolicy({ control: control(home), artifact, codeModeHost });

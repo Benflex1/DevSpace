@@ -99,6 +99,9 @@ function dockerFixture(options: {
   return { docker, calls, topArguments };
 }
 
+const VERIFIER_OTEL_ENDPOINT = "http://127.0.0.1:43180/v1/traces";
+const VERIFIER_OTEL_OVERRIDE = 'otel.trace_exporter={ otlp-http = { endpoint = "http://127.0.0.1:43180/v1/traces", protocol = "json" } }';
+
 test("starts the verified exec-server only inside the executor", async () => {
   const fixture = dockerFixture();
   const handle = await startCodexExecServer({ docker: fixture.docker, executor, transport });
@@ -107,6 +110,48 @@ test("starts the verified exec-server only inside the executor", async () => {
     command: ["/opt/devspace/codex-launcher/codex", "exec-server", "--listen", "ws://0.0.0.0:4545"],
     workingDirectory: "/workspace", environment: {}, attachStdin: false, tty: false
   });
+});
+
+test("configures verifier-only executor OTEL without native home, credentials, or control-egress", async () => {
+  const fixture = dockerFixture();
+  const handle = await startCodexExecServer({
+    docker: fixture.docker, executor, transport, otelTraceExporterEndpoint: VERIFIER_OTEL_ENDPOINT
+  });
+  expect(handle).toMatchObject({ executorContainerId: "executor-id", execId: "server-exec", serverPid: 123 });
+  expect(fixture.calls[0]).toEqual({
+    command: [
+      "/opt/devspace/codex-launcher/codex",
+      "-c",
+      VERIFIER_OTEL_OVERRIDE,
+      "exec-server",
+      "--listen",
+      "ws://0.0.0.0:4545"
+    ],
+    workingDirectory: "/workspace",
+    environment: {},
+    attachStdin: false,
+    tty: false
+  });
+  const environment = (fixture.calls[0] as { readonly environment: Readonly<Record<string, string>> }).environment;
+  expect(environment).not.toHaveProperty("CODEX_HOME");
+  expect(environment).not.toHaveProperty("HOME");
+  expect(Object.keys(environment).some((name) => /^(?:CODEX_|OPENAI_).*(?:KEY|TOKEN)$/u.test(name))).toBe(false);
+  expect(executor.controlEgressAttached).toBe(false);
+});
+
+test("rejects a verifier OTEL endpoint that is not executor-local loopback", async () => {
+  await expect(startCodexExecServer({
+    docker: dockerFixture().docker, executor, transport,
+    otelTraceExporterEndpoint: "http://codex-control:43180/v1/traces"
+  })).rejects.toThrow("codex-exec-server-otel-endpoint");
+});
+
+test("leaves non-verifier exec-server launch command unchanged when OTEL is omitted", async () => {
+  const fixture = dockerFixture();
+  await startCodexExecServer({ docker: fixture.docker, executor, transport });
+  expect((fixture.calls[0] as { readonly command: readonly string[] }).command).toEqual([
+    "/opt/devspace/codex-launcher/codex", "exec-server", "--listen", "ws://0.0.0.0:4545"
+  ]);
 });
 
 test("requires an executing server with a stable PID and rejects a stale process", async () => {
@@ -207,6 +252,28 @@ test("treats malformed readiness probe identity as a hard error without retrying
   const request = { docker: fixture.docker, handle, readiness: readinessOptions() };
   await expect(assertCodexExecServerReady(request)).rejects.toThrow("codex-exec-server-probe");
   expect(fixture.calls.filter((call) => typeof call === "object")).toHaveLength(2);
+});
+
+test("rejects reattach of an exec-server that lacks the required verifier OTEL identity", async () => {
+  const fixture = dockerFixture({ execIds: ["ready-exec"] });
+  await expect(probeCodexExecServerReady({
+    docker: fixture.docker, executor, transport, readiness: readinessOptions(),
+    otelTraceExporterEndpoint: VERIFIER_OTEL_ENDPOINT
+  })).rejects.toThrow("codex-exec-server-telemetry-identity");
+});
+
+test("reattaches an exec-server whose process args carry the verifier OTEL identity", async () => {
+  const fixture = dockerFixture({
+    execIds: ["ready-exec"],
+    topProcessTables: [
+      { titles: ["PID", "ARGS"], processes: [["123", `codex -c ${VERIFIER_OTEL_OVERRIDE} exec-server`]] },
+      { titles: ["PID", "ARGS"], processes: [["123", `codex -c ${VERIFIER_OTEL_OVERRIDE} exec-server`]] }
+    ]
+  });
+  await expect(probeCodexExecServerReady({
+    docker: fixture.docker, executor, transport, readiness: readinessOptions(),
+    otelTraceExporterEndpoint: VERIFIER_OTEL_ENDPOINT
+  })).resolves.toBe(123);
 });
 
 test("reattaches with the same bounded readiness semantics", async () => {

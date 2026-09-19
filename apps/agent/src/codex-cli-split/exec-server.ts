@@ -11,6 +11,43 @@ const EXEC_SERVER_READY_DEADLINE_MS = 10_000;
 const EXEC_SERVER_READY_POLL_INTERVAL_MS = 50;
 const EXEC_SERVER_STARTUP_DEADLINE_MS = 1_000;
 const EXEC_SERVER_STARTUP_POLL_INTERVAL_MS = 25;
+const OTEL_TRACE_PATH = "/v1/traces" as const;
+
+function assertVerifierOtelTraceExporterEndpoint(value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("codex-exec-server-otel-endpoint");
+  }
+  if (parsed.protocol !== "http:"
+    || parsed.hostname !== "127.0.0.1"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.pathname !== OTEL_TRACE_PATH
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || !Number.isSafeInteger(Number(parsed.port))
+    || Number(parsed.port) < 1
+    || Number(parsed.port) > 65535) {
+    throw new Error("codex-exec-server-otel-endpoint");
+  }
+}
+
+function execServerOtelOverride(endpoint: string): string {
+  assertVerifierOtelTraceExporterEndpoint(endpoint);
+  return `otel.trace_exporter={ otlp-http = { endpoint = "${endpoint}", protocol = "json" } }`;
+}
+
+function execServerCommand(
+  artifact: CodexProjectExecutorBinding["policy"]["artifact"],
+  transport: CodexSplitTransportBinding,
+  otelTraceExporterEndpoint?: string
+): readonly string[] {
+  const listen = ["exec-server", "--listen", listenUrl(transport)];
+  if (otelTraceExporterEndpoint === undefined) return codexCommand(artifact, listen);
+  return codexCommand(artifact, ["-c", execServerOtelOverride(otelTraceExporterEndpoint), ...listen]);
+}
 
 export interface CodexExecServerReadinessOptions {
   readonly deadlineMs?: number;
@@ -237,10 +274,11 @@ export async function startCodexExecServer(input: {
   readonly executor: CodexProjectExecutorBinding;
   readonly transport: CodexSplitTransportBinding;
   readonly startup?: CodexExecServerStartupOptions;
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<CodexExecServerHandle> {
   assertServerEndpoint(input.executor, input.transport);
   assertServerNetwork(input.executor, input.transport);
-  const command = codexCommand(input.executor.policy.artifact, ["exec-server", "--listen", listenUrl(input.transport)]);
+  const command = execServerCommand(input.executor.policy.artifact, input.transport, input.otelTraceExporterEndpoint);
   const execId = await input.docker.createExec(input.executor.containerId, {
     command, workingDirectory: input.executor.policy.workingDirectory, environment: {}, attachStdin: false, tty: false
   });
@@ -264,12 +302,20 @@ export async function startCodexExecServer(input: {
 function processServerPid(input: {
   readonly titles: readonly string[];
   readonly processes: readonly (readonly string[])[];
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): number {
   const pidIndex = input.titles.findIndex((title) => title.toLowerCase() === "pid");
   const argsIndex = input.titles.findIndex((title) => ["args", "cmd", "command"].includes(title.toLowerCase()));
   if (pidIndex < 0 || argsIndex < 0) throw new Error("codex-exec-server-process");
   const candidates = input.processes.filter((row) => (row[argsIndex] ?? "").includes("exec-server"));
   if (candidates.length !== 1) throw new Error("codex-exec-server-process");
+  const args = candidates[0]![argsIndex] ?? "";
+  if (input.otelTraceExporterEndpoint !== undefined) {
+    assertVerifierOtelTraceExporterEndpoint(input.otelTraceExporterEndpoint);
+    if (!args.includes("otel.trace_exporter") || !args.includes(input.otelTraceExporterEndpoint)) {
+      throw new Error("codex-exec-server-telemetry-identity");
+    }
+  }
   const pid = Number(candidates[0]![pidIndex]);
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("codex-exec-server-process");
   return pid;
@@ -301,20 +347,30 @@ export async function probeCodexExecServerReady(input: {
   readonly executor: CodexProjectExecutorBinding;
   readonly transport: CodexSplitTransportBinding;
   readonly readiness?: CodexExecServerReadinessOptions;
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<number> {
   assertServerEndpoint(input.executor, input.transport);
   assertServerNetwork(input.executor, input.transport);
   const processes = await input.docker.topContainer(input.executor.containerId, "-o pid,args");
-  const serverPid = processServerPid(processes);
+  const serverPid = processServerPid({
+    ...processes,
+    otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+  });
   await runReadyProbe({
     ...input,
     server: {
       assertAlive: async () => {
         try {
           const currentProcesses = await input.docker.topContainer(input.executor.containerId, "-o pid,args");
-          if (processServerPid(currentProcesses) !== serverPid) throw new Error("codex-exec-server-process");
+          if (processServerPid({
+            ...currentProcesses,
+            otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+          }) !== serverPid) throw new Error("codex-exec-server-process");
         } catch (error) {
-          if (error instanceof Error && error.message === "codex-exec-server-process") throw error;
+          if (error instanceof Error && (
+            error.message === "codex-exec-server-process"
+            || error.message === "codex-exec-server-telemetry-identity"
+          )) throw error;
           throw new Error("codex-exec-server-process", { cause: error });
         }
       }
@@ -327,6 +383,7 @@ export async function assertCodexExecServerReady(input: {
   readonly docker: DockerEngineClient;
   readonly handle: CodexExecServerHandle;
   readonly readiness?: CodexExecServerReadinessOptions;
+  readonly otelTraceExporterEndpoint?: string | undefined;
 }): Promise<void> {
   const serverExecutor = {
     containerId: input.handle.executorContainerId,
@@ -334,6 +391,15 @@ export async function assertCodexExecServerReady(input: {
   } as CodexProjectExecutorBinding;
   const serverInspection = await input.docker.inspectExec(input.handle.execId);
   assertServerInspection(serverInspection, serverExecutor, input.handle.execId, input.handle.serverPid);
+  if (input.otelTraceExporterEndpoint !== undefined) {
+    const processes = await input.docker.topContainer(input.handle.executorContainerId, "-o pid,args");
+    if (processServerPid({
+      ...processes,
+      otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+    }) !== input.handle.serverPid) {
+      throw new Error("codex-exec-server-telemetry-identity");
+    }
+  }
   await runReadyProbe({
     docker: input.docker,
     executor: {

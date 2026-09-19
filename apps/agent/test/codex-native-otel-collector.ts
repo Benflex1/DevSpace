@@ -31,7 +31,10 @@ const names=new Set(["code_mode.grpc.execute","code_mode.grpc.callback","code_mo
 const allowed={"code_mode.grpc.execute":new Set(["execution.id","call_id"]),"code_mode.grpc.callback":new Set(["session.id","execution.id","cell.id","invocation.id"]),"code_mode.broker.invoke_tool":new Set(["cell.id","runtime_tool_call_id","tool_name"]),"codex.exec_server.process":new Set(["process.id","result"])};
 const scalar=(value)=>{if(!value||typeof value!=="object")return null;if(typeof value.stringValue==="string"&&value.stringValue.length<=256)return value.stringValue;if(typeof value.intValue==="number"&&Number.isSafeInteger(value.intValue))return value.intValue;if(typeof value.intValue==="string"&&/^-?[0-9]+$/.test(value.intValue)&&Number.isSafeInteger(Number(value.intValue)))return Number(value.intValue);return typeof value.boolValue==="boolean"?value.boolValue:null;};
 const status=(value)=>value&&typeof value.code==="string"?value.code:"STATUS_CODE_UNSET";
-const project=(root)=>{const result=[];for(const resource of Array.isArray(root&&root.resourceSpans)?root.resourceSpans:[]){for(const scope of Array.isArray(resource&&resource.scopeSpans)?resource.scopeSpans:[]){for(const raw of Array.isArray(scope&&scope.spans)?scope.spans:[]){if(result.length>=maxSpans||!raw||typeof raw.name!=="string"||!names.has(raw.name)||typeof raw.traceId!=="string"||!/^[0-9a-f]{32}$/.test(raw.traceId))continue;const attrs=[];for(const item of Array.isArray(raw.attributes)?raw.attributes:[]){if(!item||typeof item.key!=="string"||!allowed[raw.name].has(item.key))continue;const value=scalar(item.value);if(value!==null)attrs.push({key:item.key,value:typeof value==="string"?{stringValue:value}:typeof value==="number"?{intValue:value}:{boolValue:value}});}result.push({name:raw.name,traceId:raw.traceId,status:{code:status(raw.status)},attributes:attrs});}}}return {resourceSpans:[{scopeSpans:[{spans:result}]}]};};
+const hex16=(value)=>typeof value==="string"&&/^[0-9a-f]{16}$/.test(value)?value:null;
+const nano=(value)=>typeof value==="string"&&/^[0-9]{1,32}$/.test(value)?value:typeof value==="number"&&Number.isSafeInteger(value)&&value>=0?String(value):null;
+const serviceName=(resource)=>{const attrs=resource&&resource.resource&&Array.isArray(resource.resource.attributes)?resource.resource.attributes:[];for(const item of attrs){if(!item||item.key!=="service.name")continue;const value=scalar(item.value);if(typeof value==="string")return value;}return null;};
+const project=(root)=>{const result=[];for(const resource of Array.isArray(root&&root.resourceSpans)?root.resourceSpans:[]){const service=serviceName(resource);for(const scope of Array.isArray(resource&&resource.scopeSpans)?resource.scopeSpans:[]){for(const raw of Array.isArray(scope&&scope.spans)?scope.spans:[]){if(result.length>=maxSpans||!raw||typeof raw.name!=="string"||!names.has(raw.name)||typeof raw.traceId!=="string"||!/^[0-9a-f]{32}$/.test(raw.traceId))continue;const attrs=[];for(const item of Array.isArray(raw.attributes)?raw.attributes:[]){if(!item||typeof item.key!=="string"||!allowed[raw.name].has(item.key))continue;const value=scalar(item.value);if(value!==null)attrs.push({key:item.key,value:typeof value==="string"?{stringValue:value}:typeof value==="number"?{intValue:value}:{boolValue:value}});}const span={name:raw.name,traceId:raw.traceId,status:{code:status(raw.status)},attributes:attrs};const spanId=hex16(raw.spanId);if(spanId)span.spanId=spanId;const parent=hex16(raw.parentSpanId);if(parent)span.parentSpanId=parent;const started=nano(raw.startTimeUnixNano);if(started)span.startTimeUnixNano=started;if(service)span.serviceName=service;result.push(span);}}}return {resourceSpans:[{scopeSpans:[{spans:result}]}]};};
 const server=http.createServer((request,response)=>{if(request.method!=="POST"||request.url!=="/v1/traces"){response.statusCode=404;response.end();return;}const chunks=[];let size=0;request.on("data",chunk=>{size+=chunk.length;if(size<=maxBody)chunks.push(chunk);else request.destroy();});request.on("end",()=>{if(size>maxBody){response.statusCode=413;response.end();return;}try{const body=project(JSON.parse(Buffer.concat(chunks).toString("utf8")));process.stdout.write(JSON.stringify(body)+"\\n");response.statusCode=200;response.end();}catch{response.statusCode=400;response.end();}});});
 server.listen(port,"127.0.0.1",()=>process.stdout.write("${READY_MARKER}\\n"));`;
 }
@@ -163,13 +166,13 @@ export interface CodexNativeOtelCollectorHandle {
 
 export async function startCodexNativeOtelCollector(input: {
   readonly docker: DockerEngineClient;
-  readonly controlContainerId: string;
+  readonly containerId: string;
   readonly port?: number;
   readonly startupDeadlineMs?: number;
 }): Promise<CodexNativeOtelCollectorHandle> {
   const port = input.port ?? DEFAULT_PORT;
   assertPort(port);
-  const execId = await input.docker.createExec(input.controlContainerId, {
+  const execId = await input.docker.createExec(input.containerId, {
     command: createCodexNativeOtelCollectorCommand(port),
     workingDirectory: "/",
     environment: {},
@@ -193,7 +196,7 @@ export async function startCodexNativeOtelCollector(input: {
     if (timeout !== undefined) clearTimeout(timeout);
   });
   const inspection = await input.docker.inspectExec(execId);
-  const serverPid = inspectCollector(inspection, execId, input.controlContainerId);
+  const serverPid = inspectCollector(inspection, execId, input.containerId);
   return {
     execId,
     serverPid,
@@ -204,4 +207,29 @@ export async function startCodexNativeOtelCollector(input: {
     },
     close: () => stream.destroy()
   };
+}
+
+export async function drainCodexNativeOtelObservations(input: {
+  readonly takeObservations: () => CodexNativeOtelSpanObservation[];
+  readonly isComplete: (spans: readonly CodexNativeOtelSpanObservation[]) => boolean;
+  readonly deadlineMs: number;
+  readonly pollIntervalMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}): Promise<CodexNativeOtelSpanObservation[]> {
+  const pollIntervalMs = input.pollIntervalMs ?? 100;
+  if (!Number.isSafeInteger(input.deadlineMs) || input.deadlineMs < 1 || input.deadlineMs > 60_000
+    || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 5_000) {
+    throw new Error("codex-native-otel-drain-options");
+  }
+  const now = input.now ?? Date.now;
+  const sleep = input.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const deadline = now() + input.deadlineMs;
+  for (;;) {
+    const observations = input.takeObservations();
+    if (input.isComplete(observations)) return observations;
+    const remaining = deadline - now();
+    if (remaining <= 0) return observations;
+    await sleep(Math.min(pollIntervalMs, remaining));
+  }
 }

@@ -231,8 +231,14 @@ async function buildDefaultAssembly(input: CodexSplitRuntimeAssemblyInput & { re
       executor, network, protocolAuthenticationVerified: false, privateNetworkIsolationVerified: true,
       admittedVersion: "0.153.4"
     });
-    const server = await startCodexExecServer({ docker: input.docker, executor, transport });
-    await assertCodexExecServerReady({ docker: input.docker, handle: server });
+    const server = await startCodexExecServer({
+      docker: input.docker, executor, transport,
+      otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+    });
+    await assertCodexExecServerReady({
+      docker: input.docker, handle: server,
+      otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+    });
     const codeModeHostPolicy = buildCodexCodeModeHostPolicy({ executor, artifact: capabilities });
     const codeModeHost = await startCodexCodeModeHost({ docker: input.docker, policy: codeModeHostPolicy });
     await assertCodexCodeModeHostReady({ docker: input.docker, handle: codeModeHost, policy: codeModeHostPolicy });
@@ -457,6 +463,10 @@ function hasDockerNotFoundCause(error: unknown): boolean {
   return cause !== undefined && hasDockerNotFoundCause(cause);
 }
 
+function isTelemetryIdentityMismatch(error: unknown): boolean {
+  return error instanceof Error && error.message === "codex-exec-server-telemetry-identity";
+}
+
 async function inspectOptional<T>(operation: () => Promise<T>): Promise<T | null> {
   try {
     return await operation();
@@ -664,7 +674,7 @@ export class CodexSplitRuntime {
         this.assemblies.set(key, reattached);
         return reattached;
       } catch (error) {
-        if (!hasDockerNotFoundCause(error)) throw error;
+        if (!hasDockerNotFoundCause(error) && !isTelemetryIdentityMismatch(error)) throw error;
         await discardStaleRuntimeResources({ docker: this.docker, record: existing });
         await unlink(recordPath(this.stateRoot, existing.workspaceId)).catch((unlinkError: NodeJS.ErrnoException) => {
           if (unlinkError.code !== "ENOENT") throw unlinkError;
@@ -972,7 +982,10 @@ async function buildDefaultReattachedAssembly(input: {
     endpoint: transport,
     serverPid: input.record.execServer.serverPid
   };
-  await assertCodexExecServerReady({ docker: input.docker, handle: server });
+  await assertCodexExecServerReady({
+    docker: input.docker, handle: server,
+    otelTraceExporterEndpoint: input.otelTraceExporterEndpoint
+  });
   const codeModeHostPolicy = buildCodexCodeModeHostPolicy({ executor, artifact: capabilities });
   const codeModeHost: CodexCodeModeHostHandle = {
     executorContainerId: input.record.codeModeHost.executorContainerId,

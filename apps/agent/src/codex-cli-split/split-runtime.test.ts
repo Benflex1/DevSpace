@@ -284,6 +284,23 @@ test("forwards the verifier OTEL endpoint during agent-restart reconciliation", 
   expect(received).toEqual(["http://127.0.0.1:43180/v1/traces"]);
 });
 
+test("rebuilds when a persisted assembly lacks verifier telemetry identity", async () => {
+  const events: string[] = [];
+  const value = await fixture(events);
+  await value.runtime.ensure({ projectId, workspaceId });
+  const reattached = new CodexSplitRuntime({
+    managed: value.managed, docker: value.docker, stateRoot: value.stateRoot,
+    controlImageReference: "registry.example/codex-control@sha256:abc", codexExecutablePath: "/agent/codex",
+    otelTraceExporterEndpoint: "http://127.0.0.1:43180/v1/traces"
+  }, {
+    reattachAssembly: () => Promise.reject(new Error("codex-exec-server-telemetry-identity")),
+    buildAssembly: () => { events.push("rebuild"); return Promise.resolve(assembly()); },
+    now: () => "2026-09-16T10:00:00.000Z"
+  });
+  await expect(reattached.ensure({ projectId, workspaceId })).resolves.toMatchObject({ executor: { id: "executor-id" } });
+  expect(events).toContain("rebuild");
+});
+
 test("omits the verifier OTEL endpoint during normal agent-restart reconciliation", async () => {
   const events: string[] = [];
   const value = await fixture(events);

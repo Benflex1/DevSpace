@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateCodexNativeRemoteCodeModeEvidence,
   collectCodexNativeOtelSpanObservations,
+  mergeCodexNativeOtelSpanSources,
   projectCodexNativeRemoteCodeModeEvidence,
   type CodexNativeRemoteCodeModeExecProcessEvidence,
   type CodexNativeRemoteCodeModeEvidenceInput,
@@ -284,5 +285,77 @@ describe("Codex native remote Code Mode evidence", () => {
 
   it("blocks a successful-looking generic command without the Code Mode lineage", () => {
     expectProjectionBlocked(projected({ spans: spans().filter((span) => span.name === "codex.exec_server.process") }));
+  });
+
+  it("preserves diagnostic telemetry metadata without requiring it for correlation", () => {
+    const observations = collectCodexNativeOtelSpanObservations({
+      resourceSpans: [{
+        resource: { attributes: [{ key: "service.name", value: { stringValue: "codex-exec-server" } }] },
+        scopeSpans: [{ spans: [{
+          name: "codex.exec_server.process",
+          traceId: TRACE_ID,
+          spanId: "abcdef0123456789",
+          parentSpanId: "0123456789abcdef",
+          startTimeUnixNano: "100",
+          status: { code: "STATUS_CODE_OK" },
+          attributes: [
+            { key: "process.id", value: { stringValue: "process-1" } },
+            { key: "result", value: { stringValue: "success" } }
+          ]
+        }] }]
+      }]
+    });
+    expect(observations).toEqual([expect.objectContaining({
+      name: "codex.exec_server.process",
+      traceId: TRACE_ID,
+      spanId: "abcdef0123456789",
+      parentSpanId: "0123456789abcdef",
+      startTimeUnixNano: "100",
+      serviceName: "codex-exec-server",
+      attributes: { "process.id": "process-1", result: "success" }
+    })]);
+    expect(projected({ spans: spans() })).toMatchObject({ readiness: "MODEL_CORRELATION_OBSERVER_READY" });
+  });
+
+  it("merges CONTROL Code Mode spans with the EXECUTOR process span into one evidence set", () => {
+    const control = spans().filter((span) => span.name !== "codex.exec_server.process");
+    const executor = spans().filter((span) => span.name === "codex.exec_server.process");
+    const merged = mergeCodexNativeOtelSpanSources({ control, executor });
+    expect(merged).toMatchObject({ ok: true });
+    if (merged.ok) {
+      expect(projected({ spans: merged.spans })).toMatchObject({ readiness: "MODEL_CORRELATION_OBSERVER_READY" });
+    }
+  });
+
+  it.each([
+    ["missing executor process span", { control: spans().filter((span) => span.name !== "codex.exec_server.process"), executor: [] }],
+    ["missing control callback span", {
+      control: spans().filter((span) => span.name !== "code_mode.grpc.callback" && span.name !== "codex.exec_server.process"),
+      executor: spans().filter((span) => span.name === "codex.exec_server.process")
+    }],
+    ["process span observed on CONTROL", { control: spans(), executor: [] }],
+    ["code mode span observed on EXECUTOR", {
+      control: spans().filter((span) => span.name !== "codex.exec_server.process"),
+      executor: spans()
+    }],
+    ["duplicate executor process spans", {
+      control: spans().filter((span) => span.name !== "codex.exec_server.process"),
+      executor: [
+        ...spans().filter((span) => span.name === "codex.exec_server.process"),
+        ...spans().filter((span) => span.name === "codex.exec_server.process")
+      ]
+    }],
+    ["mismatched process trace", {
+      control: spans().filter((span) => span.name !== "codex.exec_server.process"),
+      executor: spans({ "codex.exec_server.process": { traceId: "fedcba9876543210fedcba9876543210" } })
+        .filter((span) => span.name === "codex.exec_server.process")
+    }]
+  ] as const)("rejects two-source merge: %s", (_name, sources) => {
+    const merged = mergeCodexNativeOtelSpanSources(sources);
+    if (merged.ok) {
+      expectProjectionBlocked(projected({ spans: merged.spans }));
+      return;
+    }
+    expect(merged).toMatchObject({ ok: false });
   });
 });

@@ -27,10 +27,12 @@ import { lstatIdentity } from "../src/private-state.js";
 import {
   CODEX_NATIVE_OTEL_COLLECTOR_MARKER,
   CODEX_NATIVE_OTEL_TRACE_EXPORTER_ENDPOINT,
+  drainCodexNativeOtelObservations,
   startCodexNativeOtelCollector,
   type CodexNativeOtelCollectorHandle
 } from "./codex-native-otel-collector.js";
 import {
+  mergeCodexNativeOtelSpanSources,
   projectCodexNativeRemoteCodeModeEvidence,
   type CodexNativeOtelSpanObservation
 } from "./codex-native-remote-code-mode-evidence.js";
@@ -112,7 +114,8 @@ function spanByName(spans: readonly CodexNativeOtelSpanObservation[], name: Code
 }
 
 async function observeRemoteCodeModeEvidence(input: {
-  readonly collector: CodexNativeOtelCollectorHandle;
+  readonly controlCollector: CodexNativeOtelCollectorHandle;
+  readonly executorCollector: CodexNativeOtelCollectorHandle;
   readonly model: CodexNativeAppServerProbeModel;
   readonly threadId: string;
   readonly turnId: string;
@@ -129,17 +132,26 @@ async function observeRemoteCodeModeEvidence(input: {
       model: input.model,
       remoteCodeModeObserved: true as const
     };
-  const deadline = Date.now() + CORRELATION_TIMEOUT_MS;
-  let observations: CodexNativeOtelSpanObservation[] = [];
+  const control: CodexNativeOtelSpanObservation[] = [];
+  const executor: CodexNativeOtelSpanObservation[] = [];
   let lastReason = "codex-model-probe-remote-code-mode-unobserved";
-  for (;;) {
-    observations = observations.concat(input.collector.takeObservations());
-    const requiredNames = new Set(observations.map((span) => span.name));
-    if (requiredNames.size === 4) {
+  let evidence: unknown;
+  await drainCodexNativeOtelObservations({
+    takeObservations: () => {
+      control.push(...input.controlCollector.takeObservations());
+      executor.push(...input.executorCollector.takeObservations());
+      return [...control, ...executor];
+    },
+    isComplete: () => {
+      const merged = mergeCodexNativeOtelSpanSources({ control, executor });
+      if (!merged.ok) {
+        lastReason = merged.reason;
+        return false;
+      }
       try {
-        const execute = spanByName(observations, "code_mode.grpc.execute");
-        const callback = spanByName(observations, "code_mode.grpc.callback");
-        const process = spanByName(observations, "codex.exec_server.process");
+        const execute = spanByName(merged.spans, "code_mode.grpc.execute");
+        const callback = spanByName(merged.spans, "code_mode.grpc.callback");
+        const process = spanByName(merged.spans, "codex.exec_server.process");
         const projection = projectCodexNativeRemoteCodeModeEvidence({
           model: input.model,
           toolModeEvidence,
@@ -157,7 +169,7 @@ async function observeRemoteCodeModeEvidence(input: {
             hostCompleted: true,
             aborted: false
           },
-          spans: observations,
+          spans: merged.spans,
           execProcess: {
             executorContainerId: input.execServerContainerId,
             cwd: "/workspace",
@@ -171,15 +183,22 @@ async function observeRemoteCodeModeEvidence(input: {
           executorHasNativeHome: false,
           executorHasCredentials: false
         });
-        if (projection.readiness === "MODEL_CORRELATION_OBSERVER_READY") return projection.evidence;
+        if (projection.readiness === "MODEL_CORRELATION_OBSERVER_READY") {
+          evidence = projection.evidence;
+          return true;
+        }
         lastReason = projection.reason;
+        return false;
       } catch (error) {
         lastReason = error instanceof Error ? error.message : "codex-model-probe-otel-correlation";
+        return false;
       }
-    }
-    if (Date.now() >= deadline) throw new Error(lastReason);
-    await new Promise<void>((resolve) => setTimeout(resolve, CORRELATION_POLL_MS));
-  }
+    },
+    deadlineMs: CORRELATION_TIMEOUT_MS,
+    pollIntervalMs: CORRELATION_POLL_MS
+  });
+  if (evidence === undefined) throw new Error(lastReason);
+  return evidence;
 }
 
 async function main(): Promise<void> {
@@ -195,7 +214,8 @@ async function main(): Promise<void> {
 
   const docker = new DockerEngineClient(configuration.dockerSocketPath);
   let runtime: CodexSplitRuntime | null = null;
-  let collector: CodexNativeOtelCollectorHandle | null = null;
+  let controlCollector: CodexNativeOtelCollectorHandle | null = null;
+  let executorCollector: CodexNativeOtelCollectorHandle | null = null;
   let ensured = false;
   try {
     await docker.assertRootlessAvailable();
@@ -218,7 +238,8 @@ async function main(): Promise<void> {
     });
     const record = await runtime.ensure({ projectId: configuration.projectId, workspaceId: configuration.workspaceId });
     ensured = true;
-    collector = await startCodexNativeOtelCollector({ docker, controlContainerId: record.control.id });
+    controlCollector = await startCodexNativeOtelCollector({ docker, containerId: record.control.id });
+    executorCollector = await startCodexNativeOtelCollector({ docker, containerId: record.executor.id });
     const uid = process.getuid?.();
     const gid = process.getgid?.();
     if (uid === undefined || gid === undefined) throw new Error("codex-model-probe-agent-owner");
@@ -302,7 +323,8 @@ async function main(): Promise<void> {
         };
       },
       observeRemoteCodeModeEvidence: (observation) => observeRemoteCodeModeEvidence({
-        collector: collector!,
+        controlCollector: controlCollector!,
+        executorCollector: executorCollector!,
         ...observation
       }),
       now: Date.now,
@@ -342,7 +364,8 @@ async function main(): Promise<void> {
     }) + "\n");
     process.exitCode = 1;
   } finally {
-    collector?.close();
+    controlCollector?.close();
+    executorCollector?.close();
     if (ensured && runtime !== null) {
       await runtime.stop({ projectId: configuration.projectId, workspaceId: configuration.workspaceId }).catch((error: unknown) => {
         process.stderr.write(`${JSON.stringify(formatCodexSplitDiagnostic("cleanup", error, "verifier"))}\n`);

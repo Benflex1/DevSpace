@@ -165,7 +165,15 @@ export interface CodexNativeOtelSpanObservation {
   readonly traceId: string;
   readonly status: "ok" | "error" | "unset";
   readonly attributes: Readonly<Record<string, string | number | boolean>>;
+  readonly spanId?: string;
+  readonly parentSpanId?: string;
+  readonly startTimeUnixNano?: string;
+  readonly serviceName?: string;
 }
+
+export type CodexNativeOtelSpanMergeResult =
+  | { readonly ok: true; readonly spans: readonly CodexNativeOtelSpanObservation[] }
+  | { readonly ok: false; readonly reason: string };
 
 export interface CodexNativeExecProcessRuntimeObservation {
   readonly executorContainerId: string;
@@ -206,6 +214,14 @@ const SPAN_NAMES = new Set<CodexNativeOtelSpanObservation["name"]>([
   "code_mode.grpc.execute",
   "code_mode.grpc.callback",
   "code_mode.broker.invoke_tool",
+  "codex.exec_server.process"
+]);
+const CONTROL_SPAN_NAMES = new Set<CodexNativeOtelSpanObservation["name"]>([
+  "code_mode.grpc.execute",
+  "code_mode.grpc.callback",
+  "code_mode.broker.invoke_tool"
+]);
+const EXECUTOR_SPAN_NAMES = new Set<CodexNativeOtelSpanObservation["name"]>([
   "codex.exec_server.process"
 ]);
 
@@ -274,6 +290,49 @@ function spanStatus(value: unknown): "ok" | "error" | "unset" {
   return "unset";
 }
 
+function hex16(value: unknown): string | undefined {
+  return typeof value === "string" && /^[0-9a-f]{16}$/u.test(value) ? value : undefined;
+}
+
+function unixNano(value: unknown): string | undefined {
+  if (typeof value === "string" && /^[0-9]{1,32}$/u.test(value)) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
+  return undefined;
+}
+
+function resourceServiceName(resourceSpan: unknown): string | undefined {
+  const resource = recordOf(recordOf(resourceSpan)?.resource);
+  const attributes = resource?.attributes;
+  if (!Array.isArray(attributes)) return undefined;
+  for (const item of attributes) {
+    const attributeRecord = recordOf(item);
+    if (attributeRecord?.key !== "service.name") continue;
+    const value = scalarAttribute(attributeRecord.value);
+    if (typeof value === "string" && value.length > 0 && value.length <= 256) return value;
+  }
+  return undefined;
+}
+
+function diagnosticFields(span: Record<string, unknown>, serviceName: string | undefined): {
+  readonly spanId?: string;
+  readonly parentSpanId?: string;
+  readonly startTimeUnixNano?: string;
+  readonly serviceName?: string;
+} {
+  const spanId = hex16(span.spanId);
+  const parentSpanId = hex16(span.parentSpanId);
+  const startTimeUnixNano = unixNano(span.startTimeUnixNano);
+  const named = typeof span.serviceName === "string" && span.serviceName.length > 0 && span.serviceName.length <= 256
+    ? span.serviceName
+    : serviceName;
+  return {
+    ...(spanId === undefined ? {} : { spanId }),
+    ...(parentSpanId === undefined ? {} : { parentSpanId }),
+    ...(startTimeUnixNano === undefined ? {} : { startTimeUnixNano }),
+    ...(named === undefined ? {} : { serviceName: named })
+  };
+}
+
 /**
  * Projects an OTLP/HTTP JSON batch into the small span shape used by the
  * evaluator. Unknown resource, span, and attribute data is discarded in
@@ -285,6 +344,7 @@ export function collectCodexNativeOtelSpanObservations(input: unknown): CodexNat
   if (!Array.isArray(resourceSpans)) return [];
   const observations: CodexNativeOtelSpanObservation[] = [];
   for (const resourceSpan of resourceSpans) {
+    const serviceName = resourceServiceName(resourceSpan);
     const scopes = recordOf(resourceSpan)?.scopeSpans;
     if (!Array.isArray(scopes)) continue;
     for (const scope of scopes) {
@@ -294,11 +354,11 @@ export function collectCodexNativeOtelSpanObservations(input: unknown): CodexNat
         const span = recordOf(rawSpan);
         const name = span?.name;
         const trace = traceId(span?.traceId);
-        if (typeof name !== "string" || !SPAN_NAMES.has(name as CodexNativeOtelSpanObservation["name"]) || trace === null) continue;
+        if (span === null || typeof name !== "string" || !SPAN_NAMES.has(name as CodexNativeOtelSpanObservation["name"]) || trace === null) continue;
         const typedName = name as CodexNativeOtelSpanObservation["name"];
         const allowed = SPAN_ATTRIBUTES[typedName];
         const attributes: Record<string, string | number | boolean> = {};
-        const rawAttributes = span?.attributes;
+        const rawAttributes = span.attributes;
         if (Array.isArray(rawAttributes)) {
           for (const rawAttribute of rawAttributes) {
             const attributeRecord = recordOf(rawAttribute);
@@ -309,12 +369,37 @@ export function collectCodexNativeOtelSpanObservations(input: unknown): CodexNat
             if (value !== null) attributes[key] = value;
           }
         }
-        observations.push({ name: typedName, traceId: trace, status: spanStatus(span?.status), attributes });
+        observations.push({
+          name: typedName,
+          traceId: trace,
+          status: spanStatus(span.status),
+          attributes,
+          ...diagnosticFields(span, serviceName)
+        });
         if (observations.length >= 128) return observations;
       }
     }
   }
   return observations;
+}
+
+export function mergeCodexNativeOtelSpanSources(input: {
+  readonly control: readonly CodexNativeOtelSpanObservation[];
+  readonly executor: readonly CodexNativeOtelSpanObservation[];
+}): CodexNativeOtelSpanMergeResult {
+  if (input.control.some((span) => !CONTROL_SPAN_NAMES.has(span.name))
+    || input.executor.some((span) => !EXECUTOR_SPAN_NAMES.has(span.name))) {
+    return { ok: false, reason: "codex-native-code-mode-otel-source-mismatch" };
+  }
+  const spans = [...input.control, ...input.executor];
+  const names = spans.map((span) => span.name);
+  if (names.length !== new Set(names).size || new Set(names).size !== 4) {
+    return { ok: false, reason: "codex-native-code-mode-otel-correlation-unobserved" };
+  }
+  if (new Set(spans.map((span) => span.traceId)).size !== 1) {
+    return { ok: false, reason: "codex-native-code-mode-otel-correlation-unobserved" };
+  }
+  return { ok: true, spans };
 }
 
 function projectSpanEvidence(
