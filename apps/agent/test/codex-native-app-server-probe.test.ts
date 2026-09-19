@@ -208,7 +208,32 @@ describe("Codex native app-server model probe", () => {
     });
 
     expect(result.model).toBe("gpt-5.6-luna");
+    expect(sent).toContainEqual({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "devspace-codex-split-model-probe", version: "0.0.0" },
+        capabilities: { experimentalApi: true }
+      }
+    });
     expect(sent).toContainEqual({ id: 4, method: "environment/status", params: { environmentId: "remote" } });
+    expect(sent.map((request) => request.method)).toEqual([
+      "initialize", "initialized", "thread/start", "turn/start", "environment/status"
+    ]);
+  });
+
+  it("blocks a protocol-gated environment/status request without experimental opt-in", async () => {
+    const { socket } = await validSocket();
+    const messages = [
+      { id: 1, result: { userAgent: "codex" } },
+      { id: 2, result: { thread: { id: "thread-1" } } },
+      { id: 3, result: { turn: { id: "turn-1" } } },
+      { method: "turn/completed", params: { turn: { id: "turn-1", status: "completed" } } },
+      { id: 4, error: { code: -32600, message: "experimental API not enabled" } }
+    ] as const;
+    await expect(runCodexNativeAppServerModelProbe({
+      socket, model: "gpt-5.6-luna", logicalCwd: "/workspace", operation: "pwd", timeoutMs: 100
+    }, dependencies(messages))).rejects.toThrow("codex-model-probe-protocol-error");
   });
 
   it("rejects a non-Astra model before connecting", async () => {

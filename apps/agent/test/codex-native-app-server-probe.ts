@@ -341,7 +341,7 @@ export async function runCodexNativeAppServerModelProbe(
       method: "initialize",
       params: {
         clientInfo: { name: "devspace-codex-split-model-probe", version: "0.0.0" },
-        capabilities: { experimentalApi: false }
+        capabilities: { experimentalApi: true }
       }
     }, observations, deadline, deps);
     await connection.send({ method: "initialized", params: {} });
