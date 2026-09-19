@@ -5,7 +5,13 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   canonicalizeRuntimePlanV1, compileRuntimePlanV1, hashRuntimePlanV1
 } from "@devspace/project-options";
-import { runtimeCreationSchema, runtimeOwnershipSchema, verifyRuntimePlanAgainstOptions, WorkspaceRuntimeManager } from "./workspace-runtime.js";
+import {
+  classifyHarnessSlotMount,
+  runtimeCreationSchema,
+  runtimeOwnershipSchema,
+  verifyRuntimePlanAgainstOptions,
+  WorkspaceRuntimeManager
+} from "./workspace-runtime.js";
 import { DockerEngineClient, DockerEngineError, type DockerContainerInspection, type DockerNetworkInspection } from "./docker-runtime.js";
 import { durableJsonWriter, type AtomicJsonWriter } from "./private-state.js";
 
@@ -61,7 +67,12 @@ class FakeEngine extends DockerEngineClient {
         CapAdd: [], CapDrop: [], SecurityOpt: ["no-new-privileges:true"], AutoRemove: false, ReadonlyRootfs: false,
         RestartPolicy: { Name: "no", MaximumRetryCount: 0 } },
       NetworkSettings: { Networks: { [input.networkName]: { NetworkID: "" } } },
-      Mounts: [{ Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" }] });
+      Mounts: [
+        { Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" },
+        ...(input.harnessSlotPath === undefined ? [] : [{
+          Type: "bind", Source: input.harnessSlotPath, Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate"
+        }])
+      ] });
     return Promise.resolve(id);
   }
   override inspectContainer(id: string): Promise<DockerContainerInspection> {
@@ -367,7 +378,7 @@ describe("bounded development-container stabilization", () => {
     const fixture = await runtimeFixture();
     await expect(start(fixture)).resolves.toMatchObject({ observedState: "running" });
     expect(fixture.lifecycle.current).toBe(fixture.policy.stabilizationDurationMs);
-    expect(fixture.engine.runningInspections).toBe(3);
+    expect(fixture.engine.runningInspections).toBe(4);
   });
 
   test.each([
@@ -396,5 +407,42 @@ describe("bounded development-container stabilization", () => {
       if (inspection === 2) container.HostConfig.Memory += 1;
     };
     await expect(start(fixture)).rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+  });
+
+  test("classifies pre-slice, exact, and mismatched harness slot mounts", () => {
+    const worktree = "/srv/worktree";
+    const slot = "/agent/harness-slots/ws";
+    const workspaceMount = { Type: "bind", Source: worktree, Destination: "/workspace", RW: true, Propagation: "rprivate" };
+    expect(classifyHarnessSlotMount({
+      mounts: [workspaceMount], worktreePath: worktree, slotHostPath: slot
+    })).toEqual({ state: "missing" });
+    expect(classifyHarnessSlotMount({
+      mounts: [
+        workspaceMount,
+        { Type: "bind", Source: slot, Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate" }
+      ],
+      worktreePath: worktree, slotHostPath: slot
+    })).toEqual({ state: "present-and-exact" });
+    expect(classifyHarnessSlotMount({
+      mounts: [
+        workspaceMount,
+        { Type: "bind", Source: "/wrong", Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate" }
+      ],
+      worktreePath: worktree, slotHostPath: slot
+    })).toEqual({ state: "mismatch" });
+  });
+
+  test("new workspace containers receive the harness slot and inspect as present-and-exact", async () => {
+    const fixture = await runtimeFixture();
+    await expect(start(fixture)).resolves.toMatchObject({
+      observedState: "running",
+      harnessSlotMount: { state: "present-and-exact" }
+    });
+    expect(fixture.engine.lastContainerInput?.harnessSlotPath).toBe(
+      path.join(fixture.root, "state", "harness-slots", fixture.association.workspaceId)
+    );
+    expect(onlyContainer(fixture).Mounts.map((mount) => mount.Destination).sort()).toEqual([
+      "/opt/devspace/harness-home", "/workspace"
+    ]);
   });
 });

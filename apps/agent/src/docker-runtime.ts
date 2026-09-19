@@ -340,7 +340,7 @@ export class DockerEngineClient {
   }
 
   async createContainer(name: string, input: {
-    imageReference: string; worktreePath: string; user: string | null; environment: Record<string, string>;
+    imageReference: string; worktreePath: string; harnessSlotPath: string; user: string | null; environment: Record<string, string>;
     networkName: string; labels: Record<string, string>; cpuMillicores: number; memoryBytes: number; pidLimit: number;
     portBindings?: DockerPortBindings; declaredContainerPorts?: readonly number[];
   }): Promise<string> {
@@ -357,8 +357,12 @@ export class DockerEngineClient {
         .map(([key, value]) => `${key}=${value}`),
       Labels: input.labels, ExposedPorts: Object.fromEntries(Object.keys(portBindings).map((key) => [key, {}])),
       HostConfig: {
-        Binds: [], Mounts: [{ Type: "bind", Source: path.resolve(input.worktreePath), Target: "/workspace", ReadOnly: false,
-          BindOptions: { Propagation: "rprivate" } }],
+        Binds: [], Mounts: [
+          { Type: "bind", Source: path.resolve(input.worktreePath), Target: "/workspace", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } },
+          { Type: "bind", Source: path.resolve(input.harnessSlotPath), Target: "/opt/devspace/harness-home", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } }
+        ],
         NetworkMode: input.networkName, PortBindings: portBindings, PublishAllPorts: false,
         Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
         AutoRemove: false, ReadonlyRootfs: false, RestartPolicy: { Name: "no", MaximumRetryCount: 0 },

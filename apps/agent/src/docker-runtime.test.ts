@@ -99,7 +99,7 @@ describe("dedicated rootless Docker boundary", () => {
     const fixture = await recordingEngineSocket();
     const engine = new DockerEngineClient(fixture.socket);
     await expect(engine.createContainer("devspace-preview", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
       declaredContainerPorts: [3000], portBindings: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "40000" }] }
     })).resolves.toBe("container-1");
@@ -108,19 +108,45 @@ describe("dedicated rootless Docker boundary", () => {
       HostConfig: { PublishAllPorts: false, PortBindings: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "40000" }] } }
     });
     await expect(engine.createContainer("devspace-public", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
       declaredContainerPorts: [3000], portBindings: { "3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "40001" }] }
     })).rejects.toThrow();
     await expect(engine.createContainer("devspace-undeclared", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
       declaredContainerPorts: [3000], portBindings: { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: "40002" }] }
     })).rejects.toThrow();
     await expect(engine.createContainer("devspace-host", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "container:other", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16
     })).rejects.toThrow("preview-host-network-is-forbidden");
+  });
+
+  test("binds the workspace worktree and one harness slot without injecting CODEX_HOME", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createContainer("devspace-harness", {
+      imageReference: "node:24", worktreePath: "/srv/worktree", user: null, environment: { LANG: "C" },
+      networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
+      harnessSlotPath: "/agent-state/harness-slots/018f1f34-7000-7000-8000-000000000002"
+    })).resolves.toBe("container-1");
+    const body = fixture.bodies[0] as {
+      Env: string[];
+      HostConfig: { Mounts: Array<{ Type: string; Source: string; Target: string; ReadOnly: boolean; BindOptions: { Propagation: string } }> };
+    };
+    expect(body.HostConfig.Mounts).toEqual([
+      { Type: "bind", Source: "/srv/worktree", Target: "/workspace", ReadOnly: false, BindOptions: { Propagation: "rprivate" } },
+      {
+        Type: "bind",
+        Source: "/agent-state/harness-slots/018f1f34-7000-7000-8000-000000000002",
+        Target: "/opt/devspace/harness-home",
+        ReadOnly: false,
+        BindOptions: { Propagation: "rprivate" }
+      }
+    ]);
+    expect(body.Env.join("\n")).not.toContain("CODEX_HOME");
+    expect(JSON.stringify(body)).not.toContain("docker.sock");
   });
 
   test("serializes an isolated probe container without inheriting image startup or workspace authority", async () => {

@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import * as z from "zod";
 import { projectOptionsRevisionHashSchema, uuidV7Schema } from "@devspace/contracts";
@@ -77,11 +77,44 @@ export interface RuntimeAssociation {
   readonly projectId: string; readonly workspaceId: string; readonly revisionId: string;
   readonly revisionHash: string; readonly runtimePlanHash: string; readonly generation: number;
 }
+export type HarnessSlotMountObservation =
+  | { readonly state: "present-and-exact" }
+  | { readonly state: "missing" }
+  | { readonly state: "mismatch" };
+
 export interface RuntimeObservation {
   readonly observedState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
   readonly serviceState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
   readonly errorCode: string | null;
   readonly containerIdentity: string | null;
+  readonly harnessSlotMount?: HarnessSlotMountObservation;
+}
+
+const HARNESS_SLOT_DESTINATION = "/opt/devspace/harness-home";
+
+export function classifyHarnessSlotMount(input: {
+  readonly mounts: readonly { Type: string; Source: string; Destination: string; RW: boolean; Propagation: string }[];
+  readonly worktreePath: string;
+  readonly slotHostPath: string;
+}): HarnessSlotMountObservation {
+  const workspace = input.mounts.filter((mount) => mount.Destination === "/workspace");
+  const slot = input.mounts.filter((mount) => mount.Destination === HARNESS_SLOT_DESTINATION);
+  const extras = input.mounts.filter((mount) => mount.Destination !== "/workspace" && mount.Destination !== HARNESS_SLOT_DESTINATION);
+  const workspaceExact = workspace.length === 1
+    && workspace[0]!.Type === "bind"
+    && path.resolve(workspace[0]!.Source) === path.resolve(input.worktreePath)
+    && workspace[0]!.RW === true
+    && workspace[0]!.Propagation === "rprivate";
+  if (!workspaceExact || extras.length > 0 || workspace.length !== 1) return { state: "mismatch" };
+  if (slot.length === 0 && input.mounts.length === 1) return { state: "missing" };
+  const expectedSlot = path.resolve(input.slotHostPath);
+  const slotExact = slot.length === 1
+    && slot[0]!.Type === "bind"
+    && path.resolve(slot[0]!.Source) === expectedSlot
+    && slot[0]!.RW === true
+    && slot[0]!.Propagation === "rprivate";
+  if (slotExact && input.mounts.length === 2) return { state: "present-and-exact" };
+  return { state: "mismatch" };
 }
 
 function suffix(id: string): string { return id.replaceAll("-", ""); }
@@ -123,7 +156,7 @@ export class WorkspaceRuntimeManager {
     readonly state?: "accepted" | "running" | "succeeded" | "failed";
   } | undefined) | null = null;
   constructor(
-    stateRoot: string,
+    private readonly stateRoot: string,
     private readonly engine: DockerEngineClient,
     private readonly policy: RuntimePolicy,
     private readonly writer: AtomicJsonWriter = durableJsonWriter,
@@ -133,6 +166,19 @@ export class WorkspaceRuntimeManager {
   ) {
     this.ownershipRoot = path.join(path.resolve(stateRoot), "ownership", "runtimes");
     this.creationRoot = path.join(path.resolve(stateRoot), "runtime-creations");
+  }
+
+  harnessSlotHostPath(workspaceId: string): string {
+    return path.join(path.resolve(this.stateRoot), "harness-slots", uuidV7Schema.parse(workspaceId));
+  }
+
+  private async slotMountFor(record: RuntimeOwnership): Promise<HarnessSlotMountObservation> {
+    const container = await this.engine.inspectContainer(record.developmentContainer.id);
+    return classifyHarnessSlotMount({
+      mounts: container.Mounts,
+      worktreePath: record.worktreePath,
+      slotHostPath: this.harnessSlotHostPath(record.workspaceId)
+    });
   }
 
   private ownershipPath(workspaceId: string): string {
@@ -249,11 +295,12 @@ export class WorkspaceRuntimeManager {
       || container.HostConfig.PidsLimit !== record.resources.pidLimit
       || capAdd.length !== 0 || capDrop.length !== 0
       || JSON.stringify(securityOptions) !== JSON.stringify(["no-new-privileges:true"])
-      || container.Mounts.length !== 1 || container.Mounts[0]?.Type !== "bind"
-      || path.resolve(container.Mounts[0].Source) !== record.worktreePath
-      || container.Mounts[0].Destination !== "/workspace" || container.Mounts[0].RW !== true
-      || container.Mounts[0].Propagation !== "rprivate"
-      || container.Mounts.some((mount) => mount.Source.includes("docker.sock") || mount.Destination.includes("docker.sock"))) {
+      || container.Mounts.some((mount) => mount.Source.includes("docker.sock") || mount.Destination.includes("docker.sock"))
+      || classifyHarnessSlotMount({
+        mounts: container.Mounts,
+        worktreePath: record.worktreePath,
+        slotHostPath: this.harnessSlotHostPath(record.workspaceId)
+      }).state === "mismatch") {
       throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained development container no longer satisfies exact Agent ownership and runtime policy.");
     }
   }
@@ -426,7 +473,10 @@ export class WorkspaceRuntimeManager {
         }
       }
       const inspected = recoveredCreation === null ? await this.inspectOwned(record) : await this.inspectCreationOwned(recoveredCreation);
-      return { observedState: inspected.running ? "running" : "stopped", serviceState: inspected.running ? "running" : "stopped",
+      return {
+        observedState: inspected.running ? "running" : "stopped",
+        serviceState: inspected.running ? "running" : "stopped",
+        harnessSlotMount: await this.slotMountFor(record),
         errorCode: null, containerIdentity: record.developmentContainer.id };
     } catch (error) {
       if (error instanceof WorkspaceRuntimeError) return { observedState: "lost", serviceState: "lost", errorCode: error.code, containerIdentity: null };
@@ -479,7 +529,10 @@ export class WorkspaceRuntimeManager {
       else await this.inspectCreationOwned(recoveredCreation);
       await this.engine.startContainer(record.developmentContainer.id);
       await this.stabilize(record);
-      return { observedState: "running", serviceState: "running", errorCode: null, containerIdentity: record.developmentContainer.id };
+      return {
+        observedState: "running", serviceState: "running", errorCode: null,
+        containerIdentity: record.developmentContainer.id, harnessSlotMount: await this.slotMountFor(record)
+      };
     }
     let creation = await this.loadCreation(association.workspaceId);
     if (creation === null) {
@@ -516,8 +569,10 @@ export class WorkspaceRuntimeManager {
       await this.engine.ensureImage(plan.developmentContainer.source.imageReference);
       let containerId: string;
       try {
+        const harnessSlotPath = this.harnessSlotHostPath(association.workspaceId);
+        await mkdir(harnessSlotPath, { recursive: true, mode: 0o700 });
         containerId = await this.engine.createContainer(names.container, {
-        imageReference: plan.developmentContainer.source.imageReference, worktreePath,
+        imageReference: plan.developmentContainer.source.imageReference, worktreePath, harnessSlotPath,
         user: plan.developmentContainer.containerUser, environment: plan.developmentContainer.environment,
         networkName: names.network, labels: containerLabels, ...resources,
         portBindings: Object.fromEntries(previewBindings.map((binding) => [
@@ -539,7 +594,10 @@ export class WorkspaceRuntimeManager {
     await this.inspectCreationOwned(creation);
     await this.engine.startContainer(record.developmentContainer.id);
     await this.stabilize(record);
-    return { observedState: "running", serviceState: "running", errorCode: null, containerIdentity: record.developmentContainer.id };
+    return {
+      observedState: "running", serviceState: "running", errorCode: null,
+      containerIdentity: record.developmentContainer.id, harnessSlotMount: await this.slotMountFor(record)
+    };
   }
 
   async stop(association: RuntimeAssociation): Promise<RuntimeObservation> {
