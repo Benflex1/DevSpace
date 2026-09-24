@@ -11,6 +11,7 @@ import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./previ
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import { AiSessionTab } from "./ai-session-tab.js";
+import { HarnessSessionTab } from "./harness-session-tab.js";
 import { resolveAiChangedFileOpenTarget } from "./ai-changed-file-open.js";
 import { EditorTab } from "./editor-tab.js";
 import { WorkspaceChanges, type GitCommitFormInput } from "./workspace-changes.js";
@@ -686,8 +687,10 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
-      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} onOpenChangedFile={onOpenAiChangedFile} />
-        : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
+      })() : tab.kind === "ai" ? <>
+        <HarnessSessionTab key={`${tab.id}-native`} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} />
+        <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} onOpenChangedFile={onOpenAiChangedFile} />
+      </> : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
           mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
           readFile={editorViews[tab.id]?.readFile ?? true}
           documents={editorDocuments} remountCount={editorPresentationGeneration + 1}

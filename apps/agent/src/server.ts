@@ -12,6 +12,8 @@ import {
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
   parseEventCursor,
+  nativeHarnessResumeDataSchema,
+  nativeHarnessStartDataSchema,
   type AgentExecutionFailure,
   type SourceInspectionData
 } from "@devspace/contracts";
@@ -31,6 +33,8 @@ import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./previ
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
+import { createHarnessHomeStore, HarnessHomeError } from "./harness-home.js";
+import { createHarnessRuntime, HarnessRuntimeError } from "./harness-runtime.js";
 import { AiOutboxError } from "./ai-session-outbox.js";
 import { createAiStreamAdmission } from "./ai-stream-admission.js";
 import { createGithubAppAuthority, type GithubAppAuthority } from "./github-app.js";
@@ -326,6 +330,22 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
+  const harnessHome = createHarnessHomeStore(managedRoots.state);
+  const harnessRuntime = createHarnessRuntime({
+    home: harnessHome,
+    stateRoot: managedRoots.state,
+    createHarnessExec: async (input) => {
+      await execution.createHarness(input);
+    },
+    inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
+    recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId, createId()),
+    imageCodex: { present: true, version: null },
+    artifact: {
+      available: process.env.DEVSPACE_CODEX_EXECUTABLE_PATH !== undefined,
+      version: null,
+      command: [process.env.DEVSPACE_CODEX_EXECUTABLE_PATH ?? "codex"]
+    }
+  });
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const configuredCodexPath = process.env.DEVSPACE_CODEX_EXECUTABLE_PATH;
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
@@ -739,6 +759,39 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
     }
 
+    if (request.method === "POST" && (url.pathname === "/v1/harness-sessions/start" || url.pathname === "/v1/harness-sessions/resume")) {
+      let raw: unknown;
+      try { raw = await readJsonBody(request); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      const envelope = z.strictObject({ data: z.unknown() }).safeParse(raw);
+      if (!envelope.success) return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
+      try {
+        if (url.pathname.endsWith("/start")) {
+          const data = nativeHarnessStartDataSchema.parse(envelope.data.data);
+          if (data.definition !== undefined) harnessRuntime.registerCustom(data.definition);
+          await harnessRuntime.start(data);
+        } else {
+          const data = nativeHarnessResumeDataSchema.parse(envelope.data.data);
+          await harnessRuntime.resumeExec(data);
+        }
+        return sendJson(response, 200, { meta: meta(requestId, now), data: { ok: true } });
+      } catch (error) {
+        const code = error instanceof HarnessRuntimeError || error instanceof HarnessHomeError ? error.code : "AGENT_INTERNAL_ERROR";
+        const status = code === "HARNESS_HOME_IN_USE" || code === "RESOURCE_STATE_CONFLICT" ? 409
+          : code === "AI_CAPABILITY_UNSUPPORTED" || code === "HARNESS_SLOT_MOUNT_MISSING" ? 422
+            : code === "RESOURCE_NOT_FOUND" ? 404 : 500;
+        return sendJson(response, status, {
+          meta: meta(requestId, now),
+          error: {
+            code,
+            message: error instanceof Error ? error.message : "harness-failure",
+            retryable: false,
+            details: {}
+          }
+        });
+      }
+    }
+
     const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "project.git.stage", "project.git.unstage", "project.git.commit", "workspace.create", "workspace.start", "workspace.stop",
       "task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"] as const;
     for (const operation of mutationRoutes) {
@@ -1138,7 +1191,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       managed.setGithubAuthority(githubAuthority);
       await managed.initialize();
       await journal.initialize();
-      if (managed.isHealthy) await execution.initialize();
+      if (managed.isHealthy) {
+        await execution.initialize();
+        await harnessRuntime.recoverAfterAgentRestart();
+      }
       if (managed.isHealthy && journal.isHealthy) {
         await managed.validateCreationJournalBindings((operationId) => journal.get(operationId)).catch(() => undefined);
         if (managed.isHealthy) {

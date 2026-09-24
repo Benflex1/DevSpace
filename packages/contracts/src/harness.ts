@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { configurationKeySchema, uuidV7Schema } from "./primitives.js";
 
 export const SESSION_ID_PLACEHOLDER = "{sessionId}";
 
@@ -68,3 +69,53 @@ export function resumeCapability(input: {
   if (classified.kind === "provider-handled") return true;
   return input.nativeSessionId !== null;
 }
+
+const displayNameSchema = z.string().min(1).max(64);
+const environmentNameSchema = z.string().regex(/^[A-Z_][A-Z0-9_]*$/u);
+
+export const customHarnessDefinitionSchema = z.strictObject({
+  id: configurationKeySchema,
+  displayName: displayNameSchema,
+  origin: z.literal("custom"),
+  launch: harnessArgvSchema,
+  resume: harnessArgvSchema.nullable(),
+  environment: z.record(environmentNameSchema, z.strictObject({
+    kind: z.literal("literal"),
+    value: z.string().max(4096)
+  })).default({}),
+  privateState: z.strictObject({ kind: z.literal("none") }).default({ kind: "none" })
+}).superRefine((value, context) => {
+  if (value.id === "codex") {
+    context.addIssue({ code: "custom", message: "custom id collides with builtin", path: ["id"] });
+  }
+  if (value.resume !== null) {
+    try { parseResumeArgv(value.resume); }
+    catch (error) {
+      context.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "placeholder",
+        path: ["resume"]
+      });
+    }
+  }
+});
+export type CustomHarnessDefinition = z.infer<typeof customHarnessDefinitionSchema>;
+
+export const nativeHarnessStartDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  sessionId: uuidV7Schema,
+  harnessId: configurationKeySchema,
+  processId: uuidV7Schema,
+  terminalId: uuidV7Schema,
+  processGeneration: z.number().int().positive(),
+  definition: customHarnessDefinitionSchema.optional()
+});
+export const nativeHarnessResumeDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  sessionId: uuidV7Schema,
+  processId: uuidV7Schema,
+  terminalId: uuidV7Schema,
+  processGeneration: z.number().int().positive()
+});

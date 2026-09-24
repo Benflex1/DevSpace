@@ -2118,6 +2118,26 @@ export class ManagedWorkspaces {
     return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The workspace runtime operation failed safely.", { incidentId: uuidv7() }));
   }
 
+  async observeHarnessSlot(workspaceId: string) {
+    return await this.runtime.observeHarnessSlot(workspaceId);
+  }
+
+  async recreateHarnessSlot(projectId: string, workspaceId: string, operationId: string) {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
+    if (revision.runtimePlan === null) {
+      throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
+    }
+    const association = { projectId, workspaceId, revisionId: workspace.revision.revisionId,
+      revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 };
+    return await this.runtime.recreateIfSlotMissing(
+      association,
+      JSON.parse(revision.runtimePlan.canonicalJson) as Parameters<WorkspaceRuntimeManager["recreateIfSlotMissing"]>[1],
+      workspace.worktreePath,
+      operationId
+    );
+  }
+
   async startWorkspace(projectId: string, workspaceId: string, operationId: string): Promise<void> {
     const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);

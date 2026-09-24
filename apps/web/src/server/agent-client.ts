@@ -518,8 +518,65 @@ export function createAgentClient(socketPath: string, options: {
         activeRequest = null;
         releaseAdmission();
       }
+    },
+    startNativeHarness: async (data: {
+      projectId: string; workspaceId: string; sessionId: string; harnessId: string;
+      processId: string; terminalId: string; processGeneration: number; definition?: unknown;
+    }): Promise<void> => {
+      await callHarness("/v1/harness-sessions/start", data);
+    },
+    resumeNativeHarness: async (data: {
+      projectId: string; workspaceId: string; sessionId: string;
+      processId: string; terminalId: string; processGeneration: number;
+    }): Promise<void> => {
+      await callHarness("/v1/harness-sessions/resume", data);
     }
   };
+
+  async function callHarness(path: string, data: unknown): Promise<void> {
+    const requestId = uuidv7();
+    const body = JSON.stringify({ data });
+    await new Promise<void>((resolve, reject) => {
+      const request = http.request({
+        socketPath,
+        path,
+        method: "POST",
+        headers: {
+          "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION),
+          "X-DevSpace-Request-Id": requestId,
+          "X-DevSpace-Sent-At": new Date().toISOString(),
+          Accept: "application/json",
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          const status = response.statusCode ?? 0;
+          let parsed: unknown;
+          try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+          catch { return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId)); }
+          if (status === 200) return resolve();
+          const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };
+          if (typeof envelope.error?.code === "string") {
+            return reject(new AgentResponseError(
+              envelope.error.code,
+              envelope.error.message ?? "harness-failure",
+              envelope.error.retryable === true,
+              undefined,
+              classifyFailureCode(envelope.error.code),
+              requestId
+            ));
+          }
+          return reject(new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId));
+        });
+      });
+      request.on("error", () => reject(new AgentUnavailableError("AGENT_UNAVAILABLE", "dependency-unavailable", requestId)));
+      request.write(body);
+      request.end();
+    });
+  }
 }
 
 export type FullAgentClient = ReturnType<typeof createAgentClient>;

@@ -59,7 +59,7 @@ export interface HarnessRuntimeDependencies {
     command: readonly string[]; environment: Readonly<Record<string, string>>;
   }) => Promise<void>;
   readonly inspectSlot: (workspaceId: string) => Promise<HarnessSlotMountObservation>;
-  readonly recreateWorkspace?: (workspaceId: string) => Promise<HarnessSlotMountObservation>;
+  readonly recreateWorkspace?: (input: { workspaceId: string; projectId: string }) => Promise<HarnessSlotMountObservation>;
   readonly imageCodex?: { present: boolean; version: string | null };
   readonly artifact?: { available: boolean; version: string | null; command: readonly string[] };
   readonly now?: () => Date;
@@ -131,7 +131,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           if (dependencies.recreateWorkspace === undefined) {
             throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
           }
-          slot = await dependencies.recreateWorkspace(input.workspaceId);
+          slot = await dependencies.recreateWorkspace({ workspaceId: input.workspaceId, projectId: input.projectId });
           if (slot.state !== "present-and-exact") {
             throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
           }
@@ -239,7 +239,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           if (dependencies.recreateWorkspace === undefined) {
             throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
           }
-          slot = await dependencies.recreateWorkspace(record.workspaceId);
+          slot = await dependencies.recreateWorkspace({ workspaceId: record.workspaceId, projectId: input.projectId });
           if (slot.state !== "present-and-exact") {
             throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
           }

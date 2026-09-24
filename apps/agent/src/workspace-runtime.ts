@@ -1,4 +1,4 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import * as z from "zod";
 import { projectOptionsRevisionHashSchema, uuidV7Schema } from "@devspace/contracts";
@@ -170,6 +170,36 @@ export class WorkspaceRuntimeManager {
 
   harnessSlotHostPath(workspaceId: string): string {
     return path.join(path.resolve(this.stateRoot), "harness-slots", uuidV7Schema.parse(workspaceId));
+  }
+
+  async observeHarnessSlot(workspaceId: string): Promise<HarnessSlotMountObservation> {
+    const record = await this.load(workspaceId);
+    if (record === null) return { state: "missing" };
+    try {
+      return await this.slotMountFor(record);
+    } catch {
+      return { state: "missing" };
+    }
+  }
+
+  async recreateIfSlotMissing(
+    association: RuntimeAssociation,
+    plan: RuntimePlanV1,
+    worktreePath: string,
+    operationId: string,
+    previewBindings: readonly RuntimePreviewBinding[] = []
+  ): Promise<HarnessSlotMountObservation> {
+    const current = await this.observeHarnessSlot(association.workspaceId);
+    if (current.state === "present-and-exact") return current;
+    const record = await this.load(association.workspaceId);
+    if (record !== null) {
+      try { await this.engine.stopContainer(record.developmentContainer.id); } catch { /* already stopped */ }
+      try { await this.engine.removeContainer(record.developmentContainer.id); } catch { /* already removed */ }
+      await unlink(this.ownershipPath(association.workspaceId)).catch(() => undefined);
+      await unlink(this.creationPath(association.workspaceId)).catch(() => undefined);
+    }
+    const started = await this.start(association, plan, worktreePath, operationId, previewBindings);
+    return started.harnessSlotMount ?? { state: "missing" };
   }
 
   private async slotMountFor(record: RuntimeOwnership): Promise<HarnessSlotMountObservation> {

@@ -37,6 +37,7 @@ import {
   auditEvents, migrateDatabase, operations, processes, projectConfigRevisions, projects, runtimeStacks, taskRuns, terminalSessions,
   previews, workspaceServices, workspaces, aiSessions, aiTurns, aiEvents,
   githubConnectionAttempts, githubConnections, githubConnectionSetupAttempts, projectGithubSources,
+  harnessDefinitions,
   type Operation, type Preview, type Project, type ProjectConfigRevision, type ProjectGithubSource
 } from "@devspace/database";
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
@@ -1488,6 +1489,88 @@ export function openProjectDatabase(path: string, options: {
         db.insert(aiSessions).values(session).run();
         return { session, created: true as const, kind: "created" as const };
       }).immediate();
+    },
+    listHarnessDefinitions() {
+      return db.select().from(harnessDefinitions).orderBy(desc(harnessDefinitions.updatedAt), desc(harnessDefinitions.id)).all();
+    },
+    saveHarnessDefinition(input: {
+      id: string; displayName: string; launchJson: string; resumeJson: string | null; environmentJson: string;
+    }) {
+      const timestamp = now().toISOString();
+      const existing = db.select().from(harnessDefinitions).where(eq(harnessDefinitions.id, input.id)).get();
+      if (existing === undefined) {
+        db.insert(harnessDefinitions).values({
+          id: input.id, displayName: input.displayName, origin: "custom",
+          launchJson: input.launchJson, resumeJson: input.resumeJson, environmentJson: input.environmentJson,
+          createdAt: timestamp, updatedAt: timestamp
+        }).run();
+      } else {
+        db.update(harnessDefinitions).set({
+          displayName: input.displayName, launchJson: input.launchJson, resumeJson: input.resumeJson,
+          environmentJson: input.environmentJson, updatedAt: timestamp
+        }).where(eq(harnessDefinitions.id, input.id)).run();
+      }
+    },
+    createNativeHarnessSession(input: { projectId: string; workspaceId: string; harnessId: string; title?: string }) {
+      return client.transaction(() => {
+        const context = this.getRuntimeContext(input.projectId);
+        if (context.workspace.id !== input.workspaceId) throw new ProjectSetupConflictError("The AI session workspace is not owned by this project.");
+        const live = db.select().from(aiSessions).where(and(
+          eq(aiSessions.workspaceId, input.workspaceId),
+          or(eq(aiSessions.state, "creating"), eq(aiSessions.state, "active"),
+            eq(aiSessions.state, "waiting_for_input"), eq(aiSessions.state, "interrupted"))
+        )).get();
+        if (live !== undefined) throw new ProjectSetupConflictError("A live AI session already exists in this workspace.");
+        const timestamp = now().toISOString();
+        const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
+        const session = {
+          id: createId(), workspaceId: input.workspaceId, terminalSessionId: null, processId: null,
+          providerKey: input.harnessId, profileKey: input.harnessId,
+          profileRevision: `sha256-ai-profile-v1:${"0".repeat(64)}`,
+          revisionId: context.revision.id, runtimePlanHash: context.revision.runtimePlanHash ?? `sha256-jcs-v1:${"0".repeat(64)}`,
+          runtimeGeneration: Math.max(1, runtime?.runtimeGeneration ?? 1), processGeneration: 1, lastSequence: 0,
+          historyStartSequence: 1, historyTruncated: false, interactionHistoryTruncated: false, failureCode: null, failureJson: null,
+          externalSessionId: null, runtimeKind: "native-pty" as const, harnessId: input.harnessId,
+          title: input.title?.trim().slice(0, 128) || `${input.harnessId} session`, state: "creating" as const,
+          createdAt: timestamp, updatedAt: timestamp, lastActivityAt: null, stoppedAt: null
+        };
+        db.insert(aiSessions).values(session).run();
+        return session;
+      }).immediate();
+    },
+    listNativeHarnessSessions(workspaceId: string) {
+      return db.select().from(aiSessions).where(and(
+        eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.runtimeKind, "native-pty")
+      )).orderBy(desc(aiSessions.updatedAt)).all();
+    },
+    prepareHarnessTerminal(projectId: string): { workspaceId: string; terminalId: string } {
+      return client.transaction(() => {
+        pruneExpiredLostTerminalSessions();
+        const context = this.getRuntimeContext(projectId);
+        if (context.workspace.observedState !== "running") throw new ProjectSetupConflictError("The workspace runtime must be running.");
+        const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, context.workspace.id)).get();
+        const service = stack === undefined ? undefined : db.select().from(workspaceServices).where(and(
+          eq(workspaceServices.runtimeStackId, stack.id), eq(workspaceServices.kind, "development"))).get();
+        if (stack?.observedState !== "running" || service?.observedState !== "running") {
+          throw new ProjectSetupConflictError("The exact development container is not running.");
+        }
+        const terminalId = createId();
+        const timestamp = now().toISOString();
+        db.insert(processes).values({ id: terminalId, workspaceId: context.workspace.id, serviceId: service.id,
+          kind: "terminal", definitionKey: null, desiredState: "running", observedState: "queued", exitCode: null,
+          startedAt: null, finishedAt: null, lastObservedAt: null }).run();
+        db.insert(terminalSessions).values({ id: terminalId, workspaceId: context.workspace.id, processId: terminalId,
+          title: "AI harness", shellProfileKey: "agent-default-sh", state: "creating", createdAt: timestamp,
+          lastActivityAt: null, closedAt: null }).run();
+        return { workspaceId: context.workspace.id, terminalId };
+      }).immediate();
+    },
+    bindNativeHarnessTerminal(input: { sessionId: string; terminalId: string; processId: string }) {
+      const timestamp = now().toISOString();
+      db.update(aiSessions).set({
+        terminalSessionId: input.terminalId, processId: input.processId, state: "active", updatedAt: timestamp, lastActivityAt: timestamp
+      }).where(eq(aiSessions.id, input.sessionId)).run();
+      db.update(terminalSessions).set({ state: "active", lastActivityAt: timestamp }).where(eq(terminalSessions.id, input.terminalId)).run();
     },
     prepareInitialAiSessionRetry(input: {
       projectId: string;

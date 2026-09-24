@@ -5,7 +5,8 @@ import {
   parseResumeArgv,
   substituteResumeArgv,
   assertNativeSessionId,
-  resumeCapability
+  resumeCapability,
+  customHarnessDefinitionSchema
 } from "./harness.js";
 
 test("rejects host paths and shell-like executables", () => {
@@ -45,6 +46,30 @@ test("substitutes {sessionId} as exactly one argv token", () => {
     "0196abc-native"
   );
   expect(out).toEqual({ executable: "codex", args: ["resume", "0196abc-native"] });
+});
+
+test("custom definition rejects secret env and interpolated resume", () => {
+  expect(customHarnessDefinitionSchema.safeParse({
+    id: "my-agent",
+    displayName: "My Agent",
+    origin: "custom",
+    launch: { executable: "my-agent", args: [] },
+    resume: { executable: "my-agent", args: ["--resume={sessionId}"] }
+  }).success).toBe(false);
+  expect(customHarnessDefinitionSchema.safeParse({
+    id: "my-agent",
+    displayName: "My Agent",
+    origin: "custom",
+    launch: { executable: "my-agent", args: [] },
+    environment: { TOKEN: { kind: "secret", secretId: "018f1f34-7000-7000-8000-000000000001" } }
+  }).success).toBe(false);
+  expect(customHarnessDefinitionSchema.safeParse({
+    id: "my-agent",
+    displayName: "My Agent",
+    origin: "custom",
+    launch: { executable: "my-agent", args: [] },
+    resume: null
+  }).success).toBe(true);
 });
 
 test("native id rejects controls, leading dash, empties, and oversize", () => {
