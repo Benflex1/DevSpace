@@ -1747,6 +1747,7 @@ describe("AI session runtime", () => {
     const protocol = createProtocolDocker(captured);
     let received: CodexLaunchArtifact | null = null;
     const artifactStager: CodexArtifactStager = {
+      stageIntoRunningContainer: () => Promise.reject(new Error("native-container-staging-is-not-used-by-this-structured-test")),
       stageIntoManagedProvider: async (input) => {
         received = input.launchArtifact;
         return {

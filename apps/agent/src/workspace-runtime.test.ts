@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -92,6 +92,15 @@ class FakeEngine extends DockerEngineClient {
       NetworkSettings: { Networks: { [network.Name]: { NetworkID: network.Id } } } }); return Promise.resolve(); }
   override stopContainer(id: string): Promise<void> { const value = this.containers.get(id); if (value === undefined) throw new DockerEngineError(404, "missing");
     this.containers.set(id, { ...value, State: { Running: false, Status: "exited" } }); return Promise.resolve(); }
+  override removeContainer(id: string): Promise<void> {
+    const value = this.containers.get(id);
+    if (value === undefined) throw new DockerEngineError(404, "missing");
+    this.containers.delete(id);
+    this.names.delete(value.Name.replace(/^\//u, ""));
+    this.removedContainerIds.push(id);
+    return Promise.resolve();
+  }
+  readonly removedContainerIds: string[] = [];
 }
 
 const association = { projectId: "018f1f34-7000-7000-8000-000000000001", workspaceId: "018f1f34-7000-7000-8000-000000000002",
@@ -430,6 +439,148 @@ describe("bounded development-container stabilization", () => {
       ],
       worktreePath: worktree, slotHostPath: slot
     })).toEqual({ state: "mismatch" });
+  });
+
+  const unrelatedOperationId = "018f1f34-7000-7000-8000-0000000000b0";
+
+  function originalStart(fixture: Awaited<ReturnType<typeof runtimeFixture>>) {
+    return (id: string) => id === operationId ? {
+      operationName: "workspace.start",
+      request: { projectId: fixture.association.projectId, workspaceId: fixture.association.workspaceId }
+    } : undefined;
+  }
+
+  async function preSliceRuntime(fixture: Awaited<ReturnType<typeof runtimeFixture>>) {
+    await start(fixture);
+    await fixture.manager.validateCreationJournalBindings(originalStart(fixture));
+    const container = onlyContainer(fixture);
+    const networkId = Object.values(container.NetworkSettings.Networks ?? {})[0]?.NetworkID;
+    if (networkId === undefined) throw new Error("network missing");
+    const networkLabels = { ...fixture.engine.networks.get(networkId)!.Labels };
+    fixture.engine.containers.set(container.Id, {
+      ...container,
+      Mounts: container.Mounts.filter((mount) => mount.Destination === "/workspace")
+    });
+    const sidecarId = "sidecar-preserved";
+    fixture.engine.containers.set(sidecarId, {
+      ...container,
+      Id: sidecarId,
+      Name: "/devspace-sidecar",
+      Mounts: []
+    });
+    fixture.engine.names.add("devspace-sidecar");
+    return { container, networkId, networkLabels, sidecarId };
+  }
+
+  test("replaces only the development container and keeps the original creation operation", async () => {
+    const fixture = await runtimeFixture();
+    const before = await preSliceRuntime(fixture);
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).resolves.toEqual({ state: "present-and-exact" });
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.networks.get(before.networkId)?.Labels).toEqual(before.networkLabels);
+    expect(before.networkLabels["devspace.creation-operation-id"]).toBe(operationId);
+    expect(fixture.engine.removedContainerIds).toEqual([before.container.Id]);
+    expect(fixture.engine.containers.has(before.sidecarId)).toBe(true);
+    expect(fixture.engine.containers.has(before.container.Id)).toBe(false);
+    const creation = runtimeCreationSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    expect(creation.operationId).toBe(operationId);
+    expect(creation.phase).toBe("ownership-committed");
+    expect(creation.networkId).toBe(before.networkId);
+    expect(creation.containerId).not.toBe(before.container.Id);
+    const ownership = runtimeOwnershipSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/ownership/runtimes", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    expect(ownership.developmentContainer.id).toBe(creation.containerId);
+    expect(ownership.developmentContainer.labels["devspace.creation-operation-id"]).toBe(operationId);
+    expect(ownership.network.labels).toEqual(before.networkLabels);
+    await expect(fixture.manager.validateCreationJournalBindings(originalStart(fixture))).resolves.toBeUndefined();
+    await expect(fixture.manager.validateCreationJournalBindings(() => undefined)).rejects.toThrow(/not-bound-to-its-durable-operation/u);
+    const replacement = [...fixture.engine.containers.values()].find((item) => item.Id === creation.containerId);
+    expect(replacement?.Mounts.map((mount) => mount.Destination).sort()).toEqual(["/opt/devspace/harness-home", "/workspace"]);
+    expect(replacement?.HostConfig.NetworkMode).toBe(before.networkLabels ? ownership.network.name : ownership.network.name);
+  });
+
+  test.each([
+    ["planned", "before the old container is removed"],
+    ["previous-removed", "after the old container is removed"],
+    ["replacement-created", "after the replacement exists but before ownership commit"]
+  ] as const)("retries slot replacement interrupted %s", async (phase, _description) => {
+    const fixture = await runtimeFixture(faultingWriter(
+      (file, value) => file.includes("harness-slot-replacements") && (value as { phase?: string }).phase === phase,
+      "after"
+    ));
+    await preSliceRuntime(fixture);
+    const beforeNetworks = fixture.engine.networkCreates;
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).rejects.toThrow(/simulated-crash-after-durable-write/u);
+    expect(fixture.engine.networkCreates).toBe(beforeNetworks);
+    restart(fixture);
+    await fixture.manager.validateCreationJournalBindings(originalStart(fixture));
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).resolves.toEqual({ state: "present-and-exact" });
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.containers.size).toBe(2);
+  });
+
+  test("does not adopt a foreign container that reuses the development name", async () => {
+    const fixture = await runtimeFixture();
+    const before = await preSliceRuntime(fixture);
+    const devName = before.container.Name.replace(/^\//u, "");
+    fixture.engine.containers.delete(before.container.Id);
+    fixture.engine.names.delete(devName);
+    fixture.engine.containers.set("foreign", {
+      ...before.container,
+      Id: "foreign",
+      Name: `/${devName}`,
+      Config: { ...before.container.Config, Labels: { ...before.container.Config.Labels, "devspace.creation-operation-id": unrelatedOperationId } },
+      Mounts: before.container.Mounts
+    });
+    fixture.engine.names.add(devName);
+    const replacement = {
+      version: 1, ...fixture.association, worktreePath: path.resolve(fixture.worktree),
+      resources: { cpuMillicores: 2000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256 },
+      previewBindings: [], originalOperationId: operationId, networkId: before.networkId,
+      networkName: `devspace-${fixture.association.workspaceId.replaceAll("-", "")}-g1-network`,
+      previousContainerId: null, replacementContainerId: null, phase: "previous-removed"
+    };
+    await mkdir(path.join(fixture.root, "state/harness-slot-replacements"), { recursive: true });
+    await writeFile(path.join(fixture.root, "state/harness-slot-replacements", `${fixture.association.workspaceId}.json`),
+      `${JSON.stringify(replacement)}\n`);
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+    expect(fixture.engine.containers.has("foreign")).toBe(true);
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.networks.get(before.networkId)?.Labels).toEqual(before.networkLabels);
+  });
+
+  test("recovers the stranded acceptance state onto the original creation operation", async () => {
+    const fixture = await runtimeFixture();
+    const before = await preSliceRuntime(fixture);
+    await rm(path.join(fixture.root, "state/ownership/runtimes", `${fixture.association.workspaceId}.json`));
+    fixture.engine.containers.delete(before.container.Id);
+    fixture.engine.names.delete(before.container.Name.replace(/^\//u, ""));
+    const creation = runtimeCreationSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    await writeFile(path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`),
+      `${JSON.stringify({ ...creation, operationId: unrelatedOperationId, networkId: null, containerId: null, phase: "reserved" })}\n`);
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).resolves.toEqual({ state: "present-and-exact" });
+    const recovered = runtimeCreationSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    expect(recovered.operationId).toBe(operationId);
+    expect(recovered.networkId).toBe(before.networkId);
+    expect(recovered.phase).toBe("ownership-committed");
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.networks.get(before.networkId)?.Labels["devspace.creation-operation-id"]).toBe(operationId);
+    await expect(fixture.manager.validateCreationJournalBindings(originalStart(fixture))).resolves.toBeUndefined();
+    restart(fixture);
+    await expect(fixture.manager.validateCreationJournalBindings(originalStart(fixture))).resolves.toBeUndefined();
   });
 
   test("new workspace containers receive the harness slot and inspect as present-and-exact", async () => {

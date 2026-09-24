@@ -289,50 +289,99 @@ test("resume exec-create failure restores the previous session and releases the 
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
 });
 
-test("codex executable source follows the image probe, then the artifact, then unavailable", async () => {
-  const artifact = { available: true, version: null, command: ["/opt/devspace/codex"] as const };
+test("image codex wins without staging and an in-container artifact is the only fallback", async () => {
   const image = await fixture();
+  let imageStages = 0;
   const imageRuntime = createHarnessRuntime({
     home: image.home, stateRoot: image.root,
     createHarnessExec: async (exec) => { image.createdExecs.push({ command: exec.command, environment: { ...exec.environment } }); },
     inspectSlot: async () => ({ state: "present-and-exact" }),
     probeImageCodex: async () => ({ present: true, version: "0.160.0" }),
-    artifact
+    stageNativeCodex: async () => { imageStages += 1; return { entrypointPath: "/opt/devspace/codex-artifact/unused/artifact/codex", reportedVersion: null }; }
   });
   await imageRuntime.start({
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
+  expect(imageStages).toBe(0);
   expect(image.createdExecs[0]?.command).toEqual(["codex"]);
   expect(await imageRuntime.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "image-path", reportedVersion: "0.160.0" } });
 
   const fallbackRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-artifact-"));
   roots.push(fallbackRoot);
   const fallbackExecs: Array<{ command: readonly string[] }> = [];
+  let staged = 0;
+  const entrypoint = "/opt/devspace/codex-artifact/closure/artifact/codex";
   const fallback = createHarnessRuntime({
     home: createHarnessHomeStore(fallbackRoot), stateRoot: fallbackRoot,
     createHarnessExec: async (exec) => { fallbackExecs.push({ command: exec.command }); },
     inspectSlot: async () => ({ state: "present-and-exact" }),
     probeImageCodex: async () => ({ present: false, version: null }),
-    artifact
+    stageNativeCodex: async () => { staged += 1; return { entrypointPath: entrypoint, reportedVersion: "0.156.1" }; }
   });
   await fallback.start({
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
-  expect(fallbackExecs[0]?.command).toEqual(["/opt/devspace/codex"]);
-  expect(await fallback.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "agent-artifact" } });
+  expect(staged).toBe(1);
+  expect(fallbackExecs[0]?.command).toEqual([entrypoint]);
+  expect(await fallback.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "agent-artifact", reportedVersion: "0.156.1" } });
 
   const none = createHarnessRuntime({
     home: createHarnessHomeStore(fallbackRoot), stateRoot: fallbackRoot,
     createHarnessExec: async () => { throw new Error("should-not-exec"); },
     inspectSlot: async () => ({ state: "present-and-exact" }),
-    probeImageCodex: async () => ({ present: false, version: null }),
-    artifact: { available: false, version: null, command: ["codex"] }
+    probeImageCodex: async () => ({ present: false, version: null })
   });
   await expect(none.start({
     projectId, workspaceId, sessionId: "018f1f34-7000-7000-8000-000000000033",
     harnessId: "codex", processId: "018f1f34-7000-7000-8000-000000000034",
     terminalId: "018f1f34-7000-7000-8000-000000000035", processGeneration: 1
   })).rejects.toMatchObject({ code: "HARNESS_EXECUTABLE_UNAVAILABLE" });
+});
+
+test("a host path is never executed and a staging failure releases the home", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-host-path-"));
+  roots.push(root);
+  const home = createHarnessHomeStore(root);
+  await mkdir(home.persistentHomePath("codex"), { recursive: true });
+  await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
+  const execs: string[][] = [];
+  const hostPath = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (exec) => { execs.push([...exec.command]); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    probeImageCodex: async () => ({ present: false, version: null }),
+    stageNativeCodex: async () => ({ entrypointPath: "/config/.local/bin/codex", reportedVersion: null })
+  });
+  await expect(hostPath.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_EXECUTABLE_UNAVAILABLE" });
+  expect(execs).toEqual([]);
+  expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
+
+  const stageRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-stage-fail-"));
+  roots.push(stageRoot);
+  const stageHome = createHarnessHomeStore(stageRoot);
+  await mkdir(stageHome.persistentHomePath("codex"), { recursive: true });
+  await writeFile(path.join(stageHome.persistentHomePath("codex"), "auth.json"), "keep-me");
+  const failedStage = createHarnessRuntime({
+    home: stageHome, stateRoot: stageRoot,
+    createHarnessExec: async () => { throw new Error("should-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    probeImageCodex: async () => ({ present: false, version: null }),
+    stageNativeCodex: async () => { throw new Error("upload-failed"); }
+  });
+  await expect(failedStage.start({
+    projectId, workspaceId, sessionId: "018f1f34-7000-7000-8000-000000000043",
+    harnessId: "codex", processId: "018f1f34-7000-7000-8000-000000000044",
+    terminalId: "018f1f34-7000-7000-8000-000000000045", processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_EXECUTABLE_UNAVAILABLE" });
+  expect(await readFile(path.join(stageHome.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
+  await expect(stageHome.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
 });
 
 test("resume generation is monotonic and a stale generation does not exec", async () => {

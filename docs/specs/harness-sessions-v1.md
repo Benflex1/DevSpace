@@ -33,10 +33,18 @@ populated slot.
 ## Codex executable
 
 The Agent probes `codex --version` with a structured argv exec inside the exact workspace
-container. Image PATH wins (`executableSource.kind = image-path`). The Agent-managed artifact
-is used only when that probe reports `codex` is absent and `DEVSPACE_CODEX_EXECUTABLE_PATH`
-is configured. Otherwise start fails with `HARNESS_EXECUTABLE_UNAVAILABLE`. There is no
-Codex version pin.
+container. Image PATH wins (`executableSource.kind = image-path`). If that probe reports
+`codex` is absent, DevSpace resolves its Agent-managed Codex artifact, verifies the closure,
+and stages it into the workspace container at `/opt/devspace/codex-artifact/<digest>/`.
+The native PTY then executes that in-container entrypoint
+(`executableSource.kind = agent-artifact`). An Agent-host path is never passed to Docker
+exec. Otherwise start fails with `HARNESS_EXECUTABLE_UNAVAILABLE`. There is no Codex version pin.
+
+A pre-slice development container that has only `/workspace` is upgraded in place. The
+existing workspace network, its labels, and the original `workspace.start` operation stay
+in place. Only the development container is replaced so it can gain
+`/opt/devspace/harness-home`. A failed reconciliation must not adopt a same-name resource
+or invent a new creation operation.
 
 ## Exit, failure, and restart
 

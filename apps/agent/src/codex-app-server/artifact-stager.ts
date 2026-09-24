@@ -34,6 +34,11 @@ export interface CodexArtifactReadback {
 }
 
 export interface CodexArtifactStager {
+  stageIntoRunningContainer(input: {
+    readonly containerId: string;
+    readonly staged: StagedCodexExecutionArtifact;
+    readonly destinationRoot: string;
+  }): Promise<{ readonly entrypointPath: string }>;
   stageIntoManagedProvider(input: {
     readonly containerId: string;
     readonly launchArtifact: CodexLaunchArtifact;
@@ -258,6 +263,47 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
   }
 
   return {
+    async stageIntoRunningContainer(input: {
+      containerId: string;
+      staged: StagedCodexExecutionArtifact;
+      destinationRoot: string;
+    }) {
+      if (!input.destinationRoot.startsWith("/opt/devspace/codex-artifact/") || input.destinationRoot.includes("..")) {
+        throw new Error("codex-artifact-path-invalid");
+      }
+      await verifyStagedCodexExecutionArtifact(input.staged);
+      const artifactRoot = `${input.destinationRoot}/artifact`;
+      const artifactReadbackPath = `${input.destinationRoot}/codex-artifact-readback`;
+      try {
+        await upload(input.containerId, artifactReadbackPath, Buffer.from(options.readbackHelperBytes), 0o700);
+        const actualEntries: CodexArtifactEntry[] = [];
+        for (const entry of input.staged.artifact.entries) {
+          const targetPath = entryPath(artifactRoot, entry);
+          if (entry.kind === "symlink") await uploadSymlink(input.containerId, targetPath, entry.linkTarget!);
+          else {
+            const read = await readRegularFileNoFollow(path.join(input.staged.stagingRoot, ...entry.relativePath.split("/")), MAX_ENTRY_BYTES);
+            if (read.bytes.length !== entry.byteLength || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) throw artifactReadbackMismatch();
+            await upload(input.containerId, targetPath, read.bytes, entry.mode);
+          }
+          const actual = await readbackEntry({ containerId: input.containerId, artifactRoot, entry, readbackPath: artifactReadbackPath });
+          if (!sameEntry(entry, actual)) throw artifactReadbackMismatch();
+          actualEntries.push({
+            relativePath: entry.relativePath, kind: actual.kind, mode: actual.mode,
+            linkTarget: actual.linkTarget, byteLength: actual.kind === "file" ? actual.bytes.length : 0,
+            sha256: actual.kind === "file" ? createHash("sha256").update(actual.bytes).digest("hex") : null
+          });
+        }
+        const closureDigest = codexExecutionArtifactClosureDigest({
+          layout: input.staged.artifact.layout, target: input.staged.artifact.target,
+          packageVersion: input.staged.artifact.packageVersion, entries: actualEntries
+        });
+        if (closureDigest !== input.staged.artifact.closureDigest) throw artifactReadbackMismatch();
+        return { entrypointPath: entryPath(artifactRoot, input.staged.artifact.entrypoint) };
+      } catch (error) {
+        await removeRemote(input.containerId, input.destinationRoot);
+        throw error;
+      }
+    },
     async stageIntoManagedProvider(input) {
       const { launchArtifact } = input;
       await assertManagedRuntime(input.containerId, launchArtifact);

@@ -10,7 +10,7 @@ import {
 } from "@devspace/contracts";
 import { durableJsonWriter, readStrictJson } from "./private-state.js";
 import { discoverCodexNativeSessionId } from "./harness-codex-discovery.js";
-import { resolveCodexExecutable, type ExecutableSource } from "./harness-executable.js";
+import type { ExecutableSource } from "./harness-executable.js";
 import { CODEX_HARNESS_ID, CODEX_PRESET, HARNESS_SLOT_ENV } from "./harness-presets.js";
 import type { HarnessHomeStore } from "./harness-home.js";
 import type { HarnessSlotMountObservation } from "./workspace-runtime.js";
@@ -71,6 +71,9 @@ export interface HarnessRuntimeDependencies {
   readonly imageCodex?: { present: boolean; version: string | null };
   readonly probeImageCodex?: (input: { projectId: string; workspaceId: string }) => Promise<{ present: boolean; version: string | null }>;
   readonly artifact?: { available: boolean; version: string | null; command: readonly string[] };
+  readonly stageNativeCodex?: (input: { projectId: string; workspaceId: string }) => Promise<{
+    entrypointPath: string; reportedVersion: string | null;
+  }>;
   readonly now?: () => Date;
 }
 
@@ -135,20 +138,32 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       : { ...previous, leaseId: null });
   };
 
-  const resolveCodex = async (input: { projectId: string; workspaceId: string }) => {
-    const probed = dependencies.probeImageCodex !== undefined
-      ? await dependencies.probeImageCodex(input)
-      : dependencies.imageCodex ?? { present: false, version: null };
-    const artifact = dependencies.artifact ?? { available: false, version: null, command: ["codex"] };
-    return {
-      resolved: resolveCodexExecutable({
-        imageHasCodex: probed.present,
-        imageReportedVersion: probed.version,
-        artifactAvailable: artifact.available,
-        artifactReportedVersion: artifact.version
-      }),
-      artifact
-    };
+  const probeCodex = async (input: { projectId: string; workspaceId: string }) => dependencies.probeImageCodex !== undefined
+    ? await dependencies.probeImageCodex(input)
+    : { present: dependencies.imageCodex?.present === true, version: dependencies.imageCodex?.version ?? null };
+
+  const assertInContainerEntrypoint = (value: string): string => {
+    if (!value.startsWith("/opt/devspace/codex-artifact/") || value.includes("..") || value.includes("\0")
+      || path.posix.normalize(value) !== value) {
+      throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "The Codex artifact entrypoint is not inside the workspace container.");
+    }
+    return value;
+  };
+
+  const stageCodexCommand = async (input: { projectId: string; workspaceId: string }, base: readonly string[]) => {
+    if (dependencies.stageNativeCodex === undefined) {
+      throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available in the workspace image or as an Agent artifact.");
+    }
+    try {
+      const staged = await dependencies.stageNativeCodex(input);
+      return {
+        command: [assertInContainerEntrypoint(staged.entrypointPath), ...base.slice(1)],
+        executableSource: { kind: "agent-artifact" as const, reportedVersion: staged.reportedVersion }
+      };
+    } catch (error) {
+      if (error instanceof HarnessRuntimeError) throw error;
+      throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "The Agent Codex artifact could not be staged into the workspace container.");
+    }
   };
 
   return {
@@ -205,12 +220,14 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
                 throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
               }
             }
-            const resolution = await resolveCodex(input);
-            if (resolution.resolved.kind === "unavailable") {
+            const probed = await probeCodex(input);
+            const stageAfterMaterialize = !probed.present;
+            if (probed.present) {
+              executableSource = { kind: "image-path", command: "codex", reportedVersion: probed.version };
+              command = ["codex", ...command.slice(1)];
+            } else if (dependencies.stageNativeCodex === undefined) {
               throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available in the workspace image or as an Agent artifact.");
             }
-            executableSource = resolution.resolved;
-            command = resolution.resolved.kind === "agent-artifact" ? [...resolution.artifact.command] : ["codex"];
             const lease = await dependencies.home.acquireLease({
               harnessId: input.harnessId, workspaceId: input.workspaceId,
               aiSessionId: input.sessionId, processGeneration: input.processGeneration
@@ -220,6 +237,11 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
               workspaceId: input.workspaceId, harnessId: input.harnessId, leaseId: lease.leaseId
             });
             env.CODEX_HOME = HARNESS_SLOT_ENV;
+            if (stageAfterMaterialize) {
+              const staged = await stageCodexCommand(input, command);
+              command = staged.command;
+              executableSource = staged.executableSource;
+            }
           }
           const admitted: SessionRecord = {
             workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
@@ -347,12 +369,14 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
                 throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
               }
             }
-            const resolution = await resolveCodex({ projectId: input.projectId, workspaceId: record.workspaceId });
-            if (resolution.resolved.kind === "unavailable") {
+            const probed = await probeCodex({ projectId: input.projectId, workspaceId: record.workspaceId });
+            const stageAfterMaterialize = !probed.present;
+            if (probed.present) {
+              executableSource = { kind: "image-path", command: "codex", reportedVersion: probed.version };
+              command = ["codex", ...command.slice(1)];
+            } else if (dependencies.stageNativeCodex === undefined) {
               throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available.");
             }
-            executableSource = resolution.resolved;
-            if (resolution.resolved.kind === "agent-artifact") command = [...resolution.artifact.command, ...command.slice(1)];
             const lease = await dependencies.home.acquireLease({
               harnessId: record.harnessId, workspaceId: record.workspaceId,
               aiSessionId: input.sessionId, processGeneration: input.processGeneration
@@ -362,6 +386,11 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
               workspaceId: record.workspaceId, harnessId: record.harnessId, leaseId: lease.leaseId
             });
             env.CODEX_HOME = HARNESS_SLOT_ENV;
+            if (stageAfterMaterialize) {
+              const staged = await stageCodexCommand({ projectId: input.projectId, workspaceId: record.workspaceId }, command);
+              command = staged.command;
+              executableSource = staged.executableSource;
+            }
           }
           const admitted: SessionRecord = {
             ...record, processId: input.processId, executableSource, state: "live", leaseId,

@@ -2122,7 +2122,7 @@ export class ManagedWorkspaces {
     return await this.runtime.observeHarnessSlot(workspaceId);
   }
 
-  async recreateHarnessSlot(projectId: string, workspaceId: string, operationId: string) {
+  async recreateHarnessSlot(projectId: string, workspaceId: string) {
     const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
     if (revision.runtimePlan === null) {
@@ -2133,8 +2133,7 @@ export class ManagedWorkspaces {
     return await this.runtime.recreateIfSlotMissing(
       association,
       JSON.parse(revision.runtimePlan.canonicalJson) as Parameters<WorkspaceRuntimeManager["recreateIfSlotMissing"]>[1],
-      workspace.worktreePath,
-      operationId
+      workspace.worktreePath
     );
   }
 
@@ -2321,6 +2320,15 @@ export class ManagedWorkspaces {
 
   async validateCreationJournalBindings(findOperation: (operationId: string) => CreationJournalBinding | undefined): Promise<void> {
     await this.assertManagedDirectories();
+    await this.runtime.recoverOutstandingHarnessSlotReplacements(async (creation) => {
+      const workspace = await this.loadWorkspaceOwnership(creation.projectId, creation.workspaceId);
+      const revision = await this.loadRevisionRecord(creation.projectId, workspace.revision.revisionId);
+      if (revision.runtimePlan === null || revision.runtimePlan.hash !== creation.runtimePlanHash
+        || workspace.revision.revisionId !== creation.revisionId || workspace.revision.revisionHash !== creation.revisionHash) {
+        return null;
+      }
+      return { plan: parseRuntimePlanV1(JSON.parse(revision.runtimePlan.canonicalJson)), worktreePath: workspace.worktreePath };
+    }, findOperation);
     for (const name of await readdir(path.join(this.stateRoot, "creations"))) {
       const record = await this.loadCreation(path.basename(name, ".json"));
       if (record === null || name !== `${record.operationId}.json`) {

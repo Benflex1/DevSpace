@@ -35,6 +35,7 @@ import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspa
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
 import { probeImageCodex } from "./harness-executable.js";
+import { stageAgentCodexIntoContainer } from "./harness-codex-artifact.js";
 import { createHarnessHomeStore, HarnessHomeError } from "./harness-home.js";
 import { createHarnessRuntime, HarnessRuntimeError } from "./harness-runtime.js";
 import { AiOutboxError } from "./ai-session-outbox.js";
@@ -341,16 +342,21 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       await execution.createHarness(input);
     },
     inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
-    recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId, createId()),
+    recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId),
     probeImageCodex: async (input) => {
       const context = await managed.executionContext(input.projectId, input.workspaceId);
       return probeImageCodex(new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
         context.ownership.developmentContainer.id);
     },
-    artifact: {
-      available: process.env.DEVSPACE_CODEX_EXECUTABLE_PATH !== undefined,
-      version: null,
-      command: [process.env.DEVSPACE_CODEX_EXECUTABLE_PATH ?? "codex"]
+    stageNativeCodex: async (input) => {
+      const context = await managed.executionContext(input.projectId, input.workspaceId);
+      return stageAgentCodexIntoContainer({
+        docker: new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
+        containerId: context.ownership.developmentContainer.id,
+        stateRoot: managedRoots.state,
+        createId,
+        environment: process.env
+      });
     }
   });
   harnessHooks.onHarnessSettled = async (event) => {

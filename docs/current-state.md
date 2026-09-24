@@ -7,7 +7,10 @@ It adds a parallel `native-pty` runtime beside structured Codex. Structured app-
 F11, and Workbench turn cards remain. Stage 3/4 default-switch and retirement have not
 happened. Exit settlement, image-PATH Codex detection, pre-start lease compensation,
 custom-definition resume across Agent restart, SQLite stopped/lost projection, and
-monotonic resume generations are implemented. This is not live Codex acceptance.
+monotonic resume generations are implemented. Missing harness slots are added by
+replacing only the development container under the original workspace creation
+operation. Agent Codex artifacts are staged into the container before native exec.
+Live Codex TUI acceptance has not been rerun.
 
 ## Delivery status
 
