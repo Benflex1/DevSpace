@@ -9,8 +9,9 @@
 - `specs/` — versioned implementation contracts.
 - `decisions/` — durable accepted ADRs.
 
-Current AI-session authorities are ADR 015 and `specs/ai-sessions-v1.md`; ADR 009 remains the
-authority for ordinary user-operated terminal/PTY AI CLI workflows.
+Current AI-session authorities are ADR 015 and `specs/ai-sessions-v1.md` for the structured
+Codex path; ADR 016 and `specs/harness-sessions-v1.md` for the generic native PTY path;
+ADR 009 remains the authority for ordinary user-operated terminal/PTY AI CLI workflows.
 
 ## Status
 

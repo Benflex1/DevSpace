@@ -1,5 +1,12 @@
 # Current State
 
+## Native harness slice
+
+The generic native AI-harness first slice is implemented on `feat/generic-native-ai-harness`.
+It adds a parallel `native-pty` runtime beside structured Codex. Structured app-server,
+F11, and Workbench turn cards remain. Stage 3/4 default-switch and retirement have not
+happened.
+
 ## Delivery status
 
 Milestones 0 and 1 are complete. PR #43 / AI Session Beta Checkpoint 1 and PR #47 / private

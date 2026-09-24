@@ -100,6 +100,14 @@ Supported M1 tasks and terminals execute inside the development container. The a
 
 Predefined tasks use structured executable and argument arrays. Project Options v1 can represent interactive, long-running, timeout, and replacement policies, but the M1 task runtime accepts only `interactive: false`, `longRunning: false`, `timeoutSeconds: null`, and `concurrencyPolicy: "reject" | "allow"`; other valid combinations are rejected before Docker side effects. Interactive browser terminals are the supported elevated shell capability in M1; AI sessions are future work.
 
+## Native harness-session model
+
+The target product architecture hosts real native AI CLIs in the workspace development
+container through Docker-exec PTYs. Built-in Codex and owner-defined custom harnesses share
+structured argv, an optional resume template, and Agent-private per-harness homes. The
+structured Codex app-server path remains shipped in parallel. See ADR 016 and
+`docs/specs/harness-sessions-v1.md`.
+
 ## Structured AI-session model
 
 ADR 015 refines ADR 009. Ordinary user-operated provider CLIs may continue to run in generic
