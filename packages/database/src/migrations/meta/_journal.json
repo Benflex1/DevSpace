@@ -64,6 +64,13 @@
       "when": 1788717248024,
       "tag": "0008_github_connection_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789861856607,
+      "tag": "0009_native_harness_sessions",
+      "breakpoints": true
     }
   ]
 }

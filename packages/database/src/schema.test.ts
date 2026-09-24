@@ -19,7 +19,7 @@ function rows<T>(database: Database.Database, sql: string): T[] {
 
 describe("database schema metadata", () => {
   test("exports exactly the accepted application tables", () => {
-    expect(Object.keys(schema)).toHaveLength(21);
+    expect(Object.keys(schema)).toHaveLength(22);
     expect(Object.values(schema).map(getTableName)).toEqual(applicationTableNames);
   });
 
