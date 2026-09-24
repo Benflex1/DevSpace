@@ -522,21 +522,28 @@ export function createAgentClient(socketPath: string, options: {
     startNativeHarness: async (data: {
       projectId: string; workspaceId: string; sessionId: string; harnessId: string;
       processId: string; terminalId: string; processGeneration: number; definition?: unknown;
-    }): Promise<void> => {
-      await callHarness("/v1/harness-sessions/start", data);
-    },
+    }): Promise<{ settled: boolean }> => callHarness("/v1/harness-sessions/start", data),
     resumeNativeHarness: async (data: {
       projectId: string; workspaceId: string; sessionId: string;
       processId: string; terminalId: string; processGeneration: number;
-    }): Promise<void> => {
-      await callHarness("/v1/harness-sessions/resume", data);
+      definition?: unknown;
+    }): Promise<{ settled: boolean }> => callHarness("/v1/harness-sessions/resume", data),
+    inspectNativeHarness: async (data: {
+      sessionId: string; definition?: unknown;
+    }): Promise<{ state: string; resume: boolean; executableSource: unknown }> => {
+      const body = await callHarness("/v1/harness-sessions/inspect", data);
+      return {
+        state: typeof body.state === "string" ? body.state : "lost",
+        resume: body.resume === true,
+        executableSource: body.executableSource ?? null
+      };
     }
   };
 
-  async function callHarness(path: string, data: unknown): Promise<void> {
+  async function callHarness(path: string, data: unknown): Promise<{ settled: boolean; state?: string; resume?: boolean; executableSource?: unknown }> {
     const requestId = uuidv7();
     const body = JSON.stringify({ data });
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
       const request = http.request({
         socketPath,
         path,
@@ -557,7 +564,15 @@ export function createAgentClient(socketPath: string, options: {
           let parsed: unknown;
           try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
           catch { return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId)); }
-          if (status === 200) return resolve();
+          if (status === 200) {
+            const data = (parsed as { data?: { settled?: boolean; state?: string; resume?: boolean; executableSource?: unknown } }).data;
+            return resolve({
+              settled: data?.settled === true,
+              ...(typeof data?.state === "string" ? { state: data.state } : {}),
+              ...(typeof data?.resume === "boolean" ? { resume: data.resume } : {}),
+              ...(data?.executableSource !== undefined ? { executableSource: data.executableSource } : {})
+            });
+          }
           const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };
           if (typeof envelope.error?.code === "string") {
             return reject(new AgentResponseError(

@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
 import { uuidV7Schema } from "@devspace/contracts";
-import { createAgentClient } from "../../../../../server/agent-client.js";
+import { AgentResponseError, createAgentClient } from "../../../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../../../server/config.js";
 import { getProjectDatabase, ProjectSetupConflictError } from "../../../../../server/database.js";
 import { listCustomHarnessDefinitions, saveCustomHarnessDefinition } from "../../../../../server/harness-definitions.js";
 import {
   createNativeHarnessSession,
+  listProjectedHarnessSessions,
   parseHarnessAction,
   resumeNativeHarnessSession
 } from "../../../../../server/harness-sessions.js";
 import { readBoundedJsonBody } from "../../../../../server/request-body.js";
-import { AgentResponseError } from "../../../../../server/agent-client.js";
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 
@@ -27,9 +27,10 @@ export async function GET(request: Request, context: { params: Promise<{ project
       return json({ message: "The workspace identity is invalid." }, 422);
     }
     const database = getProjectDatabase(config.databasePath);
+    const agent = createAgentClient(config.agentSocketPath);
     return json({
       definitions: [{ id: "codex", displayName: "Codex", origin: "builtin" }, ...listCustomHarnessDefinitions(database)],
-      sessions: database.listNativeHarnessSessions(workspaceId)
+      sessions: await listProjectedHarnessSessions(workspaceId, { database, agent })
     });
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);

@@ -31,3 +31,7 @@ The structured Codex Workbench remains shipped and default until a later migrati
 - Persistent harness homes are Agent-owned, exclusively leased, and never stored in `/workspace`.
 - A populated slot is visible to other processes in the same trusted container.
 - Stage 3/4 migration (default switch and structured-path retirement) has not happened.
+- Harness PTY exit settles through ExecutionManager. Agent restart and that exit are projected
+  onto SQLite as `lost` and `stopped`. Resume generation is monotonic. Custom resume carries
+  the Web-owned definition and a pinned digest. Codex executable detection is an image PATH
+  probe with an Agent-artifact fallback. Live Codex acceptance is still outstanding.

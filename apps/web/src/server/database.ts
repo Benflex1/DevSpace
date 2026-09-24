@@ -1520,7 +1520,10 @@ export function openProjectDatabase(path: string, options: {
           or(eq(aiSessions.state, "creating"), eq(aiSessions.state, "active"),
             eq(aiSessions.state, "waiting_for_input"), eq(aiSessions.state, "interrupted"))
         )).get();
-        if (live !== undefined) throw new ProjectSetupConflictError("A live AI session already exists in this workspace.");
+        if (live !== undefined && !(live.runtimeKind === "native-pty" && live.state === "creating" && live.harnessId === input.harnessId)) {
+          throw new ProjectSetupConflictError("A live AI session already exists in this workspace.");
+        }
+        if (live !== undefined) return live;
         const timestamp = now().toISOString();
         const runtime = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
         const session = {
@@ -1565,12 +1568,77 @@ export function openProjectDatabase(path: string, options: {
         return { workspaceId: context.workspace.id, terminalId };
       }).immediate();
     },
+    reopenNativeHarnessCreating(sessionId: string) {
+      db.update(aiSessions).set({ state: "creating", updatedAt: now().toISOString() }).where(eq(aiSessions.id, sessionId)).run();
+    },
+    failNativeHarnessSession(sessionId: string) {
+      const timestamp = now().toISOString();
+      db.update(aiSessions).set({ state: "failed", updatedAt: timestamp, stoppedAt: timestamp })
+        .where(and(eq(aiSessions.id, sessionId), eq(aiSessions.runtimeKind, "native-pty"), eq(aiSessions.state, "creating"))).run();
+    },
+    claimHarnessResumeGeneration(sessionId: string): number {
+      return client.transaction(() => {
+        const session = db.select().from(aiSessions).where(eq(aiSessions.id, sessionId)).get();
+        if (session === undefined || session.runtimeKind !== "native-pty") {
+          throw new ProjectSetupConflictError("The native harness session is not available.");
+        }
+        if (session.state === "active" || session.state === "creating") {
+          throw new ProjectSetupConflictError("The native harness session is still live.");
+        }
+        const next = session.processGeneration + 1;
+        const updated = db.update(aiSessions).set({
+          processGeneration: next, state: "creating", updatedAt: now().toISOString()
+        }).where(and(eq(aiSessions.id, sessionId), eq(aiSessions.processGeneration, session.processGeneration))).run();
+        if (updated.changes !== 1) throw new ProjectSetupConflictError("The harness resume generation is stale.");
+        return next;
+      }).immediate();
+    },
     bindNativeHarnessTerminal(input: { sessionId: string; terminalId: string; processId: string }) {
       const timestamp = now().toISOString();
       db.update(aiSessions).set({
         terminalSessionId: input.terminalId, processId: input.processId, state: "active", updatedAt: timestamp, lastActivityAt: timestamp
       }).where(eq(aiSessions.id, input.sessionId)).run();
       db.update(terminalSessions).set({ state: "active", lastActivityAt: timestamp }).where(eq(terminalSessions.id, input.terminalId)).run();
+    },
+    assignHarnessTerminal(input: { sessionId: string; terminalId: string; processId: string }) {
+      db.update(aiSessions).set({
+        terminalSessionId: input.terminalId, processId: input.processId, updatedAt: now().toISOString()
+      }).where(eq(aiSessions.id, input.sessionId)).run();
+    },
+    activateNativeHarnessSession(sessionId: string) {
+      const timestamp = now().toISOString();
+      const session = db.select({ terminalSessionId: aiSessions.terminalSessionId }).from(aiSessions).where(eq(aiSessions.id, sessionId)).get();
+      db.update(aiSessions).set({ state: "active", updatedAt: timestamp, lastActivityAt: timestamp })
+        .where(and(eq(aiSessions.id, sessionId), eq(aiSessions.state, "creating"))).run();
+      if (session?.terminalSessionId !== null && session?.terminalSessionId !== undefined) {
+        db.update(terminalSessions).set({ state: "active", lastActivityAt: timestamp })
+          .where(eq(terminalSessions.id, session.terminalSessionId)).run();
+      }
+    },
+    completeNativeHarnessAdmission(sessionId: string) {
+      const timestamp = now().toISOString();
+      const session = db.select({ terminalSessionId: aiSessions.terminalSessionId }).from(aiSessions).where(eq(aiSessions.id, sessionId)).get();
+      db.update(aiSessions).set({ state: "stopped", updatedAt: timestamp, stoppedAt: timestamp })
+        .where(and(eq(aiSessions.id, sessionId), or(eq(aiSessions.state, "creating"), eq(aiSessions.state, "active")))).run();
+      if (session?.terminalSessionId !== null && session?.terminalSessionId !== undefined) {
+        db.update(terminalSessions).set({ state: "closed", closedAt: timestamp })
+          .where(eq(terminalSessions.id, session.terminalSessionId)).run();
+      }
+    },
+    rollbackHarnessResume(input: { sessionId: string; expectedGeneration: number; restoreState: "stopped" | "lost" }) {
+      const timestamp = now().toISOString();
+      const result = db.update(aiSessions).set({
+        processGeneration: input.expectedGeneration - 1,
+        state: input.restoreState,
+        terminalSessionId: null,
+        processId: null,
+        updatedAt: timestamp
+      }).where(and(
+        eq(aiSessions.id, input.sessionId),
+        eq(aiSessions.state, "creating"),
+        eq(aiSessions.processGeneration, input.expectedGeneration)
+      )).run();
+      if (result.changes !== 1) throw new ProjectSetupConflictError("The harness resume could not be rolled back.");
     },
     prepareInitialAiSessionRetry(input: {
       projectId: string;
@@ -2164,6 +2232,18 @@ export function openProjectDatabase(path: string, options: {
                 ? terminal.closedAt ?? timestamp
                 : ["closed", "failed"].includes(resource.state) ? timestamp : null })
               .where(and(eq(terminalSessions.id, terminal.id), eq(terminalSessions.workspaceId, terminal.workspaceId))).run();
+            const nativeState = resource.state === "lost" ? "lost"
+              : resource.state === "closed" || resource.state === "failed" ? "stopped" : null;
+            if (nativeState !== null) {
+              db.update(aiSessions).set({
+                state: nativeState, updatedAt: timestamp,
+                stoppedAt: nativeState === "stopped" || nativeState === "lost" ? timestamp : null
+              }).where(and(
+                eq(aiSessions.terminalSessionId, terminal.id),
+                eq(aiSessions.runtimeKind, "native-pty"),
+                or(eq(aiSessions.state, "active"), eq(aiSessions.state, "creating"))
+              )).run();
+            }
           } else if (resource.type === "preview") {
             const observed = resource.observation;
             const project = db.select().from(projects).where(and(

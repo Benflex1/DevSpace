@@ -5,7 +5,9 @@
 The generic native AI-harness first slice is implemented on `feat/generic-native-ai-harness`.
 It adds a parallel `native-pty` runtime beside structured Codex. Structured app-server,
 F11, and Workbench turn cards remain. Stage 3/4 default-switch and retirement have not
-happened.
+happened. Exit settlement, image-PATH Codex detection, pre-start lease compensation,
+custom-definition resume across Agent restart, SQLite stopped/lost projection, and
+monotonic resume generations are implemented. This is not live Codex acceptance.
 
 ## Delivery status
 

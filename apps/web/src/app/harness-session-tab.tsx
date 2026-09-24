@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { harnessResumeControlEnabled } from "./harness-resume.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 
 type Definition = { id: string; displayName: string; origin: string };
@@ -11,6 +12,7 @@ type NativeSession = {
   terminalSessionId: string | null;
   processId: string | null;
   title: string;
+  resume?: boolean;
 };
 
 export function HarnessSessionTab({ projectId, workspaceId, active }: {
@@ -42,11 +44,11 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         state: current.state === "active" ? "active" : current.state === "lost" ? "lost" : "disconnected"
       });
     }
-    setResumeEnabled(current !== null && current.state !== "active");
+    setResumeEnabled(harnessResumeControlEnabled(current));
   }, [projectId, workspaceId]);
 
   useEffect(() => {
-    if (active) void refresh();
+    if (active) refresh().catch(() => undefined);
   }, [active, refresh]);
 
   const post = async (body: Record<string, unknown>) => {
@@ -86,7 +88,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     </header>
     {message !== null && <p role="status">{message}</p>}
     {terminal !== null
-      ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={() => { void refresh(); }} onTerminalStateChange={(id, state) => setTerminal((current) => current?.id === id ? { ...current, state } : current)} />
+      ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={() => { refresh().catch(() => undefined); }} onTerminalStateChange={(id, state) => setTerminal((current) => current?.id === id ? { ...current, state } : current)} />
       : <p>Start a native harness to attach its terminal.</p>}
     <p>Legacy structured Codex sessions remain available in the Codex session tab.</p>
   </div>;
