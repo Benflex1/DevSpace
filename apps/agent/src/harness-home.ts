@@ -284,6 +284,7 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
         throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The slot is not owned by this lease.");
       }
       await requireLease(meta.harnessId, input.leaseId, workspaceId);
+      if (!meta.dirty) return;
       const slot = slotHostPath(workspaceId);
       const homePath = persistentHomePath(meta.harnessId);
       const incoming = `${homePath}.incoming`;

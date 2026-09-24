@@ -104,6 +104,10 @@ export function isSuccessfulTaskExitCode(successExitCodes: readonly number[], ex
   return successExitCodes.includes(exitCode);
 }
 
+export function harnessExecutionAdmissionUncertain(error: unknown): boolean {
+  return error instanceof TaskStartRecoveryRequiredError;
+}
+
 export class TaskStartRecoveryRequiredError extends Error {
   constructor() {
     super("The task start boundary is ambiguous; the exact retained exec must be inspected before the operation can complete.");
@@ -111,16 +115,28 @@ export class TaskStartRecoveryRequiredError extends Error {
   }
 }
 
+export type HarnessExecutionSettlement = {
+  readonly processId: string;
+  readonly terminalId: string;
+  readonly observedState: "exited" | "failed" | "killed" | "lost";
+  readonly exitCode: number | null;
+};
+
 export class ExecutionManager {
   private readonly recordsRoot: string;
   private readonly executions = new Map<string, LiveExecution>();
+  private readonly harnessProcessIds = new Set<string>();
+  private readonly settledHarnessProcessIds = new Set<string>();
 
   constructor(
     stateRoot: string,
     private readonly managed: ManagedWorkspaces,
     private readonly engine: DockerEngineClient,
     private readonly writer: AtomicJsonWriter = durableJsonWriter,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly hooks: {
+      readonly onHarnessSettled?: (event: HarnessExecutionSettlement) => void | Promise<void>;
+    } = {}
   ) {
     this.recordsRoot = path.join(path.resolve(stateRoot), "ownership", "executions");
   }
@@ -193,6 +209,7 @@ export class ExecutionManager {
       live.record = { ...live.record, observedState: stopped ? "killed" : successful ? "exited" : "failed",
         exitCode: inspection.ExitCode, finishedAt: this.now().toISOString(), terminalState: live.record.kind === "terminal" ? "closed" : null };
       await this.persist(live);
+      await this.notifyHarnessSettled(live).catch(() => undefined);
       if (live.attachment !== null && live.attachment.readyState === live.attachment.OPEN) {
         live.attachment.send(encodeTerminalAgentFrame({ type: "exit", exitCode: inspection.ExitCode }), { binary: true });
         live.attachment.close(TERMINAL_NORMAL_CLOSE_CODE);
@@ -345,7 +362,33 @@ export class ExecutionManager {
       throw new TaskStartRecoveryRequiredError();
     }
     if (!terminal && stream !== null) this.attachStream(live, stream);
-    else stream?.destroy();
+    else {
+      stream?.destroy();
+      // Settlement failure must not turn a started exec into a second launch.
+      // flushHarnessSettlements retries until the hook succeeds once.
+      await this.notifyHarnessSettled(live).catch(() => undefined);
+    }
+  }
+
+  private async notifyHarnessSettled(live: LiveExecution): Promise<void> {
+    if (!this.harnessProcessIds.has(live.record.processId)) return;
+    if (live.record.terminalId === null) return;
+    // Agent restart marks terminals lost without this hook. Recovery writeback
+    // and discovery belong to HarnessRuntime.recoverAfterAgentRestart.
+    if (!["exited", "failed", "killed"].includes(live.record.observedState)) return;
+    if (this.settledHarnessProcessIds.has(live.record.processId)) return;
+    this.settledHarnessProcessIds.add(live.record.processId);
+    try {
+      await this.hooks.onHarnessSettled?.({
+        processId: live.record.processId,
+        terminalId: live.record.terminalId,
+        observedState: live.record.observedState as HarnessExecutionSettlement["observedState"],
+        exitCode: live.record.exitCode
+      });
+    } catch {
+      this.settledHarnessProcessIds.delete(live.record.processId);
+      throw new Error("harness-settlement-failed");
+    }
   }
 
   private activeTask(taskKey: string, workspaceId: string): LiveExecution[] {
@@ -447,6 +490,7 @@ export class ExecutionManager {
     if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
       resource: { type: "terminal", id: input.terminalId }, action: "create"
     });
+    this.harnessProcessIds.add(input.processId);
     await this.createExec(context, {
       kind: "terminal", processId: input.processId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
       successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
@@ -622,6 +666,12 @@ export class ExecutionManager {
         }
       }
     };
+  }
+
+  async flushHarnessSettlements(): Promise<void> {
+    for (const live of this.executions.values()) {
+      await this.notifyHarnessSettled(live);
+    }
   }
 
   snapshotResources(): AgentSnapshotResource[] {

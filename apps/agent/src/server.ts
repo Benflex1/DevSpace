@@ -12,6 +12,7 @@ import {
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
   parseEventCursor,
+  nativeHarnessInspectDataSchema,
   nativeHarnessResumeDataSchema,
   nativeHarnessStartDataSchema,
   type AgentExecutionFailure,
@@ -33,6 +34,7 @@ import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./previ
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
+import { probeImageCodex } from "./harness-executable.js";
 import { createHarnessHomeStore, HarnessHomeError } from "./harness-home.js";
 import { createHarnessRuntime, HarnessRuntimeError } from "./harness-runtime.js";
 import { AiOutboxError } from "./ai-session-outbox.js";
@@ -328,8 +330,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
+  const harnessHooks: { onHarnessSettled?: (event: { processId: string }) => Promise<void> } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
-    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
+    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks);
   const harnessHome = createHarnessHomeStore(managedRoots.state);
   const harnessRuntime = createHarnessRuntime({
     home: harnessHome,
@@ -339,13 +342,20 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     },
     inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
     recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId, createId()),
-    imageCodex: { present: true, version: null },
+    probeImageCodex: async (input) => {
+      const context = await managed.executionContext(input.projectId, input.workspaceId);
+      return probeImageCodex(new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
+        context.ownership.developmentContainer.id);
+    },
     artifact: {
       available: process.env.DEVSPACE_CODEX_EXECUTABLE_PATH !== undefined,
       version: null,
       command: [process.env.DEVSPACE_CODEX_EXECUTABLE_PATH ?? "codex"]
     }
   });
+  harnessHooks.onHarnessSettled = async (event) => {
+    await harnessRuntime.settleByProcess(event.processId);
+  };
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const configuredCodexPath = process.env.DEVSPACE_CODEX_EXECUTABLE_PATH;
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
@@ -755,37 +765,54 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!managed.isHealthy || !journal.isHealthy || !executor.isHealthy) return sendJson(response, 500, snapshotEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
         code: "AGENT_INTERNAL_ERROR", message: "Agent-private state is corrupt.", retryable: true, details: { incidentId: createId() }
       } }));
+      await execution.flushHarnessSettlements().catch(() => undefined);
       const data = { agentBootId, throughCursor: events.throughCursor, resources: executor.snapshotResources(), operationObservations: journal.observations() };
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
     }
 
-    if (request.method === "POST" && (url.pathname === "/v1/harness-sessions/start" || url.pathname === "/v1/harness-sessions/resume")) {
+    if (request.method === "POST" && (url.pathname === "/v1/harness-sessions/start" || url.pathname === "/v1/harness-sessions/resume" || url.pathname === "/v1/harness-sessions/inspect")) {
       let raw: unknown;
       try { raw = await readJsonBody(request); }
       catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
       const envelope = z.strictObject({ data: z.unknown() }).safeParse(raw);
       if (!envelope.success) return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
       try {
+        if (url.pathname.endsWith("/inspect")) {
+          const data = nativeHarnessInspectDataSchema.parse(envelope.data.data);
+          const capability = data.definition === undefined
+            ? await harnessRuntime.capability(data.sessionId)
+            : await harnessRuntime.capability(data.sessionId, data.definition);
+          return sendJson(response, 200, { meta: meta(requestId, now), data: capability });
+        }
+        let sessionId: string;
         if (url.pathname.endsWith("/start")) {
           const data = nativeHarnessStartDataSchema.parse(envelope.data.data);
+          sessionId = data.sessionId;
           if (data.definition !== undefined) harnessRuntime.registerCustom(data.definition);
           await harnessRuntime.start(data);
         } else {
           const data = nativeHarnessResumeDataSchema.parse(envelope.data.data);
-          await harnessRuntime.resumeExec(data);
+          sessionId = data.sessionId;
+          await harnessRuntime.resumeExec({
+            sessionId: data.sessionId, projectId: data.projectId, processId: data.processId,
+            terminalId: data.terminalId, processGeneration: data.processGeneration,
+            ...(data.definition === undefined ? {} : { definition: data.definition })
+          });
         }
-        return sendJson(response, 200, { meta: meta(requestId, now), data: { ok: true } });
+        const snapshot = await harnessRuntime.publicSnapshot(sessionId);
+        return sendJson(response, 200, { meta: meta(requestId, now), data: { ok: true, settled: snapshot.state !== "live" } });
       } catch (error) {
         const code = error instanceof HarnessRuntimeError || error instanceof HarnessHomeError ? error.code : "AGENT_INTERNAL_ERROR";
-        const status = code === "HARNESS_HOME_IN_USE" || code === "RESOURCE_STATE_CONFLICT" ? 409
-          : code === "AI_CAPABILITY_UNSUPPORTED" || code === "HARNESS_SLOT_MOUNT_MISSING" ? 422
-            : code === "RESOURCE_NOT_FOUND" ? 404 : 500;
+        const status = code === "HARNESS_ADMISSION_UNCERTAIN" ? 503
+          : code === "HARNESS_HOME_IN_USE" || code === "RESOURCE_STATE_CONFLICT" || code === "HARNESS_DEFINITION_CONFLICT" ? 409
+            : code === "AI_CAPABILITY_UNSUPPORTED" || code === "HARNESS_SLOT_MOUNT_MISSING" || code === "HARNESS_EXECUTABLE_UNAVAILABLE" ? 422
+              : code === "RESOURCE_NOT_FOUND" ? 404 : 500;
         return sendJson(response, status, {
           meta: meta(requestId, now),
           error: {
             code,
             message: error instanceof Error ? error.message : "harness-failure",
-            retryable: false,
+            retryable: code === "HARNESS_ADMISSION_UNCERTAIN",
             details: {}
           }
         });

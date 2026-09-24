@@ -1,7 +1,9 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+/* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/unbound-method -- harness fixtures model async boundaries. */
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
+import { TaskStartRecoveryRequiredError } from "./execution-manager.js";
 import { createHarnessHomeStore } from "./harness-home.js";
 import { createHarnessRuntime } from "./harness-runtime.js";
 import type { HarnessSlotMountObservation } from "./workspace-runtime.js";
@@ -199,6 +201,243 @@ test("codex resume after discovery execs resume argv with native id", async () =
   expect(result.command).toEqual(["codex", "resume", "thread-live"]);
   expect(createdExecs.at(-1)?.command).toEqual(["codex", "resume", "thread-live"]);
   expect(createdExecs.at(-1)?.environment.CODEX_HOME).toBe("/opt/devspace/harness-home");
+});
+
+test("the misleading resume() entry point is not part of the runtime", async () => {
+  const source = await readFile(new URL("./harness-runtime.ts", import.meta.url), "utf8");
+  expect(source).not.toMatch(/async resume\(/u);
+  expect(source).toMatch(/async resumeExec\(/u);
+  const { runtime } = await fixture();
+  expect("resume" in runtime).toBe(false);
+  expect(runtime.resumeExec).toEqual(expect.any(Function));
+});
+
+test("exec-create failure after materialize releases the lease and keeps home bytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-compensate-"));
+  roots.push(root);
+  const home = createHarnessHomeStore(root);
+  await mkdir(home.persistentHomePath("codex"), { recursive: true });
+  await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("exec-create-failed"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await expect(runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  })).rejects.toThrow(/exec-create-failed/u);
+  expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
+  await expect(runtime.publicSnapshot(sessionId)).resolves.toMatchObject({ state: "stopped" });
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
+});
+
+test("uncertain exec admission keeps the lease and does not destroy the home", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-uncertain-"));
+  roots.push(root);
+  const home = createHarnessHomeStore(root);
+  await mkdir(home.persistentHomePath("codex"), { recursive: true });
+  await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new TaskStartRecoveryRequiredError(); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await expect(runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+});
+
+test("resume exec-create failure restores the previous session and releases the new lease", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-resume-compensate-"));
+  roots.push(root);
+  const home = createHarnessHomeStore(root);
+  let calls = 0;
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("resume-exec-failed");
+    },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  const slot = path.join(root, "harness-slots", workspaceId);
+  await mkdir(path.join(slot, "sessions"), { recursive: true });
+  await writeFile(path.join(slot, "sessions", "thread-live.jsonl"), `${JSON.stringify({ id: "thread-live", cwd: "/workspace" })}\n`);
+  await runtime.settleExit({ sessionId });
+  await expect(runtime.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000016",
+    terminalId: "018f1f34-7000-7000-8000-000000000017", processGeneration: 2
+  })).rejects.toThrow(/resume-exec-failed/u);
+  expect(await runtime.privateNativeId(sessionId)).toBe("thread-live");
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "stopped" });
+  expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
+});
+
+test("codex executable source follows the image probe, then the artifact, then unavailable", async () => {
+  const artifact = { available: true, version: null, command: ["/opt/devspace/codex"] as const };
+  const image = await fixture();
+  const imageRuntime = createHarnessRuntime({
+    home: image.home, stateRoot: image.root,
+    createHarnessExec: async (exec) => { image.createdExecs.push({ command: exec.command, environment: { ...exec.environment } }); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    probeImageCodex: async () => ({ present: true, version: "0.160.0" }),
+    artifact
+  });
+  await imageRuntime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  expect(image.createdExecs[0]?.command).toEqual(["codex"]);
+  expect(await imageRuntime.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "image-path", reportedVersion: "0.160.0" } });
+
+  const fallbackRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-artifact-"));
+  roots.push(fallbackRoot);
+  const fallbackExecs: Array<{ command: readonly string[] }> = [];
+  const fallback = createHarnessRuntime({
+    home: createHarnessHomeStore(fallbackRoot), stateRoot: fallbackRoot,
+    createHarnessExec: async (exec) => { fallbackExecs.push({ command: exec.command }); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    probeImageCodex: async () => ({ present: false, version: null }),
+    artifact
+  });
+  await fallback.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  expect(fallbackExecs[0]?.command).toEqual(["/opt/devspace/codex"]);
+  expect(await fallback.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "agent-artifact" } });
+
+  const none = createHarnessRuntime({
+    home: createHarnessHomeStore(fallbackRoot), stateRoot: fallbackRoot,
+    createHarnessExec: async () => { throw new Error("should-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    probeImageCodex: async () => ({ present: false, version: null }),
+    artifact: { available: false, version: null, command: ["codex"] }
+  });
+  await expect(none.start({
+    projectId, workspaceId, sessionId: "018f1f34-7000-7000-8000-000000000033",
+    harnessId: "codex", processId: "018f1f34-7000-7000-8000-000000000034",
+    terminalId: "018f1f34-7000-7000-8000-000000000035", processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_EXECUTABLE_UNAVAILABLE" });
+});
+
+test("resume generation is monotonic and a stale generation does not exec", async () => {
+  const { runtime, createdExecs, root } = await fixture();
+  await runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  const slot = path.join(root, "harness-slots", workspaceId);
+  await mkdir(path.join(slot, "sessions"), { recursive: true });
+  await writeFile(path.join(slot, "sessions", "thread-live.jsonl"), `${JSON.stringify({ id: "thread-live", cwd: "/workspace" })}\n`);
+  await runtime.settleExit({ sessionId });
+  const secondProcess = "018f1f34-7000-7000-8000-000000000016";
+  await runtime.resumeExec({
+    sessionId, projectId, processId: secondProcess,
+    terminalId: "018f1f34-7000-7000-8000-000000000017", processGeneration: 2
+  });
+  const lease = JSON.parse(await readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8")) as { processGeneration: number };
+  expect(lease.processGeneration).toBe(2);
+  await runtime.settleExit({ sessionId });
+  await expect(runtime.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000018",
+    terminalId: "018f1f34-7000-7000-8000-000000000019", processGeneration: 2
+  })).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  await runtime.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-00000000001a",
+    terminalId: "018f1f34-7000-7000-8000-00000000001b", processGeneration: 3
+  });
+  expect(createdExecs).toHaveLength(3);
+  const record = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as { processGeneration: number };
+  expect(record.processGeneration).toBe(3);
+});
+
+const customContinue = {
+  id: "my-agent-continue", displayName: "Continue", origin: "custom" as const,
+  launch: { executable: "my-agent", args: [] as string[] },
+  resume: { executable: "my-agent", args: ["--resume"] },
+  environment: {}, privateState: { kind: "none" as const }
+};
+
+test("custom resume survives a new agent process only when the pinned definition matches", async () => {
+  const { runtime, root, home } = await fixture();
+  runtime.registerCustom(customContinue);
+  await runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "my-agent-continue", processId, terminalId, processGeneration: 1
+  });
+  await runtime.settleExit({ sessionId });
+  const restarted = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => undefined,
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: false, version: null }
+  });
+  await expect(restarted.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000006",
+    terminalId: "018f1f34-7000-7000-8000-000000000007", processGeneration: 2
+  })).rejects.toMatchObject({ code: "RESOURCE_NOT_FOUND" });
+  const resumed = await restarted.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000006",
+    terminalId: "018f1f34-7000-7000-8000-000000000007", processGeneration: 2,
+    definition: customContinue
+  });
+  expect(resumed.command).toEqual(["my-agent", "--resume"]);
+  expect(await restarted.capability(sessionId, customContinue)).toMatchObject({ resume: false, state: "live" });
+  await restarted.settleExit({ sessionId });
+  expect(await restarted.capability(sessionId, customContinue)).toMatchObject({ resume: true });
+  expect(JSON.stringify(await restarted.capability(sessionId, customContinue))).not.toContain("nativeSession");
+  await expect(restarted.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000008",
+    terminalId: "018f1f34-7000-7000-8000-000000000009", processGeneration: 3,
+    definition: { ...customContinue, launch: { executable: "other-agent", args: [] } }
+  })).rejects.toMatchObject({ code: "HARNESS_DEFINITION_CONFLICT" });
+});
+
+test("resume capability follows the definition and private native id", async () => {
+  const codex = await fixture();
+  await codex.runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  await codex.runtime.settleExit({ sessionId });
+  expect(await codex.runtime.capability(sessionId)).toMatchObject({ state: "stopped", resume: false });
+
+  const provider = await fixture();
+  provider.runtime.registerCustom(customContinue);
+  await provider.runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "my-agent-continue", processId, terminalId, processGeneration: 1
+  });
+  await provider.runtime.settleExit({ sessionId });
+  const providerRestart = createHarnessRuntime({
+    home: provider.home, stateRoot: provider.root,
+    createHarnessExec: async () => undefined,
+    inspectSlot: async () => ({ state: "present-and-exact" })
+  });
+  expect(await providerRestart.capability(sessionId)).toMatchObject({ resume: false });
+  expect(await providerRestart.capability(sessionId, customContinue)).toMatchObject({ resume: true });
+
+  const identified = await fixture();
+  identified.runtime.registerCustom({
+    ...customContinue, id: "my-agent-id",
+    resume: { executable: "my-agent", args: ["--resume", "{sessionId}"] }
+  });
+  await identified.runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "my-agent-id", processId, terminalId, processGeneration: 1
+  });
+  await identified.runtime.settleExit({ sessionId });
+  expect(await identified.runtime.capability(sessionId)).toMatchObject({ resume: false });
 });
 
 test("custom privateState none may start when the slot is missing", async () => {

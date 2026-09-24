@@ -117,5 +117,10 @@ export const nativeHarnessResumeDataSchema = z.strictObject({
   sessionId: uuidV7Schema,
   processId: uuidV7Schema,
   terminalId: uuidV7Schema,
-  processGeneration: z.number().int().positive()
+  processGeneration: z.number().int().positive(),
+  definition: customHarnessDefinitionSchema.optional()
+});
+export const nativeHarnessInspectDataSchema = z.strictObject({
+  sessionId: uuidV7Schema,
+  definition: customHarnessDefinitionSchema.optional()
 });
