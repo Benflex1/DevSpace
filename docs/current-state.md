@@ -10,7 +10,10 @@ custom-definition resume across Agent restart, SQLite stopped/lost projection, a
 monotonic resume generations are implemented. Missing harness slots are added by
 replacing only the development container under the original workspace creation
 operation. Agent Codex artifacts are staged into the container before native exec.
-Live Codex TUI acceptance has not been rerun.
+Live acceptance reached the native Codex sign-in screen and is paused there. Codex was
+not authenticated and no model request was sent. The Workbench reconnect loop is fixed,
+and the AI tab now defaults to the native harness. Structured Codex remains available
+behind a temporary Legacy presentation. Native Codex acceptance is not complete.
 
 ## Delivery status
 

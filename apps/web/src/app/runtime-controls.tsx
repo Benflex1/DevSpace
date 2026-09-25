@@ -80,10 +80,10 @@ export function RuntimeControls({ projectId, runtimeState, runtimeAvailable, act
       onClick={() => { mutate().catch(() => undefined); }}>
       {pending ? "Restarting…" : "Restart workspace"}
     </button>}
-    {!isRestart && activeAction !== null && <button type="button" disabled title="Another runtime action is already in progress.">
+    {!isRestart && activeAction !== null && <button type="button" data-runtime-action={activeAction} disabled title="Another runtime action is already in progress.">
       {activeAction === "start" ? "Starting…" : "Stopping…"}
     </button>}
-    {!isRestart && activeAction === null && <button type="button" disabled={state.disabled || pending} title={state.reason ?? undefined}
+    {!isRestart && activeAction === null && <button type="button" data-runtime-action={action} disabled={state.disabled || pending} title={state.reason ?? undefined}
       onClick={() => { mutate().catch(() => undefined); }}>
       {pending ? (action === "start" ? "Starting…" : "Stopping…")
         : action === "start" ? (retryStart ? "Retry start" : "Start runtime") : (stopLabel ?? "Stop runtime")}

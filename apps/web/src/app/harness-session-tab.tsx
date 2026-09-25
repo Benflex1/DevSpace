@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { harnessResumeControlEnabled } from "./harness-resume.js";
+import { nativeAiPresentation } from "./native-ai-presentation.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 
 type Definition = { id: string; displayName: string; origin: string };
@@ -24,8 +24,6 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const [harnessId, setHarnessId] = useState("codex");
   const [session, setSession] = useState<NativeSession | null>(null);
   const [terminal, setTerminal] = useState<TerminalView | null>(null);
-  const [resumeEnabled, setResumeEnabled] = useState(false);
-  const [source, setSource] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -34,22 +32,38 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     if (!response.ok) return;
     const body = await response.json() as { definitions?: Definition[]; sessions?: NativeSession[] };
     if (Array.isArray(body.definitions) && body.definitions.length > 0) setDefinitions(body.definitions);
-    const current = body.sessions?.find((item) => item.state === "active") ?? body.sessions?.[0] ?? null;
-    setSession(current ?? null);
+    const current = body.sessions?.find((item) => item.state === "active" || item.state === "creating")
+      ?? body.sessions?.find((item) => item.resume === true)
+      ?? body.sessions?.[0]
+      ?? null;
+    setSession(current);
     if (current?.terminalSessionId) {
-      setTerminal({
-        id: current.terminalSessionId,
-        processId: current.processId ?? current.terminalSessionId,
-        title: current.title,
-        state: current.state === "active" ? "active" : current.state === "lost" ? "lost" : "disconnected"
+      setTerminal((existing) => {
+        const nextState = current.state === "active" || current.state === "creating" ? "active"
+          : current.state === "lost" ? "lost" : "disconnected";
+        if (existing?.id === current.terminalSessionId && existing.state === nextState && existing.title === current.title) {
+          return existing;
+        }
+        return {
+          id: current.terminalSessionId!,
+          processId: current.processId ?? current.terminalSessionId!,
+          title: current.title,
+          state: nextState
+        };
       });
     }
-    setResumeEnabled(harnessResumeControlEnabled(current));
   }, [projectId, workspaceId]);
 
   useEffect(() => {
     if (active) refresh().catch(() => undefined);
   }, [active, refresh]);
+
+  const onRefresh = useCallback(() => {
+    refresh().catch(() => undefined);
+  }, [refresh]);
+  const onTerminalStateChange = useCallback((id: string, state: string) => {
+    setTerminal((current) => current?.id === id ? { ...current, state } : current);
+  }, []);
 
   const post = async (body: Record<string, unknown>) => {
     setPending(true);
@@ -60,13 +74,10 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
       });
-      const payload = await response.json() as { message?: string; terminalId?: string; sessionId?: string; executableSource?: { kind?: string; reportedVersion?: string | null } };
+      const payload = await response.json() as { message?: string };
       if (!response.ok) {
         setMessage(payload.message ?? "The harness action failed.");
         return;
-      }
-      if (payload.executableSource?.kind) {
-        setSource(`${payload.executableSource.kind}${payload.executableSource.reportedVersion ? ` ${payload.executableSource.reportedVersion}` : ""}`);
       }
       await refresh();
     } finally {
@@ -74,22 +85,30 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     }
   };
 
-  return <div hidden={!active} className="ai-session-tab">
-    <header className="ai-session-header">
-      <label>
-        Harness
-        <select value={harnessId} onChange={(event) => setHarnessId(event.target.value)} disabled={pending}>
-          {definitions.map((definition) => <option key={definition.id} value={definition.id}>{definition.displayName}</option>)}
-        </select>
-      </label>
-      <button type="button" disabled={pending} onClick={() => void post({ action: "create-native", workspaceId, harnessId })}>Start</button>
-      <button type="button" disabled={pending || !resumeEnabled || session === null} onClick={() => session && void post({ action: "resume", workspaceId, sessionId: session.id })}>Resume</button>
-      {source !== null && <span>Source: {source}</span>}
+  const presentation = nativeAiPresentation(session);
+  const selected = definitions.find((definition) => definition.id === (session?.harnessId ?? harnessId)) ?? definitions[0];
+  const displayName = selected?.displayName ?? "Codex";
+
+  return <section className="native-ai-surface" aria-label="Native harness" hidden={!active}>
+    <header className="native-ai-header">
+      {presentation.showProviderChooser
+        ? <label className="native-ai-provider">
+          <span className="visually-hidden">Harness</span>
+          <select value={harnessId} onChange={(event) => setHarnessId(event.target.value)} disabled={pending} aria-label="Harness">
+            {definitions.map((definition) => <option key={definition.id} value={definition.id}>{definition.displayName}</option>)}
+          </select>
+        </label>
+        : <strong className="native-ai-name">{displayName}</strong>}
+      {presentation.status !== null && <span className={`native-ai-state${presentation.status === "Running" ? " is-running" : ""}`}>{presentation.status}</span>}
+      <span className="native-ai-spacer" />
+      {presentation.action === "start" && <button type="button" disabled={pending} onClick={() => { post({ action: "create-native", workspaceId, harnessId }).catch(() => undefined); }}>Start</button>}
+      {presentation.action === "resume" && session !== null && <button type="button" disabled={pending} onClick={() => { post({ action: "resume", workspaceId, sessionId: session.id }).catch(() => undefined); }}>Resume</button>}
+      {message !== null && <span className="native-ai-message" role="status">{message}</span>}
     </header>
-    {message !== null && <p role="status">{message}</p>}
-    {terminal !== null
-      ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={() => { refresh().catch(() => undefined); }} onTerminalStateChange={(id, state) => setTerminal((current) => current?.id === id ? { ...current, state } : current)} />
-      : <p>Start a native harness to attach its terminal.</p>}
-    <p>Legacy structured Codex sessions remain available in the Codex session tab.</p>
-  </div>;
+    <div className="native-ai-terminal">
+      {terminal !== null
+        ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
+        : <p className="native-ai-empty">Start a harness to open its terminal.</p>}
+    </div>
+  </section>;
 }
