@@ -28,6 +28,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
   const authoritativeState = useRef(terminal.state);
   authoritativeState.current = terminal.state;
   const closeAttachment = useRef<(() => void) | null>(null);
+  const onRefreshRef = useRef(onRefresh);
+  const onTerminalStateChangeRef = useRef(onTerminalStateChange);
+  onRefreshRef.current = onRefresh;
+  onTerminalStateChangeRef.current = onTerminalStateChange;
   const updateState = (next: TerminalUiState) => {
     setState(next);
   };
@@ -66,7 +70,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
     let terminalEnded = false;
     let disposeResources = () => undefined;
     const requestRefresh = () => {
-      onRefresh();
+      onRefreshRef.current();
     };
     const start = window.setTimeout(() => {
       if (!isTerminalAttachableState(authoritativeState.current)) {
@@ -140,7 +144,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (decoded.frame.type === "ready") {
             ready = true;
             updateState("active");
-            onTerminalStateChange(terminal.id, "active");
+            onTerminalStateChangeRef.current(terminal.id, "active");
             requestRefresh();
             scheduleResize();
             if (stableConnectionTimer !== null) window.clearTimeout(stableConnectionTimer);
@@ -150,7 +154,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (decoded.frame.type === "output") { terminalInstance.write(decoded.frame.data); return; }
           terminalEnded = true;
           updateState("closed");
-          onTerminalStateChange(terminal.id, "closed");
+          onTerminalStateChangeRef.current(terminal.id, "closed");
           setMessage(decoded.frame.exitCode === null ? "Terminal exited." : `Terminal exited with code ${decoded.frame.exitCode}.`);
           requestRefresh();
         };
@@ -164,17 +168,17 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (action === "refresh") {
             if (!terminalEnded && cancelled && isTerminalAttachableState(authoritativeState.current)) {
               updateState("disconnected");
-              onTerminalStateChange(terminal.id, "disconnected");
+              onTerminalStateChangeRef.current(terminal.id, "disconnected");
             }
             requestRefresh();
             return;
           }
           updateState("disconnected");
-          onTerminalStateChange(terminal.id, "disconnected");
+          onTerminalStateChangeRef.current(terminal.id, "disconnected");
           reconnectAttempts += 1;
           if (reconnectAttempts > 8) {
             updateState("failed");
-            onTerminalStateChange(terminal.id, "failed");
+            onTerminalStateChangeRef.current(terminal.id, "failed");
             requestRefresh();
             return;
           }
@@ -213,8 +217,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
       disposeResources();
       closeAttachment.current = null;
     };
-    // A tab owns one terminal attachment for its entire mounted lifetime.
-  }, [onRefresh, onTerminalStateChange, projectId, terminal.id, workspaceId]);
+    // Callback identity must not own the socket. Only the terminal identity does.
+  }, [projectId, terminal.id, workspaceId]);
 
   return <section className={`terminal-tab-surface ${active ? "is-active" : "is-inactive"}`} aria-hidden={!active}
     aria-label="Terminal session" role={active ? "region" : undefined}>

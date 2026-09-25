@@ -1,7 +1,30 @@
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { expectedPackages } from "./tooling/workspace-graph.mjs";
+
+const requireFromVite = createRequire(createRequire(import.meta.url).resolve("vite/package.json"));
+
+function webJsxPlugin() {
+  const { transformSync } = requireFromVite("esbuild");
+  return {
+    name: "devspace-web-jsx",
+    enforce: "pre",
+    transform(code, id) {
+      const filename = id.split("?")[0] ?? id;
+      if (!filename.endsWith(".tsx")) return null;
+      const result = transformSync(code, {
+        loader: "tsx",
+        jsx: "automatic",
+        format: "esm",
+        sourcefile: filename,
+        target: "es2022"
+      });
+      return { code: result.code, map: result.map };
+    }
+  };
+}
 
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceAliases = Object.fromEntries(
@@ -13,9 +36,10 @@ const workspaceAliases = Object.fromEntries(
 
 const testProjectDefinitions = [...expectedPackages].map(([directory, definition]) => ({
   resolve: { alias: workspaceAliases },
+  ...(directory === "apps/web" ? { plugins: [webJsxPlugin()] } : {}),
   test: {
     name: definition.name,
-    include: [`${directory}/src/**/*.test.ts`],
+    include: [`${directory}/src/**/*.test.ts`, `${directory}/src/**/*.test.tsx`],
     environment: "node",
     passWithNoTests: false,
     isolate: true,
