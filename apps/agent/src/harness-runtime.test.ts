@@ -55,7 +55,7 @@ test("codex launch env contains CODEX_HOME and not CLAUDE_CONFIG_DIR", async () 
   expect(env.CODEX_HOME).toBe("/opt/devspace/harness-home");
   expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
   expect(env.HOME).not.toBe("/opt/devspace/harness-home");
-  expect(createdExecs[0]?.command).toEqual(["codex"]);
+  expect(createdExecs[0]?.command).toEqual(["codex", "--yolo"]);
 });
 
 test("image codex wins over artifact on start", async () => {
@@ -79,6 +79,7 @@ test("custom start does not set CODEX_HOME and does not acquire a home lease", a
     projectId, workspaceId, sessionId, harnessId: "my-agent", processId, terminalId, processGeneration: 1
   });
   expect(env.CODEX_HOME).toBeUndefined();
+  expect(createdExecs[0]?.command).toEqual(["my-agent"]);
   expect(createdExecs[0]?.environment.CODEX_HOME).toBeUndefined();
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
@@ -198,8 +199,9 @@ test("codex resume after discovery execs resume argv with native id", async () =
     sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000016",
     terminalId: "018f1f34-7000-7000-8000-000000000017", processGeneration: 2
   });
-  expect(result.command).toEqual(["codex", "resume", "thread-live"]);
-  expect(createdExecs.at(-1)?.command).toEqual(["codex", "resume", "thread-live"]);
+  expect(result.command).toEqual(["codex", "--yolo", "resume", "thread-live"]);
+  expect(createdExecs.at(-1)?.command).toEqual(["codex", "--yolo", "resume", "thread-live"]);
+  expect(createdExecs.at(-1)?.command[3]).toBe("thread-live");
   expect(createdExecs.at(-1)?.environment.CODEX_HOME).toBe("/opt/devspace/harness-home");
 });
 
@@ -303,7 +305,7 @@ test("image codex wins without staging and an in-container artifact is the only 
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   expect(imageStages).toBe(0);
-  expect(image.createdExecs[0]?.command).toEqual(["codex"]);
+  expect(image.createdExecs[0]?.command).toEqual(["codex", "--yolo"]);
   expect(await imageRuntime.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "image-path", reportedVersion: "0.160.0" } });
 
   const fallbackRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-artifact-"));
@@ -322,7 +324,7 @@ test("image codex wins without staging and an in-container artifact is the only 
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   expect(staged).toBe(1);
-  expect(fallbackExecs[0]?.command).toEqual([entrypoint]);
+  expect(fallbackExecs[0]?.command).toEqual([entrypoint, "--yolo"]);
   expect(await fallback.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "agent-artifact", reportedVersion: "0.156.1" } });
 
   const none = createHarnessRuntime({

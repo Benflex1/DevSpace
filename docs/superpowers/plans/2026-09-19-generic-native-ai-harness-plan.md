@@ -499,8 +499,8 @@ EOF
 export const CODEX_HARNESS_ID = "codex";
 export const CODEX_PRESET = {
   id: "codex",
-  launch: { executable: "codex", args: [] },
-  resume: { executable: "codex", args: ["resume", "{sessionId}"] },
+  launch: { executable: "codex", args: ["--yolo"] },
+  resume: { executable: "codex", args: ["--yolo", "resume", "{sessionId}"] },
   privateState: { kind: "dedicated-home", env: { CODEX_HOME: "/opt/devspace/harness-home" } }
 } as const;
 

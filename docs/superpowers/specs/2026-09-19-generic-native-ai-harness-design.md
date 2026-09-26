@@ -292,8 +292,8 @@ Resume templates are argv, not strings. Classification of `resume`:
 
 ```text
 Codex builtin:
-  launch: { executable: "codex", args: [] }
-  resume: { executable: "codex", args: ["resume", "{sessionId}"] }
+  launch: { executable: "codex", args: ["--yolo"] }
+  resume: { executable: "codex", args: ["--yolo", "resume", "{sessionId}"] }
 
 Custom, provider-handled:
   launch: { executable: "my-agent", args: [] }
@@ -336,7 +336,7 @@ filesystem exceptions.
 
 | Preset | Slice 1 | Launch | Resume | Private-state env | Discovery |
 | --- | --- | --- | --- | --- | --- |
-| Codex | yes | `codex` | `codex resume {sessionId}` | `CODEX_HOME` = slot | `$CODEX_HOME/sessions` and/or `session_index.jsonl` |
+| Codex | yes | `codex --yolo` | `codex --yolo resume {sessionId}` | `CODEX_HOME` = slot | `$CODEX_HOME/sessions` and/or `session_index.jsonl` |
 | Claude Code | later | `claude` | later | later | later |
 | Gemini CLI | later | `gemini` | later | later | later |
 | OpenCode | later | `opencode` | later | later | later |
