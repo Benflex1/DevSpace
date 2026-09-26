@@ -44,7 +44,7 @@ const sessionId = "018f1f34-7000-7000-8000-000000000010";
 const terminalId = "018f1f34-7000-7000-8000-000000000011";
 const secretPath = "/opt/devspace/codex-artifact/b8cfdf0ab86c/artifact/bin/codex";
 const roots: Root[] = [];
-const posts: unknown[] = [];
+const posts: Array<{ body: unknown; headers: Record<string, string> }> = [];
 
 function harnessBody(sessions: unknown[]) {
   return {
@@ -73,8 +73,8 @@ function session(state: string, resume = false) {
 
 function installFetch(sessions: unknown[]) {
   posts.length = 0;
-  vi.stubGlobal("fetch", vi.fn((url: string, init?: { method?: string; body?: string }) => {
-    if (init?.method === "POST") posts.push(JSON.parse(init.body ?? "{}"));
+  vi.stubGlobal("fetch", vi.fn((url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
+    if (init?.method === "POST") posts.push({ body: JSON.parse(init.body ?? "{}"), headers: init.headers ?? {} });
     if (String(url).includes("/harness")) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(harnessBody(sessions)) });
     }
@@ -220,6 +220,39 @@ test("switching away from the AI surface and back reuses the same terminal socke
   expect(FakeSocket.instances).toHaveLength(1);
   expect(posts).toEqual([]);
 });
+
+test("Start and Resume send the DevSpace CSRF marker", async () => {
+  installFetch([]);
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  const empty = await mount(createElement(HarnessSessionTab, { projectId, workspaceId, active: true }));
+  const start = findButtons(empty).find((button) => buttonText(button) === "Start");
+  const startClick = reactClick(start!);
+  act(() => { startClick(); });
+  expect(posts.at(-1)).toMatchObject({
+    body: { action: "create-native", workspaceId, harnessId: "codex" },
+    headers: { "content-type": "application/json", "x-devspace-csrf": "1" }
+  });
+
+  for (const root of roots) root.unmount();
+  roots.length = 0;
+  posts.length = 0;
+  installFetch([session("stopped", true)]);
+  const stopped = await mount(createElement(HarnessSessionTab, { projectId, workspaceId, active: true }));
+  const resume = findButtons(stopped).find((button) => buttonText(button) === "Resume");
+  const resumeClick = reactClick(resume!);
+  act(() => { resumeClick(); });
+  expect(posts.at(-1)).toMatchObject({
+    body: { action: "resume", workspaceId, sessionId },
+    headers: { "content-type": "application/json", "x-devspace-csrf": "1" }
+  });
+});
+
+function reactClick(node: FakeNode): () => void {
+  const propsKey = Object.getOwnPropertyNames(node).find((name) => name.startsWith("__reactProps"));
+  const onClick = (node as unknown as Record<string, { onClick?: () => void }>)[propsKey ?? ""]?.onClick;
+  if (onClick === undefined) throw new Error("button has no click handler");
+  return onClick;
+}
 
 function findSelect(node: FakeNode): boolean {
   if (node.nodeName === "SELECT") return !node.hidden && node.parentNode instanceof Object;

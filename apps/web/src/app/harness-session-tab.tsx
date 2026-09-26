@@ -71,7 +71,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     try {
       const response = await fetch(`/api/projects/${projectId}/harness`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-devspace-csrf": "1" },
         body: JSON.stringify(body)
       });
       const payload = await response.json() as { message?: string };

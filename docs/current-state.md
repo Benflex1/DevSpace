@@ -10,10 +10,13 @@ custom-definition resume across Agent restart, SQLite stopped/lost projection, a
 monotonic resume generations are implemented. Missing harness slots are added by
 replacing only the development container under the original workspace creation
 operation. Agent Codex artifacts are staged into the container before native exec.
-Live acceptance reached the native Codex sign-in screen and is paused there. Codex was
-not authenticated and no model request was sent. The Workbench reconnect loop is fixed,
+A generation-1 native Codex process is still running from before the YOLO default.
+Its clean exit, native-id discovery, and resume have not been accepted, and no model
+request has been sent. The Workbench reconnect loop is fixed,
 and the AI tab now defaults to the native harness. Structured Codex remains available
-behind a temporary Legacy presentation. Native Codex acceptance is not complete.
+behind a temporary Legacy presentation. The built-in Codex preset launches and resumes
+with `codex --yolo`, and native harness mutations send the normal DevSpace CSRF marker.
+Native Codex acceptance is not complete.
 
 ## Delivery status
 
