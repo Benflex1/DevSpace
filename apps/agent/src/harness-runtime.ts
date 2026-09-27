@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { harnessExecutionAdmissionUncertain } from "./execution-manager.js";
+import {
+  harnessExecutionAdmissionUncertain,
+  type HarnessRecoveryIdentity,
+  type HarnessRecoveryReport
+} from "./execution-manager.js";
 import {
   classifyResumeArgv,
   resumeCapability,
@@ -41,6 +45,7 @@ type SessionRecord = {
   executableSource: ExecutableSource | null;
   state: "live" | "stopped" | "lost";
   leaseId: string | null;
+  recoveryPhase?: "ready-to-release";
   definitionDigest: string | null;
   processGeneration: number;
   admission: "started" | "uncertain";
@@ -54,6 +59,7 @@ const sessionRecordSchema = z.strictObject({
   executableSource: z.unknown().nullable(),
   state: z.enum(["live", "stopped", "lost"]),
   leaseId: z.string().nullable(),
+  recoveryPhase: z.literal("ready-to-release").optional(),
   definitionDigest: z.string().nullable().default(null),
   processGeneration: z.number().int().positive().default(1),
   admission: z.enum(["started", "uncertain"]).default("started")
@@ -65,7 +71,9 @@ export interface HarnessRuntimeDependencies {
   readonly createHarnessExec: (input: {
     projectId: string; workspaceId: string; processId: string; terminalId: string;
     command: readonly string[]; environment: Readonly<Record<string, string>>;
+    sessionId: string; processGeneration: number; leaseId: string | null;
   }) => Promise<void>;
+  readonly observeHarnessRecovery?: () => readonly HarnessRecoveryReport[];
   readonly inspectSlot: (workspaceId: string) => Promise<HarnessSlotMountObservation>;
   readonly recreateWorkspace?: (input: { workspaceId: string; projectId: string }) => Promise<HarnessSlotMountObservation>;
   readonly imageCodex?: { present: boolean; version: string | null };
@@ -91,6 +99,20 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
   const saveSession = async (sessionId: string, record: SessionRecord): Promise<void> => {
     await mkdir(sessionsRoot, { recursive: true, mode: 0o700 });
     await durableJsonWriter.write(sessionPath(sessionId), record);
+  };
+
+  const workspaceHarnessBusy = async (workspaceId: string, sessionId: string): Promise<boolean> => {
+    const { readdir } = await import("node:fs/promises");
+    let names: string[];
+    try { names = await readdir(sessionsRoot); } catch { return false; }
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const candidateId = name.slice(0, -".json".length);
+      if (candidateId === sessionId) continue;
+      const candidate = await loadSession(candidateId).catch(() => null);
+      if (candidate?.workspaceId === workspaceId && (candidate.state === "live" || candidate.leaseId !== null)) return true;
+    }
+    return false;
   };
 
   const definitionOf = (harnessId: string) => {
@@ -123,6 +145,21 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     catch { /* lease was already released by settlement or a previous compensation */ }
   };
 
+  const writeBackAndReleaseHome = async (sessionId: string, record: SessionRecord): Promise<void> => {
+    if (record.leaseId === null) return;
+    if (record.recoveryPhase !== "ready-to-release") {
+      await dependencies.home.writeBackAndClear({ workspaceId: record.workspaceId, leaseId: record.leaseId });
+      if (record.harnessId === CODEX_HARNESS_ID) {
+        record.nativeSessionId = await discoverCodexNativeSessionId(dependencies.home.persistentHomePath(CODEX_HARNESS_ID));
+      }
+      record.recoveryPhase = "ready-to-release";
+      await saveSession(sessionId, record);
+    }
+    await dependencies.home.releaseLease({ harnessId: record.harnessId, leaseId: record.leaseId });
+    record.leaseId = null;
+    delete record.recoveryPhase;
+  };
+
   const restoreAfterDefinitePreStartFailure = async (
     sessionId: string,
     workspaceId: string,
@@ -136,6 +173,18 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     await saveSession(sessionId, previous === null
       ? { ...admitted, state: "stopped", leaseId: null, admission: "started" }
       : { ...previous, leaseId: null });
+  };
+
+  const finalizeRecoveredLoss = async (identity: HarnessRecoveryIdentity): Promise<void> => {
+    const record = await loadSession(identity.sessionId);
+    if (record.processId !== identity.processId || record.workspaceId !== identity.workspaceId
+      || record.processGeneration !== identity.processGeneration || record.leaseId !== identity.leaseId) return;
+    if (record.state === "stopped" && record.leaseId === null) return;
+    await writeBackAndReleaseHome(identity.sessionId, record);
+    record.state = "lost";
+    record.admission = "started";
+    liveByWorkspace.delete(record.workspaceId);
+    await saveSession(identity.sessionId, record);
   };
 
   const probeCodex = async (input: { projectId: string; workspaceId: string }) => dependencies.probeImageCodex !== undefined
@@ -196,7 +245,9 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           liveByWorkspace.set(input.workspaceId, input.sessionId);
           return {};
         }
-        if (existingEarly?.state === "live" || (liveByWorkspace.has(input.workspaceId) && liveByWorkspace.get(input.workspaceId) !== input.sessionId)) {
+        if ((existingEarly !== null && (existingEarly.state === "live" || existingEarly.leaseId !== null))
+          || (liveByWorkspace.has(input.workspaceId) && liveByWorkspace.get(input.workspaceId) !== input.sessionId)
+          || await workspaceHarnessBusy(input.workspaceId, input.sessionId)) {
           throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A native harness is already live in this workspace.");
         }
         const definition = definitionOf(input.harnessId);
@@ -254,7 +305,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           await dependencies.createHarnessExec({
             projectId: input.projectId, workspaceId: input.workspaceId,
             processId: input.processId, terminalId: input.terminalId,
-            command, environment: env
+            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId
           });
         } catch (error) {
           if (harnessExecutionAdmissionUncertain(error)) {
@@ -290,14 +341,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     async settleExit(input: { sessionId: string }) {
       const record = await loadSession(input.sessionId);
       if (record.state === "stopped") return;
-      if (record.leaseId !== null) {
-        await dependencies.home.writeBackAndClear({ workspaceId: record.workspaceId, leaseId: record.leaseId });
-        if (record.harnessId === CODEX_HARNESS_ID) {
-          record.nativeSessionId = await discoverCodexNativeSessionId(dependencies.home.persistentHomePath(CODEX_HARNESS_ID));
-        }
-        await dependencies.home.releaseLease({ harnessId: record.harnessId, leaseId: record.leaseId });
-        record.leaseId = null;
-      }
+      await writeBackAndReleaseHome(input.sessionId, record);
       record.state = "stopped";
       record.admission = "started";
       liveByWorkspace.delete(record.workspaceId);
@@ -338,6 +382,9 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
         }
         if (input.processGeneration !== record.processGeneration + 1) {
           throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The harness generation is stale.");
+        }
+        if (dedicatedHome(record.harnessId) && record.leaseId !== null) {
+          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The dedicated harness home is still leased to a recovered process.");
         }
         if (record.state === "live" || liveByWorkspace.has(record.workspaceId)) {
           throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A native harness is already live in this workspace.");
@@ -402,7 +449,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           await dependencies.createHarnessExec({
             projectId: input.projectId, workspaceId: record.workspaceId,
             processId: input.processId, terminalId: input.terminalId,
-            command, environment: env
+            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId
           });
         } catch (error) {
           if (harnessExecutionAdmissionUncertain(error)) {
@@ -440,7 +487,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       }
       let resume: boolean;
       try {
-        resume = record.state !== "live" && resumeCapability({
+        resume = record.state !== "live" && record.leaseId === null && resumeCapability({
           resume: definitionOf(record.harnessId).resume,
           nativeSessionId: record.nativeSessionId
         });
@@ -449,26 +496,40 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       }
       return { state: record.state, resume, executableSource: record.executableSource };
     },
+    async finalizeRecoveredLoss(identity: HarnessRecoveryIdentity) {
+      return exclusive(async () => await finalizeRecoveredLoss(identity));
+    },
     async recoverAfterAgentRestart() {
-      const recovered = await dependencies.home.recoverDirtySlots();
-      const { readdir } = await import("node:fs/promises");
-      let entries: string[];
-      try { entries = await readdir(sessionsRoot); } catch { entries = []; }
-      for (const name of entries) {
-        if (!name.endsWith(".json")) continue;
-        const sessionId = name.slice(0, -".json".length);
-        const record = await loadSession(sessionId);
-        if (record.state !== "live") continue;
-        if (record.harnessId === CODEX_HARNESS_ID) {
-          record.nativeSessionId = await discoverCodexNativeSessionId(dependencies.home.persistentHomePath(CODEX_HARNESS_ID));
+      return exclusive(async () => {
+        const reports = dependencies.observeHarnessRecovery?.() ?? [];
+        const { readdir } = await import("node:fs/promises");
+        let entries: string[];
+        try { entries = await readdir(sessionsRoot); } catch { entries = []; }
+        for (const name of entries) {
+          if (!name.endsWith(".json")) continue;
+          const sessionId = name.slice(0, -".json".length);
+          const record = await loadSession(sessionId);
+          if (record.state !== "live" && !(record.state === "lost" && record.leaseId !== null)) continue;
+          const matching = reports.filter((item) => item.processId === record.processId && item.workspaceId === record.workspaceId
+            && item.sessionId === sessionId && item.processGeneration === record.processGeneration && item.leaseId === record.leaseId);
+          record.state = "lost";
+          if (record.leaseId !== null || matching.some((item) => item.observation === "running" || item.observation === "unproven")) {
+            liveByWorkspace.set(record.workspaceId, sessionId);
+          }
+          await saveSession(sessionId, record);
+          if (matching.length !== 1) continue;
+          const report = matching[0]!;
+          if (report.observation === "running" || report.observation === "unproven") continue;
+          await finalizeRecoveredLoss({
+            processId: report.processId,
+            workspaceId: report.workspaceId,
+            sessionId,
+            processGeneration: report.processGeneration!,
+            leaseId: report.leaseId
+          });
         }
-        record.state = "lost";
-        record.leaseId = null;
-        liveByWorkspace.delete(record.workspaceId);
-        await saveSession(sessionId, record);
-      }
-      await dependencies.home.reapStaleLeases();
-      return recovered;
+        return [];
+      });
     },
     privateNativeId: async (sessionId: string) => (await loadSession(sessionId)).nativeSessionId,
     publicSnapshot: async (sessionId: string) => {

@@ -1,5 +1,5 @@
 import { constants as fsConstants, type Dirent } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rename, rm, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { configurationKeySchema, uuidV7Schema } from "@devspace/contracts";
@@ -201,6 +201,7 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
   const homesRoot = path.join(root, "harness-homes");
   const slotsRoot = path.join(root, "harness-slots");
   const metaRoot = path.join(root, "harness-meta");
+  const leaseLocks = new Map<string, Promise<void>>();
 
   const persistentHomePath = (harnessId: string): string => path.join(homesRoot, requireHarnessId(harnessId));
   const slotHostPath = (workspaceId: string): string => path.join(slotsRoot, requireUuid(workspaceId, "workspaceId"));
@@ -227,43 +228,89 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
     return metadata;
   };
 
+  const hasFinalizedLease = async (harnessId: string, leaseId: string): Promise<boolean> => {
+    let entries: Dirent[];
+    try { entries = await readdir(metaRoot, { withFileTypes: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    let matches = 0;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) return false;
+      const meta = await readStrictJson(path.join(metaRoot, entry.name), slotMetaSchema);
+      if (meta.harnessId === harnessId && meta.leaseId === leaseId) {
+        if (meta.dirty) return false;
+        matches += 1;
+      }
+    }
+    return matches === 1;
+  };
+
+  const withLeaseLock = async <T>(harnessId: string, operation: () => Promise<T>): Promise<T> => {
+    const previous = leaseLocks.get(harnessId) ?? Promise.resolve();
+    let unlock!: () => void;
+    const held = new Promise<void>((resolve) => { unlock = resolve; });
+    const queued = previous.then(() => held);
+    leaseLocks.set(harnessId, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      unlock();
+      if (leaseLocks.get(harnessId) === queued) leaseLocks.delete(harnessId);
+    }
+  };
+
   return {
     persistentHomePath,
     async acquireLease(input) {
       const harnessId = requireHarnessId(input.harnessId);
-      const workspaceId = requireUuid(input.workspaceId, "workspaceId");
-      const aiSessionId = requireUuid(input.aiSessionId, "aiSessionId");
-      if (!Number.isInteger(input.processGeneration) || input.processGeneration < 1) {
-        throw new HarnessHomeError("HARNESS_IDENTITY_INVALID", "processGeneration must be a positive integer.");
-      }
-      await establishPinnedDirectory(homesRoot);
-      const homePath = persistentHomePath(harnessId);
-      await ensureDirectory(homePath);
-      const existing = await readLease(homePath);
-      if (existing !== null) {
-        if (
-          existing.workspaceId === workspaceId
-          && existing.aiSessionId === aiSessionId
-          && existing.processGeneration === input.processGeneration
-        ) {
-          return { leaseId: existing.leaseId };
+      return withLeaseLock(harnessId, async () => {
+        const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+        const aiSessionId = requireUuid(input.aiSessionId, "aiSessionId");
+        if (!Number.isInteger(input.processGeneration) || input.processGeneration < 1) {
+          throw new HarnessHomeError("HARNESS_IDENTITY_INVALID", "processGeneration must be a positive integer.");
         }
-        throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The Codex home/profile is already active in another workspace.");
-      }
-      const leaseId = randomUUID();
-      try {
-        await writeLease(homePath, {
-          leaseId,
-          harnessId,
-          workspaceId,
-          aiSessionId,
-          processGeneration: input.processGeneration,
-          acquiredAt: new Date().toISOString()
-        });
-      } catch {
-        throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The Codex home/profile is already active in another workspace.");
-      }
-      return { leaseId };
+        await establishPinnedDirectory(homesRoot);
+        const homePath = persistentHomePath(harnessId);
+        await ensureDirectory(homePath);
+        const existing = await readLease(homePath);
+        if (existing !== null) {
+          if (
+            existing.workspaceId === workspaceId
+            && existing.aiSessionId === aiSessionId
+            && existing.processGeneration === input.processGeneration
+          ) {
+            return { leaseId: existing.leaseId };
+          }
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The Codex home/profile is already active in another workspace.");
+        }
+        await establishPinnedDirectory(metaRoot);
+        for (const entry of await readdir(metaRoot, { withFileTypes: true })) {
+          if (!entry.isFile() || !entry.name.endsWith(".json")) {
+            throw new HarnessHomeError("HARNESS_HOME_IN_USE", "Harness slot ownership metadata is not exact.");
+          }
+          const meta = await readStrictJson(path.join(metaRoot, entry.name), slotMetaSchema);
+          if (meta.harnessId === harnessId && meta.dirty) {
+            throw new HarnessHomeError("HARNESS_HOME_IN_USE", "A dirty harness slot still owns this persistent home.");
+          }
+        }
+        const leaseId = randomUUID();
+        try {
+          await writeLease(homePath, {
+            leaseId,
+            harnessId,
+            workspaceId,
+            aiSessionId,
+            processGeneration: input.processGeneration,
+            acquiredAt: new Date().toISOString()
+          });
+        } catch {
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The Codex home/profile is already active in another workspace.");
+        }
+        return { leaseId };
+      });
     },
     async materialize(input) {
       const harnessId = requireHarnessId(input.harnessId);
@@ -283,8 +330,14 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
       if (meta === null || meta.leaseId !== input.leaseId) {
         throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The slot is not owned by this lease.");
       }
+      if (!meta.dirty) {
+        // A previous writeback completed before a crash but its caller did not
+        // persist the released lease. The clean owner marker makes this retry
+        // a slot clear, never a second copy into the persistent home.
+        await emptyDirectory(slotHostPath(workspaceId));
+        return;
+      }
       await requireLease(meta.harnessId, input.leaseId, workspaceId);
-      if (!meta.dirty) return;
       const slot = slotHostPath(workspaceId);
       const homePath = persistentHomePath(meta.harnessId);
       const incoming = `${homePath}.incoming`;
@@ -296,15 +349,26 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
         await rm(incoming, { recursive: true, force: true }).catch(() => undefined);
         throw error;
       }
-      await emptyDirectory(slot);
       await writeMeta({ ...meta, dirty: false });
+      await emptyDirectory(slot);
     },
     async releaseLease(input) {
       const harnessId = requireHarnessId(input.harnessId);
-      const metadata = await requireLease(harnessId, input.leaseId);
-      const homePath = persistentHomePath(harnessId);
-      await rm(leaseDir(homePath), { recursive: true, force: true });
-      void metadata;
+      return withLeaseLock(harnessId, async () => {
+        const homePath = persistentHomePath(harnessId);
+        const current = await readLease(homePath);
+        if (current === null || current.leaseId !== input.leaseId) {
+          if (await hasFinalizedLease(harnessId, input.leaseId)) {
+            // The old lease was already released after its exact slot was made
+            // clean. Do not remove a newer lease that may now own this home.
+            if (current === null) await rm(leaseDir(homePath), { recursive: true, force: true });
+            return;
+          }
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The harness home lease does not match.");
+        }
+        await requireLease(harnessId, input.leaseId);
+        await rm(leaseDir(homePath), { recursive: true, force: true });
+      });
     },
     async recoverDirtySlots() {
       await establishPinnedDirectory(metaRoot);

@@ -56,6 +56,19 @@ test("same workspace re-acquires its lease after simulated agent restart", async
   expect(again.leaseId).toBe(first.leaseId);
 });
 
+test("a dirty slot blocks a new lease when its lease metadata is missing", async () => {
+  const { home, root } = await store();
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 1 });
+  const slot = await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: lease.leaseId });
+  await rm(path.join(home.persistentHomePath("codex"), ".lease"), { recursive: true, force: true });
+
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: sessionB, processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
+  expect(await readFile(path.join(root, "harness-meta", `${wsA}.json`), "utf8")).toContain('"dirty":true');
+});
+
 test("stale lease after writeback-before-release is recovered then acquired by another workspace", async () => {
   const { home } = await store();
   const leaseA = await home.acquireLease({
@@ -64,9 +77,10 @@ test("stale lease after writeback-before-release is recovered then acquired by a
   await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: leaseA.leaseId });
   await home.writeBackAndClear({ workspaceId: wsA, leaseId: leaseA.leaseId });
   await home.reapStaleLeases();
-  await expect(home.acquireLease({
+  const leaseB = await home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: sessionB, processGeneration: 1
-  })).resolves.toMatchObject({ leaseId: expect.any(String) });
+  });
+  expect(leaseB.leaseId).toEqual(expect.any(String));
 });
 
 test("rejects symlink, special file, path escape, oversize file, and over-count trees", async () => {
@@ -111,4 +125,26 @@ test("writeback restores only the recorded owner home", async () => {
   expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("codex-after");
   expect(await readFile(path.join(home.persistentHomePath("claude"), "auth.json"), "utf8")).toBe("claude-before");
   expect(await readdir(slot.slotHostPath)).toEqual([]);
+});
+
+test("a finalized slot can retry writeback and release without overwriting a newer lease", async () => {
+  const { home } = await store();
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 1 });
+  const slot = await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: lease.leaseId });
+  await writeFile(path.join(slot.slotHostPath, "auth.json"), "completed-home", { mode: 0o600 });
+  await home.writeBackAndClear({ workspaceId: wsA, leaseId: lease.leaseId });
+  await home.releaseLease({ harnessId: "codex", leaseId: lease.leaseId });
+
+  await home.writeBackAndClear({ workspaceId: wsA, leaseId: lease.leaseId });
+  const [, newerLease] = await Promise.all([
+    home.releaseLease({ harnessId: "codex", leaseId: lease.leaseId }),
+    home.acquireLease({ harnessId: "codex", workspaceId: wsB, aiSessionId: sessionB, processGeneration: 1 })
+  ]);
+
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("completed-home");
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
+  expect(newerLease.leaseId).not.toBe(lease.leaseId);
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: otherWorkspace, aiSessionId: otherSession, processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
 });

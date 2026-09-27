@@ -158,8 +158,39 @@ test("codex start with missing slot does not exec and recreates then launches", 
   expect(createdExecs).toHaveLength(1);
 });
 
-test("agent restart discovers a native id from the recovered persistent home", async () => {
+test("agent restart without exact exec evidence marks the session lost but preserves its lease and slot", async () => {
   const { runtime, home, root } = await fixture();
+  await runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  const slot = path.join(root, "harness-slots", workspaceId);
+  await mkdir(path.join(slot, "sessions"), { recursive: true });
+  await writeFile(path.join(slot, "sessions", "thread-crash.jsonl"), `${JSON.stringify({ id: "thread-crash", cwd: "/workspace" })}\n`);
+  await runtime.recoverAfterAgentRestart();
+  expect(await runtime.privateNativeId(sessionId)).toBeNull();
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
+  expect((await runtime.inspect({ harnessId: "codex", workspaceId, sessionId })).capabilities.resume).toBe(false);
+  expect(await readdir(path.join(slot, "sessions"))).toEqual(["thread-crash.jsonl"]);
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+});
+
+test("proven terminated recovery discovers the id and keeps the session lost", async () => {
+  const { home, root } = await fixture();
+  let recovery: {
+    processId: string; workspaceId: string; sessionId: string; processGeneration: number; leaseId: string | null;
+    observation: "terminated";
+  } | null = null;
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => {
+      recovery = { ...input, observation: "terminated" };
+    },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null },
+    observeHarnessRecovery: () => recovery === null ? [] : [recovery]
+  });
   await runtime.start({
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
@@ -169,11 +200,64 @@ test("agent restart discovers a native id from the recovered persistent home", a
   await runtime.recoverAfterAgentRestart();
   expect(await runtime.privateNativeId(sessionId)).toBe("thread-crash");
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
-  expect(JSON.stringify(await runtime.publicSnapshot(sessionId))).not.toContain("thread-crash");
   expect((await runtime.inspect({ harnessId: "codex", workspaceId, sessionId })).capabilities.resume).toBe(true);
-  expect(await home.acquireLease({
+  expect(await readdir(slot)).toEqual([]);
+  await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
-  })).toMatchObject({ leaseId: expect.any(String) });
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
+});
+
+test("recovery resumes safely after the lease was released before session persistence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-release-restart-"));
+  roots.push(root);
+  const home = createHarnessHomeStore(root);
+  let releaseThenCrash = true;
+  const interruptedHome = {
+    ...home,
+    releaseLease: async (input: { harnessId: string; leaseId: string }) => {
+      await home.releaseLease(input);
+      if (releaseThenCrash) {
+        releaseThenCrash = false;
+        throw new Error("simulated-agent-crash-after-lease-release");
+      }
+    }
+  };
+  let identity: { processId: string; workspaceId: string; sessionId: string; processGeneration: number; leaseId: string | null } | null = null;
+  const recovery = () => identity === null ? [] : [{ ...identity, observation: "definitely-gone" as const }];
+  const runtime = createHarnessRuntime({
+    home: interruptedHome, stateRoot: root,
+    createHarnessExec: async (input) => { identity = input; },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    observeHarnessRecovery: recovery,
+    imageCodex: { present: true, version: null }
+  });
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  const slot = path.join(root, "harness-slots", workspaceId, "sessions");
+  await mkdir(slot, { recursive: true });
+  await writeFile(path.join(slot, "thread-release-window.jsonl"), `${JSON.stringify({ id: "thread-release-window", cwd: "/workspace" })}\n`);
+
+  await expect(runtime.recoverAfterAgentRestart()).rejects.toThrow("simulated-agent-crash-after-lease-release");
+  expect(await runtime.privateNativeId(sessionId)).toBe("thread-release-window");
+  expect(await readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8").catch(() => null)).toBeNull();
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "lost", resume: false });
+
+  const restarted = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    observeHarnessRecovery: recovery,
+    imageCodex: { present: true, version: null }
+  });
+  await restarted.recoverAfterAgentRestart();
+  expect(await restarted.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
+  expect(await restarted.privateNativeId(sessionId)).toBe("thread-release-window");
+  expect(await restarted.capability(sessionId)).toMatchObject({ state: "lost", resume: true });
+  expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-release-window.jsonl"), "utf8"))
+    .toContain("thread-release-window");
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
 });
 
 test("agent restart does not invent an id when discovery finds nothing", async () => {
@@ -327,8 +411,10 @@ test("image codex wins without staging and an in-container artifact is the only 
   expect(fallbackExecs[0]?.command).toEqual([entrypoint, "--yolo"]);
   expect(await fallback.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "agent-artifact", reportedVersion: "0.156.1" } });
 
+  const noneRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-no-executable-"));
+  roots.push(noneRoot);
   const none = createHarnessRuntime({
-    home: createHarnessHomeStore(fallbackRoot), stateRoot: fallbackRoot,
+    home: createHarnessHomeStore(noneRoot), stateRoot: noneRoot,
     createHarnessExec: async () => { throw new Error("should-not-exec"); },
     inspectSlot: async () => ({ state: "present-and-exact" }),
     probeImageCodex: async () => ({ present: false, version: null })

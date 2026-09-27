@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { openProjectDatabase } from "./database.js";
-import { createNativeHarnessSession, resumeNativeHarnessSession } from "./harness-sessions.js";
+import { createNativeHarnessSession, listProjectedHarnessSessions, resumeNativeHarnessSession } from "./harness-sessions.js";
 import { saveCustomHarnessDefinition } from "./harness-definitions.js";
 
 const directories: string[] = [];
@@ -220,4 +220,30 @@ test("native terminal snapshot projects stopped and lost without touching struct
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === restarted.sessionId)).toMatchObject({ state: "lost" });
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === native.sessionId)).toMatchObject({ state: "stopped" });
   expect(fixture.database.getAiSession(fixture.project.id, fixture.workspaceId, structuredId)?.session.state).toBe("creating");
+});
+
+test("lost native session exposes Resume only after Agent recovery capability becomes available", async () => {
+  const fixture = await createReadyProject();
+  const agent = { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient;
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", { database: fixture.database, agent });
+  fixture.database.applyExecutionSnapshot({
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1",
+    resources: [{ type: "terminal", identity: { projectId: fixture.project.id, workspaceId: fixture.workspaceId, terminalId: started.terminalId }, state: "lost" }],
+    operationObservations: []
+  });
+
+  let canResume = false;
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, {
+    database: fixture.database,
+    agent: { inspectNativeHarness: async () => ({ resume: canResume }) } as unknown as Pick<FullAgentClient, "inspectNativeHarness">
+  });
+  expect(projected[0]).toMatchObject({ id: started.sessionId, state: "lost", resume: false });
+
+  canResume = true;
+  const finalized = await listProjectedHarnessSessions(fixture.workspaceId, {
+    database: fixture.database,
+    agent: { inspectNativeHarness: async () => ({ resume: canResume }) } as unknown as Pick<FullAgentClient, "inspectNativeHarness">
+  });
+  expect(finalized[0]).toMatchObject({ id: started.sessionId, state: "lost", resume: true });
 });

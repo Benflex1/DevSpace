@@ -26,7 +26,7 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationConflictError, OperationJournal } from "./operation-journal.js";
-import { ExecutionManager } from "./execution-manager.js";
+import { ExecutionManager, type HarnessRecoveryIdentity } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -331,7 +331,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
-  const harnessHooks: { onHarnessSettled?: (event: { processId: string }) => Promise<void> } = {};
+  const harnessHooks: {
+    onHarnessSettled?: (event: { processId: string }) => Promise<void>;
+    onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void>;
+  } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks);
   const harnessHome = createHarnessHomeStore(managedRoots.state);
@@ -341,6 +344,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     createHarnessExec: async (input) => {
       await execution.createHarness(input);
     },
+    observeHarnessRecovery: () => execution.harnessRecoveryReports(),
     inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
     recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId),
     probeImageCodex: async (input) => {
@@ -361,6 +365,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   });
   harnessHooks.onHarnessSettled = async (event) => {
     await harnessRuntime.settleByProcess(event.processId);
+  };
+  harnessHooks.onHarnessRecovered = async (event) => {
+    await harnessRuntime.finalizeRecoveredLoss(event);
   };
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const configuredCodexPath = process.env.DEVSPACE_CODEX_EXECUTABLE_PATH;

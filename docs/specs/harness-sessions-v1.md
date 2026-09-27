@@ -60,10 +60,35 @@ uncertainty: the lease stays, the private record stays live, and Web leaves the 
 `creating` so the same process id can be retried. A retry of the same process does not launch
 a second exec.
 
-Agent restart loses the PTY. The Agent recovers a dirty slot, discovers the native id, marks
-its private record `lost`, and releases the lease. Web applies the existing Agent snapshot:
-a closed or failed harness terminal becomes SQLite `stopped`; a lost harness terminal becomes
-SQLite `lost`. No extra poll is added.
+Startup also reconciles a harness exec with a durable exit observation when its exact private
+session still records pending settlement. This closes the crash window between recording the
+exec exit and completing its settlement callback. The private session record persists a
+ready-to-release checkpoint before removing the lease, so a restart can finish release without
+re-copying an already-cleared slot or removing a newer lease.
+
+Agent restart loses the PTY and terminal attachment. Harness execution identity is durable. For
+an older record without that role, startup may classify it as a harness only by correlating one
+exact private harness session, process, workspace, generation, lease, and dirty slot. Ambiguous
+or incomplete evidence does not authorize recovery.
+
+Before touching a dirty slot, startup inspects the exact retained Docker exec in its exact
+owning workspace container. If it is still running, the process observation remains `running`
+while the terminal attachment and private harness session become `lost`. The slot and lease
+remain intact, no native-id discovery runs, and Resume is unavailable. The Agent monitors that
+exact exec. If its state is unproven, the slot and lease also remain intact and Resume stays
+unavailable.
+
+Only an observed exit code, or proof that the exact owning workspace container is stopped,
+absent, or replaced after the old container is confirmed gone, authorizes recovered finalization:
+write back the dirty slot, discover a native id, empty the slot, and release the lease. The
+session remains `lost` because its PTY was lost. Resume becomes available only after finalization
+has released the lease and only when the harness has a resumable native session (or the
+definition supports provider-handled resume). Stopping the workspace runtime is the supported
+way to retire an orphan that remains running; individual process stop remains unsupported.
+
+Web applies the existing Agent snapshot: a closed or failed harness terminal becomes SQLite
+`stopped`; a lost harness terminal becomes SQLite `lost`. Resume is projected from the Agent's
+recovery-aware capability. No extra poll is added.
 
 ## Resume generation and custom definitions
 

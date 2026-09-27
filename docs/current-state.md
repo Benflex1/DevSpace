@@ -16,7 +16,11 @@ request has been sent. The Workbench reconnect loop is fixed,
 and the AI tab now defaults to the native harness. Structured Codex remains available
 behind a temporary Legacy presentation. The built-in Codex preset launches and resumes
 with `codex --yolo`, and native harness mutations send the normal DevSpace CSRF marker.
-Native Codex acceptance is not complete.
+The Agent PTY for that generation-1 process was lost while its Docker exec remained live.
+Orphan-safe recovery now retains durable harness identity and holds the slot and lease until
+the exact exec exits or its owning workspace container stops. Deterministic recovery tests and
+validation pass; corrected-Agent recovery against the managed root and native Codex acceptance
+remain pending. No real model request has been sent. Native Codex acceptance is not complete.
 
 ## Delivery status
 

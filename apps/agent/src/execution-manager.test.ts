@@ -683,6 +683,7 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
   const created: Array<{ command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean }> = [];
+  let identityAtStart: Record<string, unknown> | null = null;
   const engine = {
     createExec: async (_containerId: string, input: {
       command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
@@ -690,7 +691,12 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
       created.push(input);
       return `exec-${created.length}`;
     },
-    startExecAttached: async () => new PassThrough(),
+    startExecAttached: async (execId: string) => {
+      if (execId === "exec-1") {
+        identityAtStart = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${harnessTerminalId}.json`), "utf8")) as Record<string, unknown>;
+      }
+      return new PassThrough();
+    },
     inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
   const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
@@ -699,7 +705,12 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
   await manager.createHarness({
     projectId: id, workspaceId, processId: harnessTerminalId, terminalId: harnessTerminalId,
     command: ["codex", "resume", "thread-1"],
-    environment: { CODEX_HOME: "/opt/devspace/harness-home" }
+    environment: { CODEX_HOME: "/opt/devspace/harness-home" },
+    sessionId: "018f0f00-0000-7000-8000-0000000000ab", processGeneration: 7, leaseId: "lease-test"
+  });
+  expect(identityAtStart).toMatchObject({
+    kind: "terminal", executionRole: "harness", harnessSessionId: "018f0f00-0000-7000-8000-0000000000ab",
+    harnessGeneration: 7, harnessLeaseId: "lease-test", creationPhase: "start-intent"
   });
   expect(created[0]).toMatchObject({
     command: ["codex", "resume", "thread-1"],
@@ -708,6 +719,9 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
     environment: { TERM: "xterm-256color", CODEX_HOME: "/opt/devspace/harness-home" }
   });
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const terminalRecord = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(terminalRecord.executionRole).toBe("terminal");
+  expect(terminalRecord.harnessSessionId).toBeNull();
   expect(created[1]).toMatchObject({
     command: ["/bin/sh"],
     environment: { TERM: "xterm-256color" }
