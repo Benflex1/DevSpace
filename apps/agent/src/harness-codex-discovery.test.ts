@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -31,4 +31,14 @@ test("returns null rather than inventing an id", async () => {
   const emptyHome = await mkdtemp(path.join(tmpdir(), "devspace-codex-empty-"));
   roots.push(emptyHome);
   expect(await discoverCodexNativeSessionId(emptyHome)).toBeNull();
+});
+
+test("does not discover a native id through a symlinked sessions directory", async () => {
+  const external = await mkdtemp(path.join(tmpdir(), "devspace-codex-external-"));
+  const home = await mkdtemp(path.join(tmpdir(), "devspace-codex-symlink-"));
+  roots.push(external, home);
+  await writeCodexSession(external, { id: "external-session", cwd: "/workspace", mtime: 1 });
+  await symlink(path.join(external, "sessions"), path.join(home, "sessions"));
+
+  expect(await discoverCodexNativeSessionId(home)).toBeNull();
 });

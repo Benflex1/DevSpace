@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, lstat, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -83,22 +83,50 @@ test("stale lease after writeback-before-release is recovered then acquired by a
   expect(leaseB.leaseId).toEqual(expect.any(String));
 });
 
-test("rejects symlink, special file, path escape, oversize file, and over-count trees", async () => {
-  const { home } = await store();
+test("preserves absolute symlink objects without dereferencing their targets", async () => {
+  const { home, root } = await store();
   const homePath = home.persistentHomePath("codex");
-  await mkdir(homePath, { recursive: true, mode: 0o700 });
-  await symlink("/tmp/outside", path.join(homePath, "link"));
+  const outsideTarget = path.join(root, "target-outside-home");
+  await writeAuth(homePath, "codex-before");
+  await writeFile(outsideTarget, "this target must never be copied through the link");
+  await symlink(outsideTarget, path.join(homePath, "link"));
   const lease = await home.acquireLease({ harnessId: "codex", workspaceId, aiSessionId, processGeneration: 1 });
-  await expect(home.materialize({ workspaceId, harnessId: "codex", leaseId: lease.leaseId }))
-    .rejects.toMatchObject({ code: "HARNESS_HOME_UNSUPPORTED" });
+  const slot = await home.materialize({ workspaceId, harnessId: "codex", leaseId: lease.leaseId });
+  const slotLink = path.join(slot.slotHostPath, "link");
+  expect((await lstat(slotLink)).isSymbolicLink()).toBe(true);
+  expect(await readlink(slotLink)).toBe(outsideTarget);
+
+  await home.writeBackAndClear({ workspaceId, leaseId: lease.leaseId });
+  const persistentLink = path.join(homePath, "link");
+  expect((await lstat(persistentLink)).isSymbolicLink()).toBe(true);
+  expect(await readlink(persistentLink)).toBe(outsideTarget);
+  expect(await readFile(path.join(homePath, "auth.json"), "utf8")).toBe("codex-before");
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
 });
 
-test("failed writeback leaves the previous persistent home intact and keeps the lease", async () => {
+test("writeback ignores a container-created reserved .lease entry", async () => {
+  const { home } = await store();
+  const homePath = home.persistentHomePath("codex");
+  await writeAuth(homePath, "previous-home");
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId, aiSessionId, processGeneration: 1 });
+  const slot = await home.materialize({ workspaceId, harnessId: "codex", leaseId: lease.leaseId });
+  await symlink("/container-only-target", path.join(slot.slotHostPath, ".lease"));
+
+  await home.writeBackAndClear({ workspaceId, leaseId: lease.leaseId });
+
+  expect(await readFile(path.join(homePath, "auth.json"), "utf8")).toBe("previous-home");
+  expect(await readFile(path.join(homePath, ".lease", "metadata.json"), "utf8")).toContain(lease.leaseId);
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
+});
+
+test("unsupported file writeback leaves the previous persistent home intact and keeps the lease", async () => {
   const { home } = await store();
   await writeAuth(home.persistentHomePath("codex"), "previous");
   const lease = await home.acquireLease({ harnessId: "codex", workspaceId, aiSessionId, processGeneration: 1 });
   const slot = await home.materialize({ workspaceId, harnessId: "codex", leaseId: lease.leaseId });
-  await symlink("/tmp/outside", path.join(slot.slotHostPath, "bad"));
+  const tooLarge = await open(path.join(slot.slotHostPath, "too-large"), "wx", 0o600);
+  await tooLarge.truncate(32 * 1024 * 1024 + 1);
+  await tooLarge.close();
   await expect(home.writeBackAndClear({ workspaceId, leaseId: lease.leaseId }))
     .rejects.toMatchObject({ code: "HARNESS_HOME_UNSUPPORTED" });
   expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("previous");

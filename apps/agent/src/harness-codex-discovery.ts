@@ -5,6 +5,15 @@ import { assertNativeSessionId } from "@devspace/contracts";
 type Candidate = { id: string; cwd: string | null; mtimeMs: number };
 
 async function collectJsonl(root: string, into: string[]): Promise<void> {
+  let rootStats;
+  try { rootStats = await lstat(root); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  // Harness home entries can be symlinks created inside the container. Never
+  // follow one from the Agent host while searching for a native session id.
+  if (!rootStats.isDirectory()) return;
   let entries;
   try { entries = await readdir(root, { withFileTypes: true }); }
   catch (error) {

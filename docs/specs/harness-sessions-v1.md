@@ -28,7 +28,13 @@ Launch and resume are `{ executable, args[] }`. Resume classification:
 
 Only the selected harness home is copied into `/opt/devspace/harness-home`. Unrelated homes
 are never mounted. After writeback the slot is emptied. Same-container shells may read a
-populated slot.
+populated slot. Bounded symlink entries are copied as link text without resolving their
+targets on the Agent host. Native-session discovery skips symlinked session roots and files,
+so container-local absolute links can round-trip without making the host follow them.
+The copy and discovery walkers use path-based checks and do not pin directory handles against
+a concurrent same-container writer replacing a checked directory. This rare race is deferred
+for the trusted-code beta. Orphan recovery writes a slot back only after its exact owning
+workspace container is stopped or proven absent.
 
 ## Codex executable
 

@@ -18,9 +18,15 @@ behind a temporary Legacy presentation. The built-in Codex preset launches and r
 with `codex --yolo`, and native harness mutations send the normal DevSpace CSRF marker.
 The Agent PTY for that generation-1 process was lost while its Docker exec remained live.
 Orphan-safe recovery now retains durable harness identity and holds the slot and lease until
-the exact exec exits or its owning workspace container stops. Deterministic recovery tests and
-validation pass; corrected-Agent recovery against the managed root and native Codex acceptance
-remain pending. No real model request has been sent. Native Codex acceptance is not complete.
+the exact exec exits or its owning workspace container stops. The corrected Agent observed the
+exact orphan running, projected the session and terminal as lost, and kept its slot and lease.
+The Agent's workspace-stop operation then stopped its exact owning container. Initial
+writeback failed safely because the slot contains dangling absolute symlink entries; the slot
+and lease stayed intact. The follow-up now preserves bounded symlink link text without host
+resolution, skips symlinked session discovery roots, and ignores a container-created reserved
+`.lease` entry during writeback. Recovery must be retried by the corrected Agent before the
+dirty slot and lease can be finalized. Deterministic recovery tests and validation pass. No real
+model request has been sent. Native Codex acceptance is not complete.
 
 ## Delivery status
 

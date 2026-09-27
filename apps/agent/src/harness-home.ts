@@ -1,5 +1,5 @@
 import { constants as fsConstants, type Dirent } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readlink, readdir, rename, rm, symlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { configurationKeySchema, uuidV7Schema } from "@devspace/contracts";
@@ -141,7 +141,19 @@ async function walkCopy(sourceRoot: string, destinationRoot: string, skip: Reado
     const source = relative === "" ? sourceRoot : path.join(sourceRoot, relative);
     const destination = relative === "" ? destinationRoot : path.join(destinationRoot, relative);
     const stats = await lstat(source);
-    if (stats.isSymbolicLink()) rejectUnsupported("symbolic links are not allowed");
+    if (stats.isSymbolicLink()) {
+      entries += 1;
+      if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
+      const target = await readlink(source);
+      const targetBytes = Buffer.byteLength(target, "utf8");
+      if (targetBytes > 4_096) rejectUnsupported("symbolic link target exceeds the bound");
+      totalBytes += targetBytes;
+      if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
+      await ensureDirectory(path.dirname(destination));
+      // Retain the link itself without resolving its target on the host.
+      await symlink(target, destination);
+      return;
+    }
     if (stats.isSocket() || stats.isFIFO() || stats.isBlockDevice() || stats.isCharacterDevice()) {
       rejectUnsupported("special files are not allowed");
     }
@@ -343,7 +355,7 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
       const incoming = `${homePath}.incoming`;
       await rm(incoming, { recursive: true, force: true });
       try {
-        await walkCopy(slot, incoming, new Set());
+        await walkCopy(slot, incoming, new Set([".lease"]));
         await rotatePayload(homePath, incoming);
       } catch (error) {
         await rm(incoming, { recursive: true, force: true }).catch(() => undefined);
