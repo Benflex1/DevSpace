@@ -6,6 +6,7 @@ import {
   f11AiAgentApiV1EndpointByOperation,
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
+  nativeHarnessInspectResponseSchema,
   AI_EVENT_STREAM_FRAME_MAX_BYTES,
   type AiEventStreamFrame,
   type AiProviderProfileProjection,
@@ -22,6 +23,7 @@ import {
   type GitWorkspaceFileData,
   type HealthData,
   type MutationReceipt,
+  type NativeHarnessInspectResponse,
   type PreviewInspectionData,
   type ProjectPushData,
   type RuntimeStatusData,
@@ -530,17 +532,17 @@ export function createAgentClient(socketPath: string, options: {
     }): Promise<{ settled: boolean }> => callHarness("/v1/harness-sessions/resume", data),
     inspectNativeHarness: async (data: {
       sessionId: string; definition?: unknown;
-    }): Promise<{ state: string; resume: boolean; executableSource: unknown }> => {
+    }): Promise<NativeHarnessInspectResponse> => {
       const body = await callHarness("/v1/harness-sessions/inspect", data);
-      return {
-        state: typeof body.state === "string" ? body.state : "lost",
-        resume: body.resume === true,
-        executableSource: body.executableSource ?? null
-      };
+      return nativeHarnessInspectResponseSchema.parse({
+        state: body.state,
+        resume: body.resume,
+        processGeneration: body.processGeneration
+      });
     }
   };
 
-  async function callHarness(path: string, data: unknown): Promise<{ settled: boolean; state?: string; resume?: boolean; executableSource?: unknown }> {
+  async function callHarness(path: string, data: unknown): Promise<{ settled: boolean; state?: string; resume?: boolean; processGeneration?: number }> {
     const requestId = uuidv7();
     const body = JSON.stringify({ data });
     return await new Promise((resolve, reject) => {
@@ -565,12 +567,12 @@ export function createAgentClient(socketPath: string, options: {
           try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
           catch { return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId)); }
           if (status === 200) {
-            const data = (parsed as { data?: { settled?: boolean; state?: string; resume?: boolean; executableSource?: unknown } }).data;
+            const data = (parsed as { data?: { settled?: boolean; state?: string; resume?: boolean; processGeneration?: number } }).data;
             return resolve({
               settled: data?.settled === true,
               ...(typeof data?.state === "string" ? { state: data.state } : {}),
               ...(typeof data?.resume === "boolean" ? { resume: data.resume } : {}),
-              ...(data?.executableSource !== undefined ? { executableSource: data.executableSource } : {})
+              ...(typeof data?.processGeneration === "number" ? { processGeneration: data.processGeneration } : {})
             });
           }
           const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };

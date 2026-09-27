@@ -576,6 +576,22 @@ test("constructs protocol headers and parses valid success envelopes", async () 
   } finally { await service.close(); }
 });
 
+test("native harness inspection returns only bounded lifecycle state, capability, and generation", async () => {
+  const service = await listen((request, response) => {
+    expect(request.url).toBe("/v1/harness-sessions/inspect");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({
+      meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp },
+      data: { state: "lost", resume: true, processGeneration: 2, nativeSessionId: "private-provider-id" }
+    }));
+  });
+  try {
+    await expect(createAgentClient(service.socketPath, { createId: () => id, now: () => new Date(timestamp) })
+      .inspectNativeHarness({ sessionId: id }))
+      .resolves.toEqual({ state: "lost", resume: true, processGeneration: 2 });
+  } finally { await service.close(); }
+});
+
 test("allows Codex profile discovery to complete beyond the general observation timeout", async () => {
   const profile = {
     profileId: "codex",

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { expect, test } from "vitest";
 import {
   harnessArgvSchema,
   classifyResumeArgv,
@@ -6,8 +6,18 @@ import {
   substituteResumeArgv,
   assertNativeSessionId,
   resumeCapability,
-  customHarnessDefinitionSchema
+  customHarnessDefinitionSchema,
+  nativeHarnessInspectResponseSchema
 } from "./harness.js";
+
+test("native harness inspect response is generation-fenced and excludes private provider identity", () => {
+  expect(nativeHarnessInspectResponseSchema.parse({ state: "lost", processGeneration: 2, resume: true }))
+    .toEqual({ state: "lost", processGeneration: 2, resume: true });
+  expect(nativeHarnessInspectResponseSchema.safeParse({ state: "orphaned", processGeneration: 2, resume: true }).success).toBe(false);
+  expect(nativeHarnessInspectResponseSchema.safeParse({
+    state: "lost", processGeneration: 2, resume: true, nativeSessionId: "private-provider-id"
+  }).success).toBe(false);
+});
 
 test("rejects host paths and shell-like executables", () => {
   expect(harnessArgvSchema.safeParse({ executable: "/usr/bin/codex", args: [] }).success).toBe(false);

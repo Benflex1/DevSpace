@@ -78,6 +78,65 @@ export async function createNativeHarnessSession(
   return { sessionId: session.id, terminalId: terminal.terminalId, workspaceId, harnessId };
 }
 
+type NativeHarnessSessionRow = ReturnType<ProjectDatabase["listNativeHarnessSessions"]>[number];
+type CustomHarnessDefinition = ReturnType<typeof listCustomHarnessDefinitions>[number];
+
+async function inspectAndReconcileNativeHarnessSession(
+  workspaceId: string,
+  sessionId: string,
+  dependencies: { database: ProjectDatabase; agent: Pick<FullAgentClient, "inspectNativeHarness"> },
+  definitions: readonly CustomHarnessDefinition[]
+): Promise<{
+  session: NativeHarnessSessionRow | null;
+  definition: CustomHarnessDefinition | undefined;
+  definitionMissing: boolean;
+  agentState: "live" | "stopped" | "lost" | null;
+  authoritative: boolean;
+  resume: boolean;
+}> {
+  const findSession = () => dependencies.database.listNativeHarnessSessions(workspaceId).find((row) => row.id === sessionId) ?? null;
+  const initial = findSession();
+  if (initial === null) {
+    return { session: null, definition: undefined, definitionMissing: false, agentState: null, authoritative: false, resume: false };
+  }
+  const isCustom = initial.harnessId !== null && initial.harnessId !== "codex";
+  const definition = isCustom ? definitions.find((item) => item.id === initial.harnessId) : undefined;
+  if (isCustom && definition === undefined) {
+    return { session: initial, definition: undefined, definitionMissing: true, agentState: null, authoritative: false, resume: false };
+  }
+
+  let observation: Awaited<ReturnType<FullAgentClient["inspectNativeHarness"]>>;
+  try {
+    observation = await dependencies.agent.inspectNativeHarness({
+      sessionId: initial.id,
+      ...(definition === undefined ? {} : { definition })
+    });
+  } catch {
+    return { session: findSession() ?? initial, definition, definitionMissing: false, agentState: null, authoritative: false, resume: false };
+  }
+  if (observation.processGeneration !== initial.processGeneration) {
+    return { session: findSession() ?? initial, definition, definitionMissing: false, agentState: observation.state, authoritative: false, resume: false };
+  }
+
+  const reconciled = dependencies.database.reconcileNativeHarnessObservation({
+    sessionId: initial.id,
+    expectedGeneration: initial.processGeneration,
+    agentState: observation.state
+  });
+  if (reconciled.status !== "matched" || reconciled.session === null || reconciled.session.runtimeKind !== "native-pty") {
+    return { session: findSession(), definition, definitionMissing: false, agentState: observation.state, authoritative: false, resume: false };
+  }
+  const authoritative = reconciled.session.processGeneration === observation.processGeneration;
+  return {
+    session: reconciled.session,
+    definition,
+    definitionMissing: false,
+    agentState: observation.state,
+    authoritative,
+    resume: authoritative && observation.state !== "live" && observation.resume
+  };
+}
+
 export async function resumeNativeHarnessSession(
   projectId: string,
   actor: string,
@@ -86,31 +145,29 @@ export async function resumeNativeHarnessSession(
   dependencies: { database: ProjectDatabase; agent: FullAgentClient }
 ) {
   void actor;
-  const existing = dependencies.database.listNativeHarnessSessions(workspaceId).find((row) => row.id === sessionId);
-  if (existing === undefined) throw new ProjectSetupConflictError("The native harness session is not available.");
-  const definition = existing.harnessId !== null && existing.harnessId !== "codex"
-    ? listCustomHarnessDefinitions(dependencies.database).find((item) => item.id === existing.harnessId)
-    : undefined;
-  if (existing.harnessId !== null && existing.harnessId !== "codex" && definition === undefined) {
+  const definitions = listCustomHarnessDefinitions(dependencies.database);
+  const inspection = await inspectAndReconcileNativeHarnessSession(workspaceId, sessionId, dependencies, definitions);
+  if (inspection.session === null) throw new ProjectSetupConflictError("The native harness session is not available.");
+  if (inspection.definitionMissing) {
     throw new ProjectSetupConflictError("The custom harness definition was not found.");
   }
+  if (!inspection.authoritative) throw new ProjectSetupConflictError("The native harness state could not be verified.");
+  const existing = inspection.session;
+  const definition = inspection.definition;
   let generation = existing.processGeneration;
   let terminalId = existing.terminalSessionId;
   let claimed = false;
   const previousState = existing.state === "lost" ? "lost" as const : "stopped" as const;
-  if (existing.state === "creating" && terminalId !== null && existing.processId !== null) {
-    generation = existing.processGeneration;
-  } else if (existing.state === "creating") {
-    const terminal = dependencies.database.prepareHarnessTerminal(projectId);
-    dependencies.database.assignHarnessTerminal({ sessionId, terminalId: terminal.terminalId, processId: terminal.terminalId });
-    terminalId = terminal.terminalId;
-  } else if (existing.state === "stopped" || existing.state === "lost") {
-    generation = dependencies.database.claimHarnessResumeGeneration(sessionId);
+  if (existing.state === "stopped" || existing.state === "lost") {
+    if (!inspection.resume) throw new ProjectSetupConflictError("The native harness session is not resumable.");
+    generation = dependencies.database.claimHarnessResumeGeneration(sessionId, existing.processGeneration);
     claimed = true;
     const terminal = dependencies.database.prepareHarnessTerminal(projectId);
     dependencies.database.assignHarnessTerminal({ sessionId, terminalId: terminal.terminalId, processId: terminal.terminalId });
     terminalId = terminal.terminalId;
-  } else {
+  } else if (existing.state === "active") {
+    throw new ProjectSetupConflictError("The native harness session is still live.");
+  } else if (existing.state !== "creating" || inspection.agentState !== "live" || terminalId === null || existing.processId === null) {
     throw new ProjectSetupConflictError("The native harness session cannot be resumed from this state.");
   }
   let settled: boolean;
@@ -143,27 +200,17 @@ export async function listProjectedHarnessSessions(
   const definitions = listCustomHarnessDefinitions(dependencies.database);
   const sessions = [];
   for (const row of dependencies.database.listNativeHarnessSessions(workspaceId)) {
-    let resume: boolean;
-    try {
-      const definition = row.harnessId !== null && row.harnessId !== "codex"
-        ? definitions.find((item) => item.id === row.harnessId)
-        : undefined;
-      const capability = await dependencies.agent.inspectNativeHarness({
-        sessionId: row.id,
-        ...(definition === undefined ? {} : { definition })
-      });
-      resume = capability.resume === true;
-    } catch {
-      resume = false;
-    }
+    const inspection = await inspectAndReconcileNativeHarnessSession(workspaceId, row.id, dependencies, definitions);
+    const session = inspection.session;
+    if (session === null) continue;
     sessions.push({
-      id: row.id,
-      harnessId: row.harnessId,
-      state: row.state,
-      terminalSessionId: row.terminalSessionId,
-      processId: row.processId,
-      title: row.title,
-      resume
+      id: session.id,
+      harnessId: session.harnessId,
+      state: session.state,
+      terminalSessionId: session.terminalSessionId,
+      processId: session.processId,
+      title: session.title,
+      resume: inspection.resume
     });
   }
   return sessions;

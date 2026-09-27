@@ -251,7 +251,7 @@ test("recovery resumes safely after the lease was released before session persis
   await restarted.recoverAfterAgentRestart();
   expect(await restarted.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
   expect(await restarted.privateNativeId(sessionId)).toBe("thread-release-window");
-  expect(await restarted.capability(sessionId)).toMatchObject({ state: "lost", resume: true });
+  expect(await restarted.capability(sessionId)).toMatchObject({ state: "lost", processGeneration: 1, resume: true });
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
   expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-release-window.jsonl"), "utf8"))
     .toContain("thread-release-window");

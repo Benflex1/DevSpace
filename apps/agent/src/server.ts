@@ -11,6 +11,7 @@ import {
   f11AiAgentApiV1EndpointByOperation,
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
+  nativeHarnessInspectResponseSchema,
   parseEventCursor,
   nativeHarnessInspectDataSchema,
   nativeHarnessResumeDataSchema,
@@ -795,7 +796,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           const capability = data.definition === undefined
             ? await harnessRuntime.capability(data.sessionId)
             : await harnessRuntime.capability(data.sessionId, data.definition);
-          return sendJson(response, 200, { meta: meta(requestId, now), data: capability });
+          return sendJson(response, 200, { meta: meta(requestId, now), data: nativeHarnessInspectResponseSchema.parse(capability) });
         }
         let sessionId: string;
         if (url.pathname.endsWith("/start")) {

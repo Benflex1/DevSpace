@@ -481,7 +481,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       const record = await loadSession(sessionId);
       if (definition !== undefined) {
         if (definition.id !== record.harnessId || (record.definitionDigest !== null && authorityDigest(definition) !== record.definitionDigest)) {
-          return { state: record.state, resume: false, executableSource: record.executableSource };
+          return { state: record.state, processGeneration: record.processGeneration, resume: false };
         }
         customs.set(definition.id, definition);
       }
@@ -494,7 +494,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       } catch {
         resume = false;
       }
-      return { state: record.state, resume, executableSource: record.executableSource };
+      return { state: record.state, processGeneration: record.processGeneration, resume };
     },
     async finalizeRecoveredLoss(identity: HarnessRecoveryIdentity) {
       return exclusive(async () => await finalizeRecoveredLoss(identity));

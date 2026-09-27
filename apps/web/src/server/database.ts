@@ -27,6 +27,7 @@ import {
   type GithubRepository,
   type SourceLocator,
   type AgentSnapshotData,
+  type NativeHarnessLifecycleState,
   type CanonicalAiEvent,
   type WorkspaceInspectionData
 } from "@devspace/contracts";
@@ -1546,6 +1547,52 @@ export function openProjectDatabase(path: string, options: {
         eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.runtimeKind, "native-pty")
       )).orderBy(desc(aiSessions.updatedAt)).all();
     },
+    reconcileNativeHarnessObservation(input: {
+      sessionId: string;
+      expectedGeneration: number;
+      agentState: NativeHarnessLifecycleState;
+    }) {
+      return client.transaction(() => {
+        const session = db.select().from(aiSessions).where(eq(aiSessions.id, input.sessionId)).get();
+        if (session === undefined) return { status: "missing" as const, session: null };
+        if (session.runtimeKind !== "native-pty") return { status: "not-native" as const, session };
+        if (session.processGeneration !== input.expectedGeneration) {
+          return { status: "generation-mismatch" as const, session };
+        }
+
+        const nativeState = input.agentState === "live" ? null : input.agentState;
+        if (nativeState !== null && (session.state === "active" || session.state === "creating")) {
+          const timestamp = now().toISOString();
+          db.update(aiSessions).set({ state: nativeState, updatedAt: timestamp, stoppedAt: timestamp })
+            .where(and(
+              eq(aiSessions.id, input.sessionId),
+              eq(aiSessions.runtimeKind, "native-pty"),
+              eq(aiSessions.processGeneration, input.expectedGeneration),
+              or(eq(aiSessions.state, "active"), eq(aiSessions.state, "creating"))
+            )).run();
+        }
+
+        if (nativeState !== null && session.terminalSessionId !== null) {
+          const terminalState = nativeState === "stopped" ? "closed" : "lost";
+          const terminal = db.select().from(terminalSessions).where(and(
+            eq(terminalSessions.id, session.terminalSessionId), eq(terminalSessions.workspaceId, session.workspaceId)
+          )).get();
+          if (terminal !== undefined && (!(["closed", "failed", "lost"].includes(terminal.state)) || terminal.state === terminalState)) {
+            const timestamp = now().toISOString();
+            db.update(terminalSessions).set({
+              state: terminalState,
+              lastActivityAt: timestamp,
+              closedAt: terminalState === "lost" ? terminal.closedAt ?? timestamp : timestamp
+            }).where(and(
+              eq(terminalSessions.id, session.terminalSessionId), eq(terminalSessions.workspaceId, session.workspaceId)
+            )).run();
+          }
+        }
+
+        const reconciled = db.select().from(aiSessions).where(eq(aiSessions.id, input.sessionId)).get();
+        return { status: "matched" as const, session: reconciled ?? session };
+      }).immediate();
+    },
     prepareHarnessTerminal(projectId: string): { workspaceId: string; terminalId: string } {
       return client.transaction(() => {
         pruneExpiredLostTerminalSessions();
@@ -1576,19 +1623,22 @@ export function openProjectDatabase(path: string, options: {
       db.update(aiSessions).set({ state: "failed", updatedAt: timestamp, stoppedAt: timestamp })
         .where(and(eq(aiSessions.id, sessionId), eq(aiSessions.runtimeKind, "native-pty"), eq(aiSessions.state, "creating"))).run();
     },
-    claimHarnessResumeGeneration(sessionId: string): number {
+    claimHarnessResumeGeneration(sessionId: string, expectedGeneration: number): number {
       return client.transaction(() => {
         const session = db.select().from(aiSessions).where(eq(aiSessions.id, sessionId)).get();
         if (session === undefined || session.runtimeKind !== "native-pty") {
           throw new ProjectSetupConflictError("The native harness session is not available.");
         }
+        if (session.processGeneration !== expectedGeneration) {
+          throw new ProjectSetupConflictError("The harness resume generation is stale.");
+        }
         if (session.state === "active" || session.state === "creating") {
           throw new ProjectSetupConflictError("The native harness session is still live.");
         }
-        const next = session.processGeneration + 1;
+        const next = expectedGeneration + 1;
         const updated = db.update(aiSessions).set({
           processGeneration: next, state: "creating", updatedAt: now().toISOString()
-        }).where(and(eq(aiSessions.id, sessionId), eq(aiSessions.processGeneration, session.processGeneration))).run();
+        }).where(and(eq(aiSessions.id, sessionId), eq(aiSessions.processGeneration, expectedGeneration))).run();
         if (updated.changes !== 1) throw new ProjectSetupConflictError("The harness resume generation is stale.");
         return next;
       }).immediate();

@@ -3,9 +3,9 @@ import BetterSqlite3 from "better-sqlite3";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
-import { openProjectDatabase } from "./database.js";
+import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
 import { createNativeHarnessSession, listProjectedHarnessSessions, resumeNativeHarnessSession } from "./harness-sessions.js";
 import { saveCustomHarnessDefinition } from "./harness-definitions.js";
 
@@ -99,12 +99,17 @@ test("a lost agent response retries the same creating harness and a definite rej
 test("resume generation increments once per admitted resume and rolls back a definite rejection", async () => {
   const fixture = await createReadyProject();
   const generations: number[] = [];
+  let agentState: "live" | "stopped" = "stopped";
+  let agentGeneration = 1;
   const agent = {
     startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness: async () => ({ state: agentState, processGeneration: agentGeneration, resume: agentState === "stopped" }),
     resumeNativeHarness: async (data: { processGeneration: number; definition?: { id: string } }) => {
       generations.push(data.processGeneration);
       if (data.definition?.id === "my-agent") return { settled: false };
       if (generations.length === 1) throw new AgentResponseError("HARNESS_DEFINITION_CONFLICT", "changed", false);
+      agentState = "live";
+      agentGeneration = data.processGeneration;
       return { settled: false };
     }
   } as unknown as FullAgentClient;
@@ -116,6 +121,7 @@ test("resume generation increments once per admitted resume and rolls back a def
   await resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, started.sessionId, { database: fixture.database, agent });
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 2 });
   fixture.database.completeNativeHarnessAdmission(started.sessionId);
+  agentState = "stopped";
   await resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, started.sessionId, { database: fixture.database, agent });
   expect(generations).toEqual([2, 2, 3]);
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]?.processGeneration).toBe(3);
@@ -125,12 +131,17 @@ test("a lost resume response keeps the claimed generation for the retry", async 
   const fixture = await createReadyProject();
   const generations: number[] = [];
   let fail = true;
+  let agentState: "live" | "stopped" = "stopped";
+  let agentGeneration = 1;
   const agent = {
     startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness: async () => ({ state: agentState, processGeneration: agentGeneration, resume: agentState === "stopped" }),
     resumeNativeHarness: async (data: { processGeneration: number; processId: string }) => {
       generations.push(data.processGeneration);
       if (fail) {
         fail = false;
+        agentState = "live";
+        agentGeneration = data.processGeneration;
         throw new AgentUnavailableError();
       }
       return { settled: false };
@@ -157,6 +168,7 @@ test("custom resume fails closed when the definition is gone and still sends it 
   const seen: unknown[] = [];
   const agent = {
     startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness: async () => ({ state: "stopped", processGeneration: 1, resume: true }),
     resumeNativeHarness: async (data: { definition?: unknown; processGeneration: number }) => {
       seen.push(data.definition);
       return { settled: false };
@@ -236,14 +248,236 @@ test("lost native session exposes Resume only after Agent recovery capability be
   let canResume = false;
   const projected = await listProjectedHarnessSessions(fixture.workspaceId, {
     database: fixture.database,
-    agent: { inspectNativeHarness: async () => ({ resume: canResume }) } as unknown as Pick<FullAgentClient, "inspectNativeHarness">
+    agent: { inspectNativeHarness: async () => ({ state: "lost", processGeneration: 1, resume: canResume }) } as unknown as Pick<FullAgentClient, "inspectNativeHarness">
   });
   expect(projected[0]).toMatchObject({ id: started.sessionId, state: "lost", resume: false });
 
   canResume = true;
   const finalized = await listProjectedHarnessSessions(fixture.workspaceId, {
     database: fixture.database,
-    agent: { inspectNativeHarness: async () => ({ resume: canResume }) } as unknown as Pick<FullAgentClient, "inspectNativeHarness">
+    agent: { inspectNativeHarness: async () => ({ state: "lost", processGeneration: 1, resume: canResume }) } as unknown as Pick<FullAgentClient, "inspectNativeHarness">
   });
   expect(finalized[0]).toMatchObject({ id: started.sessionId, state: "lost", resume: true });
+});
+
+test("an authoritative lost inspection reconciles stale active state before direct Resume", async () => {
+  const fixture = await createReadyProject();
+  const privateNativeId = "provider-native-session-private";
+  const resumeCalls: Array<{ sessionId: string; processGeneration: number }> = [];
+  const agent = {
+    startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness: async () => ({
+      state: "lost", processGeneration: 1, resume: true, nativeSessionId: privateNativeId
+    }),
+    resumeNativeHarness: async (input: { sessionId: string; processGeneration: number }) => {
+      resumeCalls.push(input);
+      return { settled: false };
+    }
+  } as unknown as FullAgentClient;
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 1 });
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(projected[0]).toMatchObject({ id: started.sessionId, state: "lost", resume: true });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "lost", processGeneration: 1 });
+  expect(JSON.stringify(projected)).not.toContain(privateNativeId);
+
+  const resumed = await resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, started.sessionId, {
+    database: fixture.database, agent
+  });
+  expect(resumed.sessionId).toBe(started.sessionId);
+  expect(resumeCalls).toHaveLength(1);
+  expect(resumeCalls[0]).toMatchObject({ sessionId: started.sessionId, processGeneration: 2 });
+  expect(JSON.stringify(resumeCalls)).not.toContain(privateNativeId);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 2 });
+});
+
+test("direct Resume reconciles stale active state before claiming its next generation", async () => {
+  const fixture = await createReadyProject();
+  const resumeCalls: Array<{ sessionId: string; processGeneration: number }> = [];
+  const inspectNativeHarness = vi.fn(async () => ({ state: "lost" as const, processGeneration: 1, resume: true }));
+  const agent = {
+    startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness,
+    resumeNativeHarness: async (input: { sessionId: string; processGeneration: number }) => {
+      resumeCalls.push(input);
+      return { settled: false };
+    }
+  } as unknown as FullAgentClient;
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+
+  await resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, started.sessionId, {
+    database: fixture.database, agent
+  });
+
+  expect(inspectNativeHarness).toHaveBeenCalledOnce();
+  expect(resumeCalls).toHaveLength(1);
+  expect(resumeCalls[0]).toMatchObject({ sessionId: started.sessionId, processGeneration: 2 });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 2 });
+});
+
+test.each([
+  ["stopped", "stopped", true, "closed"],
+  ["lost", "lost", true, "lost"],
+  ["live", "active", false, "active"]
+] as const)("Agent %s observation reconciles active generation 1 to %s", async (agentState, expectedState, resume, expectedTerminalState) => {
+  const fixture = await createReadyProject();
+  const agent = {
+    startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness: async () => ({ state: agentState, processGeneration: 1, resume })
+  } as unknown as FullAgentClient;
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+
+  expect(projected[0]).toMatchObject({ id: started.sessionId, state: expectedState, resume });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: expectedState, processGeneration: 1 });
+  const raw = new BetterSqlite3(fixture.databasePath);
+  const terminal = raw.prepare("select state from terminal_sessions where id = ?").get(started.terminalId) as { state: string } | undefined;
+  raw.close();
+  expect(terminal?.state).toBe(expectedTerminalState);
+});
+
+test("a live Agent observation does not resurrect a lost native session", async () => {
+  const fixture = await createReadyProject();
+  const initialAgent = { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient;
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent: initialAgent
+  });
+  fixture.database.applyExecutionSnapshot({
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1",
+    resources: [{ type: "terminal", identity: { projectId: fixture.project.id, workspaceId: fixture.workspaceId, terminalId: started.terminalId }, state: "lost" }],
+    operationObservations: []
+  });
+  const agent = {
+    inspectNativeHarness: async () => ({ state: "live", processGeneration: 1, resume: false })
+  } as unknown as Pick<FullAgentClient, "inspectNativeHarness">;
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+
+  expect(projected[0]).toMatchObject({ id: started.sessionId, state: "lost", resume: false });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "lost", processGeneration: 1 });
+});
+
+test("an older Agent generation cannot overwrite or resume a newer SQLite generation", async () => {
+  const fixture = await createReadyProject();
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database,
+    agent: { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient
+  });
+  fixture.database.applyExecutionSnapshot({
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1",
+    resources: [{ type: "terminal", identity: { projectId: fixture.project.id, workspaceId: fixture.workspaceId, terminalId: started.terminalId }, state: "lost" }],
+    operationObservations: []
+  });
+  expect(fixture.database.claimHarnessResumeGeneration(started.sessionId, 1)).toBe(2);
+  fixture.database.activateNativeHarnessSession(started.sessionId);
+  const resumeHarness = vi.fn(async () => ({ settled: false }));
+  const agent = {
+    inspectNativeHarness: async () => ({ state: "lost", processGeneration: 1, resume: true }),
+    resumeNativeHarness: resumeHarness
+  } as unknown as FullAgentClient;
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  await expect(resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, started.sessionId, {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(ProjectSetupConflictError);
+
+  expect(projected[0]).toMatchObject({ id: started.sessionId, state: "active", resume: false });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 2 });
+  expect(resumeHarness).not.toHaveBeenCalled();
+});
+
+test("Agent inspection failure preserves SQLite state and fails Resume closed", async () => {
+  const fixture = await createReadyProject();
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database,
+    agent: { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient
+  });
+  const resumeHarness = vi.fn(async () => ({ settled: false }));
+  const agent = {
+    inspectNativeHarness: async () => { throw new AgentUnavailableError(); },
+    resumeNativeHarness: resumeHarness
+  } as unknown as FullAgentClient;
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  await expect(resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, started.sessionId, {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(ProjectSetupConflictError);
+
+  expect(projected[0]).toMatchObject({ id: started.sessionId, state: "active", resume: false });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 1 });
+  expect(resumeHarness).not.toHaveBeenCalled();
+});
+
+test("harness inspection reconciliation ignores structured sessions", async () => {
+  const fixture = await createReadyProject();
+  const raw = new BetterSqlite3(fixture.databasePath);
+  const structuredId = "018f0f00-0000-7000-8000-0000000000aa";
+  raw.prepare(`insert into ai_sessions (
+      id, workspace_id, provider_key, profile_key, profile_revision, revision_id, runtime_plan_hash,
+      runtime_generation, process_generation, last_sequence, history_start_sequence, history_truncated,
+      interaction_history_truncated, runtime_kind, title, state, created_at, updated_at
+    ) values (?, ?, 'codex', 'codex', ?, '018f0f00-0000-7000-8000-000000000002', ?, 1, 1, 0, 1, 0, 0, 'structured', 'Codex session', 'creating', ?, ?)`).run(
+    structuredId, fixture.workspaceId, `sha256-ai-profile-v1:${"0".repeat(64)}`, `sha256-jcs-v1:${"a".repeat(64)}`,
+    "2026-07-19T00:00:00.000Z", "2026-07-19T00:00:00.000Z"
+  );
+  raw.close();
+
+  fixture.database.reconcileNativeHarnessObservation({ sessionId: structuredId, expectedGeneration: 1, agentState: "lost" });
+
+  expect(fixture.database.getAiSession(fixture.project.id, fixture.workspaceId, structuredId)?.session.state).toBe("creating");
+});
+
+test("execution snapshots and Agent inspection converge idempotently on lost", async () => {
+  const fixture = await createReadyProject();
+  const agent = { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient;
+  const snapshot = (terminalId: string, cursor: number) => fixture.database.applyExecutionSnapshot({
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: `v1.018f0f00-0000-7000-8000-000000000099.${cursor}`,
+    resources: [{ type: "terminal", identity: { projectId: fixture.project.id, workspaceId: fixture.workspaceId, terminalId }, state: "lost" }],
+    operationObservations: []
+  });
+
+  const snapshotFirst = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", { database: fixture.database, agent });
+  snapshot(snapshotFirst.terminalId, 1);
+  fixture.database.reconcileNativeHarnessObservation({ sessionId: snapshotFirst.sessionId, expectedGeneration: 1, agentState: "lost" });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === snapshotFirst.sessionId)).toMatchObject({ state: "lost" });
+
+  const inspectFirst = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", { database: fixture.database, agent });
+  fixture.database.reconcileNativeHarnessObservation({ sessionId: inspectFirst.sessionId, expectedGeneration: 1, agentState: "lost" });
+  snapshot(inspectFirst.terminalId, 2);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === inspectFirst.sessionId)).toMatchObject({ state: "lost" });
+});
+
+test("native resume generation claims are fenced to the inspected generation", async () => {
+  const fixture = await createReadyProject();
+  const started = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database,
+    agent: { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient
+  });
+  fixture.database.applyExecutionSnapshot({
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1",
+    resources: [{ type: "terminal", identity: { projectId: fixture.project.id, workspaceId: fixture.workspaceId, terminalId: started.terminalId }, state: "lost" }],
+    operationObservations: []
+  });
+  expect(fixture.database.claimHarnessResumeGeneration(started.sessionId, 1)).toBe(2);
+  fixture.database.applyExecutionSnapshot({
+    agentBootId: "018f0f00-0000-7000-8000-000000000099",
+    throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.2",
+    resources: [{ type: "terminal", identity: { projectId: fixture.project.id, workspaceId: fixture.workspaceId, terminalId: started.terminalId }, state: "lost" }],
+    operationObservations: []
+  });
+
+  expect(() => fixture.database.claimHarnessResumeGeneration(started.sessionId, 1)).toThrow(ProjectSetupConflictError);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "lost", processGeneration: 2 });
 });
