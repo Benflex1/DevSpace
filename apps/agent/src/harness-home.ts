@@ -12,7 +12,7 @@ import {
 } from "./private-state.js";
 
 export const HARNESS_HOME_MAX_DEPTH = 16;
-export const HARNESS_HOME_MAX_ENTRIES = 4096;
+export const HARNESS_HOME_MAX_ENTRIES = 16_384;
 export const HARNESS_HOME_MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const HARNESS_HOME_MAX_TREE_BYTES = 256 * 1024 * 1024;
 export const HARNESS_SLOT_CONTAINER_PATH = "/opt/devspace/harness-home" as const;

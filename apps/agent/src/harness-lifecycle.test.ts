@@ -65,7 +65,9 @@ async function legacyHarnessFixture(label: string) {
 }
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  // Recovered-exec monitoring backs off to a two-second poll interval.
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }

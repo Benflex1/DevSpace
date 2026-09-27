@@ -83,6 +83,21 @@ test("stale lease after writeback-before-release is recovered then acquired by a
   expect(leaseB.leaseId).toEqual(expect.any(String));
 });
 
+test("writes back native homes with the entry count observed during orphan recovery", async () => {
+  const { home } = await store();
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId, aiSessionId, processGeneration: 1 });
+  const slot = await home.materialize({ workspaceId, harnessId: "codex", leaseId: lease.leaseId });
+  for (let index = 0; index < 8_300; index += 1) {
+    await mkdir(path.join(slot.slotHostPath, `entry-${index}`));
+  }
+
+  await home.writeBackAndClear({ workspaceId, leaseId: lease.leaseId });
+
+  expect((await readdir(home.persistentHomePath("codex"))).filter((name) => name !== ".lease")).toHaveLength(8_300);
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
+  await home.releaseLease({ harnessId: "codex", leaseId: lease.leaseId });
+}, 20_000);
+
 test("preserves absolute symlink objects without dereferencing their targets", async () => {
   const { home, root } = await store();
   const homePath = home.persistentHomePath("codex");

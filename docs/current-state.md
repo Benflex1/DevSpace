@@ -24,9 +24,12 @@ The Agent's workspace-stop operation then stopped its exact owning container. In
 writeback failed safely because the slot contains dangling absolute symlink entries; the slot
 and lease stayed intact. The follow-up now preserves bounded symlink link text without host
 resolution, skips symlinked session discovery roots, and ignores a container-created reserved
-`.lease` entry during writeback. Recovery must be retried by the corrected Agent before the
-dirty slot and lease can be finalized. Deterministic recovery tests and validation pass. No real
-model request has been sent. Native Codex acceptance is not complete.
+`.lease` entry during writeback. Its first real restart then hit the old 4,096-entry copy bound:
+the retained home has about 8,283 entries. That attempt also failed closed before replacing the
+persistent home or clearing the slot. The bounded copy limit is now 16,384 entries, with a
+regression that writes back 8,300 entries. Deterministic recovery tests and validation pass;
+Agent-owned finalization still needs to be retried. No real model request has been sent. Native
+Codex acceptance is not complete.
 
 ## Delivery status
 
