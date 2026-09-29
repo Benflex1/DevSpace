@@ -27,6 +27,28 @@ describe("structured diagnostics logging", () => {
     expect(output).not.toContain("requestBody");
   });
 
+  test("keeps only bounded native artifact staging diagnostics", () => {
+    const fields = sanitizeLogFields({
+      phase: "artifact-entry-readback", failureCode: "codex-artifact-readback-timeout", errorClass: "Error",
+      containerId: "a".repeat(64), artifactLayout: "standalone-package", entryRelative: "bin/codex",
+      elapsedMs: 10_000, cleanupElapsedMs: 12,
+      hostPath: "/private/host/secret", stderr: "credential=hidden", entryRelativeBad: "../../etc/passwd"
+    });
+
+    expect(fields).toMatchObject({
+      phase: "artifact-entry-readback", failureCode: "codex-artifact-readback-timeout", errorClass: "Error",
+      containerId: "a".repeat(64), artifactLayout: "standalone-package", entryRelative: "bin/codex",
+      elapsedMs: 10_000, cleanupElapsedMs: 12
+    });
+    expect(fields).not.toHaveProperty("hostPath");
+    expect(fields).not.toHaveProperty("stderr");
+    expect(sanitizeLogFields({
+      phase: "unexpected", failureCode: "secret=/private/path", errorClass: "VeryLongUntrustedClassName",
+      containerId: "not-a-container", artifactLayout: "unknown-layout", entryRelative: "../secret",
+      elapsedMs: -1, cleanupElapsedMs: 999_999_999
+    })).toEqual({});
+  });
+
   test("filters debug records at the safe info default and enables them explicitly", () => {
     expect(resolveLogLevel({})).toBe("info");
     expect(resolveLogLevel({ DEVSPACE_LOG_LEVEL: "not-a-level" })).toBe("info");

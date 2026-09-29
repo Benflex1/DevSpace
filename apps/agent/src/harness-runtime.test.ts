@@ -459,13 +459,16 @@ test("a host path is never executed and a staging failure releases the home", as
     createHarnessExec: async () => { throw new Error("should-not-exec"); },
     inspectSlot: async () => ({ state: "present-and-exact" }),
     probeImageCodex: async () => ({ present: false, version: null }),
-    stageNativeCodex: async () => { throw new Error("upload-failed"); }
+    stageNativeCodex: async () => { throw new Error("failure at /private/host/secret token=do-not-expose"); }
   });
   await expect(failedStage.start({
     projectId, workspaceId, sessionId: "018f1f34-7000-7000-8000-000000000043",
     harnessId: "codex", processId: "018f1f34-7000-7000-8000-000000000044",
     terminalId: "018f1f34-7000-7000-8000-000000000045", processGeneration: 1
-  })).rejects.toMatchObject({ code: "HARNESS_EXECUTABLE_UNAVAILABLE" });
+  })).rejects.toMatchObject({
+    code: "HARNESS_EXECUTABLE_UNAVAILABLE",
+    message: "The Agent Codex artifact could not be staged into the workspace container."
+  });
   expect(await readFile(path.join(stageHome.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
   await expect(stageHome.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1

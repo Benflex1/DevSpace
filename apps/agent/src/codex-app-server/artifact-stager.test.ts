@@ -13,6 +13,7 @@ import {
 import {
   createCodexArtifactStager,
   type CodexArtifactReadback,
+  type CodexArtifactStagingDiagnostic,
   type CodexLaunchArtifact
 } from "./artifact-stager.js";
 
@@ -153,5 +154,42 @@ describe("Codex artifact stager", () => {
       containerId: "managed-container", launchArtifact: launchArtifact(fixtureValue.staged),
       sessionId: "018f0000-0000-7000-8000-000000000001", processGeneration: 1
     })).rejects.toThrow("codex-artifact-readback-mismatch");
+  });
+
+  test("reports bounded private diagnostics for the first running-container upload failure", async () => {
+    const fixtureValue = await fixture();
+    const captured: Array<Record<string, unknown>> = [];
+    const diagnostics: CodexArtifactStagingDiagnostic[] = [];
+    const docker = fakeDocker(captured);
+    let attachCount = 0;
+    docker.startExecAttached = async () => {
+      attachCount += 1;
+      if (attachCount === 1) throw new Error("permission denied at /private/host/secret");
+      return endStream();
+    };
+    const stager = createCodexArtifactStager({
+      docker, readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      onFailure: (diagnostic) => diagnostics.push(diagnostic)
+    });
+
+    await expect(stager.stageIntoRunningContainer({
+      containerId: "a".repeat(64), staged: fixtureValue.staged,
+      destinationRoot: "/opt/devspace/codex-artifact/diagnostic"
+    })).rejects.toThrow("permission denied at /private/host/secret");
+
+    expect(diagnostics).toHaveLength(1);
+    const diagnostic = diagnostics[0];
+    expect(diagnostic).toMatchObject({
+      phase: "readback-helper-upload", failureCode: "unclassified", errorClass: "Error",
+      containerId: "a".repeat(64), artifactLayout: "self-contained-native"
+    });
+    expect(diagnostic?.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(diagnostic?.cleanupElapsedMs).toBeGreaterThanOrEqual(0);
+    expect(diagnostics[0]).not.toHaveProperty("errorMessage");
+    expect(JSON.stringify(diagnostics)).not.toContain("/private/host/secret");
+    expect(captured.some((item) => {
+      const input = item.input as DockerExecInput;
+      return input.command[2]?.includes("rm -rf") === true;
+    })).toBe(true);
   });
 });

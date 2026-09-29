@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { createCodexArtifactStager } from "./codex-app-server/artifact-stager.js";
 import { resolveCodexExecutionArtifact, stageCodexExecutionArtifact } from "./codex-app-server/artifact-identity.js";
+import {
+  codexArtifactStagingDiagnostic,
+  type CodexArtifactStagingDiagnostic,
+  type CodexArtifactStagingPhase
+} from "./codex-app-server/artifact-staging-diagnostics.js";
 import { resolveCodexExecutablePath } from "./codex-executable-resolution.js";
 import { CODEX_ARTIFACT_READBACK_HELPER_SHA256 } from "./codex-native-helper-identity.js";
 import type { DockerEngineClient } from "./docker-runtime.js";
@@ -17,18 +23,43 @@ export async function stageAgentCodexIntoContainer(input: {
   createId: () => string;
   environment?: NodeJS.ProcessEnv;
   readbackHelperBytes?: Uint8Array;
+  onStagingDiagnostic?: (diagnostic: CodexArtifactStagingDiagnostic) => void;
 }): Promise<{ entrypointPath: string; reportedVersion: string | null }> {
-  const artifact = await resolveCodexExecutionArtifact(resolveCodexExecutablePath(input.environment ?? process.env));
-  const staged = await stageCodexExecutionArtifact({ artifact, stateRoot: input.stateRoot });
-  const helper = input.readbackHelperBytes ?? await readFile(READBACK_HELPER);
+  let artifactLayout: Parameters<typeof codexArtifactStagingDiagnostic>[0]["artifactLayout"] = "unknown";
+  const runPhase = async <T>(phase: CodexArtifactStagingPhase, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = performance.now();
+    try { return await operation(); }
+    catch (error) {
+      try {
+        input.onStagingDiagnostic?.(codexArtifactStagingDiagnostic({
+          phase, error, containerId: input.containerId, artifactLayout, elapsedMs: performance.now() - startedAt
+        }));
+      } catch { /* private diagnostics must not change the staging outcome */ }
+      throw error;
+    }
+  };
+  const artifact = await runPhase("artifact-resolution", async () => await resolveCodexExecutionArtifact(
+    resolveCodexExecutablePath(input.environment ?? process.env)
+  ));
+  artifactLayout = artifact.layout;
+  const staged = await runPhase("agent-side-stage-copy", async () => await stageCodexExecutionArtifact({ artifact, stateRoot: input.stateRoot }));
+  const helper = await runPhase("readback-helper-load", async () => input.readbackHelperBytes ?? await readFile(READBACK_HELPER));
   if (createHash("sha256").update(helper).digest("hex") !== CODEX_ARTIFACT_READBACK_HELPER_SHA256
     && input.readbackHelperBytes === undefined) {
-    throw new Error("codex-artifact-readback-helper-integrity-mismatch");
+    const error = new Error("codex-artifact-readback-helper-integrity-mismatch");
+    try {
+      input.onStagingDiagnostic?.(codexArtifactStagingDiagnostic({
+        phase: "readback-helper-integrity", error, containerId: input.containerId,
+        artifactLayout, elapsedMs: 0
+      }));
+    } catch { /* private diagnostics must not change the staging outcome */ }
+    throw error;
   }
   const stagedResult = await createCodexArtifactStager({
     docker: input.docker,
     readbackHelperBytes: helper,
-    createId: input.createId
+    createId: input.createId,
+    ...(input.onStagingDiagnostic === undefined ? {} : { onFailure: input.onStagingDiagnostic })
   }).stageIntoRunningContainer({
     containerId: input.containerId,
     staged,

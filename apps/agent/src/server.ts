@@ -360,7 +360,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         containerId: context.ownership.developmentContainer.id,
         stateRoot: managedRoots.state,
         createId,
-        environment: process.env
+        environment: process.env,
+        onStagingDiagnostic: (diagnostic) => logger.error(
+          "agent.harness.codex_artifact_staging_failed",
+          "Native Codex artifact staging failed.",
+          { ...diagnostic, workspaceId: input.workspaceId }
+        )
       });
     }
   });
