@@ -66,6 +66,11 @@ export class DockerEngineTransportError extends Error {
   }
 }
 
+export interface DockerConsoleSize {
+  readonly columns: number;
+  readonly rows: number;
+}
+
 export interface DockerContainerInspection {
   Id: string;
   Name: string;
@@ -504,10 +509,20 @@ export class DockerEngineClient {
     readonly environment: Readonly<Record<string, string>>;
     readonly attachStdin: boolean;
     readonly tty: boolean;
+    readonly consoleSize?: DockerConsoleSize;
   }): Promise<string> {
+    if (input.consoleSize !== undefined) {
+      const { columns, rows } = input.consoleSize;
+      if (!input.tty) throw new Error("docker-exec-console-size-requires-tty");
+      if (!Number.isInteger(columns) || columns < 1 || columns > 65_535
+        || !Number.isInteger(rows) || rows < 1 || rows > 65_535) {
+        throw new Error("docker-exec-console-size-invalid");
+      }
+    }
     const response = await this.json<{ Id: string }>("POST", `/containers/${encodeURIComponent(containerId)}/exec`, {
       AttachStdin: input.attachStdin, AttachStdout: true, AttachStderr: true,
       DetachKeys: "", Tty: input.tty, Cmd: [...input.command], WorkingDir: input.workingDirectory,
+      ...(input.consoleSize === undefined ? {} : { ConsoleSize: [input.consoleSize.rows, input.consoleSize.columns] }),
       Env: Object.entries(input.environment).sort(([left], [right]) => left.localeCompare(right))
         .map(([name, value]) => `${name}=${value}`)
     });

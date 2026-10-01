@@ -60,6 +60,11 @@ The native PTY then executes that in-container entrypoint
 (`executableSource.kind = agent-artifact`). An Agent-host path is never passed to Docker
 exec. Otherwise start fails with `HARNESS_EXECUTABLE_UNAVAILABLE`. There is no Codex version pin.
 
+Interactive terminal and harness execs receive an initial PTY geometry of 80 columns by 24 rows
+at Docker exec creation, before a browser attachment exists. Docker's API represents that initial
+size as `[rows, columns]`. After attachment, the browser's measured terminal resize replaces the
+fallback; non-TTY task execs do not receive PTY geometry.
+
 A pre-slice development container that has only `/workspace` is upgraded in place. The
 existing workspace network, its labels, and the original `workspace.start` operation stay
 in place. Only the development container is replaced so it can gain

@@ -201,6 +201,10 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await terminal.locator(".xterm-helper-textarea").focus();
   await recoveredPage.keyboard.type("echo terminal-e2e-ok"); await recoveredPage.keyboard.press("Enter");
   await expect(terminal.getByText(/terminal-e2e-ok/u)).toBeVisible();
+  await recoveredPage.keyboard.type("printf '\\033[?1049h\\033[2J\\033[Htemporary\\033[?1049l\\033[2J\\033[H\\033[31mterminal-ansi-e2e-ok\\033[0m\\nterminal-e2e-ok\\n'");
+  await recoveredPage.keyboard.press("Enter");
+  await expect(terminal.getByText(/terminal-ansi-e2e-ok/u)).toBeVisible();
+  await expect(terminal.getByText("terminal-e2e-ok", { exact: true })).toBeVisible();
   await recoveredPage.setViewportSize({ width: 800, height: 700 });
   const terminalDatabase = new BetterSqlite3(fixture.databasePath, { readonly: true });
   const terminalRow = terminalDatabase.prepare<TerminalRow>("select id from terminal_sessions order by created_at desc limit 1").get();

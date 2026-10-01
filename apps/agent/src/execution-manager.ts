@@ -21,7 +21,7 @@ import {
 import type { ProjectOptionsV1 } from "@devspace/project-options";
 import * as z from "zod";
 import type WebSocket from "ws";
-import { DockerEngineClient, DockerEngineError } from "./docker-runtime.js";
+import { DockerEngineClient, DockerEngineError, DockerEngineTransportError } from "./docker-runtime.js";
 import { AgentExecutionError, ManagedWorkspaces, type WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter } from "./private-state.js";
 
@@ -129,6 +129,7 @@ type LiveExecution = {
   attachmentReserved: boolean;
   attachmentCleanup: Promise<void> | null;
   replay: Buffer;
+  resizeFailureReported: boolean;
 };
 
 function failure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionError {
@@ -187,6 +188,15 @@ export type HarnessExecutionSettlement = {
   readonly exitCode: number | null;
 };
 
+export type TerminalResizeFailureDiagnostic = {
+  readonly processId: string;
+  readonly terminalId: string;
+  readonly columns: number;
+  readonly rows: number;
+  readonly failureClass: "docker-http" | "docker-transport" | "unknown";
+  readonly failureCode: number | null;
+};
+
 export class ExecutionManager {
   private readonly recordsRoot: string;
   private readonly stateRoot: string;
@@ -204,6 +214,7 @@ export class ExecutionManager {
     private readonly hooks: {
       readonly onHarnessSettled?: (event: HarnessExecutionSettlement) => void | Promise<void>;
       readonly onHarnessRecovered?: (event: HarnessRecoveryIdentity) => void | Promise<void>;
+      readonly onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
     } = {}
   ) {
     this.recordsRoot = path.join(path.resolve(stateRoot), "ownership", "executions");
@@ -237,7 +248,7 @@ export class ExecutionManager {
         }
         : normalized;
       const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
-        attachmentCleanup: null, replay: Buffer.alloc(0) };
+        attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false };
       this.executions.set(record.processId, live);
       if (adopted.kind === "harness" && (stored.executionRole !== "harness"
         || stored.harnessSessionId !== adopted.sessionId || stored.harnessGeneration !== adopted.processGeneration
@@ -279,7 +290,7 @@ export class ExecutionManager {
     };
     const live: LiveExecution = {
       record: normalizeExecutionRecord(retained), stream: null, attachment: null, attachmentReserved: false,
-      attachmentCleanup: null, replay: Buffer.alloc(0)
+      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false
     };
     this.executions.set(stored.processId, live);
     // Preserve the legacy shape so a later startup can still reconcile it if
@@ -558,7 +569,7 @@ export class ExecutionManager {
       exitCode: null, startedAt: null, finishedAt: null
     };
     const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
-      attachmentCleanup: null, replay: Buffer.alloc(0) };
+      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false };
     // The exact request/operation binding is durable before Docker sees a side effect.
     await this.persist(live);
     this.executions.set(record.processId, live);
@@ -566,7 +577,8 @@ export class ExecutionManager {
       const execId = await this.engine.createExec(context.ownership.developmentContainer.id, {
         command: input.command, workingDirectory: input.workingDirectory,
         environment: input.environment,
-        attachStdin: input.attachStdin, tty: input.tty
+        attachStdin: input.attachStdin, tty: input.tty,
+        ...(input.tty ? { consoleSize: { columns: 80, rows: 24 } } : {})
       });
       const reserved = live.record;
       live.record = { ...reserved, execId, creationPhase: "exec-created", observedState: "starting" };
@@ -883,6 +895,32 @@ export class ExecutionManager {
     });
   }
 
+  private reportTerminalResizeFailure(live: LiveExecution, columns: number, rows: number, error: unknown): void {
+    if (live.resizeFailureReported || live.record.terminalId === null) return;
+    live.resizeFailureReported = true;
+    let failureClass: TerminalResizeFailureDiagnostic["failureClass"] = "unknown";
+    let failureCode: number | null = null;
+    if (error instanceof DockerEngineError && Number.isInteger(error.statusCode)
+      && error.statusCode >= 100 && error.statusCode <= 599) {
+      failureClass = "docker-http";
+      failureCode = error.statusCode;
+    } else if (error instanceof DockerEngineTransportError) {
+      failureClass = "docker-transport";
+    }
+    try {
+      this.hooks.onTerminalResizeFailure?.({
+        processId: live.record.processId,
+        terminalId: live.record.terminalId,
+        columns,
+        rows,
+        failureClass,
+        failureCode
+      });
+    } catch {
+      // Diagnostics must not turn a failed browser resize into a terminal failure.
+    }
+  }
+
   reserveTerminalAttachment(terminalId: string): { attach(socket: WebSocket): Promise<void>; release(): void } {
     const live = [...this.executions.values()].find((candidate) => candidate.record.terminalId === uuidV7Schema.parse(terminalId));
     if (live === undefined) throw terminalNotFound(terminalId);
@@ -953,8 +991,9 @@ export class ExecutionManager {
           if (decoded.frame.type === "detach") { socket.close(TERMINAL_NORMAL_CLOSE_CODE); return; }
           if (decoded.frame.type === "resize") {
             if (live.record.execId === null) { socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal execution identity is unavailable."); return; }
-            void this.engine.resizeExec(live.record.execId, decoded.frame.columns, decoded.frame.rows)
-              .catch(() => undefined);
+            const { columns, rows } = decoded.frame;
+            void this.engine.resizeExec(live.record.execId, columns, rows)
+              .catch((error: unknown) => this.reportTerminalResizeFailure(live, columns, rows, error));
             return;
           }
           if (live.stream === null || live.stream.destroyed || live.stream.writableLength > ATTACHMENT_BACKPRESSURE_BYTES) {

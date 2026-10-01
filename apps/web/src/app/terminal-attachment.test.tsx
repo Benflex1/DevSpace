@@ -5,6 +5,9 @@ import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
 import { installTerminalTestDom, settleReact } from "./terminal-test-dom.js";
+import { encodeTerminalAgentFrame } from "@devspace/contracts";
+
+const xtermState = vi.hoisted(() => ({ writes: [] as Uint8Array[] }));
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -30,6 +33,10 @@ class FakeSocket {
   emitExit() {
     this.onmessage?.({ data: Uint8Array.of(0x13, 0x00).buffer });
   }
+  emitOutput(data: Uint8Array) {
+    const frame = encodeTerminalAgentFrame({ type: "output", data });
+    this.onmessage?.({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer });
+  }
 }
 
 vi.mock("@xterm/xterm", () => ({
@@ -39,7 +46,7 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon() { /* fit addon is unused */ }
     open() { /* canvas is not required */ }
     focus() { /* focus is irrelevant */ }
-    write() { /* output is irrelevant */ }
+    write(data: Uint8Array) { xtermState.writes.push(data); }
     onData() { return { dispose() { /* unused */ } }; }
     onBinary() { return { dispose() { /* unused */ } }; }
     dispose() { /* attachment teardown */ }
@@ -62,6 +69,7 @@ afterEach(() => {
   for (const root of roots) root.unmount();
   roots.length = 0;
   FakeSocket.instances = [];
+  xtermState.writes = [];
 });
 
 test("parent refresh after ready does not open a second terminal socket", async () => {
@@ -144,4 +152,25 @@ test("hiding and showing the same terminal does not open another socket", async 
   await settleReact(2);
   expect(FakeSocket.instances).toHaveLength(1);
   expect(FakeSocket.instances[0]?.readyState).toBe(1);
+});
+
+test("valid PTY output after ready reaches xterm with ANSI and screen-control bytes intact", async () => {
+  const rootElement = installTerminalTestDom(FakeSocket);
+  const { TerminalTab } = await import("./terminal-tab.js");
+  const root = createRoot(rootElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(TerminalTab, {
+    projectId, workspaceId,
+    terminal: { id: terminalId, processId: terminalId, title: "Codex", state: "active" },
+    active: true, onRefresh: () => undefined, onTerminalStateChange: () => undefined
+  })); });
+  await settleReact();
+  const socket = FakeSocket.instances[0];
+  expect(socket).toBeDefined();
+  act(() => { socket?.emitReady(); });
+  await settleReact();
+  const bytes = new TextEncoder().encode("plain\u001b[31mred\u001b[0m\u001b[?1049h\u001b[2J\u001b[Hscreen\u001b[?1049l");
+  act(() => { socket?.emitOutput(bytes); });
+
+  expect(xtermState.writes).toEqual([bytes]);
 });

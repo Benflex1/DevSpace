@@ -65,6 +65,29 @@ async function listedEngineSocket(): Promise<string> {
   return socket;
 }
 
+async function execEngineSocket(): Promise<{ socket: string; execBodies: unknown[]; resizeUrls: string[] }> {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-exec-")); directories.push(directory);
+  const socket = path.join(directory, "engine.sock");
+  const execBodies: unknown[] = [];
+  const resizeUrls: string[] = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      if (request.url === "/containers/container-1/exec") {
+        execBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        response.writeHead(201, { "content-type": "application/json" }).end(JSON.stringify({ Id: `exec-${execBodies.length}` }));
+      } else if (request.url?.startsWith("/exec/exec-1/resize") === true) {
+        resizeUrls.push(request.url);
+        response.writeHead(200).end();
+      } else response.writeHead(404).end();
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+  return { socket, execBodies, resizeUrls };
+}
+
 describe("dedicated rootless Docker boundary", () => {
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
@@ -253,5 +276,24 @@ describe("dedicated rootless Docker boundary", () => {
       Id: "container-1", Names: ["/devspace-retained"], Labels: { "devspace.managed": "true" },
       State: "exited", Status: "Exited (0) 1 second ago"
     }]);
+  });
+
+  test("creates interactive execs with bounded initial geometry in Docker height-width order and allows later resize", async () => {
+    const fixture = await execEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createExec("container-1", {
+      command: ["/bin/sh"], workingDirectory: "/workspace", environment: {}, attachStdin: true, tty: true,
+      consoleSize: { columns: 80, rows: 24 }
+    })).resolves.toBe("exec-1");
+    await expect(engine.createExec("container-1", {
+      command: ["/usr/bin/printf", "ok"], workingDirectory: "/workspace", environment: {}, attachStdin: false, tty: false
+    })).resolves.toBe("exec-2");
+    await engine.resizeExec("exec-1", 120, 40);
+
+    expect(fixture.execBodies).toEqual([
+      expect.objectContaining({ Tty: true, ConsoleSize: [24, 80] }),
+      expect.not.objectContaining({ ConsoleSize: expect.anything() })
+    ]);
+    expect(fixture.resizeUrls).toEqual(["/exec/exec-1/resize?h=40&w=120"]);
   });
 });

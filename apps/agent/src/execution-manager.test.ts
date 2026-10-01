@@ -5,7 +5,9 @@ import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { encodeTerminalClientFrame } from "@devspace/contracts";
 import { ExecutionManager, TaskStartRecoveryRequiredError, isSuccessfulTaskExitCode } from "./execution-manager.js";
+import { DockerEngineError } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter } from "./private-state.js";
 
@@ -682,11 +684,13 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
     runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
-  const created: Array<{ command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean }> = [];
+  const created: Array<{ command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
+    consoleSize?: { columns: number; rows: number } }> = [];
   let identityAtStart: Record<string, unknown> | null = null;
   const engine = {
     createExec: async (_containerId: string, input: {
       command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
+      consoleSize?: { columns: number; rows: number };
     }) => {
       created.push(input);
       return `exec-${created.length}`;
@@ -716,6 +720,7 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
     command: ["codex", "resume", "thread-1"],
     workingDirectory: "/workspace",
     tty: true,
+    consoleSize: { columns: 80, rows: 24 },
     environment: { TERM: "xterm-256color", CODEX_HOME: "/opt/devspace/harness-home" }
   });
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
@@ -724,7 +729,81 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
   expect(terminalRecord.harnessSessionId).toBeNull();
   expect(created[1]).toMatchObject({
     command: ["/bin/sh"],
-    environment: { TERM: "xterm-256color" }
+    environment: { TERM: "xterm-256color" },
+    consoleSize: { columns: 80, rows: 24 }
   });
   expect(created[1]!.environment.CODEX_HOME).toBeUndefined();
+});
+
+test("ordinary task execs stay non-TTY while interactive terminals receive initial PTY geometry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-exec-console-size-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [{ key: "check", interactive: false,
+      longRunning: false, timeoutSeconds: null, concurrencyPolicy: "allow", successExitCodes: [0], command: {
+        executable: "/usr/bin/printf", args: ["ok"], workingDirectory: ".", environment: {}
+      } }] }
+  } as unknown as WorkspaceExecutionContext;
+  const created: Array<{ tty: boolean; consoleSize?: { columns: number; rows: number } }> = [];
+  const engine = {
+    createExec: async (_containerId: string, input: { tty: boolean; consoleSize?: { columns: number; rows: number } }) => {
+      created.push(input);
+      return `exec-${created.length}`;
+    },
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  await manager.initialize();
+  await manager.startTask({ projectId: id, workspaceId, taskRunId: terminalId, processId: operationId, taskKey: "check" }, operationId);
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(created[0]).toMatchObject({ tty: false });
+  expect(created[0]?.consoleSize).toBeUndefined();
+  expect(created[1]).toMatchObject({ tty: true, consoleSize: { columns: 80, rows: 24 } });
+});
+
+test("terminal resize failures produce one bounded private diagnostic without Docker response details", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-resize-diagnostic-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const diagnostics: unknown[] = [];
+  const engine = {
+    createExec: async () => "exec-resize",
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async () => ({ ID: "exec-resize", Running: true, ExitCode: 0, ContainerID: "container-owned" }),
+    resizeExec: async () => { throw new DockerEngineError(500, "secret path and arbitrary response text"); }
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine, undefined, undefined, {
+    onTerminalResizeFailure: (event) => { diagnostics.push(event); }
+  });
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const socket = new FakeSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
+  const resize = Buffer.from(encodeTerminalClientFrame({ type: "resize", columns: 120, rows: 40 }));
+  socket.emit("message", resize, true);
+  socket.emit("message", resize, true);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  expect(diagnostics).toEqual([{
+    processId: terminalId, terminalId, columns: 120, rows: 40, failureClass: "docker-http", failureCode: 500
+  }]);
+  expect(JSON.stringify(diagnostics)).not.toContain("secret path");
+  socket.terminate();
+  const executions = (manager as unknown as {
+    executions: Map<string, { attachmentCleanup: Promise<void> | null; attachment: unknown }>;
+  }).executions;
+  const live = executions.get(terminalId);
+  for (let attempt = 0; attempt < 1_000 && (live?.attachment !== null || live.attachmentCleanup !== null); attempt += 1) {
+    await live?.attachmentCleanup;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  expect(live?.attachment).toBeNull();
+  expect(live?.attachmentCleanup).toBeNull();
 });
