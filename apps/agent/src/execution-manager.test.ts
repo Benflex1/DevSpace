@@ -4,8 +4,8 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
-import { encodeTerminalClientFrame } from "@devspace/contracts";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { ExecutionManager, TaskStartRecoveryRequiredError, isSuccessfulTaskExitCode } from "./execution-manager.js";
 import { DockerEngineError } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
@@ -16,7 +16,10 @@ const workspaceId = "018f0f00-0000-7000-8000-000000000002";
 const terminalId = "018f0f00-0000-7000-8000-000000000003";
 const operationId = "018f0f00-0000-7000-8000-000000000004";
 const roots: string[] = [];
-afterEach(async () => await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))));
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
+});
 
 describe("configured task exit semantics", () => {
   test("uses the configured success exit codes rather than assuming zero", () => {
@@ -458,10 +461,90 @@ class FakeSocket extends EventEmitter {
   readonly CLOSED = 3;
   readyState = this.OPEN;
   bufferedAmount = 0;
-  send(): void { /* protocol output is not relevant to slot ownership */ }
+  send(_data: Buffer): void { /* protocol output is not relevant to slot ownership */ }
   close(): void { this.readyState = 2; }
   terminate(): void { this.readyState = this.CLOSED; queueMicrotask(() => this.emit("close")); }
 }
+
+class RecordingFakeSocket extends FakeSocket {
+  readonly frames: Buffer[] = [];
+  override send(data: Buffer): void { this.frames.push(Buffer.from(data)); }
+}
+
+test("a browser attaching after a fast terminal exit receives bounded replay and the exact exit code once", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-fast-exit-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const stream = new PassThrough();
+  stream.end(Buffer.from("FAST_EXIT_DIAGNOSTIC"));
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let creates = 0;
+  let starts = 0;
+  let resizes = 0;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    createExec: async () => { creates += 1; return "exec-fast-exit"; },
+    startExecAttached: async () => { starts += 1; return stream; },
+    inspectExec: async () => ({ ID: "exec-fast-exit", Running: false, ExitCode: 1, ContainerID: "container-owned" }),
+    resizeExec: async () => { resizes += 1; }
+  } as never);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
+
+  const socket = new RecordingFakeSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
+  const decoded = socket.frames.map((frame) => decodeTerminalAgentFrame(frame)).map((result) => {
+    expect(result.ok).toBe(true);
+    return result.ok ? result.frame : null;
+  });
+  expect(decoded).toEqual([
+    { type: "ready" },
+    { type: "output", data: Buffer.from("FAST_EXIT_DIAGNOSTIC") },
+    { type: "exit", exitCode: 1 }
+  ]);
+  expect(socket.readyState).toBe(socket.CLOSING);
+  expect(socket.listenerCount("message")).toBe(0);
+  const input = encodeTerminalClientFrame({ type: "input", data: Buffer.from("must-not-be-written") });
+  socket.emit("message", Buffer.from(input), true);
+  expect(stream.writableLength).toBe(0);
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+  expect(resizes).toBe(0);
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(() => manager.reserveTerminalAttachment("018f0f00-0000-7000-8000-000000000099"))
+    .toThrow("The terminal was not found.");
+});
+
+test("fast-exit replay is bounded and expires without reopening the process", async () => {
+  vi.useFakeTimers();
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-replay-expiry-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const stream = new PassThrough();
+  stream.end(Buffer.alloc(80 * 1024, 65));
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    createExec: async () => "exec-expiring", startExecAttached: async () => stream,
+    inspectExec: async () => ({ ID: "exec-expiring", Running: false, ExitCode: 1, ContainerID: "container-owned" })
+  } as never);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const executions = (manager as unknown as { executions: Map<string, { replay: Buffer }> }).executions;
+  expect(executions.get(terminalId)?.replay.byteLength).toBeLessThanOrEqual(64 * 1024);
+  const available = manager.reserveTerminalAttachment(terminalId);
+  available.release();
+
+  await vi.advanceTimersByTimeAsync(30_001);
+  expect(executions.get(terminalId)?.replay).toHaveLength(0);
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+});
 
 async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, terminalId: string): Promise<void> {
   let cleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;

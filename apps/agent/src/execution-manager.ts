@@ -26,6 +26,8 @@ import { AgentExecutionError, ManagedWorkspaces, type WorkspaceExecutionContext 
 import { durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter } from "./private-state.js";
 
 const REPLAY_LIMIT_BYTES = 64 * 1024;
+const TERMINAL_REPLAY_RETENTION_MS = 30_000;
+const TERMINAL_REPLAY_DRAIN_WAIT_MS = 1_000;
 const ATTACHMENT_BACKPRESSURE_BYTES = 256 * 1024;
 const RECOVERED_HARNESS_POLL_INITIAL_MS = 250;
 const RECOVERED_HARNESS_POLL_MAX_MS = 2_000;
@@ -130,6 +132,11 @@ type LiveExecution = {
   attachmentCleanup: Promise<void> | null;
   replay: Buffer;
   resizeFailureReported: boolean;
+  terminalReplayExpiresAt: number | null;
+  terminalReplayClaimed: boolean;
+  terminalReplayTimer: NodeJS.Timeout | null;
+  terminalReplayComplete: boolean;
+  terminalReplayWaiters: Set<() => void>;
 };
 
 function failure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionError {
@@ -248,7 +255,9 @@ export class ExecutionManager {
         }
         : normalized;
       const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
-        attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false };
+        attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
+        terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
+        terminalReplayComplete: true, terminalReplayWaiters: new Set() };
       this.executions.set(record.processId, live);
       if (adopted.kind === "harness" && (stored.executionRole !== "harness"
         || stored.harnessSessionId !== adopted.sessionId || stored.harnessGeneration !== adopted.processGeneration
@@ -290,7 +299,9 @@ export class ExecutionManager {
     };
     const live: LiveExecution = {
       record: normalizeExecutionRecord(retained), stream: null, attachment: null, attachmentReserved: false,
-      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false
+      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
+      terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
+      terminalReplayComplete: true, terminalReplayWaiters: new Set()
     };
     this.executions.set(stored.processId, live);
     // Preserve the legacy shape so a later startup can still reconcile it if
@@ -484,6 +495,7 @@ export class ExecutionManager {
       live.record = { ...live.record, observedState: stopped ? "killed" : successful ? "exited" : "failed",
         exitCode: inspection.ExitCode, finishedAt: this.now().toISOString(), terminalState: live.record.kind === "terminal" ? "closed" : null };
       await this.persist(live);
+      this.retainTerminalReplay(live);
       await this.notifyHarnessSettled(live).catch(() => undefined);
       if (live.attachment !== null && live.attachment.readyState === live.attachment.OPEN) {
         live.attachment.send(encodeTerminalAgentFrame({ type: "exit", exitCode: inspection.ExitCode }), { binary: true });
@@ -525,6 +537,7 @@ export class ExecutionManager {
 
   private attachStream(live: LiveExecution, stream: Duplex): void {
     live.stream = stream;
+    live.terminalReplayComplete = false;
     stream.on("data", (chunk: Buffer) => {
       if (live.record.kind !== "terminal") return;
       const data = Buffer.from(chunk);
@@ -539,9 +552,9 @@ export class ExecutionManager {
         socket.send(encodeTerminalAgentFrame({ type: "output", data: data.subarray(offset, offset + TERMINAL_MAX_PAYLOAD_BYTES) }), { binary: true });
       }
     });
-    stream.once("close", () => { void this.refresh(live).catch(() => undefined); });
-    stream.once("end", () => { void this.refresh(live).catch(() => undefined); });
-    stream.once("error", () => { void this.refresh(live).catch(() => undefined); });
+    stream.once("close", () => { this.completeTerminalReplay(live); void this.refresh(live).catch(() => undefined); });
+    stream.once("end", () => { this.completeTerminalReplay(live); void this.refresh(live).catch(() => undefined); });
+    stream.once("error", () => { this.completeTerminalReplay(live); void this.refresh(live).catch(() => undefined); });
     stream.resume();
   }
 
@@ -569,7 +582,9 @@ export class ExecutionManager {
       exitCode: null, startedAt: null, finishedAt: null
     };
     const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
-      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false };
+      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
+      terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
+      terminalReplayComplete: true, terminalReplayWaiters: new Set() };
     // The exact request/operation binding is durable before Docker sees a side effect.
     await this.persist(live);
     this.executions.set(record.processId, live);
@@ -611,6 +626,9 @@ export class ExecutionManager {
     let stream: Duplex;
     try { stream = await this.engine.startExecAttached(execId, tty); }
     catch { throw new TaskStartRecoveryRequiredError(); }
+    // Attach the bounded terminal buffer before inspecting the exec. A short
+    // process can write its complete error and exit between start and inspect.
+    if (tty && live.record.kind === "terminal") this.attachStream(live, stream);
     let inspection: Awaited<ReturnType<DockerEngineClient["inspectExec"]>>;
     try {
       inspection = await this.engine.inspectExec(execId);
@@ -650,9 +668,13 @@ export class ExecutionManager {
       stream?.destroy();
       throw new TaskStartRecoveryRequiredError();
     }
-    if (!terminal && stream !== null) this.attachStream(live, stream);
-    else {
-      stream?.destroy();
+    if (live.record.kind === "terminal") {
+      if (stream !== null && live.stream !== stream) this.attachStream(live, stream);
+      if (terminal) this.retainTerminalReplay(live);
+    } else if (stream !== null) {
+      stream.destroy();
+    }
+    if (terminal) {
       // Settlement failure must not turn a started exec into a second launch.
       // flushHarnessSettlements retries until the hook succeeds once.
       await this.notifyHarnessSettled(live).catch(() => undefined);
@@ -921,11 +943,59 @@ export class ExecutionManager {
     }
   }
 
+  private retainTerminalReplay(live: LiveExecution): void {
+    if (live.record.kind !== "terminal" || live.record.terminalState !== "closed"
+      || live.terminalReplayExpiresAt !== null) return;
+    live.terminalReplayExpiresAt = Date.now() + TERMINAL_REPLAY_RETENTION_MS;
+    live.terminalReplayTimer = setTimeout(() => {
+      live.replay = Buffer.alloc(0);
+      live.terminalReplayExpiresAt = null;
+      live.terminalReplayTimer = null;
+    }, TERMINAL_REPLAY_RETENTION_MS);
+    live.terminalReplayTimer.unref();
+  }
+
+  private completeTerminalReplay(live: LiveExecution): void {
+    if (live.terminalReplayComplete) return;
+    live.terminalReplayComplete = true;
+    for (const wake of live.terminalReplayWaiters) wake();
+    live.terminalReplayWaiters.clear();
+  }
+
+  private async waitForTerminalReplay(live: LiveExecution): Promise<void> {
+    if (live.terminalReplayComplete || live.terminalReplayExpiresAt === null) return;
+    const waitMs = Math.min(TERMINAL_REPLAY_DRAIN_WAIT_MS, Math.max(0, live.terminalReplayExpiresAt - Date.now()));
+    if (waitMs === 0) return;
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        live.terminalReplayWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, waitMs);
+      live.terminalReplayWaiters.add(finish);
+    });
+  }
+
+  private sendTerminalReplay(socket: WebSocket, replay: Buffer): void {
+    if (socket.readyState !== socket.OPEN) return;
+    socket.send(encodeTerminalAgentFrame({ type: "ready" }), { binary: true });
+    for (let offset = 0; offset < replay.length; offset += TERMINAL_MAX_PAYLOAD_BYTES) {
+      socket.send(encodeTerminalAgentFrame({ type: "output", data: replay.subarray(offset, offset + TERMINAL_MAX_PAYLOAD_BYTES) }), { binary: true });
+    }
+  }
+
   reserveTerminalAttachment(terminalId: string): { attach(socket: WebSocket): Promise<void>; release(): void } {
     const live = [...this.executions.values()].find((candidate) => candidate.record.terminalId === uuidV7Schema.parse(terminalId));
     if (live === undefined) throw terminalNotFound(terminalId);
+    const postExitReplay = live.record.terminalState === "closed"
+      && live.terminalReplayExpiresAt !== null && Date.now() < live.terminalReplayExpiresAt
+      && !live.terminalReplayClaimed;
     if (live.attachmentReserved || live.attachment !== null || live.attachmentCleanup !== null
-      || !["active", "disconnected"].includes(live.record.terminalState ?? "")) {
+      || (!postExitReplay && !["active", "disconnected"].includes(live.record.terminalState ?? ""))) {
       throw failure("RESOURCE_STATE_CONFLICT", "The terminal cannot accept another attachment.", {
         resource: { type: "terminal", id: terminalId }, action: "attach"
       });
@@ -935,7 +1005,27 @@ export class ExecutionManager {
     return {
       release: () => { if (!claimed) live.attachmentReserved = false; },
       attach: async (socket) => {
-        claimed = true; live.attachmentReserved = false; live.attachment = socket;
+        claimed = true; live.attachmentReserved = false;
+        if (postExitReplay) {
+          live.terminalReplayClaimed = true;
+          await this.waitForTerminalReplay(live);
+          if (live.terminalReplayExpiresAt === null || Date.now() >= live.terminalReplayExpiresAt) {
+            socket.close(TERMINAL_NORMAL_CLOSE_CODE);
+            return;
+          }
+          const replay = live.replay;
+          this.sendTerminalReplay(socket, replay);
+          if (socket.readyState === socket.OPEN) {
+            socket.send(encodeTerminalAgentFrame({ type: "exit", exitCode: live.record.exitCode }), { binary: true });
+            socket.close(TERMINAL_NORMAL_CLOSE_CODE);
+          }
+          live.replay = Buffer.alloc(0);
+          if (live.terminalReplayTimer !== null) clearTimeout(live.terminalReplayTimer);
+          live.terminalReplayTimer = null;
+          live.terminalReplayExpiresAt = null;
+          return;
+        }
+        live.attachment = socket;
         let finishSetup!: () => void;
         const setupComplete = new Promise<void>((resolve) => { finishSetup = resolve; });
         let lostRequested = false;

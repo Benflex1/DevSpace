@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
-import { isTerminalAttachableState, reconcileTerminalState, terminalSocketCloseAction, terminalStateMessage, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
+import { isTerminalAttachableState, isTerminalOpenableState, reconcileTerminalState, terminalSocketCloseAction, terminalStateMessage, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
 export type TerminalView = { id: string; processId: string; title: string; state: string };
 
 export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh, onTerminalStateChange }: {
@@ -73,7 +73,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
       onRefreshRef.current();
     };
     const start = window.setTimeout(() => {
-      if (!isTerminalAttachableState(authoritativeState.current)) {
+      if (!isTerminalOpenableState(authoritativeState.current)) {
         updateState(terminalUiState(authoritativeState.current));
         return;
       }

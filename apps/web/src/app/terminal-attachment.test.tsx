@@ -174,3 +174,27 @@ test("valid PTY output after ready reaches xterm with ANSI and screen-control by
 
   expect(xtermState.writes).toEqual([bytes]);
 });
+
+test("a closed fast-exit terminal receives its one-shot retained output and exit frame", async () => {
+  const rootElement = installTerminalTestDom(FakeSocket);
+  const { TerminalTab } = await import("./terminal-tab.js");
+  const states: string[] = [];
+  const root = createRoot(rootElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(TerminalTab, {
+    projectId, workspaceId,
+    terminal: { id: terminalId, processId: terminalId, title: "Terminal 1", state: "closed" },
+    active: true, onRefresh: () => undefined, onTerminalStateChange: (_id, state) => states.push(state)
+  })); });
+  await settleReact();
+  expect(FakeSocket.instances).toHaveLength(1);
+  const socket = FakeSocket.instances[0]!;
+  act(() => { socket.emitReady(); });
+  const output = new TextEncoder().encode("FAST_EXIT_DIAGNOSTIC");
+  act(() => { socket.emitOutput(output); socket.emitExit(); });
+  await settleReact(2);
+
+  expect(xtermState.writes).toEqual([output]);
+  expect(states.at(-1)).toBe("closed");
+  expect(FakeSocket.instances).toHaveLength(1);
+});

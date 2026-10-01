@@ -35,8 +35,16 @@ Home copies are bounded to 16 directory levels, 16,384 entries, 32 MiB per file,
 total; the entry count includes directories, symlinks, and omitted runtime entries. Codex's
 versioned app-server package cache at `packages/app-server-daemon/releases` is ephemeral: it is
 walked under the depth and entry limits but omitted during both materialization and writeback,
-so large cached binaries do not consume the persistent home-copy budget. No other package path
-is exempt from the file and tree byte limits.
+so large cached binaries do not consume the persistent home-copy budget. Only that exact
+release subtree is excluded from the package cache; other package contents follow the rules
+below. Codex's exact app-server daemon runtime markers
+(`app-server-daemon/{daemon-updater.pid,daemon-updater.pid.lock,daemon-updater.stderr.log,
+daemon.lock,daemon.pid.lock,daemon.stderr.log}`) and package installer metadata
+(`packages/app-server-daemon/{auto-update-version,current,install.lock}`) are also ephemeral
+and omitted in both directions. These volatile PID, lock, log, version-pointer, and release
+cache entries are not copied back into the next private home slot. Their exact names are
+filtered while traversal still counts every entry; other contents in those directories remain
+durable and subject to the normal copy bounds.
 Unix sockets in a live slot are ephemeral and omitted during writeback. A Unix socket found in
 persistent state is rejected during materialization and is never recreated in a slot. FIFOs,
 block devices, character devices, and unknown special objects remain rejected in both
@@ -93,6 +101,12 @@ needed, empties it, and releases the lease. `TaskStartRecoveryRequiredError` is 
 uncertainty: the lease stays, the private record stays live, and Web leaves the SQLite row
 `creating` so the same process id can be retried. A retry of the same process does not launch
 a second exec.
+
+Terminal PTY output is retained in the existing bounded 64 KiB replay buffer. When a terminal
+exits before a browser attaches, one read-only attachment may receive `ready`, the captured
+output, and the exact exit frame during a 30-second window. That attachment cannot send input or
+resize, does not restart the process, and consumes the replay. The buffer is cleared on delivery
+or expiry. This also lets ordinary terminals display diagnostics from short-lived commands.
 
 Startup also reconciles a harness exec with a durable exit observation when its exact private
 session still records pending settlement. This closes the crash window between recording the
