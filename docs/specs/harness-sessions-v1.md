@@ -24,6 +24,17 @@ Launch and resume are `{ executable, args[] }`. Resume classification:
 - one whole-token `{sessionId}`: ID-based resume when a real native ID is stored privately
 - otherwise: invalid definition
 
+## Built-in Codex lifecycle
+
+The built-in Codex preset uses `--no-daemon` for both launch and resume. Its `CODEX_HOME`
+is an exclusive private slot leased only for the lifetime of the admitted native harness
+generation. A detached Codex app-server daemon or updater could continue changing that slot
+after the foreground TUI exits and DevSpace releases the lease, so detached provider daemons
+are incompatible with this dedicated-home lifecycle. Normal Codex session data remains in the
+home and is discovered for later native resume; daemon runtime state is ephemeral and is not
+needed to restore the conversation. This contract applies to the built-in Codex preset and is
+not automatically imposed on arbitrary custom harness argv.
+
 ## Isolation
 
 Only the selected harness home is copied into `/opt/devspace/harness-home`. Unrelated homes
