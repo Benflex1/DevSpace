@@ -149,6 +149,39 @@ describe("dedicated rootless Docker boundary", () => {
     expect(JSON.stringify(body)).not.toContain("docker.sock");
   });
 
+  test("creates a one-shot private-slot cleanup container with no workspace or network access", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createHarnessHomeCleanupContainer("devspace-harness-cleanup-test", {
+      imageId: `sha256:${"a".repeat(64)}`,
+      workspaceId: "018f1f34-7000-7000-8000-000000000002",
+      slotHostPath: "/srv/devspace/managed/state/harness-slots/018f1f34-7000-7000-8000-000000000002"
+    })).resolves.toBe("container-1");
+    expect(fixture.bodies[0]).toMatchObject({
+      Image: `sha256:${"a".repeat(64)}`,
+      User: "0",
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: [expect.stringContaining("find -P /opt/devspace/harness-home")],
+      HostConfig: {
+        Mounts: [{
+          Type: "bind",
+          Source: "/srv/devspace/managed/state/harness-slots/018f1f34-7000-7000-8000-000000000002",
+          Target: "/opt/devspace/harness-home",
+          ReadOnly: false,
+          BindOptions: { Propagation: "rprivate" }
+        }],
+        NetworkMode: "none",
+        Privileged: false,
+        ReadonlyRootfs: true,
+        CapAdd: ["DAC_OVERRIDE", "FOWNER"],
+        CapDrop: ["ALL"],
+        Devices: []
+      }
+    });
+    expect(JSON.stringify(fixture.bodies[0])).not.toContain("/workspace");
+    expect(JSON.stringify(fixture.bodies[0])).not.toContain("docker.sock");
+  });
+
   test("serializes an isolated probe container without inheriting image startup or workspace authority", async () => {
     const fixture = await recordingEngineSocket();
     const engine = new DockerEngineClient(fixture.socket);

@@ -1,4 +1,5 @@
 import { mkdir, readdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import * as z from "zod";
 import { projectOptionsRevisionHashSchema, uuidV7Schema } from "@devspace/contracts";
@@ -16,6 +17,7 @@ const dockerIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.:-]+$/u);
 const dockerNameSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/u);
 const labelsSchema = z.record(z.string(), z.string());
 const absolutePathSchema = z.string().refine((value) => path.isAbsolute(value), "Expected an absolute path");
+const HARNESS_SLOT_CLEANUP_TIMEOUT_MS = 10_000;
 export const runtimePreviewBindingSchema = z.strictObject({
   leaseId: uuidV7Schema,
   previewKey: z.string().regex(/^[a-z][a-z0-9-]*$/u),
@@ -206,6 +208,69 @@ export class WorkspaceRuntimeManager {
       return await this.slotMountFor(record);
     } catch {
       return { state: "missing" };
+    }
+  }
+
+  async clearHarnessHomeSlot(workspaceIdInput: string): Promise<void> {
+    const workspaceId = uuidV7Schema.parse(workspaceIdInput);
+    try { await this.engine.assertRootlessAvailable(); }
+    catch { throw new WorkspaceRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable."); }
+    const record = await this.load(workspaceId);
+    if (record === null) throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact Agent-owned workspace runtime is unavailable.");
+    let container: Awaited<ReturnType<DockerEngineClient["inspectContainer"]>>;
+    try {
+      const [network, inspected] = await Promise.all([
+        this.engine.inspectNetwork(record.network.id), this.engine.inspectContainer(record.developmentContainer.id)
+      ]);
+      this.validateNetwork(network, record.network);
+      this.validateContainer(inspected, record);
+      const slot = classifyHarnessSlotMount({ mounts: inspected.Mounts, worktreePath: record.worktreePath,
+        slotHostPath: this.harnessSlotHostPath(workspaceId) });
+      if (slot.state !== "present-and-exact") throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained container does not own the exact harness slot.");
+      container = inspected;
+    } catch (error) {
+      if (error instanceof WorkspaceRuntimeError) throw error;
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact workspace container could not be verified for private-slot cleanup.");
+    }
+    if (container.Image === undefined || !/^sha256:[0-9a-f]{64}$/u.test(container.Image)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact workspace image could not be verified for private-slot cleanup.");
+    }
+    const helperName = `devspace-harness-cleanup-${workspaceId}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    let helperId: string;
+    try {
+      helperId = await this.engine.createHarnessHomeCleanupContainer(helperName, {
+        imageId: container.Image,
+        workspaceId,
+        slotHostPath: this.harnessSlotHostPath(workspaceId)
+      });
+    } catch {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "A bounded private-slot cleanup task could not be created.");
+    }
+    let operationError: unknown;
+    try {
+      await this.engine.startContainer(helperId);
+      const deadline = this.lifecycle.now() + HARNESS_SLOT_CLEANUP_TIMEOUT_MS;
+      for (;;) {
+        const observation = await this.engine.inspectContainer(helperId);
+        if (!observation.State.Running) {
+          if (observation.State.Status !== "exited" || observation.State.ExitCode !== 0) {
+            throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The bounded private-slot cleanup task did not complete successfully.");
+          }
+          break;
+        }
+        if (this.lifecycle.now() >= deadline) {
+          throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The bounded private-slot cleanup task exceeded its time limit.");
+        }
+        await this.lifecycle.sleep(100);
+      }
+    } catch (error) {
+      operationError = error;
+    }
+    let removalError: unknown;
+    try { await this.engine.removeContainer(helperId); } catch (error) { removalError = error; }
+    if (operationError !== undefined) throw operationError;
+    if (removalError !== undefined) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The completed private-slot cleanup task could not be removed.");
     }
   }
 

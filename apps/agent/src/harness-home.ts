@@ -42,6 +42,8 @@ const slotMetaSchema = z.strictObject({
 });
 type SlotMeta = z.infer<typeof slotMetaSchema>;
 
+const CODEX_EPHEMERAL_CACHE_PATH = path.join("packages", "app-server-daemon", "releases");
+
 export type RecoveredSlot = {
   readonly workspaceId: string;
   readonly harnessId: string;
@@ -64,6 +66,11 @@ export interface HarnessHomeStore {
   recoverDirtySlots(): Promise<readonly RecoveredSlot[]>;
   reapStaleLeases(): Promise<void>;
   persistentHomePath(harnessId: string): string;
+}
+
+export interface HarnessHomeStoreOptions {
+  /** Run the fixed cleanup operation in the exact workspace container user namespace. */
+  readonly clearSlotAsWorkspaceUser?: (workspaceId: string) => Promise<void>;
 }
 
 function requireHarnessId(value: string): string {
@@ -111,6 +118,18 @@ async function emptyDirectory(target: string): Promise<void> {
   }
 }
 
+async function emptyHarnessSlot(target: string, workspaceId: string, options: HarnessHomeStoreOptions): Promise<void> {
+  try {
+    await emptyDirectory(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EACCES" || options.clearSlotAsWorkspaceUser === undefined) throw error;
+    await options.clearSlotAsWorkspaceUser(workspaceId);
+    if ((await readdir(target)).length !== 0) {
+      throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The workspace container did not clear the exact private harness slot.");
+    }
+  }
+}
+
 async function readLease(homePath: string): Promise<LeaseMetadata | null> {
   const file = leaseMetadataPath(homePath);
   if (!await pathExists(file)) return null;
@@ -133,10 +152,18 @@ function rejectUnsupported(reason: string): never {
   throw new HarnessHomeError("HARNESS_HOME_UNSUPPORTED", reason);
 }
 
-async function walkCopy(sourceRoot: string, destinationRoot: string, skip: ReadonlySet<string>): Promise<void> {
+type HomeCopyDirection = "materialize" | "writeback";
+
+async function walkCopy(
+  sourceRoot: string,
+  destinationRoot: string,
+  skip: ReadonlySet<string>,
+  direction: HomeCopyDirection,
+  harnessId: string
+): Promise<void> {
   let entries = 0;
   let totalBytes = 0;
-  const visit = async (relative: string, depth: number): Promise<void> => {
+  const visit = async (relative: string, depth: number, insideCodexCache: boolean): Promise<void> => {
     if (depth > HARNESS_HOME_MAX_DEPTH) rejectUnsupported("directory depth exceeds the bound");
     const source = relative === "" ? sourceRoot : path.join(sourceRoot, relative);
     const destination = relative === "" ? destinationRoot : path.join(destinationRoot, relative);
@@ -147,33 +174,44 @@ async function walkCopy(sourceRoot: string, destinationRoot: string, skip: Reado
       const target = await readlink(source);
       const targetBytes = Buffer.byteLength(target, "utf8");
       if (targetBytes > 4_096) rejectUnsupported("symbolic link target exceeds the bound");
-      totalBytes += targetBytes;
-      if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
+      if (!insideCodexCache) {
+        totalBytes += targetBytes;
+        if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
+      }
+      if (insideCodexCache) return;
       await ensureDirectory(path.dirname(destination));
       // Retain the link itself without resolving its target on the host.
       await symlink(target, destination);
       return;
     }
-    if (stats.isSocket() || stats.isFIFO() || stats.isBlockDevice() || stats.isCharacterDevice()) {
+    if (stats.isSocket()) {
+      entries += 1;
+      if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
+      if (direction === "writeback") return;
+      rejectUnsupported("Unix sockets cannot be materialized from the persistent harness home.");
+    }
+    if (stats.isFIFO() || stats.isBlockDevice() || stats.isCharacterDevice()) {
       rejectUnsupported("special files are not allowed");
     }
     if (stats.isDirectory()) {
       entries += 1;
       if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
-      if (relative !== "") await ensureDirectory(destination);
+      const omitDirectory = insideCodexCache || (harnessId === "codex" && relative === CODEX_EPHEMERAL_CACHE_PATH);
+      if (relative !== "" && !omitDirectory) await ensureDirectory(destination);
       const children = await readdir(source, { withFileTypes: true });
       for (const child of children) {
         if (relative === "" && skip.has(child.name)) continue;
         if (child.name === "." || child.name === ".." || child.name.includes("\0") || child.name.includes("/")) {
           rejectUnsupported("illegal path component");
         }
-        await visit(relative === "" ? child.name : path.join(relative, child.name), depth + 1);
+        await visit(relative === "" ? child.name : path.join(relative, child.name), depth + 1, omitDirectory);
       }
       return;
     }
     if (!stats.isFile()) rejectUnsupported("unsupported filesystem object");
     entries += 1;
     if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
+    if (insideCodexCache) return;
     if (stats.size > HARNESS_HOME_MAX_FILE_BYTES) rejectUnsupported("file exceeds the size bound");
     totalBytes += Number(stats.size);
     if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
@@ -188,7 +226,7 @@ async function walkCopy(sourceRoot: string, destinationRoot: string, skip: Reado
     }
   };
   await ensureDirectory(destinationRoot);
-  await visit("", 0);
+  await visit("", 0, false);
 }
 
 async function rotatePayload(homePath: string, incomingPath: string): Promise<void> {
@@ -208,7 +246,7 @@ async function rotatePayload(homePath: string, incomingPath: string): Promise<vo
   await rm(previousPath, { recursive: true, force: true });
 }
 
-export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
+export function createHarnessHomeStore(stateRoot: string, options: HarnessHomeStoreOptions = {}): HarnessHomeStore {
   const root = path.resolve(stateRoot);
   const homesRoot = path.join(root, "harness-homes");
   const slotsRoot = path.join(root, "harness-slots");
@@ -331,8 +369,8 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
       await establishPinnedDirectory(slotsRoot);
       await establishPinnedDirectory(metaRoot);
       const slot = slotHostPath(workspaceId);
-      await emptyDirectory(slot);
-      await walkCopy(persistentHomePath(harnessId), slot, new Set([".lease"]));
+      await emptyHarnessSlot(slot, workspaceId, options);
+      await walkCopy(persistentHomePath(harnessId), slot, new Set([".lease"]), "materialize", harnessId);
       await writeMeta({ harnessId, workspaceId, leaseId: input.leaseId, dirty: true });
       return { containerPath: HARNESS_SLOT_CONTAINER_PATH, slotHostPath: slot };
     },
@@ -346,7 +384,7 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
         // A previous writeback completed before a crash but its caller did not
         // persist the released lease. The clean owner marker makes this retry
         // a slot clear, never a second copy into the persistent home.
-        await emptyDirectory(slotHostPath(workspaceId));
+        await emptyHarnessSlot(slotHostPath(workspaceId), workspaceId, options);
         return;
       }
       await requireLease(meta.harnessId, input.leaseId, workspaceId);
@@ -355,14 +393,14 @@ export function createHarnessHomeStore(stateRoot: string): HarnessHomeStore {
       const incoming = `${homePath}.incoming`;
       await rm(incoming, { recursive: true, force: true });
       try {
-        await walkCopy(slot, incoming, new Set([".lease"]));
+        await walkCopy(slot, incoming, new Set([".lease"]), "writeback", meta.harnessId);
         await rotatePayload(homePath, incoming);
       } catch (error) {
         await rm(incoming, { recursive: true, force: true }).catch(() => undefined);
         throw error;
       }
       await writeMeta({ ...meta, dirty: false });
-      await emptyDirectory(slot);
+      await emptyHarnessSlot(slot, workspaceId, options);
     },
     async releaseLease(input) {
       const harnessId = requireHarnessId(input.harnessId);

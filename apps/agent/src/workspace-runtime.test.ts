@@ -27,6 +27,8 @@ class FakeEngine extends DockerEngineClient {
   readonly containers = new Map<string, DockerContainerInspection>();
   readonly names = new Set<string>();
   lastContainerInput: Parameters<DockerEngineClient["createContainer"]>[1] | null = null;
+  cleanupInput: Parameters<DockerEngineClient["createHarnessHomeCleanupContainer"]>[1] | null = null;
+  cleanupContainerId: string | null = null;
   networkCreates = 0;
   containerCreates = 0;
   imageFailures = 0;
@@ -57,7 +59,8 @@ class FakeEngine extends DockerEngineClient {
     const id = `container-${this.containerCreates}`; this.names.add(name); this.lastContainerInput = input;
     const network = [...this.networks.values()].find((candidate) => candidate.Name === input.networkName);
     if (network === undefined) throw new DockerEngineError(404, "network missing");
-    this.containers.set(id, { Id: id, Name: `/${name}`, Config: { Labels: { ...input.labels }, WorkingDir: "/workspace" },
+    this.containers.set(id, { Id: id, Name: `/${name}`, Image: `sha256:${"1".repeat(64)}`,
+      Config: { Labels: { ...input.labels }, Image: input.imageReference, User: input.user ?? "", WorkingDir: "/workspace" },
       State: { Running: false, Status: "created" }, HostConfig: { Privileged: false, PublishAllPorts: false,
         PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
         NetworkMode: input.networkName,
@@ -75,6 +78,21 @@ class FakeEngine extends DockerEngineClient {
       ] });
     return Promise.resolve(id);
   }
+  override createHarnessHomeCleanupContainer(name: string, input: Parameters<DockerEngineClient["createHarnessHomeCleanupContainer"]>[1]): Promise<string> {
+    this.cleanupInput = input;
+    const id = `cleanup-${this.containers.size + 1}`;
+    this.cleanupContainerId = id;
+    this.containers.set(id, { Id: id, Name: `/${name}`, Image: input.imageId,
+      Config: { Labels: { "devspace.managed": "true", "devspace.resource": "harness-home-cleanup",
+        "devspace.workspace-id": input.workspaceId }, Image: input.imageId, User: "0", WorkingDir: "/" },
+      State: { Running: false, Status: "created", ExitCode: 0 },
+      HostConfig: { Privileged: false, PublishAllPorts: false, PidMode: "", IpcMode: "private", UTSMode: "",
+        UsernsMode: "", CgroupnsMode: "private", NetworkMode: "none", PortBindings: {}, Devices: [],
+        NanoCpus: 500_000_000, Memory: 128 * 1024 * 1024, PidsLimit: 16, CapAdd: [], CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges:true"], AutoRemove: false, ReadonlyRootfs: true,
+        RestartPolicy: { Name: "no", MaximumRetryCount: 0 } }, NetworkSettings: { Networks: {} }, Mounts: [] });
+    return Promise.resolve(id);
+  }
   override inspectContainer(id: string): Promise<DockerContainerInspection> {
     const value = this.containers.get(id) ?? [...this.containers.values()].find((container) => container.Name.replace(/^\//u, "") === id);
     if (value?.State.Running === true) {
@@ -85,6 +103,7 @@ class FakeEngine extends DockerEngineClient {
       ? Promise.reject(new DockerEngineError(404, "missing")) : Promise.resolve(value);
   }
   override startContainer(id: string): Promise<void> { const value = this.containers.get(id); if (value === undefined) throw new DockerEngineError(404, "missing");
+    if (id === this.cleanupContainerId) { this.containers.set(id, { ...value, State: { Running: false, Status: "exited", ExitCode: 0 } }); return Promise.resolve(); }
     this.networkIdsBeforeStart.push(value.NetworkSettings.Networks?.[value.HostConfig.NetworkMode]?.NetworkID ?? "missing");
     const network = [...this.networks.values()].find((candidate) => candidate.Name === value.HostConfig.NetworkMode);
     if (network === undefined) throw new DockerEngineError(404, "network missing");
@@ -200,6 +219,21 @@ describe("exact Docker runtime ownership", () => {
     await expect(start(fixture, "018f1f34-7000-7000-8000-000000000011")).resolves.toMatchObject({ observedState: "running" });
     expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(1);
   });
+
+  test("clears a private slot with a restricted helper bound to the exact stopped workspace owner", async () => {
+    const fixture = await runtimeFixture();
+    await start(fixture);
+    await fixture.manager.stop(fixture.association);
+
+    await expect(fixture.manager.clearHarnessHomeSlot(fixture.association.workspaceId)).resolves.toBeUndefined();
+
+    expect(fixture.engine.cleanupInput).toEqual({
+      imageId: `sha256:${"1".repeat(64)}`,
+      workspaceId: fixture.association.workspaceId,
+      slotHostPath: path.join(fixture.root, "state", "harness-slots", fixture.association.workspaceId)
+    });
+    expect(fixture.engine.removedContainerIds).toContain(fixture.engine.cleanupContainerId);
+  }, 10_000);
 
   test("fails closed on name collision and never adopts the colliding resource", async () => {
     const fixture = await runtimeFixture();

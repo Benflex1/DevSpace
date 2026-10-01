@@ -338,7 +338,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks);
-  const harnessHome = createHarnessHomeStore(managedRoots.state);
+  const harnessHome = createHarnessHomeStore(managedRoots.state, {
+    clearSlotAsWorkspaceUser: async (workspaceId) => await managed.clearHarnessHomeSlot(workspaceId)
+  });
   const harnessRuntime = createHarnessRuntime({
     home: harnessHome,
     stateRoot: managedRoots.state,

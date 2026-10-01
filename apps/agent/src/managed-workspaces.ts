@@ -2122,6 +2122,10 @@ export class ManagedWorkspaces {
     return await this.runtime.observeHarnessSlot(workspaceId);
   }
 
+  async clearHarnessHomeSlot(workspaceId: string): Promise<void> {
+    await this.runtime.clearHarnessHomeSlot(workspaceId);
+  }
+
   async recreateHarnessSlot(projectId: string, workspaceId: string) {
     const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);

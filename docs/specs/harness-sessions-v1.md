@@ -32,7 +32,19 @@ populated slot. Bounded symlink entries are copied as link text without resolvin
 targets on the Agent host. Native-session discovery skips symlinked session roots and files,
 so container-local absolute links can round-trip without making the host follow them.
 Home copies are bounded to 16 directory levels, 16,384 entries, 32 MiB per file, and 256 MiB
-total; the entry count includes directories and symlinks.
+total; the entry count includes directories, symlinks, and omitted runtime entries. Codex's
+versioned app-server package cache at `packages/app-server-daemon/releases` is ephemeral: it is
+walked under the depth and entry limits but omitted during both materialization and writeback,
+so large cached binaries do not consume the persistent home-copy budget. No other package path
+is exempt from the file and tree byte limits.
+Unix sockets in a live slot are ephemeral and omitted during writeback. A Unix socket found in
+persistent state is rejected during materialization and is never recreated in a slot. FIFOs,
+block devices, character devices, and unknown special objects remain rejected in both
+directions. If rootless UID mapping makes a slot-owned directory non-removable by the Agent,
+the Agent may use a one-shot cleanup container from the exact configured workspace image. It
+receives only the exact private slot mount, has no network, and uses only the
+rootless-container-scoped `DAC_OVERRIDE` and `FOWNER` capabilities needed to remove
+container-owned directories without following symlinks.
 The copy and discovery walkers use path-based checks and do not pin directory handles against
 a concurrent same-container writer replacing a checked directory. This rare race is deferred
 for the trusted-code beta. Orphan recovery writes a slot back only after its exact owning
