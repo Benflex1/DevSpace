@@ -8,9 +8,12 @@ export const codexArtifactStagingPhases = [
   "readback-helper-integrity",
   "staged-artifact-verification",
   "readback-helper-upload",
+  "artifact-cache-verification",
+  "artifact-cache-replacement",
   "artifact-entry-upload",
   "artifact-entry-readback",
   "final-closure-verification",
+  "artifact-cache-helper-cleanup",
   "failure-cleanup"
 ] as const;
 
@@ -25,6 +28,16 @@ export interface CodexArtifactStagingDiagnostic {
   readonly entryRelative?: string;
   readonly elapsedMs: number;
   readonly cleanupElapsedMs?: number;
+}
+
+export interface CodexArtifactStagingTiming {
+  readonly phase: CodexArtifactStagingPhase;
+  readonly containerId: string;
+  readonly artifactLayout: CodexArtifactLayout | "unknown";
+  readonly elapsedMs: number;
+  readonly outcome: "success" | "failure";
+  readonly cacheState?: "hit" | "miss" | "repaired";
+  readonly entryRelative?: string;
 }
 
 function safeElapsed(value: number): number {
@@ -83,5 +96,26 @@ export function codexArtifactStagingDiagnostic(input: {
     ...(entryRelative === undefined ? {} : { entryRelative }),
     elapsedMs: safeElapsed(input.elapsedMs),
     ...(input.cleanupElapsedMs === undefined ? {} : { cleanupElapsedMs: safeElapsed(input.cleanupElapsedMs) })
+  };
+}
+
+export function codexArtifactStagingTiming(input: {
+  readonly phase: CodexArtifactStagingPhase;
+  readonly containerId: string;
+  readonly artifactLayout: CodexArtifactLayout | "unknown";
+  readonly elapsedMs: number;
+  readonly outcome: "success" | "failure";
+  readonly cacheState?: "hit" | "miss" | "repaired";
+  readonly entryRelative?: string;
+}): CodexArtifactStagingTiming {
+  const entryRelative = boundedEntryRelative(input.entryRelative);
+  return {
+    phase: input.phase,
+    containerId: /^[a-f0-9]{12,64}$/u.test(input.containerId) ? input.containerId : "unknown",
+    artifactLayout: input.artifactLayout,
+    elapsedMs: safeElapsed(input.elapsedMs),
+    outcome: input.outcome,
+    ...(input.cacheState === undefined ? {} : { cacheState: input.cacheState }),
+    ...(entryRelative === undefined ? {} : { entryRelative })
   };
 }

@@ -380,6 +380,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
           "agent.harness.codex_artifact_staging_failed",
           "Native Codex artifact staging failed.",
           { ...diagnostic, workspaceId: input.workspaceId }
+        ),
+        onStagingTiming: (timing) => logger.info(
+          "agent.harness.codex_artifact_staging_timing",
+          "Native Codex artifact staging phase completed.",
+          { ...timing, workspaceId: input.workspaceId }
         )
       });
     }

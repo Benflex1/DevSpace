@@ -5,6 +5,7 @@ import { afterEach, expect, test } from "vitest";
 import type { DockerEngineClient } from "./docker-runtime.js";
 import { stageAgentCodexIntoContainer } from "./harness-codex-artifact.js";
 import type { CodexArtifactStagingDiagnostic } from "./codex-app-server/artifact-stager.js";
+import type { CodexArtifactStagingTiming } from "./codex-app-server/artifact-staging-diagnostics.js";
 
 const roots: string[] = [];
 
@@ -16,6 +17,7 @@ test("reports bounded resolution diagnostics without exposing executable paths",
   const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-codex-stage-diagnostics-"));
   roots.push(stateRoot);
   const diagnostics: CodexArtifactStagingDiagnostic[] = [];
+  const timings: CodexArtifactStagingTiming[] = [];
 
   await expect(stageAgentCodexIntoContainer({
     docker: {} as DockerEngineClient,
@@ -23,7 +25,8 @@ test("reports bounded resolution diagnostics without exposing executable paths",
     stateRoot,
     createId: () => "diagnostic",
     environment: { PATH: "" },
-    onStagingDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
+    onStagingDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    onStagingTiming: (timing) => timings.push(timing)
   })).rejects.toThrow("CODEX_EXECUTABLE_MISSING");
 
   expect(diagnostics).toHaveLength(1);
@@ -34,4 +37,6 @@ test("reports bounded resolution diagnostics without exposing executable paths",
   expect(diagnostics[0]?.elapsedMs).toBeGreaterThanOrEqual(0);
   expect(JSON.stringify(diagnostics)).not.toContain(stateRoot);
   expect(diagnostics[0]).not.toHaveProperty("errorMessage");
+  expect(timings).toEqual([expect.objectContaining({ phase: "artifact-resolution", outcome: "failure" })]);
+  expect(JSON.stringify(timings)).not.toContain(stateRoot);
 });

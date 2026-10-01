@@ -58,7 +58,16 @@ container. Image PATH wins (`executableSource.kind = image-path`). If that probe
 and stages it into the workspace container at `/opt/devspace/codex-artifact/<digest>/`.
 The native PTY then executes that in-container entrypoint
 (`executableSource.kind = agent-artifact`). An Agent-host path is never passed to Docker
-exec. Otherwise start fails with `HARNESS_EXECUTABLE_UNAVAILABLE`. There is no Codex version pin.
+exec. The digest directory is a content-addressed in-container cache. An existing closure is
+reused only after the pinned helper enumerates its exact tree and every expected file and
+symlink is read back and checked for kind, mode, length, SHA-256, or link text. Unexpected
+entries invalidate the cache. A stale or partial closure is staged into a unique temporary
+directory, verified in full, and then published by rename; entries are never overlaid into an
+existing closure. Agent staging attempts for the same container and digest are serialized.
+Harness admission replaces a stale cache before admitting the process that will use it. An
+ambiguous verification or failed publication fails closed and never authorizes execution; a
+failed fresh stage cleans only its own temporary directory and leaves the prior cache intact.
+Otherwise start fails with `HARNESS_EXECUTABLE_UNAVAILABLE`. There is no Codex version pin.
 
 Interactive terminal and harness execs receive an initial PTY geometry of 80 columns by 24 rows
 at Docker exec creation, before a browser attachment exists. Docker's API represents that initial

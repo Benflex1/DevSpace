@@ -7,8 +7,10 @@ import { readRegularFileNoFollow } from "../private-state.js";
 import type { DockerEngineClient } from "../docker-runtime.js";
 import {
   codexArtifactStagingDiagnostic,
+  codexArtifactStagingTiming,
   type CodexArtifactStagingDiagnostic,
-  type CodexArtifactStagingPhase
+  type CodexArtifactStagingPhase,
+  type CodexArtifactStagingTiming
 } from "./artifact-staging-diagnostics.js";
 import {
   codexExecutionArtifactClosureDigest,
@@ -20,10 +22,16 @@ import {
 const PRIVATE_CONTAINER_ROOT = "/tmp/devspace-ai";
 const MAX_ENTRY_BYTES = 512 * 1024 * 1024;
 const MAX_READBACK_BYTES = MAX_ENTRY_BYTES + 64;
+const MAX_TREE_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_TREE_READBACK_BYTES = MAX_TREE_OUTPUT_BYTES + 64 * 1024;
 const EXEC_TIMEOUT_MS = 10_000;
 const ARTIFACT_READBACK_HEADER_BYTES = 32;
 const ARTIFACT_READBACK_MAGIC = "DSARTF01";
 const ARTIFACT_READBACK_VERSION = 1;
+const ARTIFACT_TREE_HEADER_BYTES = 20;
+const ARTIFACT_TREE_MAGIC = "DSARTL01";
+const ARTIFACT_TREE_VERSION = 1;
+const ARTIFACT_TREE_MAX_ENTRIES = 16_384;
 
 export interface CodexLaunchArtifact {
   readonly staged: StagedCodexExecutionArtifact;
@@ -37,6 +45,11 @@ export interface CodexArtifactReadback {
   readonly mode: number;
   readonly bytes: Buffer;
   readonly linkTarget: string | null;
+}
+
+export interface CodexArtifactTreeEntry {
+  readonly kind: "directory" | "file" | "symlink" | "special";
+  readonly relativePath: string;
 }
 
 export interface CodexArtifactStager {
@@ -63,6 +76,8 @@ export interface CodexArtifactStagerOptions {
   readonly createId: () => string;
   /** Agent-private, bounded diagnostics for native harness artifact staging failures. */
   readonly onFailure?: (diagnostic: CodexArtifactStagingDiagnostic) => void;
+  /** Agent-private, bounded phase timings; never contains artifact bytes or provider state. */
+  readonly onTiming?: (timing: CodexArtifactStagingTiming) => void;
   /** Agent-private deterministic readback seam; production invokes the native helper. */
   readonly readbackEntry?: (input: {
     readonly containerId: string;
@@ -70,6 +85,12 @@ export interface CodexArtifactStagerOptions {
     readonly entry: CodexArtifactEntry;
     readonly readbackPath: string;
   }) => Promise<CodexArtifactReadback>;
+  /** Agent-private deterministic tree-listing seam; production invokes the native helper. */
+  readonly listArtifactTree?: (input: {
+    readonly containerId: string;
+    readonly artifactRoot: string;
+    readonly readbackPath: string;
+  }) => Promise<readonly CodexArtifactTreeEntry[] | null>;
 }
 
 export type { CodexArtifactStagingDiagnostic } from "./artifact-staging-diagnostics.js";
@@ -115,7 +136,7 @@ async function waitForClose(stream: Duplex): Promise<void> {
   });
 }
 
-async function collectOutput(stream: Duplex): Promise<Buffer> {
+async function collectOutput(stream: Duplex, maxBytes = MAX_READBACK_BYTES + 16 * 1024): Promise<Buffer> {
   return await new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -136,7 +157,7 @@ async function collectOutput(stream: Duplex): Promise<Buffer> {
     stream.on("data", (chunk: Buffer) => {
       const bytes = Buffer.from(chunk);
       total += bytes.length;
-      if (total > MAX_READBACK_BYTES + 16 * 1024) {
+      if (total > maxBytes) {
         stream.destroy();
         finish(new Error("codex-artifact-readback-too-large"));
       } else chunks.push(bytes);
@@ -187,6 +208,51 @@ export function parseCodexArtifactReadback(raw: Buffer): CodexArtifactReadback {
   return { kind: "symlink", mode, bytes: Buffer.alloc(0), linkTarget };
 }
 
+export function parseCodexArtifactTree(raw: Buffer): readonly CodexArtifactTreeEntry[] | null {
+  if (raw.length < ARTIFACT_TREE_HEADER_BYTES || raw.length > MAX_TREE_OUTPUT_BYTES
+    || raw.subarray(0, ARTIFACT_TREE_MAGIC.length).toString("ascii") !== ARTIFACT_TREE_MAGIC
+    || raw.readUInt32BE(8) !== ARTIFACT_TREE_VERSION) {
+    throw new Error("codex-artifact-tree-frame");
+  }
+  const status = raw.readUInt32BE(12);
+  const count = raw.readUInt32BE(16);
+  if (count > ARTIFACT_TREE_MAX_ENTRIES) throw new Error("codex-artifact-tree-too-large");
+  if (status === 1) {
+    if (count !== 0 || raw.length !== ARTIFACT_TREE_HEADER_BYTES) throw new Error("codex-artifact-tree-frame");
+    return null;
+  }
+  if (status !== 0) throw new Error("codex-artifact-tree-frame");
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const result: CodexArtifactTreeEntry[] = [];
+  const seen = new Set<string>();
+  let offset = ARTIFACT_TREE_HEADER_BYTES;
+  for (let index = 0; index < count; index += 1) {
+    if (offset + 8 > raw.length) throw new Error("codex-artifact-tree-frame");
+    const kindValue = raw.readUInt32BE(offset);
+    const pathLength = raw.readUInt32BE(offset + 4);
+    offset += 8;
+    if (pathLength === 0 || pathLength > 16_384 || offset + pathLength > raw.length) {
+      throw new Error("codex-artifact-tree-frame");
+    }
+    let relativePath: string;
+    try { relativePath = decoder.decode(raw.subarray(offset, offset + pathLength)); }
+    catch { throw new Error("codex-artifact-tree-frame"); }
+    offset += pathLength;
+    if (relativePath.startsWith("/") || relativePath.includes("\0")
+      || relativePath.split("/").some((component) => component.length === 0 || component === "." || component === "..")
+      || seen.has(relativePath)) {
+      throw new Error("codex-artifact-tree-path-invalid");
+    }
+    const kind = ({ 1: "directory", 2: "file", 3: "symlink", 4: "special" } as const)[kindValue as 1 | 2 | 3 | 4];
+    if (kind === undefined) throw new Error("codex-artifact-tree-frame");
+    seen.add(relativePath);
+    result.push({ kind, relativePath });
+  }
+  if (offset !== raw.length) throw new Error("codex-artifact-tree-frame");
+  return result;
+}
+
 function sameEntry(expected: CodexArtifactEntry, actual: CodexArtifactReadback): boolean {
   if (expected.kind !== actual.kind || expected.mode !== actual.mode) return false;
   if (expected.kind === "symlink") return expected.linkTarget === actual.linkTarget && actual.bytes.length === 0;
@@ -197,6 +263,48 @@ function sameEntry(expected: CodexArtifactEntry, actual: CodexArtifactReadback):
 
 function artifactReadbackMismatch(): Error {
   return new Error("codex-artifact-readback-mismatch");
+}
+
+const stagingLocks = new Map<string, Promise<void>>();
+
+async function withStagingLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = stagingLocks.get(key) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => { releaseCurrent = resolve; });
+  const tail = previous.then(() => current);
+  stagingLocks.set(key, tail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    releaseCurrent();
+    if (stagingLocks.get(key) === tail) stagingLocks.delete(key);
+  }
+}
+
+function expectedArtifactTree(entries: readonly CodexArtifactEntry[]): ReadonlyMap<string, CodexArtifactTreeEntry["kind"]> {
+  const expected = new Map<string, CodexArtifactTreeEntry["kind"]>();
+  for (const entry of entries) {
+    const components = entry.relativePath.split("/");
+    for (let index = 1; index < components.length; index += 1) {
+      const directory = components.slice(0, index).join("/");
+      const existing = expected.get(directory);
+      if (existing !== undefined && existing !== "directory") throw artifactReadbackMismatch();
+      expected.set(directory, "directory");
+    }
+    const kind = entry.kind === "file" ? "file" : "symlink";
+    if (expected.has(entry.relativePath)) throw artifactReadbackMismatch();
+    expected.set(entry.relativePath, kind);
+  }
+  return expected;
+}
+
+function exactArtifactTree(
+  actual: readonly CodexArtifactTreeEntry[],
+  expected: ReadonlyMap<string, CodexArtifactTreeEntry["kind"]>
+): boolean {
+  if (actual.length !== expected.size) return false;
+  return actual.every((entry) => expected.get(entry.relativePath) === entry.kind);
 }
 
 export function createCodexArtifactStager(options: CodexArtifactStagerOptions): CodexArtifactStager {
@@ -217,7 +325,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
   async function upload(containerId: string, targetPath: string, bytes: Buffer, mode: number): Promise<void> {
     const targetDirectory = path.posix.dirname(targetPath);
     const execId = await options.docker.createExec(containerId, {
-      command: ["sh", "-c", 'umask 077; mkdir -p -- "$DEVSPACE_TARGET_DIR"; cat > "$DEVSPACE_TARGET_PATH"; chmod "$DEVSPACE_TARGET_MODE" "$DEVSPACE_TARGET_PATH"'],
+      command: ["sh", "-c", 'set -eu; umask 077; mkdir -p -- "$DEVSPACE_TARGET_DIR"; set -C; cat > "$DEVSPACE_TARGET_PATH"; chmod "$DEVSPACE_TARGET_MODE" "$DEVSPACE_TARGET_PATH"'],
       workingDirectory: "/workspace",
       environment: { DEVSPACE_TARGET_DIR: targetDirectory, DEVSPACE_TARGET_PATH: targetPath, DEVSPACE_TARGET_MODE: mode.toString(8) },
       attachStdin: true, tty: false
@@ -231,7 +339,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
 
   async function uploadSymlink(containerId: string, targetPath: string, linkTarget: string): Promise<void> {
     const execId = await options.docker.createExec(containerId, {
-      command: ["sh", "-c", 'umask 077; mkdir -p -- "$DEVSPACE_TARGET_DIR"; ln -s -- "$DEVSPACE_LINK_TARGET" "$DEVSPACE_TARGET_PATH"'],
+      command: ["sh", "-c", 'set -eu; umask 077; mkdir -p -- "$DEVSPACE_TARGET_DIR"; ln -s -- "$DEVSPACE_LINK_TARGET" "$DEVSPACE_TARGET_PATH"'],
       workingDirectory: "/workspace",
       environment: { DEVSPACE_TARGET_DIR: path.posix.dirname(targetPath), DEVSPACE_TARGET_PATH: targetPath, DEVSPACE_LINK_TARGET: linkTarget },
       attachStdin: false, tty: false
@@ -261,6 +369,26 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
     return parseCodexArtifactReadback(decodeDockerFrames(output));
   }
 
+  async function listArtifactTree(input: {
+    readonly containerId: string;
+    readonly artifactRoot: string;
+    readonly readbackPath: string;
+  }): Promise<readonly CodexArtifactTreeEntry[] | null> {
+    if (options.listArtifactTree !== undefined) return await options.listArtifactTree(input);
+    const execId = await options.docker.createExec(input.containerId, {
+      command: [input.readbackPath], workingDirectory: "/workspace",
+      environment: { DEVSPACE_ARTIFACT_ROOT: input.artifactRoot, DEVSPACE_ARTIFACT_MODE: "tree" },
+      attachStdin: false, tty: false
+    });
+    const stream = await options.docker.startExecAttached(execId, false);
+    const output = await collectOutput(stream, MAX_TREE_READBACK_BYTES);
+    const inspection = await options.docker.inspectExec(execId).catch(() => null);
+    if (inspection === null || inspection.Running || inspection.ExitCode !== 0) {
+      throw new Error("codex-artifact-tree-verification-unproven");
+    }
+    return parseCodexArtifactTree(decodeDockerFrames(output));
+  }
+
   async function removeRemote(containerId: string, root: string): Promise<{ readonly elapsedMs: number; readonly error?: unknown }> {
     const startedAt = performance.now();
     try {
@@ -280,9 +408,59 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
     }
   }
 
+  async function publishRemote(input: {
+    readonly containerId: string;
+    readonly stagingRoot: string;
+    readonly destinationRoot: string;
+    readonly backupRoot: string;
+  }): Promise<void> {
+    const script = [
+      "set -eu",
+      'if [ -e "$DEVSPACE_CACHE_DEST" ] || [ -L "$DEVSPACE_CACHE_DEST" ]; then mv -T -- "$DEVSPACE_CACHE_DEST" "$DEVSPACE_CACHE_BACKUP"; fi',
+      'if ! mv -T -- "$DEVSPACE_CACHE_STAGE" "$DEVSPACE_CACHE_DEST"; then',
+      '  if [ -e "$DEVSPACE_CACHE_BACKUP" ] || [ -L "$DEVSPACE_CACHE_BACKUP" ]; then mv -T -- "$DEVSPACE_CACHE_BACKUP" "$DEVSPACE_CACHE_DEST"; fi',
+      "  exit 1",
+      "fi",
+      'if [ -e "$DEVSPACE_CACHE_BACKUP" ] || [ -L "$DEVSPACE_CACHE_BACKUP" ]; then rm -rf -- "$DEVSPACE_CACHE_BACKUP"; fi'
+    ].join("\n");
+    const execId = await options.docker.createExec(input.containerId, {
+      command: ["sh", "-c", script], workingDirectory: "/workspace",
+      environment: {
+        DEVSPACE_CACHE_STAGE: input.stagingRoot,
+        DEVSPACE_CACHE_DEST: input.destinationRoot,
+        DEVSPACE_CACHE_BACKUP: input.backupRoot
+      }, attachStdin: false, tty: false
+    });
+    const stream = await options.docker.startExecAttached(execId, false);
+    await waitForClose(stream);
+    const inspection = await options.docker.inspectExec(execId).catch(() => null);
+    if (inspection === null || inspection.Running || inspection.ExitCode !== 0) {
+      throw new Error("codex-artifact-cache-publication-unproven");
+    }
+  }
+
   function reportFailure(diagnostic: CodexArtifactStagingDiagnostic): void {
     try { options.onFailure?.(diagnostic); }
     catch { /* private diagnostics must not change the staging outcome */ }
+  }
+
+  function reportTiming(input: {
+    readonly phase: CodexArtifactStagingPhase;
+    readonly containerId: string;
+    readonly artifactLayout: StagedCodexExecutionArtifact["artifact"]["layout"];
+    readonly startedAt: number;
+    readonly outcome: "success" | "failure";
+    readonly cacheState?: "hit" | "miss" | "repaired";
+    readonly entryRelative?: string;
+  }): void {
+    try {
+      options.onTiming?.(codexArtifactStagingTiming({
+        phase: input.phase, containerId: input.containerId, artifactLayout: input.artifactLayout,
+        elapsedMs: performance.now() - input.startedAt, outcome: input.outcome,
+        ...(input.cacheState === undefined ? {} : { cacheState: input.cacheState }),
+        ...(input.entryRelative === undefined ? {} : { entryRelative: input.entryRelative })
+      }));
+    } catch { /* private timings must not change the staging outcome */ }
   }
 
   return {
@@ -291,13 +469,16 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
       staged: StagedCodexExecutionArtifact;
       destinationRoot: string;
     }) {
-      if (!input.destinationRoot.startsWith("/opt/devspace/codex-artifact/") || input.destinationRoot.includes("..")) {
+      const closureDigest = input.staged.artifact.closureDigest;
+      if (!/^[a-f0-9]{64}$/u.test(closureDigest)
+        || input.destinationRoot !== `/opt/devspace/codex-artifact/${closureDigest}`) {
         throw new Error("codex-artifact-path-invalid");
       }
       const artifactLayout = input.staged.artifact.layout;
       let phase: CodexArtifactStagingPhase = "staged-artifact-verification";
       let phaseStartedAt = performance.now();
       let entryRelative: string | undefined;
+      let cacheState: "hit" | "miss" | "repaired" | undefined;
       const setPhase = (nextPhase: CodexArtifactStagingPhase, nextEntry?: string) => {
         phase = nextPhase;
         phaseStartedAt = performance.now();
@@ -305,59 +486,198 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
       };
       try {
         await verifyStagedCodexExecutionArtifact(input.staged);
+        reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: phaseStartedAt, outcome: "success" });
       } catch (error) {
+        reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: phaseStartedAt, outcome: "failure" });
         reportFailure(codexArtifactStagingDiagnostic({
           phase, error, containerId: input.containerId, artifactLayout, elapsedMs: performance.now() - phaseStartedAt
         }));
         throw error;
       }
-      const artifactRoot = `${input.destinationRoot}/artifact`;
-      const artifactReadbackPath = `${input.destinationRoot}/codex-artifact-readback`;
-      try {
-        setPhase("readback-helper-upload");
-        await upload(input.containerId, artifactReadbackPath, Buffer.from(options.readbackHelperBytes), 0o700);
-        const actualEntries: CodexArtifactEntry[] = [];
-        for (const entry of input.staged.artifact.entries) {
-          const targetPath = entryPath(artifactRoot, entry);
-          setPhase("artifact-entry-upload", entry.relativePath);
-          if (entry.kind === "symlink") await uploadSymlink(input.containerId, targetPath, entry.linkTarget!);
-          else {
-            const read = await readRegularFileNoFollow(path.join(input.staged.stagingRoot, ...entry.relativePath.split("/")), MAX_ENTRY_BYTES);
-            if (read.bytes.length !== entry.byteLength || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) throw artifactReadbackMismatch();
-            await upload(input.containerId, targetPath, read.bytes, entry.mode);
-          }
-          setPhase("artifact-entry-readback", entry.relativePath);
-          const actual = await readbackEntry({ containerId: input.containerId, artifactRoot, entry, readbackPath: artifactReadbackPath });
-          if (!sameEntry(entry, actual)) throw artifactReadbackMismatch();
-          actualEntries.push({
-            relativePath: entry.relativePath, kind: actual.kind, mode: actual.mode,
-            linkTarget: actual.linkTarget, byteLength: actual.kind === "file" ? actual.bytes.length : 0,
-            sha256: actual.kind === "file" ? createHash("sha256").update(actual.bytes).digest("hex") : null
+      return await withStagingLock(`${input.containerId}:${closureDigest}`, async () => {
+        const attemptId = safeId(options.createId());
+        const stagingRoot = `/opt/devspace/codex-artifact/.stage-${closureDigest}-${attemptId}`;
+        const backupRoot = `/opt/devspace/codex-artifact/.previous-${closureDigest}-${attemptId}`;
+        const helperRoot = `${PRIVATE_CONTAINER_ROOT}/codex-artifact-${safeId(input.containerId).slice(0, 24)}-${closureDigest.slice(0, 12)}-${attemptId}`;
+        const artifactReadbackPath = `${helperRoot}/codex-artifact-readback`;
+        const expectedTree = expectedArtifactTree(input.staged.artifact.entries.map((entry) => ({
+          ...entry, relativePath: `artifact/${entry.relativePath}`
+        })));
+        let stagingRootOwned = false;
+        let helperRootMayExist = false;
+        let operationError: unknown;
+        let failurePhase: CodexArtifactStagingPhase | undefined;
+        let failureEntry: string | undefined;
+        let failureElapsedMs: number | undefined;
+        let resultPath: string | undefined;
+        let cleanupElapsedMs = 0;
+
+        const verifyCache = async (cacheRoot: string): Promise<"absent" | "exact" | "mismatch"> => {
+          const tree = await listArtifactTree({
+            containerId: input.containerId, artifactRoot: cacheRoot, readbackPath: artifactReadbackPath
           });
+          if (tree === null) return "absent";
+          if (!exactArtifactTree(tree, expectedTree)) return "mismatch";
+
+          const actualEntries: CodexArtifactEntry[] = [];
+          for (const entry of input.staged.artifact.entries) {
+            const readStartedAt = performance.now();
+            const actual = await readbackEntry({
+              containerId: input.containerId, artifactRoot: `${cacheRoot}/artifact`, entry,
+              readbackPath: artifactReadbackPath
+            });
+            reportTiming({ phase: "artifact-entry-readback", containerId: input.containerId, artifactLayout,
+              startedAt: readStartedAt, outcome: "success", entryRelative: entry.relativePath });
+            if (!sameEntry(entry, actual)) return "mismatch";
+            actualEntries.push({
+              relativePath: entry.relativePath, kind: actual.kind, mode: actual.mode,
+              linkTarget: actual.linkTarget, byteLength: actual.kind === "file" ? actual.bytes.length : 0,
+              sha256: actual.kind === "file" ? createHash("sha256").update(actual.bytes).digest("hex") : null
+            });
+          }
+          const finalStartedAt = performance.now();
+          const observedDigest = codexExecutionArtifactClosureDigest({
+            layout: input.staged.artifact.layout, target: input.staged.artifact.target,
+            packageVersion: input.staged.artifact.packageVersion, entries: actualEntries
+          });
+          reportTiming({ phase: "final-closure-verification", containerId: input.containerId, artifactLayout,
+            startedAt: finalStartedAt, outcome: observedDigest === closureDigest ? "success" : "failure" });
+          return observedDigest === closureDigest ? "exact" : "mismatch";
+        };
+
+        try {
+          setPhase("readback-helper-upload");
+          const helperStartedAt = phaseStartedAt;
+          helperRootMayExist = true;
+          await upload(input.containerId, artifactReadbackPath, Buffer.from(options.readbackHelperBytes), 0o700);
+          reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: helperStartedAt, outcome: "success" });
+
+          setPhase("artifact-cache-verification");
+          const cacheStartedAt = phaseStartedAt;
+          const cacheResult = await verifyCache(input.destinationRoot);
+          cacheState = cacheResult === "exact" ? "hit" : cacheResult === "mismatch" ? "repaired" : "miss";
+          reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: cacheStartedAt,
+            outcome: "success", cacheState });
+          if (cacheResult === "exact") {
+            resultPath = entryPath(`${input.destinationRoot}/artifact`, input.staged.artifact.entrypoint);
+          } else {
+            const actualEntries: CodexArtifactEntry[] = [];
+            const stagedArtifactRoot = `${stagingRoot}/artifact`;
+            stagingRootOwned = true;
+            for (const entry of input.staged.artifact.entries) {
+              const targetPath = entryPath(stagedArtifactRoot, entry);
+              setPhase("artifact-entry-upload", entry.relativePath);
+              const uploadStartedAt = phaseStartedAt;
+              if (entry.kind === "symlink") await uploadSymlink(input.containerId, targetPath, entry.linkTarget!);
+              else {
+                const read = await readRegularFileNoFollow(path.join(input.staged.stagingRoot, ...entry.relativePath.split("/")), MAX_ENTRY_BYTES);
+                if (read.bytes.length !== entry.byteLength || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) {
+                  throw artifactReadbackMismatch();
+                }
+                await upload(input.containerId, targetPath, read.bytes, entry.mode);
+              }
+              reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: uploadStartedAt,
+                outcome: "success", cacheState, entryRelative: entry.relativePath });
+
+              setPhase("artifact-entry-readback", entry.relativePath);
+              const readbackStartedAt = phaseStartedAt;
+              const actual = await readbackEntry({
+                containerId: input.containerId, artifactRoot: stagedArtifactRoot, entry,
+                readbackPath: artifactReadbackPath
+              });
+              if (!sameEntry(entry, actual)) throw artifactReadbackMismatch();
+              reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: readbackStartedAt,
+                outcome: "success", cacheState, entryRelative: entry.relativePath });
+              actualEntries.push({
+                relativePath: entry.relativePath, kind: actual.kind, mode: actual.mode,
+                linkTarget: actual.linkTarget, byteLength: actual.kind === "file" ? actual.bytes.length : 0,
+                sha256: actual.kind === "file" ? createHash("sha256").update(actual.bytes).digest("hex") : null
+              });
+            }
+
+            setPhase("final-closure-verification");
+            const finalStartedAt = phaseStartedAt;
+            const tree = await listArtifactTree({
+              containerId: input.containerId, artifactRoot: stagingRoot, readbackPath: artifactReadbackPath
+            });
+            const observedDigest = codexExecutionArtifactClosureDigest({
+              layout: input.staged.artifact.layout, target: input.staged.artifact.target,
+              packageVersion: input.staged.artifact.packageVersion, entries: actualEntries
+            });
+            if (tree === null || !exactArtifactTree(tree, expectedTree) || observedDigest !== closureDigest) {
+              throw artifactReadbackMismatch();
+            }
+            reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: finalStartedAt,
+              outcome: "success", cacheState });
+
+            setPhase("artifact-cache-replacement");
+            const publishStartedAt = phaseStartedAt;
+            await publishRemote({
+              containerId: input.containerId, stagingRoot, destinationRoot: input.destinationRoot, backupRoot
+            });
+            stagingRootOwned = false;
+            resultPath = entryPath(`${input.destinationRoot}/artifact`, input.staged.artifact.entrypoint);
+            reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: publishStartedAt,
+              outcome: "success", cacheState });
+          }
+        } catch (error) {
+          operationError = error;
+          failurePhase = phase;
+          failureEntry = entryRelative;
+          failureElapsedMs = performance.now() - phaseStartedAt;
+          reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: phaseStartedAt,
+            outcome: "failure", ...(cacheState === undefined ? {} : { cacheState }),
+            ...(entryRelative === undefined ? {} : { entryRelative }) });
         }
-        setPhase("final-closure-verification");
-        const closureDigest = codexExecutionArtifactClosureDigest({
-          layout: input.staged.artifact.layout, target: input.staged.artifact.target,
-          packageVersion: input.staged.artifact.packageVersion, entries: actualEntries
-        });
-        if (closureDigest !== input.staged.artifact.closureDigest) throw artifactReadbackMismatch();
-        return { entrypointPath: entryPath(artifactRoot, input.staged.artifact.entrypoint) };
-      } catch (error) {
-        const elapsedMs = performance.now() - phaseStartedAt;
-        const cleanup = await removeRemote(input.containerId, input.destinationRoot);
-        reportFailure(codexArtifactStagingDiagnostic({
-          phase, error, containerId: input.containerId, artifactLayout,
-          ...(entryRelative === undefined ? {} : { entryRelative }), elapsedMs,
-          cleanupElapsedMs: cleanup.elapsedMs
-        }));
-        if (cleanup.error !== undefined) {
+
+        if (stagingRootOwned) {
+          setPhase("failure-cleanup");
+          const cleanupStartedAt = phaseStartedAt;
+          const cleanup = await removeRemote(input.containerId, stagingRoot);
+          cleanupElapsedMs += cleanup.elapsedMs;
+          reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: cleanupStartedAt,
+            outcome: cleanup.error === undefined ? "success" : "failure", ...(cacheState === undefined ? {} : { cacheState }) });
+          if (cleanup.error !== undefined && operationError === undefined) operationError = cleanup.error;
+          if (cleanup.error !== undefined) {
+            if (failurePhase === undefined) {
+              failurePhase = phase;
+              failureElapsedMs = cleanup.elapsedMs;
+            }
+            reportFailure(codexArtifactStagingDiagnostic({
+              phase, error: cleanup.error, containerId: input.containerId, artifactLayout, elapsedMs: cleanup.elapsedMs
+            }));
+          }
+        }
+        if (helperRootMayExist) {
+          setPhase("artifact-cache-helper-cleanup");
+          const cleanupStartedAt = phaseStartedAt;
+          const cleanup = await removeRemote(input.containerId, helperRoot);
+          cleanupElapsedMs += cleanup.elapsedMs;
+          reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: cleanupStartedAt,
+            outcome: cleanup.error === undefined ? "success" : "failure", ...(cacheState === undefined ? {} : { cacheState }) });
+          if (cleanup.error !== undefined && operationError === undefined) operationError = cleanup.error;
+          if (cleanup.error !== undefined) {
+            if (failurePhase === undefined) {
+              failurePhase = phase;
+              failureElapsedMs = cleanup.elapsedMs;
+            }
+            reportFailure(codexArtifactStagingDiagnostic({
+              phase, error: cleanup.error, containerId: input.containerId, artifactLayout, elapsedMs: cleanup.elapsedMs
+            }));
+          }
+        }
+        if (operationError !== undefined) {
           reportFailure(codexArtifactStagingDiagnostic({
-            phase: "failure-cleanup", error: cleanup.error, containerId: input.containerId,
-            artifactLayout, elapsedMs: cleanup.elapsedMs
+            phase: failurePhase ?? phase, error: operationError, containerId: input.containerId, artifactLayout,
+            ...(failureEntry === undefined ? {} : { entryRelative: failureEntry }),
+            elapsedMs: failureElapsedMs ?? performance.now() - phaseStartedAt,
+            ...(cleanupElapsedMs === 0 ? {} : { cleanupElapsedMs })
           }));
+          throw operationError instanceof Error ? operationError : new Error("codex-artifact-staging-failed");
         }
-        throw error;
-      }
+        if (resultPath === undefined) throw new Error("codex-artifact-cache-result-unavailable");
+        return { entrypointPath: resultPath };
+      });
     },
     async stageIntoManagedProvider(input) {
       const { launchArtifact } = input;

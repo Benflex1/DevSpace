@@ -56,7 +56,7 @@ const helperDefinitions = Object.freeze([
 
 export const NATIVE_HELPER_SOURCE_SHA256 = Object.freeze({
   "codex-staged-readback": "5ac02ace7f7eb2e2930264abd3502ccc870b128a5e6b1a7f39dbfe101e1c267c",
-  "codex-artifact-readback": "0487d87ea2f4766be50897394c3cd2a34a9fa3f575887dbcbbc8ab1b373fe092"
+  "codex-artifact-readback": "d8b7e91b997c9dc7e38b1fdb4280af3aae95977f161e7f32141e4dbdb3e6b324"
 });
 
 function identitySource() {

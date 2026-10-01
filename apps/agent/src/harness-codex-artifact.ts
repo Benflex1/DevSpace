@@ -7,8 +7,10 @@ import { createCodexArtifactStager } from "./codex-app-server/artifact-stager.js
 import { resolveCodexExecutionArtifact, stageCodexExecutionArtifact } from "./codex-app-server/artifact-identity.js";
 import {
   codexArtifactStagingDiagnostic,
+  codexArtifactStagingTiming,
   type CodexArtifactStagingDiagnostic,
-  type CodexArtifactStagingPhase
+  type CodexArtifactStagingPhase,
+  type CodexArtifactStagingTiming
 } from "./codex-app-server/artifact-staging-diagnostics.js";
 import { resolveCodexExecutablePath } from "./codex-executable-resolution.js";
 import { CODEX_ARTIFACT_READBACK_HELPER_SHA256 } from "./codex-native-helper-identity.js";
@@ -24,12 +26,28 @@ export async function stageAgentCodexIntoContainer(input: {
   environment?: NodeJS.ProcessEnv;
   readbackHelperBytes?: Uint8Array;
   onStagingDiagnostic?: (diagnostic: CodexArtifactStagingDiagnostic) => void;
+  onStagingTiming?: (timing: CodexArtifactStagingTiming) => void;
 }): Promise<{ entrypointPath: string; reportedVersion: string | null }> {
   let artifactLayout: Parameters<typeof codexArtifactStagingDiagnostic>[0]["artifactLayout"] = "unknown";
   const runPhase = async <T>(phase: CodexArtifactStagingPhase, operation: () => Promise<T>): Promise<T> => {
     const startedAt = performance.now();
-    try { return await operation(); }
+    try {
+      const result = await operation();
+      try {
+        input.onStagingTiming?.(codexArtifactStagingTiming({
+          phase, containerId: input.containerId, artifactLayout, elapsedMs: performance.now() - startedAt,
+          outcome: "success"
+        }));
+      } catch { /* private timing must not change the staging outcome */ }
+      return result;
+    }
     catch (error) {
+      try {
+        input.onStagingTiming?.(codexArtifactStagingTiming({
+          phase, containerId: input.containerId, artifactLayout, elapsedMs: performance.now() - startedAt,
+          outcome: "failure"
+        }));
+      } catch { /* private timing must not change the staging outcome */ }
       try {
         input.onStagingDiagnostic?.(codexArtifactStagingDiagnostic({
           phase, error, containerId: input.containerId, artifactLayout, elapsedMs: performance.now() - startedAt
@@ -59,7 +77,8 @@ export async function stageAgentCodexIntoContainer(input: {
     docker: input.docker,
     readbackHelperBytes: helper,
     createId: input.createId,
-    ...(input.onStagingDiagnostic === undefined ? {} : { onFailure: input.onStagingDiagnostic })
+    ...(input.onStagingDiagnostic === undefined ? {} : { onFailure: input.onStagingDiagnostic }),
+    ...(input.onStagingTiming === undefined ? {} : { onTiming: input.onStagingTiming })
   }).stageIntoRunningContainer({
     containerId: input.containerId,
     staged,
