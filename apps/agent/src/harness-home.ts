@@ -43,6 +43,18 @@ const slotMetaSchema = z.strictObject({
 type SlotMeta = z.infer<typeof slotMetaSchema>;
 
 const CODEX_EPHEMERAL_CACHE_PATH = path.join("packages", "app-server-daemon", "releases");
+const CODEX_EPHEMERAL_PATHS = new Set([
+  path.join("app-server-daemon", "daemon-updater.pid"),
+  path.join("app-server-daemon", "daemon-updater.pid.lock"),
+  path.join("app-server-daemon", "daemon-updater.stderr.log"),
+  path.join("app-server-daemon", "daemon.lock"),
+  path.join("app-server-daemon", "daemon.pid.lock"),
+  path.join("app-server-daemon", "daemon.stderr.log"),
+  path.join("packages", "app-server-daemon", "auto-update-version"),
+  path.join("packages", "app-server-daemon", "current"),
+  path.join("packages", "app-server-daemon", "install.lock"),
+  CODEX_EPHEMERAL_CACHE_PATH
+]);
 
 export type RecoveredSlot = {
   readonly workspaceId: string;
@@ -167,6 +179,7 @@ async function walkCopy(
     if (depth > HARNESS_HOME_MAX_DEPTH) rejectUnsupported("directory depth exceeds the bound");
     const source = relative === "" ? sourceRoot : path.join(sourceRoot, relative);
     const destination = relative === "" ? destinationRoot : path.join(destinationRoot, relative);
+    const codexEphemeral = harnessId === "codex" && CODEX_EPHEMERAL_PATHS.has(relative);
     const stats = await lstat(source);
     if (stats.isSymbolicLink()) {
       entries += 1;
@@ -174,11 +187,11 @@ async function walkCopy(
       const target = await readlink(source);
       const targetBytes = Buffer.byteLength(target, "utf8");
       if (targetBytes > 4_096) rejectUnsupported("symbolic link target exceeds the bound");
-      if (!insideCodexCache) {
+      if (!insideCodexCache && !codexEphemeral) {
         totalBytes += targetBytes;
         if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
       }
-      if (insideCodexCache) return;
+      if (insideCodexCache || codexEphemeral) return;
       await ensureDirectory(path.dirname(destination));
       // Retain the link itself without resolving its target on the host.
       await symlink(target, destination);
@@ -196,7 +209,7 @@ async function walkCopy(
     if (stats.isDirectory()) {
       entries += 1;
       if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
-      const omitDirectory = insideCodexCache || (harnessId === "codex" && relative === CODEX_EPHEMERAL_CACHE_PATH);
+      const omitDirectory = insideCodexCache || codexEphemeral;
       if (relative !== "" && !omitDirectory) await ensureDirectory(destination);
       const children = await readdir(source, { withFileTypes: true });
       for (const child of children) {
@@ -211,7 +224,7 @@ async function walkCopy(
     if (!stats.isFile()) rejectUnsupported("unsupported filesystem object");
     entries += 1;
     if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
-    if (insideCodexCache) return;
+    if (insideCodexCache || codexEphemeral) return;
     if (stats.size > HARNESS_HOME_MAX_FILE_BYTES) rejectUnsupported("file exceeds the size bound");
     totalBytes += Number(stats.size);
     if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");

@@ -169,6 +169,85 @@ test("writeback omits ephemeral Unix sockets and rematerializes durable home sta
   await home.releaseLease({ harnessId: "codex", leaseId: nextLease.leaseId });
 });
 
+test("Codex daemon runtime markers and package cache are omitted in both copy directions", async () => {
+  const { home } = await store();
+  const homePath = home.persistentHomePath("codex");
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 1 });
+  const daemonHome = path.join(homePath, "app-server-daemon");
+  const packageHome = path.join(homePath, "packages", "app-server-daemon");
+  await mkdir(daemonHome, { recursive: true });
+  await mkdir(path.join(packageHome, "releases", "0.159.3", "bin"), { recursive: true });
+  await writeFile(path.join(daemonHome, "durable-provider-state"), "keep-this-state");
+  await writeFile(path.join(packageHome, "durable-provider-state"), "keep-this-too");
+  for (const name of ["daemon-updater.pid", "daemon-updater.pid.lock", "daemon-updater.stderr.log", "daemon.lock", "daemon.pid.lock", "daemon.stderr.log"]) {
+    await writeFile(path.join(daemonHome, name), "old-runtime-state");
+  }
+  await writeFile(path.join(packageHome, "auto-update-version"), "0.159.3");
+  await writeFile(path.join(packageHome, "install.lock"), "stale-install-lock");
+  await symlink("/missing/codex-daemon-release", path.join(packageHome, "current"));
+  await writeFile(path.join(packageHome, "releases", "0.159.3", "bin", "codex"), "cached-daemon");
+
+  const slot = await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: lease.leaseId });
+  const slotDaemon = path.join(slot.slotHostPath, "app-server-daemon");
+  const slotPackages = path.join(slot.slotHostPath, "packages", "app-server-daemon");
+  expect(await readFile(path.join(slotDaemon, "durable-provider-state"), "utf8")).toBe("keep-this-state");
+  expect(await readFile(path.join(slotPackages, "durable-provider-state"), "utf8")).toBe("keep-this-too");
+  for (const relative of [
+    "app-server-daemon/daemon-updater.pid",
+    "app-server-daemon/daemon-updater.pid.lock",
+    "app-server-daemon/daemon-updater.stderr.log",
+    "app-server-daemon/daemon.lock",
+    "app-server-daemon/daemon.pid.lock",
+    "app-server-daemon/daemon.stderr.log",
+    "packages/app-server-daemon/auto-update-version",
+    "packages/app-server-daemon/current",
+    "packages/app-server-daemon/install.lock",
+    "packages/app-server-daemon/releases"
+  ]) {
+    await expect(lstat(path.join(slot.slotHostPath, relative))).rejects.toMatchObject({ code: "ENOENT" });
+  }
+
+  // Mimic Codex recreating ephemeral daemon and updater state in the live slot.
+  for (const name of ["daemon-updater.pid", "daemon-updater.pid.lock", "daemon-updater.stderr.log", "daemon.lock", "daemon.pid.lock", "daemon.stderr.log"]) {
+    await writeFile(path.join(slotDaemon, name), "runtime-only");
+  }
+  await writeFile(path.join(slotPackages, "auto-update-version"), "0.159.3");
+  await writeFile(path.join(slotPackages, "install.lock"), "runtime-only");
+  await symlink("releases/0.159.3-x86_64-unknown-linux-musl", path.join(slotPackages, "current"));
+  const slotRelease = path.join(slotPackages, "releases", "0.159.3-x86_64-unknown-linux-musl", "bin");
+  await mkdir(slotRelease, { recursive: true });
+  await writeFile(path.join(slotRelease, "codex"), "runtime-package-cache");
+
+  await home.writeBackAndClear({ workspaceId: wsA, leaseId: lease.leaseId });
+  expect(await readFile(path.join(homePath, "app-server-daemon", "durable-provider-state"), "utf8")).toBe("keep-this-state");
+  expect(await readFile(path.join(homePath, "packages", "app-server-daemon", "durable-provider-state"), "utf8")).toBe("keep-this-too");
+  for (const relative of [
+    "app-server-daemon/daemon-updater.pid",
+    "app-server-daemon/daemon-updater.pid.lock",
+    "app-server-daemon/daemon-updater.stderr.log",
+    "app-server-daemon/daemon.lock",
+    "app-server-daemon/daemon.pid.lock",
+    "app-server-daemon/daemon.stderr.log",
+    "packages/app-server-daemon/auto-update-version",
+    "packages/app-server-daemon/current",
+    "packages/app-server-daemon/install.lock",
+    "packages/app-server-daemon/releases"
+  ]) {
+    await expect(lstat(path.join(homePath, relative))).rejects.toMatchObject({ code: "ENOENT" });
+  }
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
+  await home.releaseLease({ harnessId: "codex", leaseId: lease.leaseId });
+
+  const nextLease = await home.acquireLease({ harnessId: "codex", workspaceId: wsB, aiSessionId: sessionB, processGeneration: 1 });
+  const nextSlot = await home.materialize({ workspaceId: wsB, harnessId: "codex", leaseId: nextLease.leaseId });
+  expect(await readFile(path.join(nextSlot.slotHostPath, "app-server-daemon", "durable-provider-state"), "utf8")).toBe("keep-this-state");
+  expect(await readFile(path.join(nextSlot.slotHostPath, "packages", "app-server-daemon", "durable-provider-state"), "utf8")).toBe("keep-this-too");
+  await expect(lstat(path.join(nextSlot.slotHostPath, "packages", "app-server-daemon", "current")))
+    .rejects.toMatchObject({ code: "ENOENT" });
+  await home.writeBackAndClear({ workspaceId: wsB, leaseId: nextLease.leaseId });
+  await home.releaseLease({ harnessId: "codex", leaseId: nextLease.leaseId });
+});
+
 test("uses exact workspace-user cleanup when rootless container ownership blocks host slot removal", async () => {
   const cleanedWorkspaces: string[] = [];
   let slotPath = "";
