@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
   isTerminalAttachableState, isTerminalOpenableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, reconcileTerminalState,
-  removeTerminalCollectionEntries, sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
+  nativeHarnessTerminalState, removeTerminalCollectionEntries, sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
 } from "./terminal-lifecycle.js";
 
 describe("terminal lifecycle reconciliation", () => {
@@ -27,6 +27,15 @@ describe("terminal lifecycle reconciliation", () => {
     expect(isTerminalAttachableState("closed")).toBe(false);
     expect(isTerminalSidebarVisible("closed", 10_000, 10_000)).toBe(true);
     expect(isTerminalSidebarVisible("closed", 10_000, 10_000 + LOST_TERMINAL_SIDEBAR_EXPIRY_MS)).toBe(false);
+  });
+
+  test.each([
+    ["creating", "active"],
+    ["active", "active"],
+    ["lost", "lost"],
+    ["stopped", "closed"]
+  ])("maps native harness state %s to terminal state %s", (sessionState, terminalState) => {
+    expect(nativeHarnessTerminalState(sessionState)).toBe(terminalState);
   });
 
   test("does not keep failed terminals in the normal terminal list", () => {

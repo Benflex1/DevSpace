@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { nativeAiPresentation } from "./native-ai-presentation.js";
+import { nativeHarnessTerminalState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 
 type Definition = { id: string; displayName: string; origin: string };
@@ -39,8 +40,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     setSession(current);
     if (current?.terminalSessionId) {
       setTerminal((existing) => {
-        const nextState = current.state === "active" || current.state === "creating" ? "active"
-          : current.state === "lost" ? "lost" : "disconnected";
+        const nextState = nativeHarnessTerminalState(current.state);
         if (existing?.id === current.terminalSessionId && existing.state === nextState && existing.title === current.title) {
           return existing;
         }

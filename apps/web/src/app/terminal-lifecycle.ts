@@ -55,6 +55,11 @@ export function isTerminalOpenableState(state: string): boolean {
   return isTerminalAttachableState(state) || state === "closed";
 }
 
+export function nativeHarnessTerminalState(sessionState: string): "active" | "closed" | "lost" {
+  if (sessionState === "active" || sessionState === "creating") return "active";
+  return sessionState === "lost" ? "lost" : "closed";
+}
+
 export function terminalStateMessage(state: string): string {
   if (state === "lost") {
     return "The Agent restart lost this terminal's PTY attachment. It cannot be reattached, and processes launched here may still be running inside the retained workspace runtime.";
