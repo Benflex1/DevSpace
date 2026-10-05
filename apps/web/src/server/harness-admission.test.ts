@@ -8,6 +8,9 @@ import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from 
 import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
 import { createNativeHarnessSession, listProjectedHarnessSessions, resumeNativeHarnessSession } from "./harness-sessions.js";
 import { saveCustomHarnessDefinition } from "./harness-definitions.js";
+import { mutatePrimaryWorkspaceRuntime } from "./workspace-runtime.js";
+import { workspaceInspectionDataSchema } from "@devspace/contracts";
+import { canonicalizeProjectOptionsV1, compileRuntimePlanV1, hashProjectOptionsV1, hashRuntimePlanV1, parseProjectOptionsV1 } from "@devspace/project-options";
 
 const directories: string[] = [];
 const databases: Array<ReturnType<typeof openProjectDatabase>> = [];
@@ -416,6 +419,185 @@ test("Agent inspection failure preserves SQLite state and fails Resume closed", 
   expect(projected[0]).toMatchObject({ id: started.sessionId, state: "active", resume: false });
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active", processGeneration: 1 });
   expect(resumeHarness).not.toHaveBeenCalled();
+});
+
+test("native harness lifecycle integration preserves one session across settle, orphan recovery, workspace restart, and resume", async () => {
+  const fixture = await createReadyProject();
+  const parsedOptions = parseProjectOptionsV1({
+    schemaVersion: 1, developmentEnvironment: { source: { kind: "image", imageReference: "node:24" } }
+  });
+  const canonicalOptions = canonicalizeProjectOptionsV1(parsedOptions);
+  const validConfigHash = hashProjectOptionsV1(parsedOptions);
+  const runtimePlanHash = hashRuntimePlanV1(compileRuntimePlanV1(parsedOptions));
+  const rawFixture = new BetterSqlite3(fixture.databasePath);
+  rawFixture.prepare("update project_config_revisions set configuration_json = ?, configuration_hash = ? where project_id = ?")
+    .run(canonicalOptions, validConfigHash, fixture.project.id);
+  rawFixture.prepare("update runtime_stacks set runtime_plan_hash = ? where workspace_id = ?")
+    .run(runtimePlanHash, fixture.workspaceId);
+  rawFixture.close();
+  type ScriptedHarness = {
+    state: "live" | "stopped" | "lost";
+    processGeneration: number;
+    processId: string;
+    terminalId: string;
+    leaseId: string | null;
+    dirty: boolean;
+    resume: boolean;
+  };
+  const harnesses = new Map<string, ScriptedHarness>();
+  const observations = new Map<string, { operationId: string; state: "succeeded"; updatedAt: string; failure: null }>();
+  const resumeCalls: Array<{ sessionId: string; processId: string; terminalId: string; processGeneration: number }> = [];
+  let runtimeState: "running" | "stopped" = "running";
+  const completeOperation = (operationId: string) => observations.set(operationId, {
+    operationId, state: "succeeded", updatedAt: "2026-07-19T00:00:00.000Z", failure: null
+  });
+  const agent = {
+    startNativeHarness: async (input: { sessionId: string; processId: string; terminalId: string; processGeneration: number }) => {
+      harnesses.set(input.sessionId, {
+        state: "live", processGeneration: input.processGeneration, processId: input.processId,
+        terminalId: input.terminalId, leaseId: `lease-${input.sessionId}-${input.processGeneration}`,
+        dirty: true, resume: false
+      });
+      return { settled: false };
+    },
+    inspectNativeHarness: async (input: { sessionId: string }) => {
+      const harness = harnesses.get(input.sessionId);
+      if (harness === undefined) throw new Error("unknown-test-harness");
+      return { state: harness.state, processGeneration: harness.processGeneration, resume: harness.resume };
+    },
+    resumeNativeHarness: async (input: { sessionId: string; processId: string; terminalId: string; processGeneration: number }) => {
+      const harness = harnesses.get(input.sessionId);
+      if (harness === undefined) throw new Error("unknown-test-harness");
+      harness.state = "live";
+      harness.processGeneration = input.processGeneration;
+      harness.processId = input.processId;
+      harness.terminalId = input.terminalId;
+      harness.leaseId = `lease-${input.sessionId}-${input.processGeneration}`;
+      harness.dirty = true;
+      harness.resume = false;
+      resumeCalls.push(input);
+      return { settled: false };
+    },
+    registerRuntimePlan: async (operationId: string) => { completeOperation(operationId); },
+    startWorkspace: async (operationId: string) => { runtimeState = "running"; completeOperation(operationId); },
+    stopWorkspace: async (operationId: string) => {
+      runtimeState = "stopped";
+      completeOperation(operationId);
+    },
+    snapshot: async () => ({
+      agentBootId: "018f0f00-0000-7000-8000-000000000099",
+      throughCursor: "v1.018f0f00-0000-7000-8000-000000000099.1" as const,
+      resources: [], operationObservations: [...observations.values()]
+    }),
+    runtimeStatus: async () => ({ rootlessRuntime: "available" as const, operationJournal: "available" as const, checkedAt: "2026-07-19T00:00:00.000Z" }),
+    inspectWorkspace: async (projectId: string, workspaceId: string) => {
+      const context = fixture.database.getRuntimeContext(projectId);
+      return workspaceInspectionDataSchema.parse({
+        projectId, workspaceId, kind: "primary", revisionId: context.revision.id,
+        revisionHash: context.revision.configurationHash,
+        desiredState: runtimeState, observedState: runtimeState, dirty: false,
+        runtimeStack: { desiredState: runtimeState, observedState: runtimeState }
+      });
+    }
+  } as unknown as FullAgentClient;
+
+  const target = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+  const targetAgent = harnesses.get(target.sessionId)!;
+  expect(targetAgent.state).toBe("live");
+  expect(targetAgent.processGeneration).toBe(1);
+  expect(targetAgent.leaseId).not.toBeNull();
+  expect(targetAgent.dirty).toBe(true);
+  expect(targetAgent.resume).toBe(false);
+
+  // The foreground generation exited cleanly; Agent observation is authoritative over the active Web row.
+  targetAgent.state = "stopped";
+  targetAgent.leaseId = null;
+  targetAgent.dirty = false;
+  targetAgent.resume = true;
+  expect(await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent })).toEqual([
+    expect.objectContaining({ id: target.sessionId, state: "stopped", resume: true })
+  ]);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === target.sessionId))
+    .toMatchObject({ state: "stopped", processGeneration: 1 });
+
+  const older = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+  const olderAgent = harnesses.get(older.sessionId)!;
+  olderAgent.state = "stopped";
+  olderAgent.leaseId = null;
+  olderAgent.dirty = false;
+  olderAgent.resume = true;
+  expect(await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent })).toHaveLength(2);
+
+  const secondGeneration = await resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, target.sessionId, {
+    database: fixture.database, agent
+  });
+  expect(secondGeneration.sessionId).toBe(target.sessionId);
+  expect(secondGeneration.terminalId).not.toBe(target.terminalId);
+  expect(resumeCalls).toEqual([expect.objectContaining({ sessionId: target.sessionId, processGeneration: 2 })]);
+  expect(targetAgent.state).toBe("live");
+  expect(targetAgent.processGeneration).toBe(2);
+  expect(targetAgent.leaseId).not.toBeNull();
+  expect(targetAgent.dirty).toBe(true);
+  expect(targetAgent.resume).toBe(false);
+  expect(await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent }))
+    .toEqual(expect.arrayContaining([expect.objectContaining({ id: target.sessionId, state: "active", resume: false }), expect.objectContaining({ id: older.sessionId })]));
+
+  // Simulate Agent loss while the exact admitted generation remains an orphan in its private home.
+  targetAgent.state = "lost";
+  expect(await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent }))
+    .toEqual(expect.arrayContaining([expect.objectContaining({ id: target.sessionId, state: "lost", resume: false })]));
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === target.sessionId))
+    .toMatchObject({ state: "lost", processGeneration: 2 });
+  expect(targetAgent.leaseId).not.toBeNull();
+  expect(targetAgent.dirty).toBe(true);
+  expect(targetAgent.resume).toBe(false);
+  await expect(resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, target.sessionId, {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(ProjectSetupConflictError);
+  expect(resumeCalls).toHaveLength(1);
+
+  const runtimeDependencies = {
+    database: fixture.database, agent: agent as never, orchestrationTimeoutMs: 2_000,
+    nowMonotonic: () => 1, sleep: async () => undefined
+  };
+  await mutatePrimaryWorkspaceRuntime("stop", fixture.project.id, "actor", runtimeDependencies);
+  expect(runtimeState).toBe("stopped");
+  // Script the exact Agent post-stop finalization observation at this external boundary.
+  targetAgent.leaseId = null;
+  targetAgent.dirty = false;
+  targetAgent.resume = true;
+  expect(targetAgent).toMatchObject({ state: "lost", leaseId: null, dirty: false, resume: true });
+  expect(await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent }))
+    .toEqual(expect.arrayContaining([expect.objectContaining({ id: target.sessionId, state: "lost", resume: true })]));
+
+  await mutatePrimaryWorkspaceRuntime("start", fixture.project.id, "actor", runtimeDependencies);
+  expect(runtimeState).toBe("running");
+  const thirdGeneration = await resumeNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, target.sessionId, {
+    database: fixture.database, agent
+  });
+  expect(thirdGeneration.sessionId).toBe(target.sessionId);
+  expect(thirdGeneration.terminalId).not.toBe(secondGeneration.terminalId);
+  expect(resumeCalls.map((call) => [call.sessionId, call.processGeneration])).toEqual([
+    [target.sessionId, 2], [target.sessionId, 3]
+  ]);
+  expect(targetAgent.state).toBe("live");
+  expect(targetAgent.processGeneration).toBe(3);
+  expect(targetAgent.leaseId).not.toBeNull();
+  expect(targetAgent.dirty).toBe(true);
+  expect(targetAgent.resume).toBe(false);
+
+  targetAgent.state = "stopped";
+  targetAgent.leaseId = null;
+  targetAgent.dirty = false;
+  targetAgent.resume = true;
+  await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId).find((row) => row.id === target.sessionId))
+    .toMatchObject({ id: target.sessionId, state: "stopped", processGeneration: 3, terminalSessionId: thirdGeneration.terminalId });
+  expect(targetAgent).toMatchObject({ state: "stopped", leaseId: null, dirty: false, resume: true });
 });
 
 test("harness inspection reconciliation ignores structured sessions", async () => {
