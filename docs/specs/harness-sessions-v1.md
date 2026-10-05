@@ -35,6 +35,23 @@ home and is discovered for later native resume; daemon runtime state is ephemera
 needed to restore the conversation. This contract applies to the built-in Codex preset and is
 not automatically imposed on arbitrary custom harness argv.
 
+## Codex native conversation identity
+
+Codex conversation identity comes from an actual rollout's canonical `session_meta` record:
+the Agent validates and stores `payload.id`, together with the record's workspace-compatible
+`payload.cwd` and root-thread metadata. Rollout filenames, including the UUID suffix in a
+`rollout-...jsonl` basename, are never native IDs. `session_index.jsonl` is supporting provider
+metadata and is not an independent identity authority.
+
+Before a new DevSpace Codex generation starts, the Agent records a private baseline of the
+existing canonical thread IDs. On settlement it binds the DevSpace session only when exactly
+one new root rollout for `/workspace` exists. Once bound, later generations retain that same
+thread ID and settlement verifies it still exists; discovery never switches the DevSpace
+session to whichever historical thread appears newest. A legacy filename-stem ID may be
+upgraded only when that exact basename identifies one valid canonical rollout whose payload
+proves the canonical ID and workspace-compatible root-thread metadata. Missing or ambiguous
+evidence leaves the old private value unchanged and Resume unavailable.
+
 ## Isolation
 
 Only the selected harness home is copied into `/opt/devspace/harness-home`. Unrelated homes

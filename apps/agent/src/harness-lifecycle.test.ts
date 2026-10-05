@@ -52,16 +52,29 @@ async function legacyHarnessFixture(label: string) {
   await manager.initialize();
   await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
   const slot = path.join(root, "harness-slots", workspaceId);
-  await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-crash.jsonl"), `${JSON.stringify({ id: "thread-crash", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000230";
+  const rollout = await writeCanonicalRollout(slot, nativeId);
   return {
     root, home, manager, runtime,
+    nativeId, rollout,
     recordPath: path.join(root, "ownership", "executions", `${processId}.json`),
     sessionPath: path.join(root, "harness-sessions", `${sessionId}.json`),
     leasePath: path.join(root, "harness-homes", "codex", ".lease", "metadata.json"),
     slotMetaPath: path.join(root, "harness-meta", `${workspaceId}.json`),
     slotPath: slot
   };
+}
+
+async function writeCanonicalRollout(home: string, id: string): Promise<string> {
+  const timestamp = "2026-10-01T14:38:06.144Z";
+  const directory = path.join(home, "sessions", "2026", "10", "01");
+  await mkdir(directory, { recursive: true });
+  const rollout = path.join(directory, `rollout-2026-10-01T14-38-06-${id}.jsonl`);
+  await writeFile(rollout, `${JSON.stringify({
+    timestamp, type: "session_meta",
+    payload: { id, session_id: id, cwd: "/workspace", timestamp }
+  })}\n`);
+  return rollout;
 }
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
@@ -123,15 +136,14 @@ test("real exec exit settles once and a shell exit does not", async () => {
   expect(hooks).toEqual([]);
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "live" });
 
-  const slot = path.join(root, "harness-slots", workspaceId, "sessions");
-  await mkdir(slot, { recursive: true });
-  await writeFile(path.join(slot, "thread-live.jsonl"), `${JSON.stringify({ id: "thread-live", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000231";
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
   running.set("exec-1", false);
   streams[0]!.end();
   await waitFor(async () => (await runtime.publicSnapshot(sessionId)).state === "stopped");
   expect(hooks).toEqual([processId]);
-  expect(await runtime.privateNativeId(sessionId)).toBe("thread-live");
-  expect(JSON.stringify(await runtime.publicSnapshot(sessionId))).not.toContain("thread-live");
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
+  expect(JSON.stringify(await runtime.publicSnapshot(sessionId))).not.toContain(nativeId);
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
   streams[0]!.emit("end");
   streams[0]!.emit("close");
@@ -140,7 +152,8 @@ test("real exec exit settles once and a shell exit does not", async () => {
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
-  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-live.jsonl"), "utf8")).toContain("thread-live");
+  const persistedRollout = path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout));
+  expect(await readFile(persistedRollout, "utf8")).toContain(nativeId);
 });
 
 test("restart recovers a durable exec exit whose clean-settlement hook was interrupted", async () => {
@@ -166,9 +179,8 @@ test("restart recovers a durable exec exit whose clean-settlement hook was inter
   await interruptedRuntime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
   const executionPath = path.join(root, "ownership", "executions", `${processId}.json`);
   expect(JSON.parse(await readFile(executionPath, "utf8"))).toMatchObject({ observedState: "exited", terminalState: "closed" });
-  const slot = path.join(root, "harness-slots", workspaceId, "sessions");
-  await mkdir(slot, { recursive: true });
-  await writeFile(path.join(slot, "thread-after-exit.jsonl"), `${JSON.stringify({ id: "thread-after-exit", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000232";
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
 
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
   const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
@@ -186,10 +198,10 @@ test("restart recovers a durable exec exit whose clean-settlement hook was inter
 
   expect(restarted.harnessRecoveryReports()).toMatchObject([{ observation: "terminated", processId, sessionId }]);
   expect(await recovered.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
-  expect(await recovered.privateNativeId(sessionId)).toBe("thread-after-exit");
+  expect(await recovered.privateNativeId(sessionId)).toBe(nativeId);
   expect(await recovered.capability(sessionId)).toMatchObject({ resume: true });
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
-  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-after-exit.jsonl"), "utf8")).toContain("thread-after-exit");
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8")).toContain(nativeId);
 });
 
 test("a still-running harness exec survives Agent restart until it exits", async () => {
@@ -217,9 +229,8 @@ test("a still-running harness exec survives Agent restart until it exits", async
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   await writeFile(path.join(home.persistentHomePath("codex"), "kept.txt"), "original");
-  const slot = path.join(root, "harness-slots", workspaceId, "sessions");
-  await mkdir(slot, { recursive: true });
-  await writeFile(path.join(slot, "thread-crash.jsonl"), `${JSON.stringify({ id: "thread-crash", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000233";
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
   const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"), hooks);
   const recovered = createHarnessRuntime({
@@ -242,8 +253,8 @@ test("a still-running harness exec survives Agent restart until it exits", async
     sessionId, projectId, processId: "018f1f34-7000-7000-8000-0000000000ae",
     terminalId: "018f1f34-7000-7000-8000-0000000000af", processGeneration: 2
   })).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
-  expect(await readdir(path.join(root, "harness-slots", workspaceId, "sessions"))).toEqual(["thread-crash.jsonl"]);
-  await expect(readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-crash.jsonl"), "utf8")).rejects.toThrow();
+  expect(await readdir(path.dirname(rollout))).toEqual([path.basename(rollout)]);
+  await expect(readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8")).rejects.toThrow();
   expect(await readFile(path.join(home.persistentHomePath("codex"), "kept.txt"), "utf8")).toBe("original");
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
@@ -255,10 +266,10 @@ test("a still-running harness exec survives Agent restart until it exits", async
   running = false;
   await waitFor(async () => (await recovered.capability(sessionId)).resume === true);
   expect(await recovered.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
-  expect(await recovered.privateNativeId(sessionId)).toBe("thread-crash");
-  expect(JSON.stringify(await recovered.publicSnapshot(sessionId))).not.toContain("thread-crash");
+  expect(await recovered.privateNativeId(sessionId)).toBe(nativeId);
+  expect(JSON.stringify(await recovered.publicSnapshot(sessionId))).not.toContain(nativeId);
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
-  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-crash.jsonl"), "utf8")).toContain("thread-crash");
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8")).toContain(nativeId);
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
@@ -298,9 +309,10 @@ test.each(["stopped", "stopped-with-stale-exec", "removed"] as const)("workspace
   });
   await manager.initialize();
   await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
-  const slot = path.join(root, "harness-slots", workspaceId, "sessions");
+  const slot = path.join(root, "harness-slots", workspaceId);
   await mkdir(slot, { recursive: true });
-  await writeFile(path.join(slot, "thread-crash.jsonl"), `${JSON.stringify({ id: "thread-crash", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000235";
+  const rollout = await writeCanonicalRollout(slot, nativeId);
   inspectedContainer = "foreign-container";
   containerMissing = true;
   const foreignHooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
@@ -315,7 +327,7 @@ test.each(["stopped", "stopped-with-stale-exec", "removed"] as const)("workspace
   await foreign.initialize();
   await foreignRuntime.recoverAfterAgentRestart();
   expect(foreign.harnessRecoveryReports()).toMatchObject([{ observation: "unproven" }]);
-  expect(await readdir(slot)).toEqual(["thread-crash.jsonl"]);
+  expect(await readdir(path.dirname(rollout))).toEqual([path.basename(rollout)]);
   expect(await foreignRuntime.capability(sessionId)).toMatchObject({ resume: false });
   inspectedContainer = "container-owned";
   execMissing = workspaceState !== "stopped-with-stale-exec";
@@ -339,7 +351,7 @@ test.each(["stopped", "stopped-with-stale-exec", "removed"] as const)("workspace
   await recovered.finalizeRecoveredLoss({
     processId, workspaceId, sessionId, processGeneration: 1, leaseId: recovery.leaseId
   });
-  expect(await recovered.privateNativeId(sessionId)).toBe("thread-crash");
+  expect(await recovered.privateNativeId(sessionId)).toBe(nativeId);
   expect(writeBackCount).toBe(1);
 });
 
@@ -370,7 +382,7 @@ test("workspace replacement alone does not prove the old harness container is go
   await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
   const slot = path.join(root, "harness-slots", workspaceId);
   await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-crash.jsonl"), `${JSON.stringify({ id: "thread-crash", cwd: "/workspace" })}\n`);
+  const rollout = await writeCanonicalRollout(slot, "018f1f34-7000-7000-8000-000000000234");
 
   execMissing = true;
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
@@ -389,7 +401,7 @@ test("workspace replacement alone does not prove the old harness container is go
   expect(replaced.harnessRecoveryReports()).toMatchObject([{ observation: "unproven" }]);
   expect(await recovered.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
   expect(await recovered.capability(sessionId)).toMatchObject({ resume: false });
-  expect(await readdir(path.join(slot, "sessions"))).toEqual(["thread-crash.jsonl"]);
+  expect(await readdir(path.dirname(rollout))).toEqual([path.basename(rollout)]);
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
@@ -497,8 +509,8 @@ test.each(["workspace", "process", "generation", "slot", "multiple", "missing-ex
     await recovered.recoverAfterAgentRestart();
     expect(await recovered.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
     expect(await recovered.capability(sessionId)).toMatchObject({ resume: false });
-    expect(await readdir(path.join(fixture.slotPath, "sessions"))).toEqual(["thread-crash.jsonl"]);
-    expect(await readFile(path.join(fixture.home.persistentHomePath("codex"), "sessions", "thread-crash.jsonl"), "utf8")
+    expect(await readdir(path.dirname(fixture.rollout))).toEqual([path.basename(fixture.rollout)]);
+    expect(await readFile(path.join(fixture.home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(fixture.rollout)), "utf8")
       .catch(() => null)).toBeNull();
     await expect(fixture.home.acquireLease({
       harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1

@@ -10,10 +10,15 @@ import {
   classifyResumeArgv,
   resumeCapability,
   substituteResumeArgv,
+  uuidV7Schema,
   type HarnessArgv
 } from "@devspace/contracts";
 import { durableJsonWriter, readStrictJson } from "./private-state.js";
-import { discoverCodexNativeSessionId } from "./harness-codex-discovery.js";
+import {
+  codexSessionIdBaseline,
+  discoverCodexNativeSessionId,
+  repairLegacyCodexFilenameId
+} from "./harness-codex-discovery.js";
 import type { ExecutableSource } from "./harness-executable.js";
 import { CODEX_HARNESS_ID, CODEX_PRESET, HARNESS_SLOT_ENV } from "./harness-presets.js";
 import type { HarnessHomeStore } from "./harness-home.js";
@@ -45,6 +50,7 @@ type SessionRecord = {
   executableSource: ExecutableSource | null;
   state: "live" | "stopped" | "lost";
   leaseId: string | null;
+  discoveryBaseline?: string[];
   recoveryPhase?: "ready-to-release";
   definitionDigest: string | null;
   processGeneration: number;
@@ -59,6 +65,7 @@ const sessionRecordSchema = z.strictObject({
   executableSource: z.unknown().nullable(),
   state: z.enum(["live", "stopped", "lost"]),
   leaseId: z.string().nullable(),
+  discoveryBaseline: z.array(uuidV7Schema).max(4_096).optional(),
   recoveryPhase: z.literal("ready-to-release").optional(),
   definitionDigest: z.string().nullable().default(null),
   processGeneration: z.number().int().positive().default(1),
@@ -93,7 +100,22 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
   const sessionPath = (sessionId: string) => path.join(sessionsRoot, `${sessionId}.json`);
 
   const loadSession = async (sessionId: string): Promise<SessionRecord> => {
-    return sessionRecordSchema.parse(await readStrictJson(sessionPath(sessionId), sessionRecordSchema)) as SessionRecord;
+    const record = sessionRecordSchema.parse(await readStrictJson(sessionPath(sessionId), sessionRecordSchema)) as SessionRecord;
+    if (record.harnessId === CODEX_HARNESS_ID && typeof record.nativeSessionId === "string"
+      && !uuidV7Schema.safeParse(record.nativeSessionId).success) {
+      try {
+        const repaired = await repairLegacyCodexFilenameId(
+          dependencies.home.persistentHomePath(CODEX_HARNESS_ID), record.nativeSessionId
+        );
+        if (repaired !== null) {
+          record.nativeSessionId = repaired;
+          await saveSession(sessionId, record);
+        }
+      } catch {
+        // A missing or ambiguous legacy mapping stays private and non-resumable.
+      }
+    }
+    return record;
   };
 
   const saveSession = async (sessionId: string, record: SessionRecord): Promise<void> => {
@@ -150,8 +172,17 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     if (record.recoveryPhase !== "ready-to-release") {
       await dependencies.home.writeBackAndClear({ workspaceId: record.workspaceId, leaseId: record.leaseId });
       if (record.harnessId === CODEX_HARNESS_ID) {
-        record.nativeSessionId = await discoverCodexNativeSessionId(dependencies.home.persistentHomePath(CODEX_HARNESS_ID));
+        const homePath = dependencies.home.persistentHomePath(CODEX_HARNESS_ID);
+        if (record.nativeSessionId === null && record.discoveryBaseline !== undefined) {
+          record.nativeSessionId = await discoverCodexNativeSessionId(homePath, { baselineIds: record.discoveryBaseline });
+        } else if (uuidV7Schema.safeParse(record.nativeSessionId).success) {
+          const verified = await discoverCodexNativeSessionId(homePath, { expectedId: record.nativeSessionId! });
+          if (verified !== record.nativeSessionId) {
+            throw new HarnessRuntimeError("HARNESS_NATIVE_SESSION_ID_UNVERIFIED", "The previously bound Codex conversation could not be verified.");
+          }
+        }
       }
+      delete record.discoveryBaseline;
       record.recoveryPhase = "ready-to-release";
       await saveSession(sessionId, record);
     }
@@ -226,6 +257,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       if (input.sessionId !== undefined) {
         try { nativeSessionId = (await loadSession(input.sessionId)).nativeSessionId; } catch { nativeSessionId = null; }
       }
+      if (input.harnessId === CODEX_HARNESS_ID && !uuidV7Schema.safeParse(nativeSessionId).success) nativeSessionId = null;
       return {
         harnessId: input.harnessId,
         capabilities: {
@@ -259,6 +291,9 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
         let command = [definition.launch.executable, ...definition.launch.args];
         let executableSource: ExecutableSource | null = null;
         const previous = existingEarly;
+        const discoveryBaseline = dedicatedHome(input.harnessId) && (previous === null || previous.nativeSessionId === null)
+          ? await codexSessionIdBaseline(dependencies.home.persistentHomePath(CODEX_HARNESS_ID))
+          : undefined;
         try {
           if (dedicatedHome(input.harnessId)) {
             let slot = await dependencies.inspectSlot(input.workspaceId);
@@ -297,6 +332,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           const admitted: SessionRecord = {
             workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
             nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+            ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
             definitionDigest: authorityDigest(definition),
             processGeneration: input.processGeneration, admission: "uncertain"
           };
@@ -312,6 +348,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
             await saveSession(input.sessionId, {
               workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
               nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+              ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
               definitionDigest: authorityDigest(definition),
               processGeneration: input.processGeneration, admission: "uncertain"
             });
@@ -321,6 +358,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           await restoreAfterDefinitePreStartFailure(input.sessionId, input.workspaceId, input.harnessId, leaseId, previous, {
             workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
             nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+            ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
             definitionDigest: authorityDigest(definition),
             processGeneration: input.processGeneration, admission: "uncertain"
           });
@@ -331,6 +369,8 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
         await saveSession(input.sessionId, {
           workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
           nativeSessionId: settled?.nativeSessionId ?? previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+          ...(settled?.discoveryBaseline === undefined && discoveryBaseline === undefined
+            ? {} : { discoveryBaseline: settled?.discoveryBaseline ?? discoveryBaseline! }),
           definitionDigest: authorityDigest(definition),
           processGeneration: input.processGeneration, admission: "started"
         });
@@ -394,6 +434,10 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
         if (classified.kind === "none") throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "Resume is not configured.");
         if (classified.kind === "native-id" && (record.nativeSessionId === null || record.nativeSessionId === undefined)) {
           throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "A native session id is not available.");
+        }
+        if (dedicatedHome(record.harnessId) && classified.kind === "native-id"
+          && !uuidV7Schema.safeParse(record.nativeSessionId).success) {
+          throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "A canonical Codex conversation id is not available.");
         }
         let command: string[];
         if (classified.kind === "provider-handled") command = [definition.resume!.executable, ...definition.resume!.args];
@@ -487,9 +531,11 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       }
       let resume: boolean;
       try {
+        const nativeSessionId = record.harnessId === CODEX_HARNESS_ID
+          && !uuidV7Schema.safeParse(record.nativeSessionId).success ? null : record.nativeSessionId;
         resume = record.state !== "live" && record.leaseId === null && resumeCapability({
           resume: definitionOf(record.harnessId).resume,
-          nativeSessionId: record.nativeSessionId
+          nativeSessionId
         });
       } catch {
         resume = false;

@@ -47,6 +47,20 @@ async function fixture(input: {
   return { runtime, home, createdExecs, setSlot: (next: HarnessSlotMountObservation) => { slot = next; }, root };
 }
 
+async function writeCanonicalRollout(home: string, input: { id: string; cwd?: string; timestamp: string }): Promise<string> {
+  const [year, month, day] = input.timestamp.slice(0, 10).split("-");
+  const fileTimestamp = input.timestamp.slice(0, 19).replaceAll(":", "-");
+  const directory = path.join(home, "sessions", year!, month!, day!);
+  await mkdir(directory, { recursive: true });
+  const file = path.join(directory, `rollout-${fileTimestamp}-${input.id}.jsonl`);
+  await writeFile(file, `${JSON.stringify({
+    timestamp: input.timestamp,
+    type: "session_meta",
+    payload: { id: input.id, session_id: input.id, cwd: input.cwd ?? "/workspace", timestamp: input.timestamp }
+  })}\n`);
+  return file;
+}
+
 test("codex launch env contains CODEX_HOME and not CLAUDE_CONFIG_DIR", async () => {
   const { runtime, createdExecs } = await fixture();
   const env = await runtime.start({
@@ -95,11 +109,11 @@ test("Codex settlement releases its dedicated home only for a foreground-only pr
   const slot = path.join(root, "harness-slots", workspaceId);
   const leasePath = path.join(root, "harness-homes", "codex", ".lease", "metadata.json");
   const command = createdExecs[0]?.command ?? [];
+  const nativeId = "018f1f34-7000-7000-8000-000000000200";
   if (!command.includes("--no-daemon")) {
     detachedWriters.push(async () => writeFile(path.join(slot, "after-release"), "detached Codex writer"));
   }
-  await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-settlement.jsonl"), `${JSON.stringify({ id: "thread-settlement", cwd: "/workspace" })}\n`);
+  await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
 
   await runtime.settleExit({ sessionId });
   expect(await readFile(leasePath, "utf8").catch(() => null)).toBeNull();
@@ -107,11 +121,153 @@ test("Codex settlement releases its dedicated home only for a foreground-only pr
   expect(await readdir(slot)).toEqual([]);
   expect(command).toEqual(["codex", "--yolo", "--no-daemon"]);
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "stopped" });
-  expect(await runtime.privateNativeId(sessionId)).toBe("thread-settlement");
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
   expect((await runtime.inspect({ harnessId: "codex", workspaceId, sessionId })).capabilities.resume).toBe(true);
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
+});
+
+test("settlement identifies only a canonical Codex session created after this DevSpace generation started", async () => {
+  const { runtime, home, root } = await fixture();
+  const oldId = "018f1f34-7000-7000-8000-000000000201";
+  const newId = "018f1f34-7000-7000-8000-000000000202";
+  await writeCanonicalRollout(home.persistentHomePath("codex"), {
+    id: oldId, timestamp: "2026-09-25T21:38:47.176Z"
+  });
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), {
+    id: newId, timestamp: "2026-10-01T14:38:06.144Z"
+  });
+
+  await runtime.settleExit({ sessionId });
+
+  expect(await runtime.privateNativeId(sessionId)).toBe(newId);
+});
+
+test("a persisted generation baseline survives Agent restart and binds recovery to its new rollout", async () => {
+  const { home, root } = await fixture();
+  const oldId = "018f1f34-7000-7000-8000-000000000213";
+  const newId = "018f1f34-7000-7000-8000-000000000214";
+  await writeCanonicalRollout(home.persistentHomePath("codex"), {
+    id: oldId, timestamp: "2026-09-25T21:38:47.176Z"
+  });
+
+  let identity: {
+    processId: string; workspaceId: string; sessionId: string; processGeneration: number; leaseId: string | null;
+  } | null = null;
+  const firstAgent = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => { identity = input; },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await firstAgent.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), {
+    id: newId, timestamp: "2026-10-01T14:38:06.144Z"
+  });
+
+  const restartedAgent = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null },
+    observeHarnessRecovery: () => identity === null ? [] : [{ ...identity, observation: "terminated" as const }]
+  });
+  await restartedAgent.recoverAfterAgentRestart();
+
+  expect(await restartedAgent.privateNativeId(sessionId)).toBe(newId);
+  expect(await restartedAgent.capability(sessionId)).toMatchObject({ state: "lost", processGeneration: 1, resume: true });
+});
+
+test("later Codex settlement retains its already-bound thread when another rollout is newer", async () => {
+  const { runtime, root } = await fixture();
+  const boundId = "018f1f34-7000-7000-8000-000000000203";
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), {
+    id: boundId, timestamp: "2026-10-01T14:38:06.144Z"
+  });
+  await runtime.settleExit({ sessionId });
+  await runtime.resumeExec({
+    sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000204",
+    terminalId: "018f1f34-7000-7000-8000-000000000205", processGeneration: 2
+  });
+  await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), {
+    id: "018f1f34-7000-7000-8000-000000000206", timestamp: "2026-10-01T14:39:06.144Z"
+  });
+
+  await runtime.settleExit({ sessionId });
+
+  expect(await runtime.privateNativeId(sessionId)).toBe(boundId);
+});
+
+test("repairs one exact legacy filename-stem id from its canonical root rollout and is idempotent", async () => {
+  const { runtime, home, root } = await fixture();
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  await runtime.settleExit({ sessionId });
+  const id = "018f1f34-7000-7000-8000-000000000207";
+  const rollout = await writeCanonicalRollout(home.persistentHomePath("codex"), {
+    id, timestamp: "2026-10-01T14:38:06.144Z"
+  });
+  const recordPath = path.join(root, "harness-sessions", `${sessionId}.json`);
+  const legacy = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+  legacy.nativeSessionId = path.basename(rollout, ".jsonl");
+  legacy.processGeneration = 2;
+  await writeFile(recordPath, JSON.stringify(legacy));
+
+  const restarted = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("startup-repair-must-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await restarted.recoverAfterAgentRestart();
+  expect(await restarted.privateNativeId(sessionId)).toBe(id);
+  const repaired = await readFile(recordPath, "utf8");
+  expect(JSON.parse(repaired)).toMatchObject({ nativeSessionId: id, processGeneration: 2, state: "stopped", leaseId: null });
+  await restarted.recoverAfterAgentRestart();
+  await restarted.privateNativeId(sessionId);
+  expect(await readFile(recordPath, "utf8")).toBe(repaired);
+});
+
+test("ambiguous legacy rollout mapping remains untouched and cannot enable Resume", async () => {
+  const { runtime, home, root } = await fixture();
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  await runtime.settleExit({ sessionId });
+  const id = "018f1f34-7000-7000-8000-000000000208";
+  const timestamp = "2026-10-01T14:38:06.144Z";
+  const first = await writeCanonicalRollout(home.persistentHomePath("codex"), { id, timestamp });
+  const duplicateRoot = path.join(home.persistentHomePath("codex"), "sessions", "2026", "09", "30");
+  await mkdir(duplicateRoot, { recursive: true });
+  await writeFile(path.join(duplicateRoot, path.basename(first)), await readFile(first));
+  const recordPath = path.join(root, "harness-sessions", `${sessionId}.json`);
+  const legacy = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+  const oldValue = path.basename(first, ".jsonl");
+  legacy.nativeSessionId = oldValue;
+  await writeFile(recordPath, JSON.stringify(legacy));
+  const before = await readFile(recordPath, "utf8");
+
+  expect(await runtime.privateNativeId(sessionId)).toBe(oldValue);
+  expect(await readFile(recordPath, "utf8")).toBe(before);
+  expect((await runtime.capability(sessionId)).resume).toBe(false);
+});
+
+test("does not repair a legacy filename id from a rollout owned by another cwd", async () => {
+  const { runtime, home, root } = await fixture();
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  await runtime.settleExit({ sessionId });
+  const id = "018f1f34-7000-7000-8000-000000000209";
+  const rollout = await writeCanonicalRollout(home.persistentHomePath("codex"), {
+    id, cwd: "/elsewhere", timestamp: "2026-10-01T14:38:06.144Z"
+  });
+  const recordPath = path.join(root, "harness-sessions", `${sessionId}.json`);
+  const legacy = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+  const oldValue = path.basename(rollout, ".jsonl");
+  legacy.nativeSessionId = oldValue;
+  await writeFile(recordPath, JSON.stringify(legacy));
+
+  expect(await runtime.privateNativeId(sessionId)).toBe(oldValue);
+  expect((await runtime.capability(sessionId)).resume).toBe(false);
 });
 
 test("custom provider-handled resume is offered without a native id", async () => {
@@ -223,10 +379,10 @@ test("proven terminated recovery discovers the id and keeps the session lost", a
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   const slot = path.join(root, "harness-slots", workspaceId);
-  await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-crash.jsonl"), `${JSON.stringify({ id: "thread-crash", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000208";
+  await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
   await runtime.recoverAfterAgentRestart();
-  expect(await runtime.privateNativeId(sessionId)).toBe("thread-crash");
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
   expect((await runtime.inspect({ harnessId: "codex", workspaceId, sessionId })).capabilities.resume).toBe(true);
   expect(await readdir(slot)).toEqual([]);
@@ -260,12 +416,12 @@ test("recovery resumes safely after the lease was released before session persis
     imageCodex: { present: true, version: null }
   });
   await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
-  const slot = path.join(root, "harness-slots", workspaceId, "sessions");
-  await mkdir(slot, { recursive: true });
-  await writeFile(path.join(slot, "thread-release-window.jsonl"), `${JSON.stringify({ id: "thread-release-window", cwd: "/workspace" })}\n`);
+  const slot = path.join(root, "harness-slots", workspaceId);
+  const nativeId = "018f1f34-7000-7000-8000-000000000209";
+  await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
 
   await expect(runtime.recoverAfterAgentRestart()).rejects.toThrow("simulated-agent-crash-after-lease-release");
-  expect(await runtime.privateNativeId(sessionId)).toBe("thread-release-window");
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
   expect(await readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8").catch(() => null)).toBeNull();
   expect(await runtime.capability(sessionId)).toMatchObject({ state: "lost", resume: false });
 
@@ -278,11 +434,12 @@ test("recovery resumes safely after the lease was released before session persis
   });
   await restarted.recoverAfterAgentRestart();
   expect(await restarted.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
-  expect(await restarted.privateNativeId(sessionId)).toBe("thread-release-window");
+  expect(await restarted.privateNativeId(sessionId)).toBe(nativeId);
   expect(await restarted.capability(sessionId)).toMatchObject({ state: "lost", processGeneration: 1, resume: true });
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
-  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "thread-release-window.jsonl"), "utf8"))
-    .toContain("thread-release-window");
+  const persistedRollout = path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01",
+    `rollout-2026-10-01T14-38-06-${nativeId}.jsonl`);
+  expect(await readFile(persistedRollout, "utf8")).toContain(nativeId);
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
@@ -304,17 +461,17 @@ test("codex resume after discovery execs resume argv with native id", async () =
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   const slot = path.join(root, "harness-slots", workspaceId);
-  await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-live.jsonl"), `${JSON.stringify({ id: "thread-live", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000210";
+  await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
   await runtime.settleExit({ sessionId });
   const result = await runtime.resumeExec({
     sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000016",
     terminalId: "018f1f34-7000-7000-8000-000000000017", processGeneration: 2
   });
-  expect(result.command).toEqual(["codex", "--yolo", "--no-daemon", "resume", "thread-live"]);
-  expect(createdExecs.at(-1)?.command).toEqual(["codex", "--yolo", "--no-daemon", "resume", "thread-live"]);
-  expect(createdExecs.at(-1)?.command[4]).toBe("thread-live");
-  expect(JSON.stringify(await runtime.publicSnapshot(sessionId))).not.toContain("thread-live");
+  expect(result.command).toEqual(["codex", "--yolo", "--no-daemon", "resume", nativeId]);
+  expect(createdExecs.at(-1)?.command).toEqual(["codex", "--yolo", "--no-daemon", "resume", nativeId]);
+  expect(createdExecs.at(-1)?.command[4]).toBe(nativeId);
+  expect(JSON.stringify(await runtime.publicSnapshot(sessionId))).not.toContain(nativeId);
   expect(createdExecs.at(-1)?.environment.CODEX_HOME).toBe("/opt/devspace/harness-home");
 });
 
@@ -389,14 +546,14 @@ test("resume exec-create failure restores the previous session and releases the 
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   const slot = path.join(root, "harness-slots", workspaceId);
-  await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-live.jsonl"), `${JSON.stringify({ id: "thread-live", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000211";
+  await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
   await runtime.settleExit({ sessionId });
   await expect(runtime.resumeExec({
     sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000016",
     terminalId: "018f1f34-7000-7000-8000-000000000017", processGeneration: 2
   })).rejects.toThrow(/resume-exec-failed/u);
-  expect(await runtime.privateNativeId(sessionId)).toBe("thread-live");
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "stopped" });
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
   await expect(home.acquireLease({
@@ -510,8 +667,8 @@ test("resume generation is monotonic and a stale generation does not exec", asyn
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   const slot = path.join(root, "harness-slots", workspaceId);
-  await mkdir(path.join(slot, "sessions"), { recursive: true });
-  await writeFile(path.join(slot, "sessions", "thread-live.jsonl"), `${JSON.stringify({ id: "thread-live", cwd: "/workspace" })}\n`);
+  const nativeId = "018f1f34-7000-7000-8000-000000000212";
+  await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
   await runtime.settleExit({ sessionId });
   const secondProcess = "018f1f34-7000-7000-8000-000000000016";
   await runtime.resumeExec({
