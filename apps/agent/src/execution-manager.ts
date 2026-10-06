@@ -5,6 +5,7 @@ import {
   TERMINAL_FAILURE_CLOSE_CODE,
   TERMINAL_MAX_PAYLOAD_BYTES,
   TERMINAL_NORMAL_CLOSE_CODE,
+  TERMINAL_POST_EXIT_REPLAY_RETENTION_MS,
   TERMINAL_PROTOCOL_ERROR_CLOSE_CODE,
   decodeTerminalClientFrame,
   encodeTerminalAgentFrame,
@@ -26,7 +27,6 @@ import { AgentExecutionError, ManagedWorkspaces, type WorkspaceExecutionContext 
 import { durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter } from "./private-state.js";
 
 const REPLAY_LIMIT_BYTES = 64 * 1024;
-const TERMINAL_REPLAY_RETENTION_MS = 30_000;
 const TERMINAL_REPLAY_DRAIN_WAIT_MS = 1_000;
 const ATTACHMENT_BACKPRESSURE_BYTES = 256 * 1024;
 const RECOVERED_HARNESS_POLL_INITIAL_MS = 250;
@@ -946,12 +946,12 @@ export class ExecutionManager {
   private retainTerminalReplay(live: LiveExecution): void {
     if (live.record.kind !== "terminal" || live.record.terminalState !== "closed"
       || live.terminalReplayExpiresAt !== null) return;
-    live.terminalReplayExpiresAt = Date.now() + TERMINAL_REPLAY_RETENTION_MS;
+    live.terminalReplayExpiresAt = Date.now() + TERMINAL_POST_EXIT_REPLAY_RETENTION_MS;
     live.terminalReplayTimer = setTimeout(() => {
       live.replay = Buffer.alloc(0);
       live.terminalReplayExpiresAt = null;
       live.terminalReplayTimer = null;
-    }, TERMINAL_REPLAY_RETENTION_MS);
+    }, TERMINAL_POST_EXIT_REPLAY_RETENTION_MS);
     live.terminalReplayTimer.unref();
   }
 

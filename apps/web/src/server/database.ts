@@ -18,6 +18,7 @@ import {
 } from "./ai-history.js";
 import {
   AI_USER_CONTENT_MAX_BYTES,
+  TERMINAL_POST_EXIT_REPLAY_RETENTION_MS,
   aiChangedFilesSummarySchema,
   canonicalAiEventSchema,
   classifyAiEventAppend,
@@ -2343,7 +2344,13 @@ export function openProjectDatabase(path: string, options: {
       const project = db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.primaryWorkspaceId, workspaceId))).get();
       if (project === undefined || project.state !== "ready") return false;
       const terminal = db.select().from(terminalSessions).where(and(eq(terminalSessions.id, terminalId), eq(terminalSessions.workspaceId, workspaceId))).get();
-      return terminal !== undefined && ["active", "disconnected"].includes(terminal.state);
+      if (terminal === undefined) return false;
+      if (["active", "disconnected"].includes(terminal.state)) return true;
+      if (terminal.state !== "closed" || terminal.closedAt === null) return false;
+      const closedAt = Date.parse(terminal.closedAt);
+      const currentTime = now().valueOf();
+      return Number.isFinite(closedAt) && closedAt <= currentTime
+        && currentTime - closedAt < TERMINAL_POST_EXIT_REPLAY_RETENTION_MS;
     },
     finalizePrimaryWorkspace(input: {
       projectId: string; revisionId: string; workspaceId: string; branchName: string; baseRef: string; actor: string;
