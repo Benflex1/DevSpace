@@ -2,40 +2,36 @@
 
 ## Native harness slice
 
-The generic native AI-harness first slice is implemented on `feat/generic-native-ai-harness`.
-It adds a parallel `native-pty` runtime beside structured Codex. Structured app-server,
-F11, and Workbench turn cards remain. Stage 3/4 default-switch and retirement have not
-happened. Exit settlement, image-PATH Codex detection, pre-start lease compensation,
-custom-definition resume across Agent restart, SQLite stopped/lost projection, and
-monotonic resume generations are implemented. Missing harness slots are added by
-replacing only the development container under the original workspace creation
-operation. Agent Codex artifacts are staged into the container before native exec.
-A generation-1 native Codex process is still running from before the YOLO default.
-Its clean exit, native-id discovery, and resume have not been accepted, and no model
-request has been sent. The Workbench reconnect loop is fixed,
-and the AI tab now defaults to the native harness. Structured Codex remains available
-behind a temporary Legacy presentation. The built-in Codex preset launches and resumes
-with `codex --yolo`, and native harness mutations send the normal DevSpace CSRF marker.
-The Agent PTY for that generation-1 process was lost while its Docker exec remained live.
-Orphan-safe recovery now retains durable harness identity and holds the slot and lease until
-the exact exec exits or its owning workspace container stops. The corrected Agent observed the
-exact orphan running, projected the session and terminal as lost, and kept its slot and lease.
-The Agent's workspace-stop operation then stopped its exact owning container. Initial
-writeback failed safely because the slot contains dangling absolute symlink entries; the slot
-and lease stayed intact. The follow-up now preserves bounded symlink link text without host
-resolution, skips symlinked session discovery roots, and ignores a container-created reserved
-`.lease` entry during writeback. Its first real restart then hit the old 4,096-entry copy bound:
-the retained home has about 8,283 entries. That attempt also failed closed before replacing the
-persistent home or clearing the slot. The bounded copy limit is now 16,384 entries, with a
-regression that writes back 8,300 entries. On the next corrected-Agent startup, the exact
-stopped-container evidence allowed finalization: the native session was discovered privately,
-the session remains `lost` with `resume=true`, the slot is empty, and the lease is absent. The
-existing `auth.json` remains in the persistent Codex home. The product `workspace.start`
-operation succeeded and Agent observes the runtime running again. Its public workspace-inspect
-contract does not expose container mounts, so the new live mount was not separately inspected;
-the Agent runtime path and deterministic mount tests cover it. Browser resume acceptance remains
-pending because this environment has no Web process or configured database path. No real model
-request has been sent. Native Codex acceptance is not complete.
+The generic native AI harness is implemented on `feat/generic-native-ai-harness`. The Workbench
+defaults to Native; structured Codex app-server remains available as the secondary Legacy
+presentation. Both use separate session lifecycles.
+
+Live native Codex acceptance is complete. The authenticated Codex 0.159.0 TUI used a dedicated
+private `CODEX_HOME` and made exactly one real model request, receiving
+`DEVSPACE_NATIVE_HARNESS_OK`. Codex's canonical thread identity came from rollout
+`session_meta.payload.id` and remained bound to the same DevSpace session across native Resume.
+The persisted conversation was restored over multiple generations, including after deliberate
+Agent loss and product workspace Stop recovery. Built-in launch and resume use
+`codex --yolo --no-daemon`; clean foreground settlement left the private slot empty, the lease
+released, and the home quiescent during a six-second observation.
+
+The private-home lifecycle is bounded and Agent-owned. Live Unix sockets and the exact bounded
+Codex daemon/app-server runtime state are omitted on writeback and rejected on materialization;
+the bounded app-server package cache is treated as ephemeral. Codex artifacts use a verified
+content-addressed in-container cache. Interactive PTYs start at 80x24, browser resize remains
+authoritative, and failed resize operations have private diagnostics.
+
+Fast-exit terminal output is retained in a 64 KiB replay buffer for one read-only claim within
+30 seconds. Web authorizes a closed-terminal upgrade only inside that window, with exact
+project/workspace/terminal ownership; the Agent decides whether replay remains available. Live
+acceptance verified Web-to-Agent replay, exit code delivery, and denial of a second output claim.
+The generic custom-harness smoke rendered `DEVSPACE_CUSTOM_HARNESS_OK` and `CODEX_HOME=unset`,
+exited 0, and acquired no Codex-home lease or provider state.
+
+Agent restart while foreground Codex was live preserved the exact running orphan, dirty slot, and
+lease. Product workspace Stop safely finalized it; workspace Start and subsequent Resume
+restored the same conversation. Workbench selection remains bound to the selected DevSpace
+session ID through projection refreshes. The structured Codex path has not been retired.
 
 ## Delivery status
 
