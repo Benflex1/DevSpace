@@ -1,11 +1,17 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   canonicalizeRuntimePlanV1, compileRuntimePlanV1, hashRuntimePlanV1
 } from "@devspace/project-options";
-import { runtimeCreationSchema, runtimeOwnershipSchema, verifyRuntimePlanAgainstOptions, WorkspaceRuntimeManager } from "./workspace-runtime.js";
+import {
+  classifyHarnessSlotMount,
+  runtimeCreationSchema,
+  runtimeOwnershipSchema,
+  verifyRuntimePlanAgainstOptions,
+  WorkspaceRuntimeManager
+} from "./workspace-runtime.js";
 import { DockerEngineClient, DockerEngineError, type DockerContainerInspection, type DockerNetworkInspection } from "./docker-runtime.js";
 import { durableJsonWriter, type AtomicJsonWriter } from "./private-state.js";
 
@@ -21,6 +27,8 @@ class FakeEngine extends DockerEngineClient {
   readonly containers = new Map<string, DockerContainerInspection>();
   readonly names = new Set<string>();
   lastContainerInput: Parameters<DockerEngineClient["createContainer"]>[1] | null = null;
+  cleanupInput: Parameters<DockerEngineClient["createHarnessHomeCleanupContainer"]>[1] | null = null;
+  cleanupContainerId: string | null = null;
   networkCreates = 0;
   containerCreates = 0;
   imageFailures = 0;
@@ -51,7 +59,8 @@ class FakeEngine extends DockerEngineClient {
     const id = `container-${this.containerCreates}`; this.names.add(name); this.lastContainerInput = input;
     const network = [...this.networks.values()].find((candidate) => candidate.Name === input.networkName);
     if (network === undefined) throw new DockerEngineError(404, "network missing");
-    this.containers.set(id, { Id: id, Name: `/${name}`, Config: { Labels: { ...input.labels }, WorkingDir: "/workspace" },
+    this.containers.set(id, { Id: id, Name: `/${name}`, Image: `sha256:${"1".repeat(64)}`,
+      Config: { Labels: { ...input.labels }, Image: input.imageReference, User: input.user ?? "", WorkingDir: "/workspace" },
       State: { Running: false, Status: "created" }, HostConfig: { Privileged: false, PublishAllPorts: false,
         PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
         NetworkMode: input.networkName,
@@ -61,7 +70,27 @@ class FakeEngine extends DockerEngineClient {
         CapAdd: [], CapDrop: [], SecurityOpt: ["no-new-privileges:true"], AutoRemove: false, ReadonlyRootfs: false,
         RestartPolicy: { Name: "no", MaximumRetryCount: 0 } },
       NetworkSettings: { Networks: { [input.networkName]: { NetworkID: "" } } },
-      Mounts: [{ Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" }] });
+      Mounts: [
+        { Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" },
+        ...(input.harnessSlotPath === undefined ? [] : [{
+          Type: "bind", Source: input.harnessSlotPath, Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate"
+        }])
+      ] });
+    return Promise.resolve(id);
+  }
+  override createHarnessHomeCleanupContainer(name: string, input: Parameters<DockerEngineClient["createHarnessHomeCleanupContainer"]>[1]): Promise<string> {
+    this.cleanupInput = input;
+    const id = `cleanup-${this.containers.size + 1}`;
+    this.cleanupContainerId = id;
+    this.containers.set(id, { Id: id, Name: `/${name}`, Image: input.imageId,
+      Config: { Labels: { "devspace.managed": "true", "devspace.resource": "harness-home-cleanup",
+        "devspace.workspace-id": input.workspaceId }, Image: input.imageId, User: "0", WorkingDir: "/" },
+      State: { Running: false, Status: "created", ExitCode: 0 },
+      HostConfig: { Privileged: false, PublishAllPorts: false, PidMode: "", IpcMode: "private", UTSMode: "",
+        UsernsMode: "", CgroupnsMode: "private", NetworkMode: "none", PortBindings: {}, Devices: [],
+        NanoCpus: 500_000_000, Memory: 128 * 1024 * 1024, PidsLimit: 16, CapAdd: [], CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges:true"], AutoRemove: false, ReadonlyRootfs: true,
+        RestartPolicy: { Name: "no", MaximumRetryCount: 0 } }, NetworkSettings: { Networks: {} }, Mounts: [] });
     return Promise.resolve(id);
   }
   override inspectContainer(id: string): Promise<DockerContainerInspection> {
@@ -74,6 +103,7 @@ class FakeEngine extends DockerEngineClient {
       ? Promise.reject(new DockerEngineError(404, "missing")) : Promise.resolve(value);
   }
   override startContainer(id: string): Promise<void> { const value = this.containers.get(id); if (value === undefined) throw new DockerEngineError(404, "missing");
+    if (id === this.cleanupContainerId) { this.containers.set(id, { ...value, State: { Running: false, Status: "exited", ExitCode: 0 } }); return Promise.resolve(); }
     this.networkIdsBeforeStart.push(value.NetworkSettings.Networks?.[value.HostConfig.NetworkMode]?.NetworkID ?? "missing");
     const network = [...this.networks.values()].find((candidate) => candidate.Name === value.HostConfig.NetworkMode);
     if (network === undefined) throw new DockerEngineError(404, "network missing");
@@ -81,6 +111,15 @@ class FakeEngine extends DockerEngineClient {
       NetworkSettings: { Networks: { [network.Name]: { NetworkID: network.Id } } } }); return Promise.resolve(); }
   override stopContainer(id: string): Promise<void> { const value = this.containers.get(id); if (value === undefined) throw new DockerEngineError(404, "missing");
     this.containers.set(id, { ...value, State: { Running: false, Status: "exited" } }); return Promise.resolve(); }
+  override removeContainer(id: string): Promise<void> {
+    const value = this.containers.get(id);
+    if (value === undefined) throw new DockerEngineError(404, "missing");
+    this.containers.delete(id);
+    this.names.delete(value.Name.replace(/^\//u, ""));
+    this.removedContainerIds.push(id);
+    return Promise.resolve();
+  }
+  readonly removedContainerIds: string[] = [];
 }
 
 const association = { projectId: "018f1f34-7000-7000-8000-000000000001", workspaceId: "018f1f34-7000-7000-8000-000000000002",
@@ -180,6 +219,21 @@ describe("exact Docker runtime ownership", () => {
     await expect(start(fixture, "018f1f34-7000-7000-8000-000000000011")).resolves.toMatchObject({ observedState: "running" });
     expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(1);
   });
+
+  test("clears a private slot with a restricted helper bound to the exact stopped workspace owner", async () => {
+    const fixture = await runtimeFixture();
+    await start(fixture);
+    await fixture.manager.stop(fixture.association);
+
+    await expect(fixture.manager.clearHarnessHomeSlot(fixture.association.workspaceId)).resolves.toBeUndefined();
+
+    expect(fixture.engine.cleanupInput).toEqual({
+      imageId: `sha256:${"1".repeat(64)}`,
+      workspaceId: fixture.association.workspaceId,
+      slotHostPath: path.join(fixture.root, "state", "harness-slots", fixture.association.workspaceId)
+    });
+    expect(fixture.engine.removedContainerIds).toContain(fixture.engine.cleanupContainerId);
+  }, 10_000);
 
   test("fails closed on name collision and never adopts the colliding resource", async () => {
     const fixture = await runtimeFixture();
@@ -367,7 +421,7 @@ describe("bounded development-container stabilization", () => {
     const fixture = await runtimeFixture();
     await expect(start(fixture)).resolves.toMatchObject({ observedState: "running" });
     expect(fixture.lifecycle.current).toBe(fixture.policy.stabilizationDurationMs);
-    expect(fixture.engine.runningInspections).toBe(3);
+    expect(fixture.engine.runningInspections).toBe(4);
   });
 
   test.each([
@@ -396,5 +450,184 @@ describe("bounded development-container stabilization", () => {
       if (inspection === 2) container.HostConfig.Memory += 1;
     };
     await expect(start(fixture)).rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+  });
+
+  test("classifies pre-slice, exact, and mismatched harness slot mounts", () => {
+    const worktree = "/srv/worktree";
+    const slot = "/agent/harness-slots/ws";
+    const workspaceMount = { Type: "bind", Source: worktree, Destination: "/workspace", RW: true, Propagation: "rprivate" };
+    expect(classifyHarnessSlotMount({
+      mounts: [workspaceMount], worktreePath: worktree, slotHostPath: slot
+    })).toEqual({ state: "missing" });
+    expect(classifyHarnessSlotMount({
+      mounts: [
+        workspaceMount,
+        { Type: "bind", Source: slot, Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate" }
+      ],
+      worktreePath: worktree, slotHostPath: slot
+    })).toEqual({ state: "present-and-exact" });
+    expect(classifyHarnessSlotMount({
+      mounts: [
+        workspaceMount,
+        { Type: "bind", Source: "/wrong", Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate" }
+      ],
+      worktreePath: worktree, slotHostPath: slot
+    })).toEqual({ state: "mismatch" });
+  });
+
+  const unrelatedOperationId = "018f1f34-7000-7000-8000-0000000000b0";
+
+  function originalStart(fixture: Awaited<ReturnType<typeof runtimeFixture>>) {
+    return (id: string) => id === operationId ? {
+      operationName: "workspace.start",
+      request: { projectId: fixture.association.projectId, workspaceId: fixture.association.workspaceId }
+    } : undefined;
+  }
+
+  async function preSliceRuntime(fixture: Awaited<ReturnType<typeof runtimeFixture>>) {
+    await start(fixture);
+    await fixture.manager.validateCreationJournalBindings(originalStart(fixture));
+    const container = onlyContainer(fixture);
+    const networkId = Object.values(container.NetworkSettings.Networks ?? {})[0]?.NetworkID;
+    if (networkId === undefined) throw new Error("network missing");
+    const networkLabels = { ...fixture.engine.networks.get(networkId)!.Labels };
+    fixture.engine.containers.set(container.Id, {
+      ...container,
+      Mounts: container.Mounts.filter((mount) => mount.Destination === "/workspace")
+    });
+    const sidecarId = "sidecar-preserved";
+    fixture.engine.containers.set(sidecarId, {
+      ...container,
+      Id: sidecarId,
+      Name: "/devspace-sidecar",
+      Mounts: []
+    });
+    fixture.engine.names.add("devspace-sidecar");
+    return { container, networkId, networkLabels, sidecarId };
+  }
+
+  test("replaces only the development container and keeps the original creation operation", async () => {
+    const fixture = await runtimeFixture();
+    const before = await preSliceRuntime(fixture);
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).resolves.toEqual({ state: "present-and-exact" });
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.networks.get(before.networkId)?.Labels).toEqual(before.networkLabels);
+    expect(before.networkLabels["devspace.creation-operation-id"]).toBe(operationId);
+    expect(fixture.engine.removedContainerIds).toEqual([before.container.Id]);
+    expect(fixture.engine.containers.has(before.sidecarId)).toBe(true);
+    expect(fixture.engine.containers.has(before.container.Id)).toBe(false);
+    const creation = runtimeCreationSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    expect(creation.operationId).toBe(operationId);
+    expect(creation.phase).toBe("ownership-committed");
+    expect(creation.networkId).toBe(before.networkId);
+    expect(creation.containerId).not.toBe(before.container.Id);
+    const ownership = runtimeOwnershipSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/ownership/runtimes", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    expect(ownership.developmentContainer.id).toBe(creation.containerId);
+    expect(ownership.developmentContainer.labels["devspace.creation-operation-id"]).toBe(operationId);
+    expect(ownership.network.labels).toEqual(before.networkLabels);
+    await expect(fixture.manager.validateCreationJournalBindings(originalStart(fixture))).resolves.toBeUndefined();
+    await expect(fixture.manager.validateCreationJournalBindings(() => undefined)).rejects.toThrow(/not-bound-to-its-durable-operation/u);
+    const replacement = [...fixture.engine.containers.values()].find((item) => item.Id === creation.containerId);
+    expect(replacement?.Mounts.map((mount) => mount.Destination).sort()).toEqual(["/opt/devspace/harness-home", "/workspace"]);
+    expect(replacement?.HostConfig.NetworkMode).toBe(before.networkLabels ? ownership.network.name : ownership.network.name);
+  });
+
+  test.each([
+    ["planned", "before the old container is removed"],
+    ["previous-removed", "after the old container is removed"],
+    ["replacement-created", "after the replacement exists but before ownership commit"]
+  ] as const)("retries slot replacement interrupted %s", async (phase, _description) => {
+    const fixture = await runtimeFixture(faultingWriter(
+      (file, value) => file.includes("harness-slot-replacements") && (value as { phase?: string }).phase === phase,
+      "after"
+    ));
+    await preSliceRuntime(fixture);
+    const beforeNetworks = fixture.engine.networkCreates;
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).rejects.toThrow(/simulated-crash-after-durable-write/u);
+    expect(fixture.engine.networkCreates).toBe(beforeNetworks);
+    restart(fixture);
+    await fixture.manager.validateCreationJournalBindings(originalStart(fixture));
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).resolves.toEqual({ state: "present-and-exact" });
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.containers.size).toBe(2);
+  });
+
+  test("does not adopt a foreign container that reuses the development name", async () => {
+    const fixture = await runtimeFixture();
+    const before = await preSliceRuntime(fixture);
+    const devName = before.container.Name.replace(/^\//u, "");
+    fixture.engine.containers.delete(before.container.Id);
+    fixture.engine.names.delete(devName);
+    fixture.engine.containers.set("foreign", {
+      ...before.container,
+      Id: "foreign",
+      Name: `/${devName}`,
+      Config: { ...before.container.Config, Labels: { ...before.container.Config.Labels, "devspace.creation-operation-id": unrelatedOperationId } },
+      Mounts: before.container.Mounts
+    });
+    fixture.engine.names.add(devName);
+    const replacement = {
+      version: 1, ...fixture.association, worktreePath: path.resolve(fixture.worktree),
+      resources: { cpuMillicores: 2000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256 },
+      previewBindings: [], originalOperationId: operationId, networkId: before.networkId,
+      networkName: `devspace-${fixture.association.workspaceId.replaceAll("-", "")}-g1-network`,
+      previousContainerId: null, replacementContainerId: null, phase: "previous-removed"
+    };
+    await mkdir(path.join(fixture.root, "state/harness-slot-replacements"), { recursive: true });
+    await writeFile(path.join(fixture.root, "state/harness-slot-replacements", `${fixture.association.workspaceId}.json`),
+      `${JSON.stringify(replacement)}\n`);
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+    expect(fixture.engine.containers.has("foreign")).toBe(true);
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.networks.get(before.networkId)?.Labels).toEqual(before.networkLabels);
+  });
+
+  test("recovers the stranded acceptance state onto the original creation operation", async () => {
+    const fixture = await runtimeFixture();
+    const before = await preSliceRuntime(fixture);
+    await rm(path.join(fixture.root, "state/ownership/runtimes", `${fixture.association.workspaceId}.json`));
+    fixture.engine.containers.delete(before.container.Id);
+    fixture.engine.names.delete(before.container.Name.replace(/^\//u, ""));
+    const creation = runtimeCreationSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    await writeFile(path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`),
+      `${JSON.stringify({ ...creation, operationId: unrelatedOperationId, networkId: null, containerId: null, phase: "reserved" })}\n`);
+    await expect(fixture.manager.recreateIfSlotMissing(
+      fixture.association, fixture.plan, fixture.worktree, [], originalStart(fixture)
+    )).resolves.toEqual({ state: "present-and-exact" });
+    const recovered = runtimeCreationSchema.parse(JSON.parse(await readFile(
+      path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`), "utf8")) as unknown);
+    expect(recovered.operationId).toBe(operationId);
+    expect(recovered.networkId).toBe(before.networkId);
+    expect(recovered.phase).toBe("ownership-committed");
+    expect(fixture.engine.networkCreates).toBe(1);
+    expect(fixture.engine.networks.get(before.networkId)?.Labels["devspace.creation-operation-id"]).toBe(operationId);
+    await expect(fixture.manager.validateCreationJournalBindings(originalStart(fixture))).resolves.toBeUndefined();
+    restart(fixture);
+    await expect(fixture.manager.validateCreationJournalBindings(originalStart(fixture))).resolves.toBeUndefined();
+  });
+
+  test("new workspace containers receive the harness slot and inspect as present-and-exact", async () => {
+    const fixture = await runtimeFixture();
+    await expect(start(fixture)).resolves.toMatchObject({
+      observedState: "running",
+      harnessSlotMount: { state: "present-and-exact" }
+    });
+    expect(fixture.engine.lastContainerInput?.harnessSlotPath).toBe(
+      path.join(fixture.root, "state", "harness-slots", fixture.association.workspaceId)
+    );
+    expect(onlyContainer(fixture).Mounts.map((mount) => mount.Destination).sort()).toEqual([
+      "/opt/devspace/harness-home", "/workspace"
+    ]);
   });
 });

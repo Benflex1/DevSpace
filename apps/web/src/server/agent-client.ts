@@ -6,6 +6,7 @@ import {
   f11AiAgentApiV1EndpointByOperation,
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
+  nativeHarnessInspectResponseSchema,
   AI_EVENT_STREAM_FRAME_MAX_BYTES,
   type AiEventStreamFrame,
   type AiProviderProfileProjection,
@@ -22,6 +23,7 @@ import {
   type GitWorkspaceFileData,
   type HealthData,
   type MutationReceipt,
+  type NativeHarnessInspectResponse,
   type PreviewInspectionData,
   type ProjectPushData,
   type RuntimeStatusData,
@@ -518,8 +520,80 @@ export function createAgentClient(socketPath: string, options: {
         activeRequest = null;
         releaseAdmission();
       }
+    },
+    startNativeHarness: async (data: {
+      projectId: string; workspaceId: string; sessionId: string; harnessId: string;
+      processId: string; terminalId: string; processGeneration: number; definition?: unknown;
+    }): Promise<{ settled: boolean }> => callHarness("/v1/harness-sessions/start", data),
+    resumeNativeHarness: async (data: {
+      projectId: string; workspaceId: string; sessionId: string;
+      processId: string; terminalId: string; processGeneration: number;
+      definition?: unknown;
+    }): Promise<{ settled: boolean }> => callHarness("/v1/harness-sessions/resume", data),
+    inspectNativeHarness: async (data: {
+      sessionId: string; definition?: unknown;
+    }): Promise<NativeHarnessInspectResponse> => {
+      const body = await callHarness("/v1/harness-sessions/inspect", data);
+      return nativeHarnessInspectResponseSchema.parse({
+        state: body.state,
+        resume: body.resume,
+        processGeneration: body.processGeneration
+      });
     }
   };
+
+  async function callHarness(path: string, data: unknown): Promise<{ settled: boolean; state?: string; resume?: boolean; processGeneration?: number }> {
+    const requestId = uuidv7();
+    const body = JSON.stringify({ data });
+    return await new Promise((resolve, reject) => {
+      const request = http.request({
+        socketPath,
+        path,
+        method: "POST",
+        headers: {
+          "X-DevSpace-Protocol-Version": String(AGENT_API_VERSION),
+          "X-DevSpace-Request-Id": requestId,
+          "X-DevSpace-Sent-At": new Date().toISOString(),
+          Accept: "application/json",
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          const status = response.statusCode ?? 0;
+          let parsed: unknown;
+          try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+          catch { return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId)); }
+          if (status === 200) {
+            const data = (parsed as { data?: { settled?: boolean; state?: string; resume?: boolean; processGeneration?: number } }).data;
+            return resolve({
+              settled: data?.settled === true,
+              ...(typeof data?.state === "string" ? { state: data.state } : {}),
+              ...(typeof data?.resume === "boolean" ? { resume: data.resume } : {}),
+              ...(typeof data?.processGeneration === "number" ? { processGeneration: data.processGeneration } : {})
+            });
+          }
+          const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };
+          if (typeof envelope.error?.code === "string") {
+            return reject(new AgentResponseError(
+              envelope.error.code,
+              envelope.error.message ?? "harness-failure",
+              envelope.error.retryable === true,
+              undefined,
+              classifyFailureCode(envelope.error.code),
+              requestId
+            ));
+          }
+          return reject(new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId));
+        });
+      });
+      request.on("error", () => reject(new AgentUnavailableError("AGENT_UNAVAILABLE", "dependency-unavailable", requestId)));
+      request.write(body);
+      request.end();
+    });
+  }
 }
 
 export type FullAgentClient = ReturnType<typeof createAgentClient>;

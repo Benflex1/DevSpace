@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   TERMINAL_SUBPROTOCOL,
+  TERMINAL_POST_EXIT_REPLAY_RETENTION_MS,
   decodeTerminalAgentFrame,
   decodeTerminalClientFrame,
   encodeTerminalAgentFrame,
@@ -11,6 +12,7 @@ import {
 describe("terminal binary frames", () => {
   test("uses the fixed subprotocol and attachment metadata", () => {
     expect(TERMINAL_SUBPROTOCOL).toBe("devspace.terminal.v1");
+    expect(TERMINAL_POST_EXIT_REPLAY_RETENTION_MS).toBe(30_000);
     expect(terminalProtocolMetadata).toMatchObject({
       fragmentedMessagesAllowed: false,
       activeAttachmentsPerTerminal: 1,

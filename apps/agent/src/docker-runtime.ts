@@ -3,6 +3,7 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import path from "node:path";
 import * as z from "zod";
+import { uuidV7Schema } from "@devspace/contracts";
 import { runtimePlanV1Schema, type RuntimePlanV1 } from "@devspace/project-options";
 
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -65,12 +66,17 @@ export class DockerEngineTransportError extends Error {
   }
 }
 
+export interface DockerConsoleSize {
+  readonly columns: number;
+  readonly rows: number;
+}
+
 export interface DockerContainerInspection {
   Id: string;
   Name: string;
   Image?: string;
   Config: { Labels: Record<string, string>; Image?: string; WorkingDir: string; User?: string; Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
-  State: { Running: boolean; Status: string };
+  State: { Running: boolean; Status: string; ExitCode?: number };
   HostConfig: { Privileged: boolean; PublishAllPorts: boolean; PidMode: string;
     IpcMode: string; UTSMode: string; UsernsMode: string; CgroupnsMode: string;
     NetworkMode: string; PortBindings: Record<string, Array<{ HostIp?: string | undefined; HostPort: string }> | null> | null;
@@ -115,6 +121,60 @@ export interface DockerCodexBootstrapContainerInput {
   readonly cpuMillicores: number;
   readonly memoryBytes: number;
   readonly pidLimit: number;
+}
+
+export interface DockerHarnessHomeCleanupContainerInput {
+  readonly imageId: string;
+  readonly workspaceId: string;
+  readonly slotHostPath: string;
+}
+
+export function buildHarnessHomeCleanupContainerInput(input: DockerHarnessHomeCleanupContainerInput) {
+  const slotHostPath = path.resolve(input.slotHostPath);
+  if (!/^sha256:[0-9a-f]{64}$/u.test(input.imageId)
+    || !uuidV7Schema.safeParse(input.workspaceId).success
+    || !path.isAbsolute(input.slotHostPath) || slotHostPath !== input.slotHostPath || slotHostPath.includes("\0")) {
+    throw new Error("harness-home-cleanup-container-input-invalid");
+  }
+  return {
+    Image: input.imageId,
+    Entrypoint: ["/bin/sh", "-c"],
+    Cmd: ["find -P /opt/devspace/harness-home -type d -exec chmod u+rwx {} + && find -P /opt/devspace/harness-home -mindepth 1 -delete"],
+    WorkingDir: "/",
+    User: "0",
+    Env: [],
+    Labels: {
+      "devspace.managed": "true",
+      "devspace.resource": "harness-home-cleanup",
+      "devspace.workspace-id": input.workspaceId
+    },
+    ExposedPorts: {},
+    HostConfig: {
+      Binds: [],
+      Mounts: [{ Type: "bind", Source: slotHostPath, Target: "/opt/devspace/harness-home", ReadOnly: false,
+        BindOptions: { Propagation: "rprivate" } }],
+      NetworkMode: "none",
+      PortBindings: {},
+      PublishAllPorts: false,
+      Privileged: false,
+      PidMode: "",
+      IpcMode: "private",
+      UTSMode: "",
+      UsernsMode: "",
+      CgroupnsMode: "private",
+      AutoRemove: false,
+      ReadonlyRootfs: true,
+      RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      CapAdd: ["DAC_OVERRIDE", "FOWNER"],
+      CapDrop: ["ALL"],
+      Devices: [],
+      SecurityOpt: ["no-new-privileges:true"],
+      NanoCpus: 500_000_000,
+      Memory: 128 * 1024 * 1024,
+      MemorySwap: 128 * 1024 * 1024,
+      PidsLimit: 16
+    }
+  };
 }
 
 export function buildCodexBootstrapContainerInput(input: DockerCodexBootstrapContainerInput) {
@@ -225,7 +285,7 @@ const dockerContainerInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1), Image: z.string().min(1).optional(),
   Config: z.object({ Labels: z.record(z.string(), z.string()), Image: z.string().min(1).optional(), WorkingDir: z.string(), User: z.string().optional(),
     Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() }),
-  State: z.object({ Running: z.boolean(), Status: z.string() }),
+  State: z.object({ Running: z.boolean(), Status: z.string(), ExitCode: z.number().int().optional() }),
   HostConfig: z.object({
     Privileged: z.boolean(), PublishAllPorts: z.boolean(), PidMode: z.string(), IpcMode: z.string(), UTSMode: z.string(),
     UsernsMode: z.string(), CgroupnsMode: z.string(), NetworkMode: z.string(),
@@ -340,7 +400,7 @@ export class DockerEngineClient {
   }
 
   async createContainer(name: string, input: {
-    imageReference: string; worktreePath: string; user: string | null; environment: Record<string, string>;
+    imageReference: string; worktreePath: string; harnessSlotPath: string; user: string | null; environment: Record<string, string>;
     networkName: string; labels: Record<string, string>; cpuMillicores: number; memoryBytes: number; pidLimit: number;
     portBindings?: DockerPortBindings; declaredContainerPorts?: readonly number[];
   }): Promise<string> {
@@ -357,8 +417,12 @@ export class DockerEngineClient {
         .map(([key, value]) => `${key}=${value}`),
       Labels: input.labels, ExposedPorts: Object.fromEntries(Object.keys(portBindings).map((key) => [key, {}])),
       HostConfig: {
-        Binds: [], Mounts: [{ Type: "bind", Source: path.resolve(input.worktreePath), Target: "/workspace", ReadOnly: false,
-          BindOptions: { Propagation: "rprivate" } }],
+        Binds: [], Mounts: [
+          { Type: "bind", Source: path.resolve(input.worktreePath), Target: "/workspace", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } },
+          { Type: "bind", Source: path.resolve(input.harnessSlotPath), Target: "/opt/devspace/harness-home", ReadOnly: false,
+            BindOptions: { Propagation: "rprivate" } }
+        ],
         NetworkMode: input.networkName, PortBindings: portBindings, PublishAllPorts: false,
         Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
         AutoRemove: false, ReadonlyRootfs: false, RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
@@ -431,16 +495,34 @@ export class DockerEngineClient {
     return response.Id;
   }
 
+  async createHarnessHomeCleanupContainer(name: string, input: DockerHarnessHomeCleanupContainerInput): Promise<string> {
+    if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/u.test(name)) throw new Error("harness-home-cleanup-container-name-invalid");
+    const response = await this.json<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`,
+      buildHarnessHomeCleanupContainerInput(input));
+    if (typeof response.Id !== "string" || response.Id.length < 1) throw new Error("harness-home-cleanup-container-id-missing");
+    return response.Id;
+  }
+
   async createExec(containerId: string, input: {
     readonly command: readonly string[];
     readonly workingDirectory: string;
     readonly environment: Readonly<Record<string, string>>;
     readonly attachStdin: boolean;
     readonly tty: boolean;
+    readonly consoleSize?: DockerConsoleSize;
   }): Promise<string> {
+    if (input.consoleSize !== undefined) {
+      const { columns, rows } = input.consoleSize;
+      if (!input.tty) throw new Error("docker-exec-console-size-requires-tty");
+      if (!Number.isInteger(columns) || columns < 1 || columns > 65_535
+        || !Number.isInteger(rows) || rows < 1 || rows > 65_535) {
+        throw new Error("docker-exec-console-size-invalid");
+      }
+    }
     const response = await this.json<{ Id: string }>("POST", `/containers/${encodeURIComponent(containerId)}/exec`, {
       AttachStdin: input.attachStdin, AttachStdout: true, AttachStderr: true,
       DetachKeys: "", Tty: input.tty, Cmd: [...input.command], WorkingDir: input.workingDirectory,
+      ...(input.consoleSize === undefined ? {} : { ConsoleSize: [input.consoleSize.rows, input.consoleSize.columns] }),
       Env: Object.entries(input.environment).sort(([left], [right]) => left.localeCompare(right))
         .map(([name, value]) => `${name}=${value}`)
     });

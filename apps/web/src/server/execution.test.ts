@@ -1,15 +1,25 @@
 import BetterSqlite3 from "better-sqlite3";
+import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
+import WebSocket, { WebSocketServer } from "ws";
+import { decodeTerminalAgentFrame, encodeTerminalAgentFrame, encodeTerminalClientFrame, TERMINAL_SUBPROTOCOL } from "@devspace/contracts";
 import { AgentResponseError, AgentUnavailableError } from "./agent-client.js";
 import { openProjectDatabase } from "./database.js";
 import { openTerminal } from "./execution.js";
+import { installTerminalWebSocketRelay } from "./terminal-relay.js";
 
 const directories: string[] = [];
 const databases: Array<ReturnType<typeof openProjectDatabase>> = [];
+const servers: Server[] = [];
+const relayRemovers: Array<() => void> = [];
+const webSocketServers: WebSocketServer[] = [];
 afterEach(async () => {
+  for (const remove of relayRemovers.splice(0)) remove();
+  for (const socketServer of webSocketServers.splice(0)) await new Promise<void>((resolve) => socketServer.close(() => resolve()));
+  await Promise.all(servers.splice(0).map(async (server) => await new Promise<void>((resolve) => server.close(() => resolve()))));
   for (const database of databases.splice(0)) database.close();
   await Promise.all(directories.splice(0).map(async (directory) => await rm(directory, { recursive: true, force: true })));
 });
@@ -404,6 +414,189 @@ test("closing after authoritative terminal loss preserves the lost state", async
   expect(() => database.prepareTerminalClose(project.id, intent.terminalId, "actor")).toThrow("no longer attachable");
   expect(database.getManagedProject(project.id)?.terminals).toEqual([
     expect.objectContaining({ id: intent.terminalId, state: "lost" })
+  ]);
+});
+
+test("authorizes a closed terminal only for its bounded post-exit replay window and exact owner", async () => {
+  let currentTime = new Date("2026-07-19T00:00:30.000Z");
+  const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const terminalIds = Array.from({ length: 8 }, () => database.prepareTerminalCreate(project.id, "actor").terminalId);
+  const [active, disconnected, freshClosed, expiredClosed, lost, failed, creating, nullClosed] = terminalIds;
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare("update terminal_sessions set state = 'active' where id = ?").run(active);
+  raw.prepare("update terminal_sessions set state = 'disconnected' where id = ?").run(disconnected);
+  raw.prepare("update terminal_sessions set state = 'closed', closed_at = ? where id = ?")
+    .run("2026-07-19T00:00:00.001Z", freshClosed);
+  raw.prepare("update terminal_sessions set state = 'closed', closed_at = ? where id = ?")
+    .run("2026-07-18T23:59:59.999Z", expiredClosed);
+  raw.prepare("update terminal_sessions set state = 'lost', closed_at = ? where id = ?")
+    .run(currentTime.toISOString(), lost);
+  raw.prepare("update terminal_sessions set state = 'failed', closed_at = ? where id = ?")
+    .run(currentTime.toISOString(), failed);
+  raw.prepare("update terminal_sessions set state = 'closed', closed_at = null where id = ?").run(nullClosed);
+  raw.close();
+
+  expect(database.authorizeTerminal(project.id, workspaceId, active!)).toBe(true);
+  expect(database.authorizeTerminal(project.id, workspaceId, disconnected!)).toBe(true);
+  expect(database.authorizeTerminal(project.id, workspaceId, freshClosed!)).toBe(true);
+  expect(database.authorizeTerminal(project.id, workspaceId, expiredClosed!)).toBe(false);
+  expect(database.authorizeTerminal(project.id, workspaceId, lost!)).toBe(false);
+  expect(database.authorizeTerminal(project.id, workspaceId, failed!)).toBe(false);
+  expect(database.authorizeTerminal(project.id, workspaceId, creating!)).toBe(false);
+  expect(database.authorizeTerminal(project.id, workspaceId, nullClosed!)).toBe(false);
+  expect(database.authorizeTerminal(project.id, "018f0f00-0000-7000-8000-000000000088", freshClosed!)).toBe(false);
+  expect(database.authorizeTerminal("018f0f00-0000-7000-8000-000000000087", workspaceId, freshClosed!)).toBe(false);
+  expect(database.authorizeTerminal(project.id, workspaceId, "018f0f00-0000-7000-8000-000000000086")).toBe(false);
+
+  currentTime = new Date("2026-07-19T00:00:30.001Z");
+  expect(database.authorizeTerminal(project.id, workspaceId, freshClosed!)).toBe(false);
+  currentTime = new Date("2026-07-19T00:00:00.000Z");
+  expect(database.authorizeTerminal(project.id, workspaceId, freshClosed!)).toBe(false);
+});
+
+test("Web relays a closed fast-exit terminal's one-shot Agent replay before the authorization grace expires", async () => {
+  const currentTime = new Date("2026-07-19T00:00:30.000Z");
+  const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const intent = database.prepareTerminalCreate(project.id, "actor");
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare("update terminal_sessions set state = 'closed', closed_at = ? where id = ?")
+    .run(currentTime.toISOString(), intent.terminalId);
+  raw.close();
+
+  const agentSocketPath = path.join(path.dirname(databasePath), "agent.sock");
+  const agentHttp = createServer();
+  const agentWebSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  webSocketServers.push(agentWebSockets);
+  let replayClaimed = false;
+  let agentClaims = 0;
+  agentHttp.on("upgrade", (request, socket, head) => {
+    if (request.url !== `/v1/terminals/${intent.terminalId}/stream` || request.headers["sec-websocket-protocol"] !== TERMINAL_SUBPROTOCOL) {
+      socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
+    }
+    agentClaims += 1;
+    if (replayClaimed) {
+      socket.end("HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
+    }
+    replayClaimed = true;
+    agentWebSockets.handleUpgrade(request, socket, head, (websocket) => {
+      websocket.send(Buffer.from(encodeTerminalAgentFrame({ type: "ready" })), { binary: true });
+      websocket.send(Buffer.from(encodeTerminalAgentFrame({ type: "output", data: Buffer.from("FAST_CUSTOM_HARNESS_OUTPUT\n") })), { binary: true });
+      websocket.send(Buffer.from(encodeTerminalAgentFrame({ type: "exit", exitCode: 0 })), { binary: true });
+      websocket.close(1000);
+    });
+  });
+  await new Promise<void>((resolve, reject) => { agentHttp.once("error", reject); agentHttp.listen(agentSocketPath, resolve); });
+  servers.push(agentHttp);
+
+  const origin = "http://terminal-test.invalid";
+  const web = createServer();
+  const removeRelay = installTerminalWebSocketRelay(web, {
+    appOrigin: origin, agentSocketPath, auth: { mode: "development", actor: "test@example.invalid" },
+    authorizeTerminal: (projectId, authorizedWorkspaceId, terminalId) =>
+      database.authorizeTerminal(projectId, authorizedWorkspaceId, terminalId),
+    onUnmatchedUpgrade: (_request, socket) => socket.destroy()
+  });
+  relayRemovers.push(removeRelay);
+  await new Promise<void>((resolve, reject) => { web.once("error", reject); web.listen(0, "127.0.0.1", resolve); });
+  servers.push(web);
+  const address = web.address();
+  if (address === null || typeof address === "string") throw new Error("Web relay did not bind a TCP port.");
+  const url = `ws://127.0.0.1:${address.port}/api/projects/${project.id}/workspaces/${workspaceId}/terminals/${intent.terminalId}/stream`;
+  const receive = async (terminalUrl: string): Promise<{ status: number | null; frames: Array<ReturnType<typeof decodeTerminalAgentFrame>> }> => {
+    const socket = new WebSocket(terminalUrl, TERMINAL_SUBPROTOCOL, { headers: { origin } });
+    return await new Promise((resolve, reject) => {
+      const frames: Array<ReturnType<typeof decodeTerminalAgentFrame>> = [];
+      let settled = false;
+      const finish = (status: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ status, frames });
+      };
+      const timer = setTimeout(() => { socket.terminate(); reject(new Error("terminal relay did not close")); }, 3_000);
+      socket.on("message", (data, isBinary) => {
+        if (!isBinary) { socket.terminate(); reject(new Error("terminal relay returned a text frame")); return; }
+        const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
+        frames.push(decodeTerminalAgentFrame(bytes));
+      });
+      socket.once("open", () => undefined);
+      socket.once("close", () => finish(null));
+      socket.once("unexpected-response", (_request, response) => finish(response.statusCode ?? 0));
+      socket.once("error", (error) => { if (!settled && socket.readyState !== WebSocket.CLOSED) reject(error); });
+    });
+  };
+
+  const first = await receive(url);
+  expect(first.status).toBe(null);
+  expect(first.frames.map((frame) => frame.ok ? frame.frame.type : frame.error)).toEqual(["ready", "output", "exit"]);
+  expect(first.frames[1]).toMatchObject({ ok: true, frame: { type: "output", data: Buffer.from("FAST_CUSTOM_HARNESS_OUTPUT\n") } });
+  expect(first.frames[2]).toMatchObject({ ok: true, frame: { type: "exit", exitCode: 0 } });
+  expect(agentClaims).toBe(1);
+
+  const second = await receive(url);
+  expect(second.status).toBe(409);
+  expect(second.frames).toEqual([]);
+  expect(agentClaims).toBe(2);
+
+  const foreign = await receive(`ws://127.0.0.1:${address.port}/api/projects/${project.id}/workspaces/${workspaceId}/terminals/018f0f00-0000-7000-8000-000000000086/stream`);
+  expect(foreign.status).toBe(404);
+  expect(foreign.frames).toEqual([]);
+  expect(agentClaims).toBe(2);
+});
+
+test("active terminal relay still carries live input and resize frames", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const intent = database.prepareTerminalCreate(project.id, "actor");
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare("update terminal_sessions set state = 'active' where id = ?").run(intent.terminalId);
+  raw.close();
+
+  const agentSocketPath = path.join(path.dirname(databasePath), "live-agent.sock");
+  const agentHttp = createServer();
+  const agentWebSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  webSocketServers.push(agentWebSockets);
+  const clientFrames: Buffer[] = [];
+  let finishFrames!: () => void;
+  const receivedFrames = new Promise<void>((resolve) => { finishFrames = resolve; });
+  agentHttp.on("upgrade", (request, socket, head) => {
+    agentWebSockets.handleUpgrade(request, socket, head, (websocket) => {
+      websocket.send(Buffer.from(encodeTerminalAgentFrame({ type: "ready" })), { binary: true });
+      websocket.on("message", (data, isBinary) => {
+        if (!isBinary) return;
+        const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
+        clientFrames.push(bytes);
+        if (clientFrames.length === 2) { finishFrames(); websocket.close(1000); }
+      });
+    });
+  });
+  await new Promise<void>((resolve, reject) => { agentHttp.once("error", reject); agentHttp.listen(agentSocketPath, resolve); });
+  servers.push(agentHttp);
+  const origin = "http://terminal-live-test.invalid";
+  const web = createServer();
+  relayRemovers.push(installTerminalWebSocketRelay(web, {
+    appOrigin: origin, agentSocketPath, auth: { mode: "development", actor: "test@example.invalid" },
+    authorizeTerminal: (projectId, authorizedWorkspaceId, terminalId) =>
+      database.authorizeTerminal(projectId, authorizedWorkspaceId, terminalId),
+    onUnmatchedUpgrade: (_request, socket) => socket.destroy()
+  }));
+  await new Promise<void>((resolve, reject) => { web.once("error", reject); web.listen(0, "127.0.0.1", resolve); });
+  servers.push(web);
+  const address = web.address();
+  if (address === null || typeof address === "string") throw new Error("Web relay did not bind a TCP port.");
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/projects/${project.id}/workspaces/${workspaceId}/terminals/${intent.terminalId}/stream`,
+    TERMINAL_SUBPROTOCOL, { headers: { origin } });
+  const ready = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("live terminal relay did not open")), 3_000);
+    socket.once("open", () => { clearTimeout(timer); resolve(); });
+    socket.once("error", reject);
+  });
+  await ready;
+  socket.send(Buffer.from(encodeTerminalClientFrame({ type: "input", data: Buffer.from("local-input") })), { binary: true });
+  socket.send(Buffer.from(encodeTerminalClientFrame({ type: "resize", columns: 120, rows: 40 })), { binary: true });
+  await receivedFrames;
+  expect(clientFrames.map((frame) => Array.from(frame))).toEqual([
+    Array.from(encodeTerminalClientFrame({ type: "input", data: Buffer.from("local-input") })),
+    Array.from(encodeTerminalClientFrame({ type: "resize", columns: 120, rows: 40 }))
   ]);
 });
 

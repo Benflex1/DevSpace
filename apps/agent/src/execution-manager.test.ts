@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { ExecutionManager, TaskStartRecoveryRequiredError, isSuccessfulTaskExitCode } from "./execution-manager.js";
+import { DockerEngineError } from "./docker-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter } from "./private-state.js";
 
@@ -14,7 +16,10 @@ const workspaceId = "018f0f00-0000-7000-8000-000000000002";
 const terminalId = "018f0f00-0000-7000-8000-000000000003";
 const operationId = "018f0f00-0000-7000-8000-000000000004";
 const roots: string[] = [];
-afterEach(async () => await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true }))));
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
+});
 
 describe("configured task exit semantics", () => {
   test("uses the configured success exit codes rather than assuming zero", () => {
@@ -456,10 +461,90 @@ class FakeSocket extends EventEmitter {
   readonly CLOSED = 3;
   readyState = this.OPEN;
   bufferedAmount = 0;
-  send(): void { /* protocol output is not relevant to slot ownership */ }
+  send(_data: Buffer): void { /* protocol output is not relevant to slot ownership */ }
   close(): void { this.readyState = 2; }
   terminate(): void { this.readyState = this.CLOSED; queueMicrotask(() => this.emit("close")); }
 }
+
+class RecordingFakeSocket extends FakeSocket {
+  readonly frames: Buffer[] = [];
+  override send(data: Buffer): void { this.frames.push(Buffer.from(data)); }
+}
+
+test("a browser attaching after a fast terminal exit receives bounded replay and the exact exit code once", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-fast-exit-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const stream = new PassThrough();
+  stream.end(Buffer.from("FAST_EXIT_DIAGNOSTIC"));
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let creates = 0;
+  let starts = 0;
+  let resizes = 0;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    createExec: async () => { creates += 1; return "exec-fast-exit"; },
+    startExecAttached: async () => { starts += 1; return stream; },
+    inspectExec: async () => ({ ID: "exec-fast-exit", Running: false, ExitCode: 1, ContainerID: "container-owned" }),
+    resizeExec: async () => { resizes += 1; }
+  } as never);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
+
+  const socket = new RecordingFakeSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
+  const decoded = socket.frames.map((frame) => decodeTerminalAgentFrame(frame)).map((result) => {
+    expect(result.ok).toBe(true);
+    return result.ok ? result.frame : null;
+  });
+  expect(decoded).toEqual([
+    { type: "ready" },
+    { type: "output", data: Buffer.from("FAST_EXIT_DIAGNOSTIC") },
+    { type: "exit", exitCode: 1 }
+  ]);
+  expect(socket.readyState).toBe(socket.CLOSING);
+  expect(socket.listenerCount("message")).toBe(0);
+  const input = encodeTerminalClientFrame({ type: "input", data: Buffer.from("must-not-be-written") });
+  socket.emit("message", Buffer.from(input), true);
+  expect(stream.writableLength).toBe(0);
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+  expect(resizes).toBe(0);
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(() => manager.reserveTerminalAttachment("018f0f00-0000-7000-8000-000000000099"))
+    .toThrow("The terminal was not found.");
+});
+
+test("fast-exit replay is bounded and expires without reopening the process", async () => {
+  vi.useFakeTimers();
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-replay-expiry-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const stream = new PassThrough();
+  stream.end(Buffer.alloc(80 * 1024, 65));
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    createExec: async () => "exec-expiring", startExecAttached: async () => stream,
+    inspectExec: async () => ({ ID: "exec-expiring", Running: false, ExitCode: 1, ContainerID: "container-owned" })
+  } as never);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const executions = (manager as unknown as { executions: Map<string, { replay: Buffer }> }).executions;
+  expect(executions.get(terminalId)?.replay.byteLength).toBeLessThanOrEqual(64 * 1024);
+  const available = manager.reserveTerminalAttachment(terminalId);
+  available.release();
+
+  await vi.advanceTimersByTimeAsync(30_001);
+  expect(executions.get(terminalId)?.replay).toHaveLength(0);
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+});
 
 async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, terminalId: string): Promise<void> {
   let cleanup: ReturnType<ExecutionManager["reserveTerminalAttachment"]> | undefined;
@@ -672,4 +757,136 @@ test("initial attachment persistence failure closes before releasing ownership a
   const live = (manager as unknown as { executions: Map<string, { attachment: unknown }> }).executions.get(terminalId);
   expect(live?.attachment).toBeNull();
   expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+});
+
+test("createHarness execs structured argv with CODEX_HOME only on that exec", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-exec-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const created: Array<{ command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
+    consoleSize?: { columns: number; rows: number } }> = [];
+  let identityAtStart: Record<string, unknown> | null = null;
+  const engine = {
+    createExec: async (_containerId: string, input: {
+      command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
+      consoleSize?: { columns: number; rows: number };
+    }) => {
+      created.push(input);
+      return `exec-${created.length}`;
+    },
+    startExecAttached: async (execId: string) => {
+      if (execId === "exec-1") {
+        identityAtStart = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${harnessTerminalId}.json`), "utf8")) as Record<string, unknown>;
+      }
+      return new PassThrough();
+    },
+    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  await manager.initialize();
+  const harnessTerminalId = "018f0f00-0000-7000-8000-0000000000aa";
+  await manager.createHarness({
+    projectId: id, workspaceId, processId: harnessTerminalId, terminalId: harnessTerminalId,
+    command: ["codex", "resume", "thread-1"],
+    environment: { CODEX_HOME: "/opt/devspace/harness-home" },
+    sessionId: "018f0f00-0000-7000-8000-0000000000ab", processGeneration: 7, leaseId: "lease-test"
+  });
+  expect(identityAtStart).toMatchObject({
+    kind: "terminal", executionRole: "harness", harnessSessionId: "018f0f00-0000-7000-8000-0000000000ab",
+    harnessGeneration: 7, harnessLeaseId: "lease-test", creationPhase: "start-intent"
+  });
+  expect(created[0]).toMatchObject({
+    command: ["codex", "resume", "thread-1"],
+    workingDirectory: "/workspace",
+    tty: true,
+    consoleSize: { columns: 80, rows: 24 },
+    environment: { TERM: "xterm-256color", CODEX_HOME: "/opt/devspace/harness-home" }
+  });
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const terminalRecord = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(terminalRecord.executionRole).toBe("terminal");
+  expect(terminalRecord.harnessSessionId).toBeNull();
+  expect(created[1]).toMatchObject({
+    command: ["/bin/sh"],
+    environment: { TERM: "xterm-256color" },
+    consoleSize: { columns: 80, rows: 24 }
+  });
+  expect(created[1]!.environment.CODEX_HOME).toBeUndefined();
+});
+
+test("ordinary task execs stay non-TTY while interactive terminals receive initial PTY geometry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-exec-console-size-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [{ key: "check", interactive: false,
+      longRunning: false, timeoutSeconds: null, concurrencyPolicy: "allow", successExitCodes: [0], command: {
+        executable: "/usr/bin/printf", args: ["ok"], workingDirectory: ".", environment: {}
+      } }] }
+  } as unknown as WorkspaceExecutionContext;
+  const created: Array<{ tty: boolean; consoleSize?: { columns: number; rows: number } }> = [];
+  const engine = {
+    createExec: async (_containerId: string, input: { tty: boolean; consoleSize?: { columns: number; rows: number } }) => {
+      created.push(input);
+      return `exec-${created.length}`;
+    },
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  await manager.initialize();
+  await manager.startTask({ projectId: id, workspaceId, taskRunId: terminalId, processId: operationId, taskKey: "check" }, operationId);
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(created[0]).toMatchObject({ tty: false });
+  expect(created[0]?.consoleSize).toBeUndefined();
+  expect(created[1]).toMatchObject({ tty: true, consoleSize: { columns: 80, rows: 24 } });
+});
+
+test("terminal resize failures produce one bounded private diagnostic without Docker response details", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-resize-diagnostic-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const diagnostics: unknown[] = [];
+  const engine = {
+    createExec: async () => "exec-resize",
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async () => ({ ID: "exec-resize", Running: true, ExitCode: 0, ContainerID: "container-owned" }),
+    resizeExec: async () => { throw new DockerEngineError(500, "secret path and arbitrary response text"); }
+  } as never;
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine, undefined, undefined, {
+    onTerminalResizeFailure: (event) => { diagnostics.push(event); }
+  });
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const socket = new FakeSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
+  const resize = Buffer.from(encodeTerminalClientFrame({ type: "resize", columns: 120, rows: 40 }));
+  socket.emit("message", resize, true);
+  socket.emit("message", resize, true);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  expect(diagnostics).toEqual([{
+    processId: terminalId, terminalId, columns: 120, rows: 40, failureClass: "docker-http", failureCode: 500
+  }]);
+  expect(JSON.stringify(diagnostics)).not.toContain("secret path");
+  socket.terminate();
+  const executions = (manager as unknown as {
+    executions: Map<string, { attachmentCleanup: Promise<void> | null; attachment: unknown }>;
+  }).executions;
+  const live = executions.get(terminalId);
+  for (let attempt = 0; attempt < 1_000 && (live?.attachment !== null || live.attachmentCleanup !== null); attempt += 1) {
+    await live?.attachmentCleanup;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  expect(live?.attachment).toBeNull();
+  expect(live?.attachmentCleanup).toBeNull();
 });

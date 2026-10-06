@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import {
-  isTerminalAttachableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, reconcileTerminalState,
-  removeTerminalCollectionEntries, sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
+  isTerminalAttachableState, isTerminalOpenableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, reconcileTerminalState,
+  nativeHarnessTerminalState, removeTerminalCollectionEntries, sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
 } from "./terminal-lifecycle.js";
 
 describe("terminal lifecycle reconciliation", () => {
@@ -21,8 +21,26 @@ describe("terminal lifecycle reconciliation", () => {
     expect(terminalUiState("active")).toBe("disconnected");
   });
 
-  test.each(["closed", "failed"])("does not keep %s in the normal terminal list", (state) => {
-    expect(isTerminalVisibleState(state)).toBe(false);
+  test("keeps closed output briefly visible without making the terminal live-attachable", () => {
+    expect(isTerminalVisibleState("closed")).toBe(true);
+    expect(isTerminalOpenableState("closed")).toBe(true);
+    expect(isTerminalAttachableState("closed")).toBe(false);
+    expect(isTerminalSidebarVisible("closed", 10_000, 10_000)).toBe(true);
+    expect(isTerminalSidebarVisible("closed", 10_000, 10_000 + LOST_TERMINAL_SIDEBAR_EXPIRY_MS)).toBe(false);
+  });
+
+  test.each([
+    ["creating", "active"],
+    ["active", "active"],
+    ["lost", "lost"],
+    ["stopped", "closed"]
+  ])("maps native harness state %s to terminal state %s", (sessionState, terminalState) => {
+    expect(nativeHarnessTerminalState(sessionState)).toBe(terminalState);
+  });
+
+  test("does not keep failed terminals in the normal terminal list", () => {
+    expect(isTerminalVisibleState("failed")).toBe(false);
+    expect(isTerminalOpenableState("failed")).toBe(false);
   });
 
   test("keeps a lost terminal visible but never attachable", () => {
@@ -117,7 +135,7 @@ describe("terminal lifecycle reconciliation", () => {
     expect(reopened[0]?.state).toBe("active");
     const exited = updateTerminalCollectionState(reopened, terminal.id, "closed");
     expect(exited[0]?.state).toBe("closed");
-    expect(isTerminalVisibleState(exited[0]?.state ?? "")).toBe(false);
+    expect(isTerminalVisibleState(exited[0]?.state ?? "")).toBe(true);
   });
 
   test("removes only the terminal rows captured by lost-terminal recovery", () => {
@@ -142,6 +160,7 @@ describe("terminal lifecycle reconciliation", () => {
     expect(terminalSocketCloseAction({ terminalEnded: true, cancelled: false, terminalState: "active", closeCode: 1000 })).toBe("refresh");
     expect(terminalSocketCloseAction({ terminalEnded: false, cancelled: true, terminalState: "active", closeCode: 1000 })).toBe("refresh");
     expect(terminalSocketCloseAction({ terminalEnded: false, cancelled: true, terminalState: "lost", closeCode: 1000 })).toBe("ignore");
+    expect(terminalSocketCloseAction({ terminalEnded: false, cancelled: false, terminalState: "closed", closeCode: 1006 })).toBe("ignore");
     expect(terminalSocketCloseAction({ terminalEnded: false, cancelled: false, terminalState: "active", closeCode: 1006 })).toBe("reconnect");
   });
 

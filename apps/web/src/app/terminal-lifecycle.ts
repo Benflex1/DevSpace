@@ -2,7 +2,7 @@ export const terminalServerStates = ["creating", "active", "disconnected", "clos
 export type TerminalServerState = (typeof terminalServerStates)[number];
 export type TerminalUiState = "connecting" | "active" | TerminalServerState;
 
-const terminalVisibleStates = new Set(["creating", "active", "disconnected", "lost"]);
+const terminalVisibleStates = new Set(["creating", "active", "disconnected", "closed", "lost"]);
 const terminalDisplayNumberPattern = /^Terminal ([1-9][0-9]*)$/u;
 export const LOST_TERMINAL_SIDEBAR_EXPIRY_MS = 30_000;
 
@@ -12,7 +12,7 @@ export function isTerminalVisibleState(state: string): boolean {
 
 export function isTerminalSidebarVisible(state: string, lostAt: number | undefined, now: number): boolean {
   if (!isTerminalVisibleState(state)) return false;
-  return state !== "lost" || lostAt === undefined || now < lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS;
+  return !["closed", "lost"].includes(state) || lostAt === undefined || now < lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS;
 }
 
 export function terminalDisplayNumber(title: string): number | undefined {
@@ -51,6 +51,15 @@ export function isTerminalAttachableState(state: string): state is "active" | "d
   return state === "active" || state === "disconnected";
 }
 
+export function isTerminalOpenableState(state: string): boolean {
+  return isTerminalAttachableState(state) || state === "closed";
+}
+
+export function nativeHarnessTerminalState(sessionState: string): "active" | "closed" | "lost" {
+  if (sessionState === "active" || sessionState === "creating") return "active";
+  return sessionState === "lost" ? "lost" : "closed";
+}
+
 export function terminalStateMessage(state: string): string {
   if (state === "lost") {
     return "The Agent restart lost this terminal's PTY attachment. It cannot be reattached, and processes launched here may still be running inside the retained workspace runtime.";
@@ -84,6 +93,7 @@ export function terminalSocketCloseAction(input: {
 }): TerminalSocketCloseAction {
   if (input.terminalEnded) return "refresh";
   if (input.cancelled) return isTerminalAttachableState(input.terminalState) ? "refresh" : "ignore";
+  if (input.terminalState === "closed") return "ignore";
   if (input.closeCode === 4000) return "refresh";
   return "reconnect";
 }

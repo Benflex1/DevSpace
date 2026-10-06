@@ -2118,6 +2118,29 @@ export class ManagedWorkspaces {
     return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The workspace runtime operation failed safely.", { incidentId: uuidv7() }));
   }
 
+  async observeHarnessSlot(workspaceId: string) {
+    return await this.runtime.observeHarnessSlot(workspaceId);
+  }
+
+  async clearHarnessHomeSlot(workspaceId: string): Promise<void> {
+    await this.runtime.clearHarnessHomeSlot(workspaceId);
+  }
+
+  async recreateHarnessSlot(projectId: string, workspaceId: string) {
+    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
+    if (revision.runtimePlan === null) {
+      throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
+    }
+    const association = { projectId, workspaceId, revisionId: workspace.revision.revisionId,
+      revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 };
+    return await this.runtime.recreateIfSlotMissing(
+      association,
+      JSON.parse(revision.runtimePlan.canonicalJson) as Parameters<WorkspaceRuntimeManager["recreateIfSlotMissing"]>[1],
+      workspace.worktreePath
+    );
+  }
+
   async startWorkspace(projectId: string, workspaceId: string, operationId: string): Promise<void> {
     const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
@@ -2301,6 +2324,15 @@ export class ManagedWorkspaces {
 
   async validateCreationJournalBindings(findOperation: (operationId: string) => CreationJournalBinding | undefined): Promise<void> {
     await this.assertManagedDirectories();
+    await this.runtime.recoverOutstandingHarnessSlotReplacements(async (creation) => {
+      const workspace = await this.loadWorkspaceOwnership(creation.projectId, creation.workspaceId);
+      const revision = await this.loadRevisionRecord(creation.projectId, workspace.revision.revisionId);
+      if (revision.runtimePlan === null || revision.runtimePlan.hash !== creation.runtimePlanHash
+        || workspace.revision.revisionId !== creation.revisionId || workspace.revision.revisionHash !== creation.revisionHash) {
+        return null;
+      }
+      return { plan: parseRuntimePlanV1(JSON.parse(revision.runtimePlan.canonicalJson)), worktreePath: workspace.worktreePath };
+    }, findOperation);
     for (const name of await readdir(path.join(this.stateRoot, "creations"))) {
       const record = await this.loadCreation(path.basename(name, ".json"));
       if (record === null || name !== `${record.operationId}.json`) {

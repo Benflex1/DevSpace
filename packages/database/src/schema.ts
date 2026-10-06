@@ -46,6 +46,7 @@ const githubConnectionStates = ["connected", "degraded", "failed"] as const;
 const githubConnectionLifecycleStates = ["enabled", "disconnect-pending", "disconnected", "reconnect-pending",
   "installation-removed", "installation-suspended", "permission-required", "repository-access-unavailable", "transient-error"] as const;
 const githubConnectionCleanupStates = ["settled", "pending", "degraded"] as const;
+const aiSessionRuntimeKinds = ["structured", "native-pty"] as const;
 
 function quotedValues(values: readonly string[]): SQL {
   return sql.raw(values.map((value) => `'${value.replaceAll("'", "''")}'`).join(", "));
@@ -484,6 +485,8 @@ export const aiSessions = sqliteTable("ai_sessions", {
   failureCode: text("failure_code"),
   failureJson: text("failure_json"),
   externalSessionId: text("external_session_id"),
+  runtimeKind: text("runtime_kind", { enum: aiSessionRuntimeKinds }).notNull().default("structured"),
+  harnessId: text("harness_id"),
   title: text("title").notNull(),
   state: text("state", { enum: aiSessionStates }).notNull(),
   createdAt: text("created_at").notNull(),
@@ -507,10 +510,30 @@ export const aiSessions = sqliteTable("ai_sessions", {
   check("ai_sessions_runtime_plan_hash_check", sql`${table.runtimePlanHash} glob 'sha256-jcs-v1:*'`),
   jsonCheck("ai_sessions_failure_json_check", table.failureJson, true),
   enumCheck("ai_sessions_state_check", table.state, aiSessionStates),
+  enumCheck("ai_sessions_runtime_kind_check", table.runtimeKind, aiSessionRuntimeKinds),
   timestampCheck("ai_sessions_created_at_timestamp_check", table.createdAt),
   timestampCheck("ai_sessions_updated_at_timestamp_check", table.updatedAt),
   timestampCheck("ai_sessions_last_activity_at_timestamp_check", table.lastActivityAt, true),
   timestampCheck("ai_sessions_stopped_at_timestamp_check", table.stoppedAt, true)
+]);
+
+export const harnessDefinitions = sqliteTable("harness_definitions", {
+  id: text("id").primaryKey(),
+  displayName: text("display_name").notNull(),
+  origin: text("origin").notNull().default("custom"),
+  launchJson: text("launch_json").notNull(),
+  resumeJson: text("resume_json"),
+  environmentJson: text("environment_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  check("harness_definitions_id_key_check", sql`length(${table.id}) between 1 and 64 and ${table.id} glob '[a-z]*' and ${table.id} not glob '*[^a-z0-9-]*'`),
+  check("harness_definitions_origin_check", sql`${table.origin} = 'custom'`),
+  jsonCheck("harness_definitions_launch_json_check", table.launchJson),
+  jsonCheck("harness_definitions_resume_json_check", table.resumeJson, true),
+  jsonCheck("harness_definitions_environment_json_check", table.environmentJson),
+  timestampCheck("harness_definitions_created_at_timestamp_check", table.createdAt),
+  timestampCheck("harness_definitions_updated_at_timestamp_check", table.updatedAt)
 ]);
 
 export const aiTurns = sqliteTable("ai_turns", {
@@ -845,7 +868,8 @@ export const schema = {
   githubConnectionAttempts,
   githubConnections,
   githubConnectionSetupAttempts,
-  projectGithubSources
+  projectGithubSources,
+  harnessDefinitions
 } as const;
 
 export const applicationTableNames = [
@@ -869,7 +893,8 @@ export const applicationTableNames = [
   "github_connection_attempts",
   "github_connections",
   "github_connection_setup_attempts",
-  "project_github_sources"
+  "project_github_sources",
+  "harness_definitions"
 ] as const;
 
 export type Project = typeof projects.$inferSelect;

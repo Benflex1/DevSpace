@@ -2,6 +2,7 @@ import { TERMINAL_SUBPROTOCOL } from "./primitives.js";
 
 export const TERMINAL_MAX_PAYLOAD_BYTES = 65_536 as const;
 export const TERMINAL_MAX_MESSAGE_BYTES = 65_537 as const;
+export const TERMINAL_POST_EXIT_REPLAY_RETENTION_MS = 30_000 as const;
 export const TERMINAL_PROTOCOL_ERROR_CLOSE_CODE = 1002 as const;
 export const TERMINAL_NORMAL_CLOSE_CODE = 1000 as const;
 export const TERMINAL_FAILURE_CLOSE_CODE = 1011 as const;

@@ -90,7 +90,12 @@ class FakeEngine extends DockerEngineClient {
         Memory: input.memoryBytes, PidsLimit: input.pidLimit, CapAdd: [], CapDrop: [], SecurityOpt: ["no-new-privileges:true"],
         AutoRemove: false, ReadonlyRootfs: false, RestartPolicy: { Name: "no", MaximumRetryCount: 0 } },
       NetworkSettings: { Networks: { [input.networkName]: { NetworkID: "" } } },
-      Mounts: [{ Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" }] });
+      Mounts: [
+        { Type: "bind", Source: input.worktreePath, Destination: "/workspace", RW: true, Propagation: "rprivate" },
+        ...(input.harnessSlotPath === undefined ? [] : [{
+          Type: "bind", Source: input.harnessSlotPath, Destination: "/opt/devspace/harness-home", RW: true, Propagation: "rprivate"
+        }])
+      ] });
     return Promise.resolve(id);
   }
   override inspectContainer(id: string): Promise<DockerContainerInspection> {

@@ -449,14 +449,20 @@ describe("AI session runtime", () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-terminal-claim-test-"));
     const fixture = await startedCodexFixture(stateRoot);
     const completion = { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "completed" } } };
+    let quiesced = false;
+    const unsubscribe = await fixture.runtime.subscribe(sessionId, 0, (event) => {
+      if (event.eventType === "turn.quiesced") quiesced = true;
+    });
     try {
       await startFixtureTurn(fixture);
       fixture.protocol.emit(completion); fixture.protocol.emit(completion);
-      const events = await fixture.runtime.collect(sessionId, 0, 100);
+      await vi.waitFor(() => expect(quiesced).toBe(true), { timeout: 5_000 });
+      const events = await fixture.runtime.collect(sessionId, 0, 0);
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
       expect(events.filter((event) => event.eventType === "turn.quiesced")).toHaveLength(1);
       await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
     } finally {
+      unsubscribe();
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1747,6 +1753,7 @@ describe("AI session runtime", () => {
     const protocol = createProtocolDocker(captured);
     let received: CodexLaunchArtifact | null = null;
     const artifactStager: CodexArtifactStager = {
+      stageIntoRunningContainer: () => Promise.reject(new Error("native-container-staging-is-not-used-by-this-structured-test")),
       stageIntoManagedProvider: async (input) => {
         received = input.launchArtifact;
         return {

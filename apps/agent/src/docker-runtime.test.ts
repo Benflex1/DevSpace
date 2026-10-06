@@ -65,6 +65,29 @@ async function listedEngineSocket(): Promise<string> {
   return socket;
 }
 
+async function execEngineSocket(): Promise<{ socket: string; execBodies: unknown[]; resizeUrls: string[] }> {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-exec-")); directories.push(directory);
+  const socket = path.join(directory, "engine.sock");
+  const execBodies: unknown[] = [];
+  const resizeUrls: string[] = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      if (request.url === "/containers/container-1/exec") {
+        execBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        response.writeHead(201, { "content-type": "application/json" }).end(JSON.stringify({ Id: `exec-${execBodies.length}` }));
+      } else if (request.url?.startsWith("/exec/exec-1/resize") === true) {
+        resizeUrls.push(request.url);
+        response.writeHead(200).end();
+      } else response.writeHead(404).end();
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+  return { socket, execBodies, resizeUrls };
+}
+
 describe("dedicated rootless Docker boundary", () => {
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
@@ -99,7 +122,7 @@ describe("dedicated rootless Docker boundary", () => {
     const fixture = await recordingEngineSocket();
     const engine = new DockerEngineClient(fixture.socket);
     await expect(engine.createContainer("devspace-preview", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
       declaredContainerPorts: [3000], portBindings: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "40000" }] }
     })).resolves.toBe("container-1");
@@ -108,19 +131,78 @@ describe("dedicated rootless Docker boundary", () => {
       HostConfig: { PublishAllPorts: false, PortBindings: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "40000" }] } }
     });
     await expect(engine.createContainer("devspace-public", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
       declaredContainerPorts: [3000], portBindings: { "3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "40001" }] }
     })).rejects.toThrow();
     await expect(engine.createContainer("devspace-undeclared", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
       declaredContainerPorts: [3000], portBindings: { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: "40002" }] }
     })).rejects.toThrow();
     await expect(engine.createContainer("devspace-host", {
-      imageReference: "node:24", worktreePath: "/workspace/project", user: null, environment: {},
+      imageReference: "node:24", worktreePath: "/workspace/project", harnessSlotPath: "/agent/slots/ws", user: null, environment: {},
       networkName: "container:other", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16
     })).rejects.toThrow("preview-host-network-is-forbidden");
+  });
+
+  test("binds the workspace worktree and one harness slot without injecting CODEX_HOME", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createContainer("devspace-harness", {
+      imageReference: "node:24", worktreePath: "/srv/worktree", user: null, environment: { LANG: "C" },
+      networkName: "devspace-network", labels: {}, cpuMillicores: 100, memoryBytes: 64 * 1024 * 1024, pidLimit: 16,
+      harnessSlotPath: "/agent-state/harness-slots/018f1f34-7000-7000-8000-000000000002"
+    })).resolves.toBe("container-1");
+    const body = fixture.bodies[0] as {
+      Env: string[];
+      HostConfig: { Mounts: Array<{ Type: string; Source: string; Target: string; ReadOnly: boolean; BindOptions: { Propagation: string } }> };
+    };
+    expect(body.HostConfig.Mounts).toEqual([
+      { Type: "bind", Source: "/srv/worktree", Target: "/workspace", ReadOnly: false, BindOptions: { Propagation: "rprivate" } },
+      {
+        Type: "bind",
+        Source: "/agent-state/harness-slots/018f1f34-7000-7000-8000-000000000002",
+        Target: "/opt/devspace/harness-home",
+        ReadOnly: false,
+        BindOptions: { Propagation: "rprivate" }
+      }
+    ]);
+    expect(body.Env.join("\n")).not.toContain("CODEX_HOME");
+    expect(JSON.stringify(body)).not.toContain("docker.sock");
+  });
+
+  test("creates a one-shot private-slot cleanup container with no workspace or network access", async () => {
+    const fixture = await recordingEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createHarnessHomeCleanupContainer("devspace-harness-cleanup-test", {
+      imageId: `sha256:${"a".repeat(64)}`,
+      workspaceId: "018f1f34-7000-7000-8000-000000000002",
+      slotHostPath: "/srv/devspace/managed/state/harness-slots/018f1f34-7000-7000-8000-000000000002"
+    })).resolves.toBe("container-1");
+    expect(fixture.bodies[0]).toMatchObject({
+      Image: `sha256:${"a".repeat(64)}`,
+      User: "0",
+      Entrypoint: ["/bin/sh", "-c"],
+      Cmd: [expect.stringContaining("find -P /opt/devspace/harness-home")],
+      HostConfig: {
+        Mounts: [{
+          Type: "bind",
+          Source: "/srv/devspace/managed/state/harness-slots/018f1f34-7000-7000-8000-000000000002",
+          Target: "/opt/devspace/harness-home",
+          ReadOnly: false,
+          BindOptions: { Propagation: "rprivate" }
+        }],
+        NetworkMode: "none",
+        Privileged: false,
+        ReadonlyRootfs: true,
+        CapAdd: ["DAC_OVERRIDE", "FOWNER"],
+        CapDrop: ["ALL"],
+        Devices: []
+      }
+    });
+    expect(JSON.stringify(fixture.bodies[0])).not.toContain("/workspace");
+    expect(JSON.stringify(fixture.bodies[0])).not.toContain("docker.sock");
   });
 
   test("serializes an isolated probe container without inheriting image startup or workspace authority", async () => {
@@ -194,5 +276,22 @@ describe("dedicated rootless Docker boundary", () => {
       Id: "container-1", Names: ["/devspace-retained"], Labels: { "devspace.managed": "true" },
       State: "exited", Status: "Exited (0) 1 second ago"
     }]);
+  });
+
+  test("creates interactive execs with bounded initial geometry in Docker height-width order and allows later resize", async () => {
+    const fixture = await execEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    await expect(engine.createExec("container-1", {
+      command: ["/bin/sh"], workingDirectory: "/workspace", environment: {}, attachStdin: true, tty: true,
+      consoleSize: { columns: 80, rows: 24 }
+    })).resolves.toBe("exec-1");
+    await expect(engine.createExec("container-1", {
+      command: ["/usr/bin/printf", "ok"], workingDirectory: "/workspace", environment: {}, attachStdin: false, tty: false
+    })).resolves.toBe("exec-2");
+    await engine.resizeExec("exec-1", 120, 40);
+
+    expect(fixture.execBodies[0]).toEqual(expect.objectContaining({ Tty: true, ConsoleSize: [24, 80] }));
+    expect(fixture.execBodies[1]).not.toHaveProperty("ConsoleSize");
+    expect(fixture.resizeUrls).toEqual(["/exec/exec-1/resize?h=40&w=120"]);
   });
 });

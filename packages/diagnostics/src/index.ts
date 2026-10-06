@@ -80,7 +80,15 @@ export interface LogContext {
 
 export interface LogFields extends LogContext {
   readonly durationMs?: number;
+  readonly elapsedMs?: number;
+  readonly cleanupElapsedMs?: number;
   readonly mode?: string;
+  readonly phase?: string;
+  readonly failureCode?: string;
+  readonly errorClass?: string;
+  readonly containerId?: string;
+  readonly artifactLayout?: string;
+  readonly entryRelative?: string;
   readonly reason?: string;
   readonly action?: string;
   readonly operationName?: string;
@@ -110,7 +118,15 @@ export interface LogRecord extends LogContext {
   readonly event: string;
   readonly message: string;
   readonly durationMs?: number;
+  readonly elapsedMs?: number;
+  readonly cleanupElapsedMs?: number;
   readonly mode?: string;
+  readonly phase?: string;
+  readonly failureCode?: string;
+  readonly errorClass?: string;
+  readonly containerId?: string;
+  readonly artifactLayout?: string;
+  readonly entryRelative?: string;
   readonly reason?: string;
   readonly action?: string;
   readonly operationName?: string;
@@ -134,7 +150,8 @@ export interface LogRecord extends LogContext {
 export type LogSink = (line: string, level: LogLevel) => void;
 
 const safeKeys = new Set([
-  "requestId", "operationId", "projectId", "workspaceId", "previewId", "durationMs", "mode", "reason", "action",
+  "requestId", "operationId", "projectId", "workspaceId", "previewId", "durationMs", "elapsedMs", "cleanupElapsedMs",
+  "mode", "phase", "failureCode", "errorClass", "containerId", "artifactLayout", "entryRelative", "reason", "action",
   "operationName", "operationState", "observedState", "previousState", "currentState", "desiredState", "routePresent",
   "routeStatus", "statusCode", "pending", "errorCategory", "errorCode", "retryable", "healthBreakdown", "endpoint",
   "failureCategory", "incidentId", "detailKeys"
@@ -153,6 +170,39 @@ function safeText(value: string): string {
 
 function safeValue(key: string, value: unknown): unknown {
   if (sensitiveKey.test(key)) return undefined;
+  if (key === "phase") {
+    return typeof value === "string" && [
+      "artifact-resolution", "agent-side-stage-copy", "readback-helper-load", "readback-helper-integrity",
+      "staged-artifact-verification", "readback-helper-upload", "artifact-entry-upload",
+      "artifact-entry-readback", "final-closure-verification", "failure-cleanup"
+    ].includes(value) ? value : undefined;
+  }
+  if (key === "failureCode") {
+    return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,99}$/u.test(value) ? value : undefined;
+  }
+  if (key === "errorClass") {
+    return typeof value === "string" && [
+      "Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "SystemError",
+      "DockerEngineError", "DockerEngineTransportError", "UnknownError"
+    ].includes(value) ? value : undefined;
+  }
+  if (key === "containerId") {
+    return typeof value === "string" && (value === "unknown" || /^[a-f0-9]{12,64}$/u.test(value)) ? value : undefined;
+  }
+  if (key === "artifactLayout") {
+    return typeof value === "string" && [
+      "unknown", "standalone-package", "official-node-native-payload", "self-contained-native"
+    ].includes(value) ? value : undefined;
+  }
+  if (key === "entryRelative") {
+    if (typeof value !== "string" || value.length === 0 || value.length > 240 || value.startsWith("/")) return undefined;
+    const components = value.split("/");
+    return components.every((component) => component.length > 0 && component !== "." && component !== ".."
+      && /^[A-Za-z0-9._@+-]+$/u.test(component)) ? value : undefined;
+  }
+  if (key === "elapsedMs" || key === "cleanupElapsedMs") {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 600_000 ? value : undefined;
+  }
   if (key === "failureCategory") {
     return typeof value === "string" && failureCategories.includes(value as FailureCategory) ? value : undefined;
   }

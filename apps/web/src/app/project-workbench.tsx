@@ -4,13 +4,13 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitInspectionData } from "@devspace/contracts";
 import { RuntimeControls } from "./runtime-controls.js";
-import { isTerminalAttachableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
+import { isTerminalOpenableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
 import { LOST_TERMINAL_DISMISSED_SESSION_KEY, LostTerminalDialogSession, lostTerminalDialogCopy, lostTerminalDialogStepAfter, lostTerminalSetKey, type LostTerminalDialogStep } from "./lost-terminal-dialog.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./preview-liveness.js";
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
-import { AiSessionTab } from "./ai-session-tab.js";
+import { AiWorkbenchTab } from "./ai-workbench-tab.js";
 import { resolveAiChangedFileOpenTarget } from "./ai-changed-file-open.js";
 import { EditorTab } from "./editor-tab.js";
 import { WorkspaceChanges, type GitCommitFormInput } from "./workspace-changes.js";
@@ -63,7 +63,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const [editorPresentationGeneration, setEditorPresentationGeneration] = useState(0);
   const [dirtyEditorIds, setDirtyEditorIds] = useState<ReadonlySet<string>>(new Set());
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
-  const lostTerminalObservedAt = useRef(new Map<string, number>());
+  const terminalTransientObservedAt = useRef(new Map<string, number>());
   const [sidebarNow, setSidebarNow] = useState(() => Date.now());
   const currentTerminals = useRef(initialTerminals);
   const [tasks, setTasks] = useState<readonly Task[]>(initialTasks);
@@ -125,21 +125,21 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, [terminals]);
   useEffect(() => {
     const now = Date.now();
-    const lostIds = new Set<string>();
+    const transientIds = new Set<string>();
     for (const terminal of terminals) {
-      if (terminal.state === "lost") {
-        lostIds.add(terminal.id);
-        if (!lostTerminalObservedAt.current.has(terminal.id)) lostTerminalObservedAt.current.set(terminal.id, now);
+      if (terminal.state === "lost" || terminal.state === "closed") {
+        transientIds.add(terminal.id);
+        if (!terminalTransientObservedAt.current.has(terminal.id)) terminalTransientObservedAt.current.set(terminal.id, now);
       } else {
-        lostTerminalObservedAt.current.delete(terminal.id);
+        terminalTransientObservedAt.current.delete(terminal.id);
       }
     }
-    for (const terminalId of lostTerminalObservedAt.current.keys()) {
-      if (!lostIds.has(terminalId)) lostTerminalObservedAt.current.delete(terminalId);
+    for (const terminalId of terminalTransientObservedAt.current.keys()) {
+      if (!transientIds.has(terminalId)) terminalTransientObservedAt.current.delete(terminalId);
     }
     setSidebarNow(now);
-    const expiry = [...lostTerminalObservedAt.current.values()].reduce<number | undefined>((earliest, lostAt) => {
-      const candidate = lostAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS;
+    const expiry = [...terminalTransientObservedAt.current.values()].reduce<number | undefined>((earliest, observedAt) => {
+      const candidate = observedAt + LOST_TERMINAL_SIDEBAR_EXPIRY_MS;
       return earliest === undefined || candidate < earliest ? candidate : earliest;
     }, undefined);
     if (expiry === undefined) return;
@@ -279,7 +279,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, [previews]);
 
   const visibleTerminals = useMemo(() => sortTerminalViewsByTitle(terminals.filter((terminal) =>
-    isTerminalSidebarVisible(terminal.state, lostTerminalObservedAt.current.get(terminal.id), sidebarNow))), [sidebarNow, terminals]);
+    isTerminalSidebarVisible(terminal.state, terminalTransientObservedAt.current.get(terminal.id), sidebarNow))), [sidebarNow, terminals]);
   const terminalById = useMemo(() => new Map(terminals.map((terminal) => [terminal.id, terminal])), [terminals]);
   const previewById = useMemo(() => new Map(previews.map((preview) => [preview.id, preview])), [previews]);
   useEffect(() => {
@@ -304,7 +304,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   }, [previews]);
   const actionsAvailable = runtimeRunning && runtimeAvailable && agentReachable && agentStatus === "connected";
   const openTerminalTab = useCallback((terminal: TerminalView) => {
-    if (!actionsAvailable || !isTerminalAttachableState(terminal.state)) return;
+    if (!actionsAvailable || !isTerminalOpenableState(terminal.state)) return;
     setTabs((current) => openWorkbenchTab(current, {
       id: terminalTabId(terminal.id), kind: "terminal", terminalId: terminal.id, title: getTerminalTitle(terminal)
     }));
@@ -387,8 +387,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     }
     const data = await refresh();
     const terminal = data.terminals.find((candidate) => candidate.id === body.terminalId);
-    if (terminal === undefined || !isTerminalAttachableState(terminal.state)) {
-      showNotice("Terminal creation succeeded, but its current state is not attachable.", "error");
+    if (terminal === undefined || !isTerminalOpenableState(terminal.state)) {
+      showNotice("Terminal creation succeeded, but its output is no longer available.", "error");
       return;
     }
     openTerminalTab(terminal);
@@ -613,9 +613,9 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
       {terminals.length === 0 ? <p className="sidebar-empty">No terminal sessions yet.</p> : <ul className="terminal-list">
         {terminals.map((terminal) => {
           const tab = tabs.tabs.find((candidate) => candidate.kind === "terminal" && candidate.terminalId === terminal.id);
-          const attachable = actionsAvailable && isTerminalAttachableState(terminal.state);
+          const openable = actionsAvailable && isTerminalOpenableState(terminal.state);
           return <li key={terminal.id} className={tab?.id === tabs.activeTabId ? "selected" : ""}>
-            <button type="button" disabled={!attachable} onClick={() => onOpenTerminal(terminal)} title={attachable ? "Open terminal tab" : "This terminal is no longer attachable"}>
+            <button type="button" disabled={!openable} onClick={() => onOpenTerminal(terminal)} title={openable ? "Open terminal output" : "This terminal is no longer available"}>
               <span className={`sidebar-state ${terminal.state}`} aria-hidden="true" />
               <span><strong>{getTerminalTitle(terminal)}</strong><small>{terminal.state}</small></span>
               {tab?.id === tabs.activeTabId && <span className="sidebar-active">●</span>}
@@ -686,8 +686,8 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
         const preview = previewById.get(tab.previewId);
         return preview === undefined ? null : <PreviewTab key={tab.id} preview={preview}
           active={tab.id === tabs.activeTabId} onReload={onReloadPreview} previewGateway={previewGateway} />;
-      })() : tab.kind === "ai" ? <AiSessionTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} onOpenChangedFile={onOpenAiChangedFile} />
-        : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
+      })() : tab.kind === "ai" ? <AiWorkbenchTab key={tab.id} projectId={projectId} workspaceId={workspaceId} active={tab.id === tabs.activeTabId} onOpenChangedFile={onOpenAiChangedFile} />
+      : tab.kind === "editor" ? <EditorTab key={`${tab.id}:${editorPresentationGeneration}`} projectId={projectId} workspaceId={workspaceId} path={tab.fileId} tabId={tab.id}
           mode={editorViews[tab.id]?.mode ?? "edit"} diffKind={editorViews[tab.id]?.diffKind ?? "unstaged"}
           readFile={editorViews[tab.id]?.readFile ?? true}
           documents={editorDocuments} remountCount={editorPresentationGeneration + 1}

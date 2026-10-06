@@ -11,7 +11,11 @@ import {
   f11AiAgentApiV1EndpointByOperation,
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
+  nativeHarnessInspectResponseSchema,
   parseEventCursor,
+  nativeHarnessInspectDataSchema,
+  nativeHarnessResumeDataSchema,
+  nativeHarnessStartDataSchema,
   type AgentExecutionFailure,
   type SourceInspectionData
 } from "@devspace/contracts";
@@ -23,7 +27,7 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationConflictError, OperationJournal } from "./operation-journal.js";
-import { ExecutionManager } from "./execution-manager.js";
+import { ExecutionManager, type HarnessRecoveryIdentity, type TerminalResizeFailureDiagnostic } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -31,6 +35,10 @@ import { toPublicPreviewInspectionData, type PreviewGatewayProbe } from "./previ
 import type { OpaqueLeaseResolver, PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { PreviewLeaseResolverServer } from "./preview-lease-resolver.js";
 import { createAiSessionRuntime, type AiSessionRuntime } from "./ai-session-runtime.js";
+import { probeImageCodex } from "./harness-executable.js";
+import { stageAgentCodexIntoContainer } from "./harness-codex-artifact.js";
+import { createHarnessHomeStore, HarnessHomeError } from "./harness-home.js";
+import { createHarnessRuntime, HarnessRuntimeError } from "./harness-runtime.js";
 import { AiOutboxError } from "./ai-session-outbox.js";
 import { createAiStreamAdmission } from "./ai-stream-admission.js";
 import { createGithubAppAuthority, type GithubAppAuthority } from "./github-app.js";
@@ -324,8 +332,70 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   const journal = options.operationJournal ?? new OperationJournal(options.operationJournalPath ?? path.join(managedRoots.state, "operations"), now);
   const agentBootId = createId();
   const events = new AgentEventLog(agentBootId, now, options.eventRetention);
+  const harnessHooks: {
+    onHarnessSettled?: (event: { processId: string }) => Promise<void>;
+    onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void>;
+    onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
+  } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
-    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now);
+    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks);
+  harnessHooks.onTerminalResizeFailure = (event) => logger.error(
+    "agent.terminal.resize_failed",
+    "Terminal resize failed at the Docker boundary.",
+    {
+      processId: event.processId,
+      terminalId: event.terminalId,
+      columns: event.columns,
+      rows: event.rows,
+      failureClass: event.failureClass,
+      failureCode: event.failureCode === null ? "unknown" : String(event.failureCode)
+    }
+  );
+  const harnessHome = createHarnessHomeStore(managedRoots.state, {
+    clearSlotAsWorkspaceUser: async (workspaceId) => await managed.clearHarnessHomeSlot(workspaceId)
+  });
+  const harnessRuntime = createHarnessRuntime({
+    home: harnessHome,
+    stateRoot: managedRoots.state,
+    createHarnessExec: async (input) => {
+      await execution.createHarness(input);
+    },
+    reconcileHarnessAdmission: async (input) => await execution.reconcileHarnessAdmission(input),
+    observeHarnessRecovery: () => execution.harnessRecoveryReports(),
+    inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
+    recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId),
+    probeImageCodex: async (input) => {
+      const context = await managed.executionContext(input.projectId, input.workspaceId);
+      return probeImageCodex(new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
+        context.ownership.developmentContainer.id);
+    },
+    stageNativeCodex: async (input) => {
+      const context = await managed.executionContext(input.projectId, input.workspaceId);
+      return stageAgentCodexIntoContainer({
+        docker: new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
+        containerId: context.ownership.developmentContainer.id,
+        stateRoot: managedRoots.state,
+        createId,
+        environment: process.env,
+        onStagingDiagnostic: (diagnostic) => logger.error(
+          "agent.harness.codex_artifact_staging_failed",
+          "Native Codex artifact staging failed.",
+          { ...diagnostic, workspaceId: input.workspaceId }
+        ),
+        onStagingTiming: (timing) => logger.info(
+          "agent.harness.codex_artifact_staging_timing",
+          "Native Codex artifact staging phase completed.",
+          { ...timing, workspaceId: input.workspaceId }
+        )
+      });
+    }
+  });
+  harnessHooks.onHarnessSettled = async (event) => {
+    await harnessRuntime.settleByProcess(event.processId);
+  };
+  harnessHooks.onHarnessRecovered = async (event) => {
+    await harnessRuntime.finalizeRecoveredLoss(event);
+  };
   const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
   const configuredCodexPath = process.env.DEVSPACE_CODEX_EXECUTABLE_PATH;
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
@@ -735,8 +805,58 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!managed.isHealthy || !journal.isHealthy || !executor.isHealthy) return sendJson(response, 500, snapshotEndpoint.errorSchema.parse({ meta: meta(requestId, now), error: {
         code: "AGENT_INTERNAL_ERROR", message: "Agent-private state is corrupt.", retryable: true, details: { incidentId: createId() }
       } }));
+      await execution.flushHarnessSettlements().catch(() => undefined);
       const data = { agentBootId, throughCursor: events.throughCursor, resources: executor.snapshotResources(), operationObservations: journal.observations() };
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+    }
+
+    if (request.method === "POST" && (url.pathname === "/v1/harness-sessions/start" || url.pathname === "/v1/harness-sessions/resume" || url.pathname === "/v1/harness-sessions/inspect")) {
+      let raw: unknown;
+      try { raw = await readJsonBody(request); }
+      catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
+      const envelope = z.strictObject({ data: z.unknown() }).safeParse(raw);
+      if (!envelope.success) return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
+      try {
+        if (url.pathname.endsWith("/inspect")) {
+          const data = nativeHarnessInspectDataSchema.parse(envelope.data.data);
+          const capability = data.definition === undefined
+            ? await harnessRuntime.capability(data.sessionId)
+            : await harnessRuntime.capability(data.sessionId, data.definition);
+          return sendJson(response, 200, { meta: meta(requestId, now), data: nativeHarnessInspectResponseSchema.parse(capability) });
+        }
+        let sessionId: string;
+        if (url.pathname.endsWith("/start")) {
+          const data = nativeHarnessStartDataSchema.parse(envelope.data.data);
+          sessionId = data.sessionId;
+          if (data.definition !== undefined) harnessRuntime.registerCustom(data.definition);
+          await harnessRuntime.start(data);
+        } else {
+          const data = nativeHarnessResumeDataSchema.parse(envelope.data.data);
+          sessionId = data.sessionId;
+          await harnessRuntime.resumeExec({
+            sessionId: data.sessionId, projectId: data.projectId, processId: data.processId,
+            terminalId: data.terminalId, processGeneration: data.processGeneration,
+            ...(data.definition === undefined ? {} : { definition: data.definition })
+          });
+        }
+        const snapshot = await harnessRuntime.publicSnapshot(sessionId);
+        return sendJson(response, 200, { meta: meta(requestId, now), data: { ok: true, settled: snapshot.state !== "live" } });
+      } catch (error) {
+        const code = error instanceof HarnessRuntimeError || error instanceof HarnessHomeError ? error.code : "AGENT_INTERNAL_ERROR";
+        const status = code === "HARNESS_ADMISSION_UNCERTAIN" ? 503
+          : code === "HARNESS_HOME_IN_USE" || code === "RESOURCE_STATE_CONFLICT" || code === "HARNESS_DEFINITION_CONFLICT" ? 409
+            : code === "AI_CAPABILITY_UNSUPPORTED" || code === "HARNESS_SLOT_MOUNT_MISSING" || code === "HARNESS_EXECUTABLE_UNAVAILABLE" ? 422
+              : code === "RESOURCE_NOT_FOUND" ? 404 : 500;
+        return sendJson(response, status, {
+          meta: meta(requestId, now),
+          error: {
+            code,
+            message: error instanceof Error ? error.message : "harness-failure",
+            retryable: code === "HARNESS_ADMISSION_UNCERTAIN",
+            details: {}
+          }
+        });
+      }
     }
 
     const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "project.git.stage", "project.git.unstage", "project.git.commit", "workspace.create", "workspace.start", "workspace.stop",
@@ -1138,7 +1258,10 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       managed.setGithubAuthority(githubAuthority);
       await managed.initialize();
       await journal.initialize();
-      if (managed.isHealthy) await execution.initialize();
+      if (managed.isHealthy) {
+        await execution.initialize();
+        await harnessRuntime.recoverAfterAgentRestart();
+      }
       if (managed.isHealthy && journal.isHealthy) {
         await managed.validateCreationJournalBindings((operationId) => journal.get(operationId)).catch(() => undefined);
         if (managed.isHealthy) {

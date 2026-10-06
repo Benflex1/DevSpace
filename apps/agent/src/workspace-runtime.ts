@@ -1,4 +1,5 @@
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import * as z from "zod";
 import { projectOptionsRevisionHashSchema, uuidV7Schema } from "@devspace/contracts";
@@ -16,6 +17,7 @@ const dockerIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.:-]+$/u);
 const dockerNameSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/u);
 const labelsSchema = z.record(z.string(), z.string());
 const absolutePathSchema = z.string().refine((value) => path.isAbsolute(value), "Expected an absolute path");
+const HARNESS_SLOT_CLEANUP_TIMEOUT_MS = 10_000;
 export const runtimePreviewBindingSchema = z.strictObject({
   leaseId: uuidV7Schema,
   previewKey: z.string().regex(/^[a-z][a-z0-9-]*$/u),
@@ -73,15 +75,75 @@ export const runtimeCreationSchema = z.strictObject({
 });
 export type RuntimeCreation = z.infer<typeof runtimeCreationSchema>;
 
+const harnessSlotReplacementSchema = z.strictObject({
+  version: z.literal(1),
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  revisionId: uuidV7Schema,
+  revisionHash: projectOptionsRevisionHashSchema,
+  runtimePlanHash: projectOptionsRevisionHashSchema,
+  generation: z.number().int().positive(),
+  worktreePath: absolutePathSchema,
+  resources: z.strictObject({ cpuMillicores: z.number().int().positive(), memoryBytes: z.number().int().positive(), pidLimit: z.number().int().positive() }),
+  previewBindings: runtimePreviewBindingsSchema.default([]),
+  originalOperationId: uuidV7Schema,
+  networkId: dockerIdSchema,
+  networkName: dockerNameSchema,
+  previousContainerId: dockerIdSchema.nullable(),
+  replacementContainerId: dockerIdSchema.nullable(),
+  phase: z.enum(["planned", "previous-removed", "replacement-created"])
+}).superRefine((record, context) => {
+  const valid = record.phase === "planned"
+    ? record.previousContainerId !== null && record.replacementContainerId === null
+    : record.phase === "previous-removed"
+      ? record.replacementContainerId === null
+      : record.replacementContainerId !== null;
+  if (!valid) context.addIssue({ code: "custom", message: "Harness slot replacement phase is inconsistent." });
+});
+type HarnessSlotReplacement = z.infer<typeof harnessSlotReplacementSchema>;
+
 export interface RuntimeAssociation {
   readonly projectId: string; readonly workspaceId: string; readonly revisionId: string;
   readonly revisionHash: string; readonly runtimePlanHash: string; readonly generation: number;
 }
+export type HarnessSlotMountObservation =
+  | { readonly state: "present-and-exact" }
+  | { readonly state: "missing" }
+  | { readonly state: "mismatch" };
+
 export interface RuntimeObservation {
   readonly observedState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
   readonly serviceState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
   readonly errorCode: string | null;
   readonly containerIdentity: string | null;
+  readonly harnessSlotMount?: HarnessSlotMountObservation;
+}
+
+const HARNESS_SLOT_DESTINATION = "/opt/devspace/harness-home";
+
+export function classifyHarnessSlotMount(input: {
+  readonly mounts: readonly { Type: string; Source: string; Destination: string; RW: boolean; Propagation: string }[];
+  readonly worktreePath: string;
+  readonly slotHostPath: string;
+}): HarnessSlotMountObservation {
+  const workspace = input.mounts.filter((mount) => mount.Destination === "/workspace");
+  const slot = input.mounts.filter((mount) => mount.Destination === HARNESS_SLOT_DESTINATION);
+  const extras = input.mounts.filter((mount) => mount.Destination !== "/workspace" && mount.Destination !== HARNESS_SLOT_DESTINATION);
+  const workspaceExact = workspace.length === 1
+    && workspace[0]!.Type === "bind"
+    && path.resolve(workspace[0]!.Source) === path.resolve(input.worktreePath)
+    && workspace[0]!.RW === true
+    && workspace[0]!.Propagation === "rprivate";
+  if (!workspaceExact || extras.length > 0 || workspace.length !== 1) return { state: "mismatch" };
+  if (slot.length === 0 && input.mounts.length === 1) return { state: "missing" };
+  const expectedSlot = path.resolve(input.slotHostPath);
+  const slotExact = slot.length === 1
+    && slot[0]!.Type === "bind"
+    && path.resolve(slot[0]!.Source) === expectedSlot
+    && slot[0]!.RW === true
+    && slot[0]!.Propagation === "rprivate";
+  if (slotExact && input.mounts.length === 2) return { state: "present-and-exact" };
+  return { state: "mismatch" };
 }
 
 function suffix(id: string): string { return id.replaceAll("-", ""); }
@@ -123,7 +185,7 @@ export class WorkspaceRuntimeManager {
     readonly state?: "accepted" | "running" | "succeeded" | "failed";
   } | undefined) | null = null;
   constructor(
-    stateRoot: string,
+    private readonly stateRoot: string,
     private readonly engine: DockerEngineClient,
     private readonly policy: RuntimePolicy,
     private readonly writer: AtomicJsonWriter = durableJsonWriter,
@@ -133,6 +195,363 @@ export class WorkspaceRuntimeManager {
   ) {
     this.ownershipRoot = path.join(path.resolve(stateRoot), "ownership", "runtimes");
     this.creationRoot = path.join(path.resolve(stateRoot), "runtime-creations");
+  }
+
+  harnessSlotHostPath(workspaceId: string): string {
+    return path.join(path.resolve(this.stateRoot), "harness-slots", uuidV7Schema.parse(workspaceId));
+  }
+
+  async observeHarnessSlot(workspaceId: string): Promise<HarnessSlotMountObservation> {
+    const record = await this.load(workspaceId);
+    if (record === null) return { state: "missing" };
+    try {
+      return await this.slotMountFor(record);
+    } catch {
+      return { state: "missing" };
+    }
+  }
+
+  async clearHarnessHomeSlot(workspaceIdInput: string): Promise<void> {
+    const workspaceId = uuidV7Schema.parse(workspaceIdInput);
+    try { await this.engine.assertRootlessAvailable(); }
+    catch { throw new WorkspaceRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable."); }
+    const record = await this.load(workspaceId);
+    if (record === null) throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact Agent-owned workspace runtime is unavailable.");
+    let container: Awaited<ReturnType<DockerEngineClient["inspectContainer"]>>;
+    try {
+      const [network, inspected] = await Promise.all([
+        this.engine.inspectNetwork(record.network.id), this.engine.inspectContainer(record.developmentContainer.id)
+      ]);
+      this.validateNetwork(network, record.network);
+      this.validateContainer(inspected, record);
+      const slot = classifyHarnessSlotMount({ mounts: inspected.Mounts, worktreePath: record.worktreePath,
+        slotHostPath: this.harnessSlotHostPath(workspaceId) });
+      if (slot.state !== "present-and-exact") throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained container does not own the exact harness slot.");
+      container = inspected;
+    } catch (error) {
+      if (error instanceof WorkspaceRuntimeError) throw error;
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact workspace container could not be verified for private-slot cleanup.");
+    }
+    if (container.Image === undefined || !/^sha256:[0-9a-f]{64}$/u.test(container.Image)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact workspace image could not be verified for private-slot cleanup.");
+    }
+    const helperName = `devspace-harness-cleanup-${workspaceId}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    let helperId: string;
+    try {
+      helperId = await this.engine.createHarnessHomeCleanupContainer(helperName, {
+        imageId: container.Image,
+        workspaceId,
+        slotHostPath: this.harnessSlotHostPath(workspaceId)
+      });
+    } catch {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "A bounded private-slot cleanup task could not be created.");
+    }
+    let operationError: unknown;
+    try {
+      await this.engine.startContainer(helperId);
+      const deadline = this.lifecycle.now() + HARNESS_SLOT_CLEANUP_TIMEOUT_MS;
+      for (;;) {
+        const observation = await this.engine.inspectContainer(helperId);
+        if (!observation.State.Running) {
+          if (observation.State.Status !== "exited" || observation.State.ExitCode !== 0) {
+            throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The bounded private-slot cleanup task did not complete successfully.");
+          }
+          break;
+        }
+        if (this.lifecycle.now() >= deadline) {
+          throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The bounded private-slot cleanup task exceeded its time limit.");
+        }
+        await this.lifecycle.sleep(100);
+      }
+    } catch (error) {
+      operationError = error;
+    }
+    let removalError: unknown;
+    try { await this.engine.removeContainer(helperId); } catch (error) { removalError = error; }
+    if (operationError instanceof Error) throw operationError;
+    if (operationError !== undefined) {
+      throw new Error(
+        typeof operationError === "string" ? operationError : "The bounded private-slot cleanup task failed.",
+        { cause: operationError }
+      );
+    }
+    if (removalError !== undefined) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The completed private-slot cleanup task could not be removed.");
+    }
+  }
+
+  async recoverOutstandingHarnessSlotReplacements(loadPlan: (creation: RuntimeCreation) => Promise<{
+    plan: RuntimePlanV1; worktreePath: string;
+  } | null>, findOperation: (operationId: string) => {
+    readonly operationName: string; readonly request: unknown;
+  } | undefined): Promise<void> {
+    let names: string[];
+    try { names = await readdir(this.creationRoot); } catch { return; }
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const workspaceId = name.slice(0, -".json".length);
+      const creation = await this.loadCreation(workspaceId);
+      if (creation === null || creation.phase !== "reserved" || await this.load(workspaceId) !== null) continue;
+      const loaded = await loadPlan(creation);
+      if (loaded === null) continue;
+      const networkName = resourceNames(creation.workspaceId, creation.generation).network;
+      const network = await this.inspectOptionalNetwork(networkName);
+      const retainedOperation = network?.Labels?.["devspace.creation-operation-id"];
+      if (network === null || retainedOperation === undefined || retainedOperation === creation.operationId) continue;
+      await this.recreateIfSlotMissing({
+        projectId: creation.projectId, workspaceId: creation.workspaceId, revisionId: creation.revisionId,
+        revisionHash: creation.revisionHash, runtimePlanHash: creation.runtimePlanHash, generation: creation.generation
+      }, loaded.plan, loaded.worktreePath, creation.previewBindings, findOperation);
+    }
+  }
+
+  async recreateIfSlotMissing(
+    association: RuntimeAssociation,
+    planInput: RuntimePlanV1,
+    worktreePath: string,
+    previewBindings: readonly RuntimePreviewBinding[] = [],
+    findOperation?: (operationId: string) => {
+      readonly operationName: string; readonly request: unknown;
+    } | undefined
+  ): Promise<HarnessSlotMountObservation> {
+    if (findOperation !== undefined) this.creationOperation = findOperation;
+    const plan = parseRuntimePlanV1(planInput);
+    if (hashRuntimePlanV1(plan) !== association.runtimePlanHash) {
+      throw new WorkspaceRuntimeError("RUNTIME_POLICY_VIOLATION", "The registered runtime plan hash does not match the workspace.");
+    }
+    const resources = effectiveRuntimeResources(plan, this.policy);
+    const resolvedWorktree = path.resolve(worktreePath);
+    const names = resourceNames(association.workspaceId, association.generation);
+    const declaredPorts = plan.developmentContainer.ports.map((port) => port.containerPort);
+    const pending = await this.loadHarnessSlotReplacement(association.workspaceId);
+    if (pending !== null) {
+      this.assertReplacementAssociation(pending, association, resolvedWorktree, resources);
+      return await this.convergeHarnessSlotReplacement(pending, association, plan, names, declaredPorts);
+    }
+    const ownership = await this.load(association.workspaceId);
+    if (ownership !== null) {
+      if (!associationMatches(ownership, association) || ownership.worktreePath !== resolvedWorktree
+        || JSON.stringify(ownership.resources) !== JSON.stringify(resources)
+        || (previewBindings.length > 0 && JSON.stringify(ownership.previewBindings) !== JSON.stringify(previewBindings))) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime does not match the requested workspace association.");
+      }
+      await this.inspectOwned(ownership);
+      const slot = await this.slotMountFor(ownership);
+      if (slot.state === "present-and-exact") return slot;
+      if (slot.state !== "missing") {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The development container mount does not match the harness slot contract.");
+      }
+      const originalOperationId = this.originalCreationOperation(ownership);
+      this.assertOriginalWorkspaceStart(originalOperationId, association);
+      const creation = await this.loadCreation(association.workspaceId);
+      if (creation !== null && (creation.operationId !== originalOperationId
+        || !this.creationMatches(creation, association, resolvedWorktree, resources, names, ownership.previewBindings))) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "Runtime creation evidence does not match the retained workspace.");
+      }
+      const replacement = harnessSlotReplacementSchema.parse({
+        version: 1, ...association, worktreePath: resolvedWorktree, resources, previewBindings: ownership.previewBindings,
+        originalOperationId, networkId: ownership.network.id, networkName: ownership.network.name,
+        previousContainerId: ownership.developmentContainer.id, replacementContainerId: null, phase: "planned"
+      });
+      await this.saveHarnessSlotReplacement(replacement);
+      return await this.convergeHarnessSlotReplacement(replacement, association, plan, names, declaredPorts);
+    }
+    return await this.recoverStrandedHarnessSlot(association, plan, resolvedWorktree, resources, names, declaredPorts, previewBindings);
+  }
+
+  private replacementPath(workspaceId: string): string {
+    return path.join(path.resolve(this.stateRoot), "harness-slot-replacements", `${uuidV7Schema.parse(workspaceId)}.json`);
+  }
+
+  private async loadHarnessSlotReplacement(workspaceId: string): Promise<HarnessSlotReplacement | null> {
+    try { return harnessSlotReplacementSchema.parse(await readStrictJson(this.replacementPath(workspaceId), harnessSlotReplacementSchema)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  }
+
+  private async saveHarnessSlotReplacement(record: HarnessSlotReplacement): Promise<void> {
+    await this.writer.write(this.replacementPath(record.workspaceId), harnessSlotReplacementSchema.parse(record));
+  }
+
+  private assertReplacementAssociation(record: HarnessSlotReplacement, association: RuntimeAssociation, worktreePath: string,
+    resources: RuntimeOwnership["resources"]): void {
+    if (record.projectId !== association.projectId || record.workspaceId !== association.workspaceId
+      || record.revisionId !== association.revisionId || record.revisionHash !== association.revisionHash
+      || record.runtimePlanHash !== association.runtimePlanHash || record.generation !== association.generation
+      || record.worktreePath !== worktreePath || JSON.stringify(record.resources) !== JSON.stringify(resources)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The harness slot replacement belongs to another runtime.");
+    }
+  }
+
+  private assertOriginalWorkspaceStart(operationId: string, association: RuntimeAssociation): void {
+    const operation = this.creationOperation?.(operationId);
+    if (operation?.operationName !== "workspace.start"
+      || JSON.stringify(operation.request) !== JSON.stringify({ projectId: association.projectId, workspaceId: association.workspaceId })) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained workspace network is not bound to its original workspace start.");
+    }
+  }
+
+  private originalCreationOperation(record: RuntimeOwnership): string {
+    const networkOperation = record.network.labels["devspace.creation-operation-id"];
+    const containerOperation = record.developmentContainer.labels["devspace.creation-operation-id"];
+    if (networkOperation === undefined || networkOperation !== containerOperation || !uuidV7Schema.safeParse(networkOperation).success) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained network and development container do not share one creation operation.");
+    }
+    const expectedNetwork = labels(record, "network", networkOperation);
+    const expectedContainer = labels(record, "development-container", networkOperation);
+    if (!equalLabels(record.network.labels, expectedNetwork) || !equalLabels(record.developmentContainer.labels, expectedContainer)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime labels are not the original creation authority.");
+    }
+    return networkOperation;
+  }
+
+  private provedNetworkOperation(network: { Name: string; Labels?: Record<string, string> }, association: RuntimeAssociation,
+    names: ReturnType<typeof resourceNames>): string {
+    const actual = network.Labels ?? {};
+    const operationId = actual["devspace.creation-operation-id"];
+    if (typeof operationId !== "string" || !uuidV7Schema.safeParse(operationId).success || network.Name !== names.network) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained workspace network does not prove exact runtime ownership.");
+    }
+    if (!equalLabels(actual, labels(association, "network", operationId))) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained workspace network does not prove exact runtime ownership.");
+    }
+    return operationId;
+  }
+
+  private async recoverStrandedHarnessSlot(
+    association: RuntimeAssociation,
+    plan: RuntimePlanV1,
+    resolvedWorktree: string,
+    resources: RuntimeOwnership["resources"],
+    names: ReturnType<typeof resourceNames>,
+    declaredPorts: readonly number[],
+    previewBindings: readonly RuntimePreviewBinding[]
+  ): Promise<HarnessSlotMountObservation> {
+    const creation = await this.loadCreation(association.workspaceId);
+    if (creation === null || creation.phase !== "reserved") {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The workspace runtime cannot be recovered without exact creation evidence.");
+    }
+    if (!this.creationMatches(creation, association, resolvedWorktree, resources, names, previewBindings.length === 0 ? creation.previewBindings : previewBindings)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The reserved runtime creation does not match this workspace.");
+    }
+    const network = await this.inspectOptionalNetwork(names.network);
+    if (network === null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The canonical workspace network is not available.");
+    }
+    const originalOperationId = this.provedNetworkOperation(network, association, names);
+    this.assertOriginalWorkspaceStart(originalOperationId, association);
+    if (creation.operationId !== originalOperationId && creation.phase !== "reserved") {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The runtime creation record is not a recoverable reconciliation attempt.");
+    }
+    const occupying = await this.inspectOptionalContainer(names.container);
+    if (occupying !== null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "A development container already occupies the retained runtime name.");
+    }
+    const rebound = runtimeCreationSchema.parse({
+      ...creation, operationId: originalOperationId, networkId: network.Id, containerId: null, phase: "network-created",
+      previewBindings: creation.previewBindings
+    });
+    await this.saveCreation(rebound);
+    const replacement = harnessSlotReplacementSchema.parse({
+      version: 1, ...association, worktreePath: resolvedWorktree, resources, previewBindings: creation.previewBindings,
+      originalOperationId, networkId: network.Id, networkName: network.Name,
+      previousContainerId: null, replacementContainerId: null, phase: "previous-removed"
+    });
+    await this.saveHarnessSlotReplacement(replacement);
+    return await this.convergeHarnessSlotReplacement(replacement, association, plan, names, declaredPorts);
+  }
+
+  private async convergeHarnessSlotReplacement(
+    replacement: HarnessSlotReplacement,
+    association: RuntimeAssociation,
+    plan: RuntimePlanV1,
+    names: ReturnType<typeof resourceNames>,
+    declaredPorts: readonly number[]
+  ): Promise<HarnessSlotMountObservation> {
+    const network = await this.engine.inspectNetwork(replacement.networkId);
+    this.provedNetworkOperation(network, association, names);
+    if (network.Id !== replacement.networkId || network.Name !== replacement.networkName
+      || network.Labels?.["devspace.creation-operation-id"] !== replacement.originalOperationId) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained workspace network changed during slot reconciliation.");
+    }
+    let current = replacement;
+    if (current.phase === "planned") {
+      if (current.previousContainerId === null) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The previous development container identity is missing.");
+      }
+      try { await this.engine.stopContainer(current.previousContainerId); } catch { /* already stopped */ }
+      try { await this.engine.removeContainer(current.previousContainerId); } catch { /* already removed */ }
+      current = harnessSlotReplacementSchema.parse({ ...current, phase: "previous-removed" });
+      await this.saveHarnessSlotReplacement(current);
+    }
+    if (current.phase === "previous-removed") {
+      const expectedLabels = labels(association, "development-container", current.originalOperationId);
+      const occupying = await this.inspectOptionalContainer(names.container);
+      let replacementContainerId: string;
+      if (occupying !== null) {
+        if (!equalLabels(occupying.Config.Labels ?? {}, expectedLabels)) {
+          throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The development container name is occupied by an unrelated resource.");
+        }
+        const slot = classifyHarnessSlotMount({
+          mounts: occupying.Mounts, worktreePath: current.worktreePath,
+          slotHostPath: this.harnessSlotHostPath(association.workspaceId)
+        });
+        if (slot.state !== "present-and-exact") {
+          throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "An existing development container does not have the exact harness slot.");
+        }
+        replacementContainerId = occupying.Id;
+      } else {
+        await this.engine.ensureImage(plan.developmentContainer.source.imageReference);
+        const harnessSlotPath = this.harnessSlotHostPath(association.workspaceId);
+        await mkdir(harnessSlotPath, { recursive: true, mode: 0o700 });
+        replacementContainerId = await this.engine.createContainer(names.container, {
+          imageReference: plan.developmentContainer.source.imageReference, worktreePath: current.worktreePath, harnessSlotPath,
+          user: plan.developmentContainer.containerUser, environment: plan.developmentContainer.environment,
+          networkName: names.network, labels: expectedLabels, ...current.resources,
+          portBindings: Object.fromEntries(current.previewBindings.map((binding) => [
+            `${binding.containerPort}/tcp`, [{ HostIp: binding.hostIp, HostPort: String(binding.hostPort) }]
+          ])), declaredContainerPorts: declaredPorts
+        });
+      }
+      current = harnessSlotReplacementSchema.parse({ ...current, replacementContainerId, phase: "replacement-created" });
+      await this.saveHarnessSlotReplacement(current);
+    }
+    if (current.replacementContainerId === null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The replacement development container was not created.");
+    }
+    const created = runtimeCreationSchema.parse({
+      version: 1, operationId: current.originalOperationId, ...association, worktreePath: current.worktreePath,
+      resources: current.resources, previewBindings: current.previewBindings, networkName: current.networkName,
+      containerName: names.container, networkId: current.networkId, containerId: current.replacementContainerId,
+      phase: "container-created"
+    });
+    const existingCreation = await this.loadCreation(association.workspaceId);
+    if (existingCreation !== null && existingCreation.operationId !== current.originalOperationId) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "Runtime creation evidence does not match the original workspace start.");
+    }
+    await this.inspectCreationOwned(created);
+    const ownership = this.ownershipFromCreation(created);
+    await this.writer.write(this.ownershipPath(association.workspaceId), ownership);
+    const committed = runtimeCreationSchema.parse({ ...created, phase: "ownership-committed" });
+    if (existingCreation !== null) await this.saveCreation(committed);
+    if ((await this.engine.inspectContainer(ownership.developmentContainer.id)).State.Running !== true) {
+      await this.engine.startContainer(ownership.developmentContainer.id);
+    }
+    await this.stabilize(ownership);
+    const slot = await this.slotMountFor(ownership);
+    if (slot.state !== "present-and-exact") {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The replacement development container does not have the exact harness slot.");
+    }
+    await unlink(this.replacementPath(association.workspaceId)).catch(() => undefined);
+    return slot;
+  }
+
+  private async slotMountFor(record: RuntimeOwnership): Promise<HarnessSlotMountObservation> {
+    const container = await this.engine.inspectContainer(record.developmentContainer.id);
+    return classifyHarnessSlotMount({
+      mounts: container.Mounts,
+      worktreePath: record.worktreePath,
+      slotHostPath: this.harnessSlotHostPath(record.workspaceId)
+    });
   }
 
   private ownershipPath(workspaceId: string): string {
@@ -249,11 +668,12 @@ export class WorkspaceRuntimeManager {
       || container.HostConfig.PidsLimit !== record.resources.pidLimit
       || capAdd.length !== 0 || capDrop.length !== 0
       || JSON.stringify(securityOptions) !== JSON.stringify(["no-new-privileges:true"])
-      || container.Mounts.length !== 1 || container.Mounts[0]?.Type !== "bind"
-      || path.resolve(container.Mounts[0].Source) !== record.worktreePath
-      || container.Mounts[0].Destination !== "/workspace" || container.Mounts[0].RW !== true
-      || container.Mounts[0].Propagation !== "rprivate"
-      || container.Mounts.some((mount) => mount.Source.includes("docker.sock") || mount.Destination.includes("docker.sock"))) {
+      || container.Mounts.some((mount) => mount.Source.includes("docker.sock") || mount.Destination.includes("docker.sock"))
+      || classifyHarnessSlotMount({
+        mounts: container.Mounts,
+        worktreePath: record.worktreePath,
+        slotHostPath: this.harnessSlotHostPath(record.workspaceId)
+      }).state === "mismatch") {
       throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained development container no longer satisfies exact Agent ownership and runtime policy.");
     }
   }
@@ -426,7 +846,10 @@ export class WorkspaceRuntimeManager {
         }
       }
       const inspected = recoveredCreation === null ? await this.inspectOwned(record) : await this.inspectCreationOwned(recoveredCreation);
-      return { observedState: inspected.running ? "running" : "stopped", serviceState: inspected.running ? "running" : "stopped",
+      return {
+        observedState: inspected.running ? "running" : "stopped",
+        serviceState: inspected.running ? "running" : "stopped",
+        harnessSlotMount: await this.slotMountFor(record),
         errorCode: null, containerIdentity: record.developmentContainer.id };
     } catch (error) {
       if (error instanceof WorkspaceRuntimeError) return { observedState: "lost", serviceState: "lost", errorCode: error.code, containerIdentity: null };
@@ -479,7 +902,10 @@ export class WorkspaceRuntimeManager {
       else await this.inspectCreationOwned(recoveredCreation);
       await this.engine.startContainer(record.developmentContainer.id);
       await this.stabilize(record);
-      return { observedState: "running", serviceState: "running", errorCode: null, containerIdentity: record.developmentContainer.id };
+      return {
+        observedState: "running", serviceState: "running", errorCode: null,
+        containerIdentity: record.developmentContainer.id, harnessSlotMount: await this.slotMountFor(record)
+      };
     }
     let creation = await this.loadCreation(association.workspaceId);
     if (creation === null) {
@@ -516,8 +942,10 @@ export class WorkspaceRuntimeManager {
       await this.engine.ensureImage(plan.developmentContainer.source.imageReference);
       let containerId: string;
       try {
+        const harnessSlotPath = this.harnessSlotHostPath(association.workspaceId);
+        await mkdir(harnessSlotPath, { recursive: true, mode: 0o700 });
         containerId = await this.engine.createContainer(names.container, {
-        imageReference: plan.developmentContainer.source.imageReference, worktreePath,
+        imageReference: plan.developmentContainer.source.imageReference, worktreePath, harnessSlotPath,
         user: plan.developmentContainer.containerUser, environment: plan.developmentContainer.environment,
         networkName: names.network, labels: containerLabels, ...resources,
         portBindings: Object.fromEntries(previewBindings.map((binding) => [
@@ -539,7 +967,10 @@ export class WorkspaceRuntimeManager {
     await this.inspectCreationOwned(creation);
     await this.engine.startContainer(record.developmentContainer.id);
     await this.stabilize(record);
-    return { observedState: "running", serviceState: "running", errorCode: null, containerIdentity: record.developmentContainer.id };
+    return {
+      observedState: "running", serviceState: "running", errorCode: null,
+      containerIdentity: record.developmentContainer.id, harnessSlotMount: await this.slotMountFor(record)
+    };
   }
 
   async stop(association: RuntimeAssociation): Promise<RuntimeObservation> {

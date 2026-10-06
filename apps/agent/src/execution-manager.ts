@@ -5,11 +5,13 @@ import {
   TERMINAL_FAILURE_CLOSE_CODE,
   TERMINAL_MAX_PAYLOAD_BYTES,
   TERMINAL_NORMAL_CLOSE_CODE,
+  TERMINAL_POST_EXIT_REPLAY_RETENTION_MS,
   TERMINAL_PROTOCOL_ERROR_CLOSE_CODE,
   decodeTerminalClientFrame,
   encodeTerminalAgentFrame,
   f10ProcessInspectionDataSchema,
   processInspectionDataSchema,
+  configurationKeySchema,
   uuidV7Schema,
   type AgentExecutionFailure,
   type AgentSnapshotResource,
@@ -20,16 +22,23 @@ import {
 import type { ProjectOptionsV1 } from "@devspace/project-options";
 import * as z from "zod";
 import type WebSocket from "ws";
-import { DockerEngineClient, DockerEngineError } from "./docker-runtime.js";
+import { DockerEngineClient, DockerEngineError, DockerEngineTransportError } from "./docker-runtime.js";
 import { AgentExecutionError, ManagedWorkspaces, type WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter } from "./private-state.js";
 
 const REPLAY_LIMIT_BYTES = 64 * 1024;
+const TERMINAL_REPLAY_DRAIN_WAIT_MS = 1_000;
 const ATTACHMENT_BACKPRESSURE_BYTES = 256 * 1024;
+const RECOVERED_HARNESS_POLL_INITIAL_MS = 250;
+const RECOVERED_HARNESS_POLL_MAX_MS = 2_000;
 
 const executionRecordSchema = z.strictObject({
   version: z.literal(1),
   kind: z.enum(["task", "terminal"]),
+  executionRole: z.enum(["terminal", "harness", "task"]).optional(),
+  harnessSessionId: uuidV7Schema.nullable().optional(),
+  harnessGeneration: z.number().int().positive().nullable().optional(),
+  harnessLeaseId: z.string().min(1).nullable().optional(),
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
   processId: uuidV7Schema,
@@ -55,7 +64,65 @@ const executionRecordSchema = z.strictObject({
   startedAt: z.string().datetime({ offset: true }).nullable(),
   finishedAt: z.string().datetime({ offset: true }).nullable()
 });
-type ExecutionRecord = z.infer<typeof executionRecordSchema>;
+type StoredExecutionRecord = z.infer<typeof executionRecordSchema>;
+type ExecutionRole = "terminal" | "harness" | "task";
+type ExecutionRecord = StoredExecutionRecord & {
+  executionRole: ExecutionRole;
+  harnessSessionId: string | null;
+  harnessGeneration: number | null;
+  harnessLeaseId: string | null;
+};
+
+export type HarnessProcessObservation = "running" | "terminated" | "definitely-gone" | "unproven";
+export type HarnessRecoveryReport = {
+  readonly processId: string;
+  readonly workspaceId: string;
+  readonly sessionId: string | null;
+  readonly processGeneration: number | null;
+  readonly leaseId: string | null;
+  readonly observation: HarnessProcessObservation;
+};
+
+const legacyHarnessSessionSchema = z.object({
+  workspaceId: uuidV7Schema,
+  harnessId: configurationKeySchema,
+  processId: uuidV7Schema,
+  state: z.enum(["live", "stopped", "lost"]),
+  leaseId: z.string().nullable(),
+  processGeneration: z.number().int().positive()
+});
+const legacyLeaseSchema = z.object({
+  leaseId: z.string().min(1),
+  harnessId: configurationKeySchema,
+  workspaceId: uuidV7Schema,
+  aiSessionId: uuidV7Schema,
+  processGeneration: z.number().int().positive()
+});
+const legacySlotMetaSchema = z.object({
+  harnessId: configurationKeySchema,
+  workspaceId: uuidV7Schema,
+  leaseId: z.string().min(1),
+  dirty: z.boolean()
+});
+
+function normalizeExecutionRecord(record: StoredExecutionRecord): ExecutionRecord {
+  const executionRole = record.executionRole ?? (record.kind === "task" ? "task" : "terminal");
+  return {
+    ...record,
+    executionRole,
+    harnessSessionId: record.harnessSessionId ?? null,
+    harnessGeneration: record.harnessGeneration ?? null,
+    harnessLeaseId: record.harnessLeaseId ?? null
+  };
+}
+
+export type HarnessRecoveryIdentity = {
+  readonly processId: string;
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly processGeneration: number;
+  readonly leaseId: string | null;
+};
 
 type LiveExecution = {
   record: ExecutionRecord;
@@ -64,6 +131,12 @@ type LiveExecution = {
   attachmentReserved: boolean;
   attachmentCleanup: Promise<void> | null;
   replay: Buffer;
+  resizeFailureReported: boolean;
+  terminalReplayExpiresAt: number | null;
+  terminalReplayClaimed: boolean;
+  terminalReplayTimer: NodeJS.Timeout | null;
+  terminalReplayComplete: boolean;
+  terminalReplayWaiters: Set<() => void>;
 };
 
 function failure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionError {
@@ -104,6 +177,10 @@ export function isSuccessfulTaskExitCode(successExitCodes: readonly number[], ex
   return successExitCodes.includes(exitCode);
 }
 
+export function harnessExecutionAdmissionUncertain(error: unknown): boolean {
+  return error instanceof TaskStartRecoveryRequiredError;
+}
+
 export class TaskStartRecoveryRequiredError extends Error {
   constructor() {
     super("The task start boundary is ambiguous; the exact retained exec must be inspected before the operation can complete.");
@@ -111,43 +188,265 @@ export class TaskStartRecoveryRequiredError extends Error {
   }
 }
 
+export type HarnessExecutionSettlement = {
+  readonly processId: string;
+  readonly terminalId: string;
+  readonly observedState: "exited" | "failed" | "killed" | "lost";
+  readonly exitCode: number | null;
+};
+
+export type HarnessAdmissionIdentity = {
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly processId: string;
+  readonly terminalId: string;
+  readonly sessionId: string;
+  readonly processGeneration: number;
+  readonly leaseId: string | null;
+};
+
+export type HarnessAdmissionReconciliation =
+  | "attachable-running"
+  | "running-without-stream"
+  | "settled"
+  | "uncertain";
+
+export type TerminalResizeFailureDiagnostic = {
+  readonly processId: string;
+  readonly terminalId: string;
+  readonly columns: number;
+  readonly rows: number;
+  readonly failureClass: "docker-http" | "docker-transport" | "unknown";
+  readonly failureCode: number | null;
+};
+
 export class ExecutionManager {
   private readonly recordsRoot: string;
+  private readonly stateRoot: string;
+  private readonly recoveryReports: HarnessRecoveryReport[] = [];
   private readonly executions = new Map<string, LiveExecution>();
+  private readonly harnessProcessIds = new Set<string>();
+  private readonly settledHarnessProcessIds = new Set<string>();
 
   constructor(
     stateRoot: string,
     private readonly managed: ManagedWorkspaces,
     private readonly engine: DockerEngineClient,
     private readonly writer: AtomicJsonWriter = durableJsonWriter,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly hooks: {
+      readonly onHarnessSettled?: (event: HarnessExecutionSettlement) => void | Promise<void>;
+      readonly onHarnessRecovered?: (event: HarnessRecoveryIdentity) => void | Promise<void>;
+      readonly onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
+    } = {}
   ) {
     this.recordsRoot = path.join(path.resolve(stateRoot), "ownership", "executions");
+    this.stateRoot = path.resolve(stateRoot);
+  }
+
+  harnessRecoveryReports(): readonly HarnessRecoveryReport[] {
+    return [...this.recoveryReports];
   }
 
   async initialize(): Promise<void> {
     await establishPinnedDirectory(this.recordsRoot);
+    this.recoveryReports.length = 0;
     for (const name of await readdir(this.recordsRoot)) {
       if (!name.endsWith(".json")) throw new Error("unexpected-execution-ownership-entry");
-      const record = await readStrictJson(path.join(this.recordsRoot, name), executionRecordSchema);
-      if (name !== `${record.processId}.json`) throw new Error("execution-ownership-filename-mismatch");
+      const stored = await readStrictJson(path.join(this.recordsRoot, name), executionRecordSchema);
+      if (name !== `${stored.processId}.json`) throw new Error("execution-ownership-filename-mismatch");
+      const adopted = await this.adoptLegacyHarness(stored);
+      if (adopted.kind === "ambiguous") {
+        await this.retainUnclassifiedTerminalAsLost(stored);
+        continue;
+      }
+      const normalized = normalizeExecutionRecord(stored);
+      const record = adopted.kind === "harness"
+        ? {
+          ...normalized,
+          executionRole: "harness" as const,
+          harnessSessionId: adopted.sessionId,
+          harnessGeneration: adopted.processGeneration,
+          harnessLeaseId: adopted.leaseId
+        }
+        : normalized;
       const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
-        attachmentCleanup: null, replay: Buffer.alloc(0) };
+        attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
+        terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
+        terminalReplayComplete: true, terminalReplayWaiters: new Set() };
       this.executions.set(record.processId, live);
-      if (["queued", "starting", "running", "stopping"].includes(record.observedState)) {
-        if (record.creationPhase === "reserved") continue;
-        if (record.kind === "terminal") {
-          live.record = { ...record, desiredState: "stopped", observedState: "lost", terminalState: "lost",
+      if (adopted.kind === "harness" && (stored.executionRole !== "harness"
+        || stored.harnessSessionId !== adopted.sessionId || stored.harnessGeneration !== adopted.processGeneration
+        || stored.harnessLeaseId !== adopted.leaseId)) {
+        await this.persist(live);
+      }
+      const pendingRecoveredHarness = record.executionRole === "harness"
+        && record.terminalState === "lost";
+      const completedHarnessPendingSettlement = record.executionRole === "harness"
+        && ["exited", "failed", "killed"].includes(record.observedState)
+        && await this.privateHarnessSettlementPending(record);
+      if (["queued", "starting", "running", "stopping"].includes(record.observedState)
+        || pendingRecoveredHarness || completedHarnessPendingSettlement) {
+        if (record.executionRole === "harness") {
+          await this.reconcileRecoveredHarness(live);
+        } else if (record.creationPhase === "reserved") {
+          continue;
+        } else if (record.kind === "terminal") {
+          live.record = { ...live.record, desiredState: "stopped", observedState: "lost", terminalState: "lost",
             exitCode: null, finishedAt: null };
           await this.persist(live);
         } else {
           await this.refresh(live);
-          if (["running", "stopping"].includes(live.record.observedState)) {
-            if (["running", "stopping"].includes(live.record.observedState)) this.monitorRecovered(live);
-          }
+          if (["running", "stopping"].includes(live.record.observedState)) this.monitorRecovered(live);
         }
       }
     }
+  }
+
+  private async retainUnclassifiedTerminalAsLost(stored: StoredExecutionRecord): Promise<void> {
+    if (stored.kind !== "terminal" || !["queued", "starting", "running", "stopping"].includes(stored.observedState)) return;
+    const retained: StoredExecutionRecord = {
+      ...stored,
+      desiredState: "stopped",
+      observedState: "lost",
+      terminalState: "lost",
+      exitCode: null,
+      finishedAt: null
+    };
+    const live: LiveExecution = {
+      record: normalizeExecutionRecord(retained), stream: null, attachment: null, attachmentReserved: false,
+      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
+      terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
+      terminalReplayComplete: true, terminalReplayWaiters: new Set()
+    };
+    this.executions.set(stored.processId, live);
+    // Preserve the legacy shape so a later startup can still reconcile it if
+    // the private harness evidence becomes readable.
+    await this.writer.write(this.recordPath(stored.processId), executionRecordSchema.parse(retained));
+  }
+
+  private async adoptLegacyHarness(stored: StoredExecutionRecord): Promise<
+    { kind: "ambiguous" } | { kind: "harness"; sessionId: string; processGeneration: number; leaseId: string | null }
+      | { kind: "ordinary" }
+  > {
+    if (stored.kind === "task") return stored.executionRole === "harness" ? { kind: "ambiguous" } : { kind: "ordinary" };
+    if (stored.executionRole === "terminal" || stored.executionRole === "task") return { kind: "ordinary" };
+    if (stored.executionRole === "harness" && typeof stored.harnessSessionId === "string"
+      && typeof stored.harnessGeneration === "number") {
+      return {
+        kind: "harness",
+        sessionId: stored.harnessSessionId,
+        processGeneration: stored.harnessGeneration,
+        leaseId: stored.harnessLeaseId ?? null
+      };
+    }
+    const sessionsRoot = path.join(this.stateRoot, "harness-sessions");
+    let names: string[];
+    try { names = await readdir(sessionsRoot); }
+    catch { return stored.executionRole === "harness" ? { kind: "ambiguous" } : { kind: "ordinary" }; }
+    const matches: Array<{ sessionId: string; session: z.infer<typeof legacyHarnessSessionSchema> }> = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const sessionId = name.slice(0, -".json".length);
+      if (!uuidV7Schema.safeParse(sessionId).success) return { kind: "ambiguous" };
+      let session: z.infer<typeof legacyHarnessSessionSchema>;
+      try { session = legacyHarnessSessionSchema.parse(await readStrictJson(path.join(sessionsRoot, name), legacyHarnessSessionSchema)); }
+      catch { return { kind: "ambiguous" }; }
+      if (session.processId !== stored.processId || !(session.state === "live" || (session.state === "lost" && session.leaseId !== null))) continue;
+      matches.push({ sessionId, session });
+    }
+    if (matches.length === 0) return stored.executionRole === "harness" ? { kind: "ambiguous" } : { kind: "ordinary" };
+    if (matches.length !== 1) return { kind: "ambiguous" };
+    const { sessionId, session } = matches[0]!;
+    if (stored.kind !== "terminal" || stored.terminalId === null || stored.taskRunId !== null || stored.taskKey !== null
+      || session.workspaceId !== stored.workspaceId || session.leaseId === null
+      || (stored.harnessSessionId !== undefined && stored.harnessSessionId !== null && stored.harnessSessionId !== sessionId)
+      || (stored.harnessGeneration !== undefined && stored.harnessGeneration !== null && stored.harnessGeneration !== session.processGeneration)
+      || (stored.harnessLeaseId !== undefined && stored.harnessLeaseId !== null && stored.harnessLeaseId !== session.leaseId)) return { kind: "ambiguous" };
+    let lease: z.infer<typeof legacyLeaseSchema>;
+    let meta: z.infer<typeof legacySlotMetaSchema>;
+    try {
+      lease = legacyLeaseSchema.parse(await readStrictJson(path.join(this.stateRoot, "harness-homes", session.harnessId, ".lease", "metadata.json"), legacyLeaseSchema));
+      meta = legacySlotMetaSchema.parse(await readStrictJson(path.join(this.stateRoot, "harness-meta", `${session.workspaceId}.json`), legacySlotMetaSchema));
+    } catch { return { kind: "ambiguous" }; }
+    if (lease.aiSessionId !== sessionId || lease.workspaceId !== session.workspaceId || lease.harnessId !== session.harnessId
+      || lease.processGeneration !== session.processGeneration || lease.leaseId !== session.leaseId) return { kind: "ambiguous" };
+    if (meta.workspaceId !== session.workspaceId || meta.harnessId !== session.harnessId || meta.leaseId !== session.leaseId || meta.dirty !== true) {
+      return { kind: "ambiguous" };
+    }
+    if (stored.containerId.length < 1 || stored.execId === null) return { kind: "ambiguous" };
+    return { kind: "harness", sessionId, processGeneration: session.processGeneration, leaseId: session.leaseId };
+  }
+
+  private async privateHarnessSettlementPending(record: ExecutionRecord): Promise<boolean> {
+    if (record.harnessSessionId === null || record.harnessGeneration === null) return false;
+    try {
+      const session = await readStrictJson(
+        path.join(this.stateRoot, "harness-sessions", `${uuidV7Schema.parse(record.harnessSessionId)}.json`),
+        legacyHarnessSessionSchema
+      );
+      return session.processId === record.processId && session.workspaceId === record.workspaceId
+        && session.processGeneration === record.harnessGeneration && session.leaseId === record.harnessLeaseId
+        && (session.state === "live" || (session.state === "lost" && session.leaseId !== null));
+    } catch {
+      return false;
+    }
+  }
+
+  private async containerCannotRun(containerId: string): Promise<boolean> {
+    try {
+      const inspection = await this.engine.inspectContainer(containerId);
+      if (inspection.Id !== containerId) return false;
+      return inspection.State?.Running === false;
+    } catch (error) {
+      return error instanceof DockerEngineError && error.statusCode === 404;
+    }
+  }
+
+  private async harnessObservation(live: LiveExecution): Promise<HarnessProcessObservation> {
+    if (live.record.execId === null) return "unproven";
+    try {
+      const inspection = await this.engine.inspectExec(live.record.execId);
+      if (inspection.ID !== live.record.execId || inspection.ContainerID !== live.record.containerId) return "unproven";
+      if (inspection.ExitCode !== null) return "terminated";
+      if (await this.containerCannotRun(live.record.containerId)) return "definitely-gone";
+      return inspection.Running ? "running" : "unproven";
+    } catch (error) {
+      if (error instanceof DockerEngineError && error.statusCode === 404) {
+        return await this.containerCannotRun(live.record.containerId) ? "definitely-gone" : "unproven";
+      }
+      return "unproven";
+    }
+  }
+
+  private async reconcileRecoveredHarness(live: LiveExecution): Promise<void> {
+    const observation = await this.harnessObservation(live);
+    this.recoveryReports.push({
+      processId: live.record.processId,
+      workspaceId: live.record.workspaceId,
+      sessionId: live.record.harnessSessionId,
+      processGeneration: live.record.harnessGeneration,
+      leaseId: live.record.harnessLeaseId,
+      observation
+    });
+    this.harnessProcessIds.add(live.record.processId);
+    live.record = { ...live.record, terminalState: "lost", exitCode: null, finishedAt: null };
+    if (observation === "running") {
+      live.record = { ...live.record, observedState: "running" };
+      await this.persist(live);
+      this.monitorRecovered(live);
+      return;
+    }
+    if (observation === "terminated" || observation === "definitely-gone") {
+      live.record = { ...live.record, desiredState: "stopped", observedState: "lost", terminalState: "lost", finishedAt: null };
+      await this.persist(live);
+      await this.notifyHarnessRecovered(live).catch(() => undefined);
+      if (!this.settledHarnessProcessIds.has(live.record.processId) && live.record.execId !== null) this.monitorRecovered(live);
+      return;
+    }
+    live.record = { ...live.record, observedState: "lost" };
+    await this.persist(live);
+    if (live.record.execId !== null) this.monitorRecovered(live);
   }
 
   private recordPath(processId: string): string { return path.join(this.recordsRoot, `${uuidV7Schema.parse(processId)}.json`); }
@@ -180,8 +479,27 @@ export class ExecutionManager {
   }
 
   private async refresh(live: LiveExecution): Promise<void> {
-    if (!["queued", "starting", "running", "stopping"].includes(live.record.observedState)) return;
+    const recoveredHarnessLost = live.record.executionRole === "harness" && live.record.terminalState === "lost";
+    if (recoveredHarnessLost && this.settledHarnessProcessIds.has(live.record.processId)) return;
+    if (!["queued", "starting", "running", "stopping"].includes(live.record.observedState) && !recoveredHarnessLost) return;
     if (live.record.creationPhase !== "started") return;
+    if (recoveredHarnessLost) {
+      const observation = await this.harnessObservation(live);
+      if (observation === "running") {
+        live.record = { ...live.record, observedState: "running", exitCode: null, finishedAt: null };
+        await this.persist(live);
+        return;
+      }
+      if (observation === "unproven") {
+        live.record = { ...live.record, observedState: "lost", exitCode: null, finishedAt: null };
+        await this.persist(live);
+        return;
+      }
+      live.record = { ...live.record, desiredState: "stopped", observedState: "lost", terminalState: "lost", finishedAt: null };
+      await this.persist(live);
+      await this.notifyHarnessRecovered(live).catch(() => undefined);
+      return;
+    }
     try {
       const inspection = await this.inspectOwned(live);
       if (inspection.Running) return;
@@ -193,6 +511,8 @@ export class ExecutionManager {
       live.record = { ...live.record, observedState: stopped ? "killed" : successful ? "exited" : "failed",
         exitCode: inspection.ExitCode, finishedAt: this.now().toISOString(), terminalState: live.record.kind === "terminal" ? "closed" : null };
       await this.persist(live);
+      this.retainTerminalReplay(live);
+      await this.notifyHarnessSettled(live).catch(() => undefined);
       if (live.attachment !== null && live.attachment.readyState === live.attachment.OPEN) {
         live.attachment.send(encodeTerminalAgentFrame({ type: "exit", exitCode: inspection.ExitCode }), { binary: true });
         live.attachment.close(TERMINAL_NORMAL_CLOSE_CODE);
@@ -215,15 +535,25 @@ export class ExecutionManager {
   }
 
   private monitorRecovered(live: LiveExecution): void {
+    let delayMs = RECOVERED_HARNESS_POLL_INITIAL_MS;
     const poll = async () => {
       await this.refresh(live).catch(() => undefined);
-      if (["running", "stopping"].includes(live.record.observedState)) setTimeout(() => { poll().catch(() => undefined); }, 250).unref();
+      const recoveredHarnessPending = live.record.executionRole === "harness" && live.record.terminalState === "lost"
+        && !this.settledHarnessProcessIds.has(live.record.processId);
+      if (["running", "stopping"].includes(live.record.observedState) || recoveredHarnessPending) {
+        setTimeout(() => { poll().catch(() => undefined); }, delayMs).unref();
+        if (recoveredHarnessPending) delayMs = Math.min(delayMs * 2, RECOVERED_HARNESS_POLL_MAX_MS);
+      }
     };
-    setTimeout(() => { poll().catch(() => undefined); }, 250).unref();
+    setTimeout(() => { poll().catch(() => undefined); }, delayMs).unref();
+    if (live.record.executionRole === "harness" && live.record.terminalState === "lost") {
+      delayMs = Math.min(delayMs * 2, RECOVERED_HARNESS_POLL_MAX_MS);
+    }
   }
 
   private attachStream(live: LiveExecution, stream: Duplex): void {
     live.stream = stream;
+    live.terminalReplayComplete = false;
     stream.on("data", (chunk: Buffer) => {
       if (live.record.kind !== "terminal") return;
       const data = Buffer.from(chunk);
@@ -238,14 +568,16 @@ export class ExecutionManager {
         socket.send(encodeTerminalAgentFrame({ type: "output", data: data.subarray(offset, offset + TERMINAL_MAX_PAYLOAD_BYTES) }), { binary: true });
       }
     });
-    stream.once("close", () => { void this.refresh(live).catch(() => undefined); });
-    stream.once("end", () => { void this.refresh(live).catch(() => undefined); });
-    stream.once("error", () => { void this.refresh(live).catch(() => undefined); });
+    stream.once("close", () => { this.completeTerminalReplay(live); void this.refresh(live).catch(() => undefined); });
+    stream.once("end", () => { this.completeTerminalReplay(live); void this.refresh(live).catch(() => undefined); });
+    stream.once("error", () => { this.completeTerminalReplay(live); void this.refresh(live).catch(() => undefined); });
     stream.resume();
   }
 
   private async createExec(context: WorkspaceExecutionContext, input: {
-    kind: "task" | "terminal"; processId: string; terminalId: string | null; taskRunId: string | null;
+    kind: "task" | "terminal"; executionRole: ExecutionRole; harnessSessionId: string | null;
+    harnessGeneration: number | null; harnessLeaseId: string | null;
+    processId: string; terminalId: string | null; taskRunId: string | null;
     taskKey: string | null; successExitCodes: readonly number[]; command: readonly string[];
     workingDirectory: string; environment: Record<string, string>; attachStdin: boolean; tty: boolean;
     operationId: string | null;
@@ -254,7 +586,9 @@ export class ExecutionManager {
       resource: { type: "process", id: input.processId }, action: "start"
     });
     const record: ExecutionRecord = {
-      version: 1, kind: input.kind, projectId: context.projectId, workspaceId: context.workspaceId,
+      version: 1, kind: input.kind, executionRole: input.executionRole, harnessSessionId: input.harnessSessionId,
+      harnessGeneration: input.harnessGeneration, harnessLeaseId: input.harnessLeaseId,
+      projectId: context.projectId, workspaceId: context.workspaceId,
       processId: input.processId, terminalId: input.terminalId, taskRunId: input.taskRunId, taskKey: input.taskKey,
       successExitCodes: [...input.successExitCodes], revisionId: context.revisionId, revisionHash: context.revisionHash,
       runtimePlanHash: context.runtimePlanHash, generation: context.generation,
@@ -264,7 +598,9 @@ export class ExecutionManager {
       exitCode: null, startedAt: null, finishedAt: null
     };
     const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
-      attachmentCleanup: null, replay: Buffer.alloc(0) };
+      attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
+      terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
+      terminalReplayComplete: true, terminalReplayWaiters: new Set() };
     // The exact request/operation binding is durable before Docker sees a side effect.
     await this.persist(live);
     this.executions.set(record.processId, live);
@@ -272,7 +608,8 @@ export class ExecutionManager {
       const execId = await this.engine.createExec(context.ownership.developmentContainer.id, {
         command: input.command, workingDirectory: input.workingDirectory,
         environment: input.environment,
-        attachStdin: input.attachStdin, tty: input.tty
+        attachStdin: input.attachStdin, tty: input.tty,
+        ...(input.tty ? { consoleSize: { columns: 80, rows: 24 } } : {})
       });
       const reserved = live.record;
       live.record = { ...reserved, execId, creationPhase: "exec-created", observedState: "starting" };
@@ -305,6 +642,9 @@ export class ExecutionManager {
     let stream: Duplex;
     try { stream = await this.engine.startExecAttached(execId, tty); }
     catch { throw new TaskStartRecoveryRequiredError(); }
+    // Attach the bounded terminal buffer before inspecting the exec. A short
+    // process can write its complete error and exit between start and inspect.
+    if (tty && live.record.kind === "terminal") this.attachStream(live, stream);
     let inspection: Awaited<ReturnType<DockerEngineClient["inspectExec"]>>;
     try {
       inspection = await this.engine.inspectExec(execId);
@@ -313,7 +653,9 @@ export class ExecutionManager {
         inspection = await this.engine.inspectExec(execId);
       }
     } catch {
-      stream.destroy();
+      // Keep a usable harness PTY when only the follow-up inspection failed.
+      // The exact retained stream is the only supported way to attach again.
+      if (live.record.executionRole !== "harness") stream.destroy();
       throw new TaskStartRecoveryRequiredError();
     }
     if (inspection.ContainerID !== live.record.containerId) {
@@ -341,11 +683,61 @@ export class ExecutionManager {
     try { await this.persist(live); }
     catch {
       live.record = previous;
-      stream?.destroy();
+      if (stream !== null && live.record.executionRole !== "harness") stream.destroy();
       throw new TaskStartRecoveryRequiredError();
     }
-    if (!terminal && stream !== null) this.attachStream(live, stream);
-    else stream?.destroy();
+    if (live.record.kind === "terminal") {
+      if (stream !== null && live.stream !== stream) this.attachStream(live, stream);
+      if (terminal && (stream !== null || live.stream !== null)) this.retainTerminalReplay(live);
+    } else if (stream !== null) {
+      stream.destroy();
+    }
+    if (terminal) {
+      // Settlement failure must not turn a started exec into a second launch.
+      // flushHarnessSettlements retries until the hook succeeds once.
+      await this.notifyHarnessSettled(live).catch(() => undefined);
+    }
+  }
+
+  private async notifyHarnessRecovered(live: LiveExecution): Promise<boolean> {
+    if (live.record.executionRole !== "harness" || live.record.harnessSessionId === null
+      || live.record.harnessGeneration === null) return false;
+    if (this.settledHarnessProcessIds.has(live.record.processId)) return true;
+    this.settledHarnessProcessIds.add(live.record.processId);
+    try {
+      await this.hooks.onHarnessRecovered?.({
+        processId: live.record.processId,
+        workspaceId: live.record.workspaceId,
+        sessionId: live.record.harnessSessionId,
+        processGeneration: live.record.harnessGeneration,
+        leaseId: live.record.harnessLeaseId
+      });
+      return true;
+    } catch {
+      this.settledHarnessProcessIds.delete(live.record.processId);
+      throw new Error("harness-recovery-failed");
+    }
+  }
+
+  private async notifyHarnessSettled(live: LiveExecution): Promise<void> {
+    if (live.record.executionRole !== "harness" && !this.harnessProcessIds.has(live.record.processId)) return;
+    if (live.record.terminalId === null) return;
+    // A restart loss stays lost. Clean PTY exit is the only path that settles stopped.
+    if (live.record.terminalState === "lost") return;
+    if (!["exited", "failed", "killed"].includes(live.record.observedState)) return;
+    if (this.settledHarnessProcessIds.has(live.record.processId)) return;
+    this.settledHarnessProcessIds.add(live.record.processId);
+    try {
+      await this.hooks.onHarnessSettled?.({
+        processId: live.record.processId,
+        terminalId: live.record.terminalId,
+        observedState: live.record.observedState as HarnessExecutionSettlement["observedState"],
+        exitCode: live.record.exitCode
+      });
+    } catch {
+      this.settledHarnessProcessIds.delete(live.record.processId);
+      throw new Error("harness-settlement-failed");
+    }
   }
 
   private activeTask(taskKey: string, workspaceId: string): LiveExecution[] {
@@ -414,7 +806,8 @@ export class ExecutionManager {
       throw failure("RESOURCE_STATE_CONFLICT", "The task already has an active run.", { resource: { type: "task-run", id: input.taskRunId }, action: "start" });
     }
     await this.createExec(context, {
-      kind: "task", processId: input.processId, terminalId: null, taskRunId: input.taskRunId, taskKey: task.key,
+      kind: "task", executionRole: "task", harnessSessionId: null, harnessGeneration: null, harnessLeaseId: null,
+      processId: input.processId, terminalId: null, taskRunId: input.taskRunId, taskKey: task.key,
       successExitCodes: task.successExitCodes,
       command: [task.command.executable, ...task.command.args],
       workingDirectory, environment, attachStdin: false, tty: false, operationId
@@ -428,10 +821,115 @@ export class ExecutionManager {
       resource: { type: "terminal", id: input.terminalId }, action: "create"
     });
     await this.createExec(context, {
-      kind: "terminal", processId: input.terminalId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
+      kind: "terminal", executionRole: "terminal", harnessSessionId: null, harnessGeneration: null, harnessLeaseId: null,
+      processId: input.terminalId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
       successExitCodes: [0], command: ["/bin/sh"], workingDirectory: "/workspace",
       environment: { TERM: "xterm-256color" }, attachStdin: true, tty: true, operationId: null
     });
+  }
+
+  async createHarness(input: {
+    projectId: string;
+    workspaceId: string;
+    processId: string;
+    terminalId: string;
+    command: readonly string[];
+    environment: Readonly<Record<string, string>>;
+    sessionId: string;
+    processGeneration: number;
+    leaseId: string | null;
+  }): Promise<void> {
+    const harnessSessionId = uuidV7Schema.parse(input.sessionId);
+    if (!Number.isInteger(input.processGeneration) || input.processGeneration < 1) {
+      throw new Error("harness-process-generation-invalid");
+    }
+    const context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId);
+    if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
+      resource: { type: "terminal", id: input.terminalId }, action: "create"
+    });
+    this.harnessProcessIds.add(input.processId);
+    await this.createExec(context, {
+      kind: "terminal", executionRole: "harness", harnessSessionId, harnessGeneration: input.processGeneration,
+      harnessLeaseId: input.leaseId,
+      processId: input.processId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
+      successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
+      environment: { TERM: "xterm-256color", ...input.environment }, attachStdin: true, tty: true, operationId: null
+    });
+  }
+
+  async reconcileHarnessAdmission(input: HarnessAdmissionIdentity): Promise<HarnessAdmissionReconciliation> {
+    const live = this.executions.get(uuidV7Schema.parse(input.processId));
+    if (live === undefined) {
+      throw failure("PROCESS_IDENTITY_MISMATCH", "The retained harness process was not found.", { processId: input.processId });
+    }
+    const record = live.record;
+    if (record.kind !== "terminal" || record.executionRole !== "harness"
+      || record.projectId !== input.projectId || record.workspaceId !== input.workspaceId
+      || record.processId !== input.processId || record.terminalId !== input.terminalId
+      || record.harnessSessionId !== input.sessionId || record.harnessGeneration !== input.processGeneration
+      || record.harnessLeaseId !== input.leaseId || record.execId === null) {
+      throw failure("PROCESS_IDENTITY_MISMATCH", "The retained process does not match this exact harness admission.", {
+        processId: input.processId
+      });
+    }
+
+    let context: WorkspaceExecutionContext;
+    try {
+      context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    } catch {
+      return "uncertain";
+    }
+    this.assertContext(record, context);
+
+    let inspection: Awaited<ReturnType<DockerEngineClient["inspectExec"]>>;
+    try { inspection = await this.engine.inspectExec(record.execId); }
+    catch { return "uncertain"; }
+    if (inspection.ID !== record.execId || inspection.ContainerID !== record.containerId) {
+      throw failure("PROCESS_IDENTITY_MISMATCH", "The retained Docker exec no longer matches this harness admission.", {
+        processId: input.processId
+      });
+    }
+
+    if (inspection.Running && inspection.ExitCode === null) {
+      const stream = live.stream;
+      if (stream !== null && !stream.destroyed && !stream.closed && stream.readable && !stream.readableEnded
+        && stream.writable && !stream.writableEnded) {
+        try { await this.persistStartedObservation(live, null, null); }
+        catch { return "uncertain"; }
+        return "attachable-running";
+      }
+
+      const previous = live.record;
+      live.record = {
+        ...previous,
+        creationPhase: "started",
+        desiredState: "running",
+        observedState: "running",
+        terminalState: "lost",
+        exitCode: null,
+        startedAt: previous.startedAt ?? this.now().toISOString(),
+        finishedAt: null
+      };
+      try { await this.persist(live); }
+      catch {
+        live.record = previous;
+        return "uncertain";
+      }
+      this.harnessProcessIds.add(record.processId);
+      this.monitorRecovered(live);
+      return "running-without-stream";
+    }
+
+    if (!inspection.Running && inspection.ExitCode !== null) {
+      try { await this.persistStartedObservation(live, inspection.ExitCode, null); }
+      catch { return "uncertain"; }
+      return await this.privateHarnessSettlementPending(live.record) ? "uncertain" : "settled";
+    }
+
+    // In particular, start-intent + Running=false + ExitCode=null does not
+    // prove that the original Docker start request had no side effect.
+    return "uncertain";
   }
 
   private findProcess(projectId: string, workspaceId: string, processId: string): LiveExecution {
@@ -511,11 +1009,85 @@ export class ExecutionManager {
     });
   }
 
+  private reportTerminalResizeFailure(live: LiveExecution, columns: number, rows: number, error: unknown): void {
+    if (live.resizeFailureReported || live.record.terminalId === null) return;
+    live.resizeFailureReported = true;
+    let failureClass: TerminalResizeFailureDiagnostic["failureClass"] = "unknown";
+    let failureCode: number | null = null;
+    if (error instanceof DockerEngineError && Number.isInteger(error.statusCode)
+      && error.statusCode >= 100 && error.statusCode <= 599) {
+      failureClass = "docker-http";
+      failureCode = error.statusCode;
+    } else if (error instanceof DockerEngineTransportError) {
+      failureClass = "docker-transport";
+    }
+    try {
+      this.hooks.onTerminalResizeFailure?.({
+        processId: live.record.processId,
+        terminalId: live.record.terminalId,
+        columns,
+        rows,
+        failureClass,
+        failureCode
+      });
+    } catch {
+      // Diagnostics must not turn a failed browser resize into a terminal failure.
+    }
+  }
+
+  private retainTerminalReplay(live: LiveExecution): void {
+    if (live.record.kind !== "terminal" || live.record.terminalState !== "closed"
+      || live.terminalReplayExpiresAt !== null) return;
+    live.terminalReplayExpiresAt = Date.now() + TERMINAL_POST_EXIT_REPLAY_RETENTION_MS;
+    live.terminalReplayTimer = setTimeout(() => {
+      live.replay = Buffer.alloc(0);
+      live.terminalReplayExpiresAt = null;
+      live.terminalReplayTimer = null;
+    }, TERMINAL_POST_EXIT_REPLAY_RETENTION_MS);
+    live.terminalReplayTimer.unref();
+  }
+
+  private completeTerminalReplay(live: LiveExecution): void {
+    if (live.terminalReplayComplete) return;
+    live.terminalReplayComplete = true;
+    for (const wake of live.terminalReplayWaiters) wake();
+    live.terminalReplayWaiters.clear();
+  }
+
+  private async waitForTerminalReplay(live: LiveExecution): Promise<void> {
+    if (live.terminalReplayComplete || live.terminalReplayExpiresAt === null) return;
+    const waitMs = Math.min(TERMINAL_REPLAY_DRAIN_WAIT_MS, Math.max(0, live.terminalReplayExpiresAt - Date.now()));
+    if (waitMs === 0) return;
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        live.terminalReplayWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, waitMs);
+      live.terminalReplayWaiters.add(finish);
+    });
+  }
+
+  private sendTerminalReplay(socket: WebSocket, replay: Buffer): void {
+    if (socket.readyState !== socket.OPEN) return;
+    socket.send(encodeTerminalAgentFrame({ type: "ready" }), { binary: true });
+    for (let offset = 0; offset < replay.length; offset += TERMINAL_MAX_PAYLOAD_BYTES) {
+      socket.send(encodeTerminalAgentFrame({ type: "output", data: replay.subarray(offset, offset + TERMINAL_MAX_PAYLOAD_BYTES) }), { binary: true });
+    }
+  }
+
   reserveTerminalAttachment(terminalId: string): { attach(socket: WebSocket): Promise<void>; release(): void } {
     const live = [...this.executions.values()].find((candidate) => candidate.record.terminalId === uuidV7Schema.parse(terminalId));
     if (live === undefined) throw terminalNotFound(terminalId);
+    const postExitReplay = live.record.terminalState === "closed"
+      && live.terminalReplayExpiresAt !== null && Date.now() < live.terminalReplayExpiresAt
+      && !live.terminalReplayClaimed;
     if (live.attachmentReserved || live.attachment !== null || live.attachmentCleanup !== null
-      || !["active", "disconnected"].includes(live.record.terminalState ?? "")) {
+      || (!postExitReplay && !["active", "disconnected"].includes(live.record.terminalState ?? ""))) {
       throw failure("RESOURCE_STATE_CONFLICT", "The terminal cannot accept another attachment.", {
         resource: { type: "terminal", id: terminalId }, action: "attach"
       });
@@ -525,7 +1097,27 @@ export class ExecutionManager {
     return {
       release: () => { if (!claimed) live.attachmentReserved = false; },
       attach: async (socket) => {
-        claimed = true; live.attachmentReserved = false; live.attachment = socket;
+        claimed = true; live.attachmentReserved = false;
+        if (postExitReplay) {
+          live.terminalReplayClaimed = true;
+          await this.waitForTerminalReplay(live);
+          if (live.terminalReplayExpiresAt === null || Date.now() >= live.terminalReplayExpiresAt) {
+            socket.close(TERMINAL_NORMAL_CLOSE_CODE);
+            return;
+          }
+          const replay = live.replay;
+          this.sendTerminalReplay(socket, replay);
+          if (socket.readyState === socket.OPEN) {
+            socket.send(encodeTerminalAgentFrame({ type: "exit", exitCode: live.record.exitCode }), { binary: true });
+            socket.close(TERMINAL_NORMAL_CLOSE_CODE);
+          }
+          live.replay = Buffer.alloc(0);
+          if (live.terminalReplayTimer !== null) clearTimeout(live.terminalReplayTimer);
+          live.terminalReplayTimer = null;
+          live.terminalReplayExpiresAt = null;
+          return;
+        }
+        live.attachment = socket;
         let finishSetup!: () => void;
         const setupComplete = new Promise<void>((resolve) => { finishSetup = resolve; });
         let lostRequested = false;
@@ -581,8 +1173,9 @@ export class ExecutionManager {
           if (decoded.frame.type === "detach") { socket.close(TERMINAL_NORMAL_CLOSE_CODE); return; }
           if (decoded.frame.type === "resize") {
             if (live.record.execId === null) { socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal execution identity is unavailable."); return; }
-            void this.engine.resizeExec(live.record.execId, decoded.frame.columns, decoded.frame.rows)
-              .catch(() => undefined);
+            const { columns, rows } = decoded.frame;
+            void this.engine.resizeExec(live.record.execId, columns, rows)
+              .catch((error: unknown) => this.reportTerminalResizeFailure(live, columns, rows, error));
             return;
           }
           if (live.stream === null || live.stream.destroyed || live.stream.writableLength > ATTACHMENT_BACKPRESSURE_BYTES) {
@@ -602,6 +1195,12 @@ export class ExecutionManager {
         }
       }
     };
+  }
+
+  async flushHarnessSettlements(): Promise<void> {
+    for (const live of this.executions.values()) {
+      await this.notifyHarnessSettled(live);
+    }
   }
 
   snapshotResources(): AgentSnapshotResource[] {

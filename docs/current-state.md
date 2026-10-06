@@ -1,5 +1,38 @@
 # Current State
 
+## Native harness slice
+
+The generic native AI harness is implemented on `feat/generic-native-ai-harness`. The Workbench
+defaults to Native; structured Codex app-server remains available as the secondary Legacy
+presentation. Both use separate session lifecycles.
+
+Live native Codex acceptance is complete. The authenticated Codex 0.159.0 TUI used a dedicated
+private `CODEX_HOME` and made exactly one real model request, receiving
+`DEVSPACE_NATIVE_HARNESS_OK`. Codex's canonical thread identity came from rollout
+`session_meta.payload.id` and remained bound to the same DevSpace session across native Resume.
+The persisted conversation was restored over multiple generations, including after deliberate
+Agent loss and product workspace Stop recovery. Built-in launch and resume use
+`codex --yolo --no-daemon`; clean foreground settlement left the private slot empty, the lease
+released, and the home quiescent during a six-second observation.
+
+The private-home lifecycle is bounded and Agent-owned. Live Unix sockets and the exact bounded
+Codex daemon/app-server runtime state are omitted on writeback and rejected on materialization;
+the bounded app-server package cache is treated as ephemeral. Codex artifacts use a verified
+content-addressed in-container cache. Interactive PTYs start at 80x24, browser resize remains
+authoritative, and failed resize operations have private diagnostics.
+
+Fast-exit terminal output is retained in a 64 KiB replay buffer for one read-only claim within
+30 seconds. Web authorizes a closed-terminal upgrade only inside that window, with exact
+project/workspace/terminal ownership; the Agent decides whether replay remains available. Live
+acceptance verified Web-to-Agent replay, exit code delivery, and denial of a second output claim.
+The generic custom-harness smoke rendered `DEVSPACE_CUSTOM_HARNESS_OK` and `CODEX_HOME=unset`,
+exited 0, and acquired no Codex-home lease or provider state.
+
+Agent restart while foreground Codex was live preserved the exact running orphan, dirty slot, and
+lease. Product workspace Stop safely finalized it; workspace Start and subsequent Resume
+restored the same conversation. Workbench selection remains bound to the selected DevSpace
+session ID through projection refreshes. The structured Codex path has not been retired.
+
 ## Delivery status
 
 Milestones 0 and 1 are complete. PR #43 / AI Session Beta Checkpoint 1 and PR #47 / private
