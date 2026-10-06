@@ -7,7 +7,8 @@ import { createHarnessHomeStore } from "./harness-home.js";
 const syntheticDevices = vi.hoisted(() => new Map<string, "block" | "character">());
 
 vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  type FsPromisesModule = typeof import("node:fs/promises");
+  const actual = await importOriginal<FsPromisesModule>();
   return {
     ...actual,
     lstat: vi.fn(async (...args: Parameters<typeof actual.lstat>) => {
