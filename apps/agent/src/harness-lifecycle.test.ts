@@ -1,9 +1,11 @@
 /* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-assignment -- fake exec lifecycle is synchronous. */
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, expect, test } from "vitest";
+import { encodeTerminalClientFrame } from "@devspace/contracts";
 import { DockerEngineError } from "./docker-runtime.js";
 import { ExecutionManager, type HarnessRecoveryIdentity } from "./execution-manager.js";
 import { createHarnessHomeStore } from "./harness-home.js";
@@ -87,6 +89,47 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
   throw new Error("timed out waiting for harness lifecycle");
 }
 
+class HarnessTerminalSocket extends EventEmitter {
+  readonly OPEN = 1;
+  readonly CLOSING = 2;
+  readonly CLOSED = 3;
+  readonly frames: Buffer[] = [];
+  readyState = this.OPEN;
+  bufferedAmount = 0;
+
+  send(data: Buffer): void { this.frames.push(Buffer.from(data)); }
+  close(): void { this.readyState = this.CLOSING; }
+  terminate(): void {
+    this.readyState = this.CLOSED;
+    queueMicrotask(() => this.emit("close"));
+  }
+}
+
+async function nativeAdmissionFixture(engine: object, onSettled?: () => void | Promise<void>) {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-admission-fixture-"));
+  roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const home = createHarnessHomeStore(root);
+  let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
+  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
+    undefined, undefined, {
+      onHarnessRecovered: async (identity) => { await runtime.finalizeRecoveredLoss(identity); },
+      onHarnessSettled: async (event) => {
+        await onSettled?.();
+        await runtime.settleByProcess(event.processId);
+      }
+    });
+  runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => { await manager.createHarness(input); },
+    reconcileHarnessAdmission: async (input) => await manager.reconcileHarnessAdmission(input),
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await manager.initialize();
+  return { root, home, manager, runtime };
+}
+
 test("real exec exit settles once and a shell exit does not", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-lifecycle-"));
   roots.push(root);
@@ -154,6 +197,283 @@ test("real exec exit settles once and a shell exit does not", async () => {
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
   const persistedRollout = path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout));
   expect(await readFile(persistedRollout, "utf8")).toContain(nativeId);
+});
+
+test("same-Agent retry does not report uncertain harness admission active when its PTY stream was lost", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-uncertain-admission-"));
+  roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const home = createHarnessHomeStore(root);
+  let creates = 0;
+  let starts = 0;
+  let inspections = 0;
+  let containerRunning = true;
+  const engine = {
+    createExec: async () => { creates += 1; return "exec-uncertain"; },
+    startExecAttached: async () => { starts += 1; throw new Error("ambiguous-attached-start"); },
+    inspectExec: async () => {
+      inspections += 1;
+      if (!containerRunning) throw new DockerEngineError(404, "container-stopped");
+      return { ID: "exec-uncertain", Running: true, ExitCode: null, ContainerID: "container-owned" };
+    },
+    inspectContainer: async () => ({ Id: "container-owned", State: { Running: containerRunning, Status: containerRunning ? "running" : "exited" } })
+  };
+  let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
+  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
+    undefined, undefined, {
+      onHarnessRecovered: async (identity) => { await runtime.finalizeRecoveredLoss(identity); },
+      onHarnessSettled: async (event) => { await runtime.settleByProcess(event.processId); }
+    });
+  runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => { await manager.createHarness(input); },
+    reconcileHarnessAdmission: async (input) => await manager.reconcileHarnessAdmission(input),
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await manager.initialize();
+  const input = { projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 } as const;
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  const executionPath = path.join(root, "ownership", "executions", `${processId}.json`);
+  const pending = JSON.parse(await readFile(executionPath, "utf8")) as Record<string, unknown>;
+  expect(pending).toMatchObject({ creationPhase: "start-intent", terminalState: "creating" });
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "live" });
+  const pendingPrivate = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  const retried = JSON.parse(await readFile(executionPath, "utf8")) as Record<string, unknown>;
+  expect(retried).toMatchObject({ creationPhase: "started", terminalState: "lost", observedState: "running",
+    processId, terminalId, harnessSessionId: sessionId, harnessGeneration: 1, harnessLeaseId: pendingPrivate.leaseId });
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "lost", resume: false });
+  expect(retried).toMatchObject({ executionRole: "harness" });
+  const lostPrivate = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+  const retainedLease = JSON.parse(await readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8")) as Record<string, unknown>;
+  expect(lostPrivate).toMatchObject({ state: "lost", recoveryPending: true, leaseId: pendingPrivate.leaseId, processGeneration: 1 });
+  expect(retainedLease).toMatchObject({ leaseId: pendingPrivate.leaseId, workspaceId, aiSessionId: sessionId, processGeneration: 1 });
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+
+  const nativeId = "018f1f34-7000-7000-8000-000000000235";
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
+  const inspectionsBeforeStop = inspections;
+  containerRunning = false;
+  await waitFor(async () => (await runtime.capability(sessionId)).resume);
+  expect(inspections).toBeGreaterThan(inspectionsBeforeStop);
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
+  expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8"))
+    .toContain(nativeId);
+  await expect(readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8"))
+    .rejects.toMatchObject({ code: "ENOENT" });
+  expect(await manager.inspect(projectId, workspaceId, processId)).toMatchObject({ observedState: "lost" });
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+});
+
+test("same-Agent retry admits a running harness only with its retained PTY stream", async () => {
+  const stream = new PassThrough();
+  let creates = 0;
+  let starts = 0;
+  let inspections = 0;
+  const engine = {
+    createExec: async () => { creates += 1; return "exec-stream-retained"; },
+    startExecAttached: async () => { starts += 1; return stream; },
+    inspectExec: async () => {
+      inspections += 1;
+      if (inspections === 1) throw new Error("ambiguous-follow-up-inspect");
+      return { ID: "exec-stream-retained", Running: true, ExitCode: null, ContainerID: "container-owned" };
+    }
+  };
+  const { root, manager, runtime } = await nativeAdmissionFixture(engine);
+  const input = { projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 } as const;
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(stream.destroyed).toBe(false);
+  const uncertain = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+
+  await expect(runtime.start(input)).resolves.toEqual({});
+  const admitted = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+  expect(admitted).toMatchObject({ state: "live", admission: "started", processId, processGeneration: 1, leaseId: uncertain.leaseId });
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "live" });
+  expect(manager.snapshotResources()).toContainEqual(expect.objectContaining({
+    type: "terminal", identity: expect.objectContaining({ terminalId }), state: "disconnected"
+  }));
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+
+  const echoed: Buffer[] = [];
+  stream.on("data", (chunk: Buffer) => echoed.push(Buffer.from(chunk)));
+  const socket = new HarnessTerminalSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
+  socket.emit("message", Buffer.from(encodeTerminalClientFrame({ type: "input", data: Buffer.from("retained-pty-input") })), true);
+  await waitFor(async () => Promise.resolve(Buffer.concat(echoed).includes(Buffer.from("retained-pty-input"))));
+  expect(manager.snapshotResources()).toContainEqual(expect.objectContaining({
+    type: "terminal", identity: expect.objectContaining({ terminalId }), state: "active"
+  }));
+  socket.terminate();
+});
+
+test("same-Agent retry settles an exact already-exited harness without relaunch or replay", async () => {
+  let creates = 0;
+  let starts = 0;
+  let settlements = 0;
+  const engine = {
+    createExec: async () => { creates += 1; return "exec-exited-uncertain"; },
+    startExecAttached: async () => { starts += 1; throw new Error("ambiguous-attached-start"); },
+    inspectExec: async () => ({ ID: "exec-exited-uncertain", Running: false, ExitCode: 9, ContainerID: "container-owned" })
+  };
+  const { root, home, manager, runtime } = await nativeAdmissionFixture(engine, () => { settlements += 1; });
+  const input = { projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 } as const;
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  const nativeId = "018f1f34-7000-7000-8000-000000000236";
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
+
+  await expect(runtime.start(input)).resolves.toEqual({});
+  await expect(runtime.start(input)).resolves.toEqual({});
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "stopped" });
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "stopped", resume: true });
+  expect(await manager.inspect(projectId, workspaceId, processId)).toMatchObject({ observedState: "failed", exitCode: 9 });
+  expect(manager.snapshotResources()).toContainEqual(expect.objectContaining({
+    type: "terminal", identity: expect.objectContaining({ terminalId }), state: "closed"
+  }));
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8"))
+    .toContain(nativeId);
+  expect(settlements).toBe(1);
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+});
+
+test("same-Agent retries keep an unproven start-intent uncertain and never start it again", async () => {
+  let creates = 0;
+  let starts = 0;
+  let inspections = 0;
+  const engine = {
+    createExec: async () => { creates += 1; return "exec-still-unproven"; },
+    startExecAttached: async () => { starts += 1; throw new Error("ambiguous-attached-start"); },
+    inspectExec: async () => {
+      inspections += 1;
+      return { ID: "exec-still-unproven", Running: false, ExitCode: null, ContainerID: "container-owned" };
+    }
+  };
+  const { root, runtime } = await nativeAdmissionFixture(engine);
+  const input = { projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 } as const;
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "live" });
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "live", resume: false });
+  const privateSession = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+  const execution = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${processId}.json`), "utf8")) as Record<string, unknown>;
+  expect(privateSession).toMatchObject({ state: "live", admission: "uncertain", processId, processGeneration: 1 });
+  expect(execution).toMatchObject({ creationPhase: "start-intent", terminalState: "creating", harnessGeneration: 1 });
+  expect(inspections).toBe(3);
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+});
+
+test("a lost custom harness orphan cannot advertise provider-handled Resume without a home lease", async () => {
+  let creates = 0;
+  let starts = 0;
+  const engine = {
+    createExec: async () => { creates += 1; return "exec-custom-orphan"; },
+    startExecAttached: async () => { starts += 1; throw new Error("ambiguous-attached-start"); },
+    inspectExec: async () => ({ ID: "exec-custom-orphan", Running: true, ExitCode: null, ContainerID: "container-owned" })
+  };
+  const { root, runtime } = await nativeAdmissionFixture(engine);
+  const definition = {
+    id: "custom-orphan", displayName: "Custom Orphan", origin: "custom" as const,
+    launch: { executable: "custom-orphan", args: [] },
+    resume: { executable: "custom-orphan", args: ["--continue"] },
+    environment: {}, privateState: { kind: "none" as const }
+  };
+  runtime.registerCustom(definition);
+  const input = { projectId, workspaceId, sessionId, harnessId: definition.id, processId, terminalId, processGeneration: 1 } as const;
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  const privateSession = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+  expect(privateSession).toMatchObject({ state: "lost", leaseId: null, recoveryPending: true });
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "lost", resume: false });
+  await expect(runtime.resumeExec({
+    projectId, sessionId, processId: "018f1f34-7000-7000-8000-00000000023a",
+    terminalId: "018f1f34-7000-7000-8000-00000000023b", processGeneration: 2, definition
+  })).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+});
+
+test("same-Agent uncertain retry fails closed when terminal identity differs", async () => {
+  let creates = 0;
+  let starts = 0;
+  let inspections = 0;
+  const engine = {
+    createExec: async () => { creates += 1; return "exec-identity-mismatch"; },
+    startExecAttached: async () => { starts += 1; throw new Error("ambiguous-attached-start"); },
+    inspectExec: async () => {
+      inspections += 1;
+      return { ID: "exec-identity-mismatch", Running: true, ExitCode: null, ContainerID: "container-owned" };
+    }
+  };
+  const { runtime } = await nativeAdmissionFixture(engine);
+  const input = { projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 } as const;
+  await expect(runtime.start(input)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  await expect(runtime.start({ ...input, terminalId: shellTerminalId })).rejects.toMatchObject({
+    failure: { code: "PROCESS_IDENTITY_MISMATCH" }
+  });
+  expect(inspections).toBe(0);
+  expect(creates).toBe(1);
+  expect(starts).toBe(1);
+});
+
+test("uncertain Codex Resume reuses its claimed generation and lease", async () => {
+  let creates = 0;
+  let starts = 0;
+  let firstRunning = true;
+  const firstStream = new PassThrough();
+  const engine = {
+    createExec: async () => `exec-resume-${++creates}`,
+    startExecAttached: async (execId: string) => {
+      starts += 1;
+      if (execId === "exec-resume-2") throw new Error("ambiguous-resume-start");
+      return firstStream;
+    },
+    inspectExec: async (execId: string) => execId === "exec-resume-1"
+      ? { ID: execId, Running: firstRunning, ExitCode: firstRunning ? null : 0, ContainerID: "container-owned" }
+      : { ID: execId, Running: true, ExitCode: null, ContainerID: "container-owned" }
+  };
+  const { root, manager, runtime } = await nativeAdmissionFixture(engine);
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  const nativeId = "018f1f34-7000-7000-8000-000000000237";
+  await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
+  firstRunning = false;
+  await manager.inspect(projectId, workspaceId, processId);
+  expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "stopped" });
+
+  const resumeInput = {
+    projectId, sessionId, processId: "018f1f34-7000-7000-8000-000000000238",
+    terminalId: "018f1f34-7000-7000-8000-000000000239", processGeneration: 2
+  } as const;
+  await expect(runtime.resumeExec(resumeInput)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  const firstPrivate = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+  await expect(runtime.resumeExec(resumeInput)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  const retriedPrivate = JSON.parse(await readFile(path.join(root, "harness-sessions", `${sessionId}.json`), "utf8")) as Record<string, unknown>;
+  const execution = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${resumeInput.processId}.json`), "utf8")) as Record<string, unknown>;
+  expect(retriedPrivate).toMatchObject({ state: "lost", processId: resumeInput.processId, processGeneration: 2,
+    leaseId: firstPrivate.leaseId, recoveryPending: true });
+  expect(execution).toMatchObject({ processId: resumeInput.processId, terminalId: resumeInput.terminalId,
+    harnessSessionId: sessionId, harnessGeneration: 2, harnessLeaseId: firstPrivate.leaseId, terminalState: "lost" });
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "lost", processGeneration: 2, resume: false });
+  expect(await readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8"))
+    .toContain('"processGeneration":2');
+  expect(creates).toBe(2);
+  expect(starts).toBe(2);
+  expect(firstPrivate.leaseId).not.toBeNull();
 });
 
 test("restart recovers a durable exec exit whose clean-settlement hook was interrupted", async () => {

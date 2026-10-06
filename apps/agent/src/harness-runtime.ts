@@ -3,6 +3,8 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
   harnessExecutionAdmissionUncertain,
+  type HarnessAdmissionIdentity,
+  type HarnessAdmissionReconciliation,
   type HarnessRecoveryIdentity,
   type HarnessRecoveryReport
 } from "./execution-manager.js";
@@ -52,6 +54,7 @@ type SessionRecord = {
   leaseId: string | null;
   discoveryBaseline?: string[];
   recoveryPhase?: "ready-to-release";
+  recoveryPending?: boolean;
   definitionDigest: string | null;
   processGeneration: number;
   admission: "started" | "uncertain";
@@ -67,6 +70,7 @@ const sessionRecordSchema = z.strictObject({
   leaseId: z.string().nullable(),
   discoveryBaseline: z.array(uuidV7Schema).max(4_096).optional(),
   recoveryPhase: z.literal("ready-to-release").optional(),
+  recoveryPending: z.boolean().optional(),
   definitionDigest: z.string().nullable().default(null),
   processGeneration: z.number().int().positive().default(1),
   admission: z.enum(["started", "uncertain"]).default("started")
@@ -80,6 +84,7 @@ export interface HarnessRuntimeDependencies {
     command: readonly string[]; environment: Readonly<Record<string, string>>;
     sessionId: string; processGeneration: number; leaseId: string | null;
   }) => Promise<void>;
+  readonly reconcileHarnessAdmission?: (input: HarnessAdmissionIdentity) => Promise<HarnessAdmissionReconciliation>;
   readonly observeHarnessRecovery?: () => readonly HarnessRecoveryReport[];
   readonly inspectSlot: (workspaceId: string) => Promise<HarnessSlotMountObservation>;
   readonly recreateWorkspace?: (input: { workspaceId: string; projectId: string }) => Promise<HarnessSlotMountObservation>;
@@ -132,7 +137,8 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       const candidateId = name.slice(0, -".json".length);
       if (candidateId === sessionId) continue;
       const candidate = await loadSession(candidateId).catch(() => null);
-      if (candidate?.workspaceId === workspaceId && (candidate.state === "live" || candidate.leaseId !== null)) return true;
+      if (candidate?.workspaceId === workspaceId
+        && (candidate.state === "live" || candidate.leaseId !== null || candidate.recoveryPending === true)) return true;
     }
     return false;
   };
@@ -214,6 +220,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     await writeBackAndReleaseHome(identity.sessionId, record);
     record.state = "lost";
     record.admission = "started";
+    delete record.recoveryPending;
     liveByWorkspace.delete(record.workspaceId);
     await saveSession(identity.sessionId, record);
   };
@@ -246,6 +253,38 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     }
   };
 
+  const reconcileUncertainAdmission = async (input: HarnessAdmissionIdentity): Promise<"started" | "settled"> => {
+    const throwUncertain = () => new HarnessRuntimeError(
+      "HARNESS_ADMISSION_UNCERTAIN", "The harness admission is not yet safely attachable; retry the same process."
+    );
+    if (dependencies.reconcileHarnessAdmission === undefined) throw throwUncertain();
+    const result = await dependencies.reconcileHarnessAdmission(input);
+    const current = await loadSession(input.sessionId);
+    if (current.workspaceId !== input.workspaceId || current.processId !== input.processId
+      || current.processGeneration !== input.processGeneration) {
+      throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The private harness session no longer matches this admission.");
+    }
+    if (current.state === "stopped" && current.leaseId === null) return "settled";
+    if (current.leaseId !== input.leaseId) {
+      throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The private harness lease no longer matches this admission.");
+    }
+    if (result === "settled") throw throwUncertain();
+    if (result === "running-without-stream") {
+      current.state = "lost";
+      current.recoveryPending = true;
+      await saveSession(input.sessionId, current);
+      liveByWorkspace.set(input.workspaceId, input.sessionId);
+      throw throwUncertain();
+    }
+    if (result === "attachable-running" && current.state === "live" && current.admission === "uncertain") {
+      current.admission = "started";
+      await saveSession(input.sessionId, current);
+      liveByWorkspace.set(input.workspaceId, input.sessionId);
+      return "started";
+    }
+    throw throwUncertain();
+  };
+
   return {
     registerCustom(definition: CustomHarnessDefinition): void {
       if (definition.id === CODEX_HARNESS_ID) throw new HarnessRuntimeError("HARNESS_ID_INVALID", "custom id collides with codex");
@@ -273,8 +312,29 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     }) {
       return exclusive(async () => {
         const existingEarly = await loadSession(input.sessionId).catch(() => null);
+        if (existingEarly !== null && existingEarly.processId === input.processId
+          && existingEarly.processGeneration === input.processGeneration && existingEarly.state !== "live") {
+          if (existingEarly.state === "lost") throw new HarnessRuntimeError(
+            "HARNESS_ADMISSION_UNCERTAIN", "The exact harness process was lost; reconcile its Agent state before completing admission."
+          );
+          return {};
+        }
+        if (existingEarly?.recoveryPending === true) {
+          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A lost harness process is still being recovered.");
+        }
         if (existingEarly?.state === "live" && existingEarly.processId === input.processId) {
+          if (existingEarly.workspaceId !== input.workspaceId || existingEarly.harnessId !== input.harnessId
+            || existingEarly.processGeneration !== input.processGeneration) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The retry does not match the live harness generation.");
+          }
           liveByWorkspace.set(input.workspaceId, input.sessionId);
+          if (existingEarly.admission === "uncertain") {
+            await reconcileUncertainAdmission({
+              projectId: input.projectId, workspaceId: input.workspaceId, processId: input.processId,
+              terminalId: input.terminalId, sessionId: input.sessionId,
+              processGeneration: input.processGeneration, leaseId: existingEarly.leaseId
+            });
+          }
           return {};
         }
         if ((existingEarly !== null && (existingEarly.state === "live" || existingEarly.leaseId !== null))
@@ -408,7 +468,24 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
         const record = await loadSession(input.sessionId);
         if (record.state === "live" && record.processId === input.processId && record.processGeneration === input.processGeneration) {
           liveByWorkspace.set(record.workspaceId, input.sessionId);
+          if (record.admission === "uncertain") {
+            await reconcileUncertainAdmission({
+              projectId: input.projectId, workspaceId: record.workspaceId, processId: input.processId,
+              terminalId: input.terminalId, sessionId: input.sessionId,
+              processGeneration: input.processGeneration, leaseId: record.leaseId
+            });
+          }
           return { command: [], env: {} };
+        }
+        if (record.processId === input.processId && record.processGeneration === input.processGeneration
+          && record.state !== "live") {
+          if (record.state === "lost") throw new HarnessRuntimeError(
+            "HARNESS_ADMISSION_UNCERTAIN", "The exact harness process was lost; reconcile its Agent state before completing admission."
+          );
+          return { command: [], env: {} };
+        }
+        if (record.recoveryPending === true) {
+          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A lost harness process is still being recovered.");
         }
         if (input.definition !== undefined) {
           if (input.definition.id !== record.harnessId) {
@@ -533,7 +610,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       try {
         const nativeSessionId = record.harnessId === CODEX_HARNESS_ID
           && !uuidV7Schema.safeParse(record.nativeSessionId).success ? null : record.nativeSessionId;
-        resume = record.state !== "live" && record.leaseId === null && resumeCapability({
+        resume = record.state !== "live" && record.leaseId === null && record.recoveryPending !== true && resumeCapability({
           resume: definitionOf(record.harnessId).resume,
           nativeSessionId
         });
@@ -555,12 +632,17 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           if (!name.endsWith(".json")) continue;
           const sessionId = name.slice(0, -".json".length);
           const record = await loadSession(sessionId);
-          if (record.state !== "live" && !(record.state === "lost" && record.leaseId !== null)) continue;
+          if (record.state !== "live" && !(record.state === "lost" && record.leaseId !== null)
+            && record.recoveryPending !== true) continue;
           const matching = reports.filter((item) => item.processId === record.processId && item.workspaceId === record.workspaceId
             && item.sessionId === sessionId && item.processGeneration === record.processGeneration && item.leaseId === record.leaseId);
           record.state = "lost";
-          if (record.leaseId !== null || matching.some((item) => item.observation === "running" || item.observation === "unproven")) {
+          if (record.leaseId !== null || record.recoveryPending === true
+            || matching.some((item) => item.observation === "running" || item.observation === "unproven")) {
             liveByWorkspace.set(record.workspaceId, sessionId);
+          }
+          if (matching.some((item) => item.observation === "running" || item.observation === "unproven")) {
+            record.recoveryPending = true;
           }
           await saveSession(sessionId, record);
           if (matching.length !== 1) continue;

@@ -99,6 +99,64 @@ test("a lost agent response retries the same creating harness and a definite rej
   expect(again.sessionId).not.toBe(other.database.listNativeHarnessSessions(other.workspaceId).find((row) => row.state === "failed")?.id);
 });
 
+test("an uncertain lost PTY admission stays creating until Agent projection marks it lost", async () => {
+  const fixture = await createReadyProject();
+  let starts = 0;
+  const agent = {
+    startNativeHarness: async () => {
+      starts += 1;
+      throw new AgentResponseError("HARNESS_ADMISSION_UNCERTAIN", "The harness PTY is not attachable yet.", true);
+    },
+    inspectNativeHarness: async () => ({ state: "lost", processGeneration: 1, resume: false })
+  } as unknown as FullAgentClient;
+
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)).toMatchObject([
+    { state: "creating", processGeneration: 1 }
+  ]);
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(projected).toMatchObject([{ state: "lost", resume: false }]);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)).toMatchObject([
+    { state: "lost", processGeneration: 1 }
+  ]);
+  expect(starts).toBe(1);
+});
+
+test("a same-generation retry that Agent reports settled leaves the Web row stopped", async () => {
+  const fixture = await createReadyProject();
+  const calls: Array<{ sessionId: string; processId: string; terminalId: string; processGeneration: number }> = [];
+  let uncertain = true;
+  const agent = {
+    startNativeHarness: async (input: { sessionId: string; processId: string; terminalId: string; processGeneration: number }) => {
+      calls.push(input);
+      if (uncertain) {
+        uncertain = false;
+        throw new AgentResponseError("HARNESS_ADMISSION_UNCERTAIN", "The exact exec has not settled yet.", true);
+      }
+      return { settled: true };
+    }
+  } as unknown as FullAgentClient;
+
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)).toMatchObject([
+    { state: "creating", processGeneration: 1 }
+  ]);
+
+  const retried = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+  expect(retried.sessionId).toBe(calls[0]!.sessionId);
+  expect(calls[1]).toEqual(calls[0]);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)).toMatchObject([
+    { id: retried.sessionId, state: "stopped", processGeneration: 1 }
+  ]);
+});
+
 test("resume generation increments once per admitted resume and rolls back a definite rejection", async () => {
   const fixture = await createReadyProject();
   const generations: number[] = [];

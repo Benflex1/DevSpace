@@ -195,6 +195,22 @@ export type HarnessExecutionSettlement = {
   readonly exitCode: number | null;
 };
 
+export type HarnessAdmissionIdentity = {
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly processId: string;
+  readonly terminalId: string;
+  readonly sessionId: string;
+  readonly processGeneration: number;
+  readonly leaseId: string | null;
+};
+
+export type HarnessAdmissionReconciliation =
+  | "attachable-running"
+  | "running-without-stream"
+  | "settled"
+  | "uncertain";
+
 export type TerminalResizeFailureDiagnostic = {
   readonly processId: string;
   readonly terminalId: string;
@@ -637,7 +653,9 @@ export class ExecutionManager {
         inspection = await this.engine.inspectExec(execId);
       }
     } catch {
-      stream.destroy();
+      // Keep a usable harness PTY when only the follow-up inspection failed.
+      // The exact retained stream is the only supported way to attach again.
+      if (live.record.executionRole !== "harness") stream.destroy();
       throw new TaskStartRecoveryRequiredError();
     }
     if (inspection.ContainerID !== live.record.containerId) {
@@ -665,12 +683,12 @@ export class ExecutionManager {
     try { await this.persist(live); }
     catch {
       live.record = previous;
-      stream?.destroy();
+      if (stream !== null && live.record.executionRole !== "harness") stream.destroy();
       throw new TaskStartRecoveryRequiredError();
     }
     if (live.record.kind === "terminal") {
       if (stream !== null && live.stream !== stream) this.attachStream(live, stream);
-      if (terminal) this.retainTerminalReplay(live);
+      if (terminal && (stream !== null || live.stream !== null)) this.retainTerminalReplay(live);
     } else if (stream !== null) {
       stream.destroy();
     }
@@ -838,6 +856,80 @@ export class ExecutionManager {
       successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
       environment: { TERM: "xterm-256color", ...input.environment }, attachStdin: true, tty: true, operationId: null
     });
+  }
+
+  async reconcileHarnessAdmission(input: HarnessAdmissionIdentity): Promise<HarnessAdmissionReconciliation> {
+    const live = this.executions.get(uuidV7Schema.parse(input.processId));
+    if (live === undefined) {
+      throw failure("PROCESS_IDENTITY_MISMATCH", "The retained harness process was not found.", { processId: input.processId });
+    }
+    const record = live.record;
+    if (record.kind !== "terminal" || record.executionRole !== "harness"
+      || record.projectId !== input.projectId || record.workspaceId !== input.workspaceId
+      || record.processId !== input.processId || record.terminalId !== input.terminalId
+      || record.harnessSessionId !== input.sessionId || record.harnessGeneration !== input.processGeneration
+      || record.harnessLeaseId !== input.leaseId || record.execId === null) {
+      throw failure("PROCESS_IDENTITY_MISMATCH", "The retained process does not match this exact harness admission.", {
+        processId: input.processId
+      });
+    }
+
+    let context: WorkspaceExecutionContext;
+    try {
+      context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    } catch {
+      return "uncertain";
+    }
+    this.assertContext(record, context);
+
+    let inspection: Awaited<ReturnType<DockerEngineClient["inspectExec"]>>;
+    try { inspection = await this.engine.inspectExec(record.execId); }
+    catch { return "uncertain"; }
+    if (inspection.ID !== record.execId || inspection.ContainerID !== record.containerId) {
+      throw failure("PROCESS_IDENTITY_MISMATCH", "The retained Docker exec no longer matches this harness admission.", {
+        processId: input.processId
+      });
+    }
+
+    if (inspection.Running && inspection.ExitCode === null) {
+      const stream = live.stream;
+      if (stream !== null && !stream.destroyed && !stream.closed && stream.readable && !stream.readableEnded
+        && stream.writable && !stream.writableEnded) {
+        try { await this.persistStartedObservation(live, null, null); }
+        catch { return "uncertain"; }
+        return "attachable-running";
+      }
+
+      const previous = live.record;
+      live.record = {
+        ...previous,
+        creationPhase: "started",
+        desiredState: "running",
+        observedState: "running",
+        terminalState: "lost",
+        exitCode: null,
+        startedAt: previous.startedAt ?? this.now().toISOString(),
+        finishedAt: null
+      };
+      try { await this.persist(live); }
+      catch {
+        live.record = previous;
+        return "uncertain";
+      }
+      this.harnessProcessIds.add(record.processId);
+      this.monitorRecovered(live);
+      return "running-without-stream";
+    }
+
+    if (!inspection.Running && inspection.ExitCode !== null) {
+      try { await this.persistStartedObservation(live, inspection.ExitCode, null); }
+      catch { return "uncertain"; }
+      return await this.privateHarnessSettlementPending(live.record) ? "uncertain" : "settled";
+    }
+
+    // In particular, start-intent + Running=false + ExitCode=null does not
+    // prove that the original Docker start request had no side effect.
+    return "uncertain";
   }
 
   private findProcess(projectId: string, workspaceId: string, processId: string): LiveExecution {

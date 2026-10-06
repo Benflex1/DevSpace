@@ -126,9 +126,22 @@ Ordinary `/bin/sh` terminals are not harness executions and do not settle a harn
 
 If exec creation fails before the process is admitted, the Agent writes the slot back when
 needed, empties it, and releases the lease. `TaskStartRecoveryRequiredError` is admission
-uncertainty: the lease stays, the private record stays live, and Web leaves the SQLite row
-`creating` so the same process id can be retried. A retry of the same process does not launch
-a second exec.
+uncertainty: the lease stays, the private record stays live with `admission = uncertain`, and
+Web leaves the SQLite row `creating` so the same process id can be retried. Successful
+admission requires both an authoritative observation of the exact running Docker exec and a
+usable PTY stream retained by the Agent. A retry reconciles the exact process, terminal,
+session, generation, lease, exec, and current container ownership; it never creates another
+exec or starts an ambiguous `start-intent` again.
+
+If the exact exec is running and the Agent still owns its usable original PTY stream, the retry
+records it as started and makes its terminal attachable. If the exec is running but that stream
+is unavailable, the session and terminal become `lost`, not active. The Agent keeps observing
+that exact exec, retains the private-home lease and dirty slot, and reports Resume unavailable
+while recovery is pending. Normal exec exit or Workspace Stop, which proves its owning container
+cannot continue, runs the existing recovered-loss finalization and releases the slot and lease.
+An exact exit code discovered before the running-without-stream case instead follows normal
+settlement once; output replay is retained only when an original stream existed. If inspection
+cannot prove either running or an exact exit, admission remains uncertain and retryable.
 
 Terminal PTY output is retained in the existing bounded 64 KiB replay buffer. When a terminal
 exits before a browser attaches, one read-only attachment may receive `ready`, the captured
@@ -190,7 +203,8 @@ mutations. They still fence authority and retries:
 
 - Web creates at most one `creating` native session and reuses it, including its terminal, on
   retry.
-- The Agent returns success without a second exec when that same process is already live.
+- The Agent returns success for that same process only after authoritative admission; uncertain
+  admission is reconciled against the exact retained exec and usable PTY stream.
 - A definite Agent rejection fails the `creating` row or rolls a resume claim back.
 - A timeout or `HARNESS_ADMISSION_UNCERTAIN` leaves `creating` so the client retries the same
   process instead of starting another harness.

@@ -360,6 +360,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     createHarnessExec: async (input) => {
       await execution.createHarness(input);
     },
+    reconcileHarnessAdmission: async (input) => await execution.reconcileHarnessAdmission(input),
     observeHarnessRecovery: () => execution.harnessRecoveryReports(),
     inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
     recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId),
