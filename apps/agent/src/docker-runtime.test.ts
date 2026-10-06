@@ -290,10 +290,8 @@ describe("dedicated rootless Docker boundary", () => {
     })).resolves.toBe("exec-2");
     await engine.resizeExec("exec-1", 120, 40);
 
-    expect(fixture.execBodies).toEqual([
-      expect.objectContaining({ Tty: true, ConsoleSize: [24, 80] }),
-      expect.not.objectContaining({ ConsoleSize: expect.anything() })
-    ]);
+    expect(fixture.execBodies[0]).toEqual(expect.objectContaining({ Tty: true, ConsoleSize: [24, 80] }));
+    expect(fixture.execBodies[1]).not.toHaveProperty("ConsoleSize");
     expect(fixture.resizeUrls).toEqual(["/exec/exec-1/resize?h=40&w=120"]);
   });
 });

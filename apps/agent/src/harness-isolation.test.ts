@@ -48,8 +48,8 @@ test("custom harness exec env does not inherit CODEX_HOME", async () => {
   const runtime = createHarnessRuntime({
     home: createHarnessHomeStore(root),
     stateRoot: root,
-    createHarnessExec: async (input) => { created.push({ environment: { ...input.environment } }); },
-    inspectSlot: async () => ({ state: "missing" }),
+    createHarnessExec: (input) => { created.push({ environment: { ...input.environment } }); return Promise.resolve(); },
+    inspectSlot: () => Promise.resolve({ state: "missing" }),
     imageCodex: { present: true, version: null }
   });
   runtime.registerCustom({

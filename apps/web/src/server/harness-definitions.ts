@@ -10,7 +10,7 @@ export function listCustomHarnessDefinitions(database: ProjectDatabase): CustomH
     displayName: row.displayName,
     origin: "custom",
     launch: JSON.parse(row.launchJson) as CustomHarnessDefinition["launch"],
-    resume: row.resumeJson === null ? null : JSON.parse(row.resumeJson),
+    resume: row.resumeJson === null ? null : JSON.parse(row.resumeJson) as unknown,
     environment: JSON.parse(row.environmentJson) as CustomHarnessDefinition["environment"],
     privateState: { kind: "none" }
   }));

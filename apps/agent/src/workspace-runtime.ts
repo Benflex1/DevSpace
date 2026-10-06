@@ -268,7 +268,13 @@ export class WorkspaceRuntimeManager {
     }
     let removalError: unknown;
     try { await this.engine.removeContainer(helperId); } catch (error) { removalError = error; }
-    if (operationError !== undefined) throw operationError;
+    if (operationError instanceof Error) throw operationError;
+    if (operationError !== undefined) {
+      throw new Error(
+        typeof operationError === "string" ? operationError : "The bounded private-slot cleanup task failed.",
+        { cause: operationError }
+      );
+    }
     if (removalError !== undefined) {
       throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The completed private-slot cleanup task could not be removed.");
     }
