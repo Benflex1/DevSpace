@@ -12,6 +12,7 @@ import {
   stageCodexExecutionArtifact
 } from "./artifact-identity.js";
 import {
+  codexArtifactTransferTimeoutMs,
   createCodexArtifactStager,
   parseCodexArtifactTree,
   type CodexArtifactReadback,
@@ -44,8 +45,37 @@ function endStream(): Duplex {
   return stream;
 }
 
-function fakeDocker(captured: Array<Record<string, unknown>>): DockerEngineClient {
+function outputStream(bytes: Buffer): Duplex {
+  const stream = new Duplex({
+    read() { /* fake Docker stream */ },
+    write(_chunk, _encoding, callback) { callback(); }
+  });
+  setImmediate(() => {
+    stream.push(bytes);
+    stream.push(null);
+    stream.emit("close");
+  });
+  return stream;
+}
+
+function dockerReadbackFrame(entry: CodexExecutionArtifact["entrypoint"], bytes: Buffer): Buffer {
+  const payload = Buffer.alloc(32 + bytes.length);
+  payload.write("DSARTF01", 0, "ascii");
+  payload.writeUInt32BE(1, 8);
+  payload.writeUInt32BE(1, 12);
+  payload.writeUInt32BE(entry.mode, 16);
+  payload.writeBigUInt64BE(BigInt(bytes.length), 24);
+  bytes.copy(payload, 32);
+  const frame = Buffer.alloc(8);
+  frame[0] = 1;
+  frame.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([frame, payload]);
+}
+
+function fakeDocker(captured: Array<Record<string, unknown>>, readbackFrames: readonly Buffer[] = []): DockerEngineClient {
   let execNumber = 0;
+  let readbackNumber = 0;
+  const execInputs = new Map<string, DockerExecInput>();
   return {
     inspectContainer: async () => ({
       Id: "managed-container", Name: "/managed", Image: imageId,
@@ -57,14 +87,21 @@ function fakeDocker(captured: Array<Record<string, unknown>>): DockerEngineClien
     createExec: async (_containerId: string, input: DockerExecInput) => {
       captured.push({ input });
       execNumber += 1;
-      return `exec-${execNumber}`;
+      const id = `exec-${execNumber}`;
+      execInputs.set(id, input);
+      return id;
     },
-    startExecAttached: async () => endStream(),
+    startExecAttached: async (id: string) => {
+      if (execInputs.get(id)?.attachStdin === true) return endStream();
+      const frame = readbackFrames[readbackNumber];
+      readbackNumber += 1;
+      return frame === undefined ? endStream() : outputStream(frame);
+    },
     inspectExec: async (id: string) => ({ ID: id, Running: false, ExitCode: 0, ContainerID: "managed-container" })
   } as unknown as DockerEngineClient;
 }
 
-async function fixture(): Promise<{
+async function fixture(nativeByteLength = 68): Promise<{
   readonly root: string;
   readonly staged: Awaited<ReturnType<typeof stageCodexExecutionArtifact>>;
   readonly artifact: CodexExecutionArtifact;
@@ -72,7 +109,9 @@ async function fixture(): Promise<{
   const root = await mkdtemp(path.join(tmpdir(), "devspace-codex-artifact-stager-"));
   roots.push(root);
   const sourceRoot = path.join(root, "source");
-  await writeFile(path.join(root, "native"), Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.alloc(64, 7)]), { mode: 0o755 });
+  await writeFile(path.join(root, "native"), Buffer.concat([
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.alloc(nativeByteLength - 4, 7)
+  ]), { mode: 0o755 });
   await chmod(path.join(root, "native"), 0o755);
   await writeFile(path.join(root, "resource"), "same staged bytes", { mode: 0o644 });
   await chmod(path.join(root, "resource"), 0o644);
@@ -290,6 +329,56 @@ function launchArtifact(staged: Awaited<ReturnType<typeof stageCodexExecutionArt
 }
 
 describe("Codex artifact stager", () => {
+  test("keeps tiny artifact transfers near the 10-second floor", () => {
+    expect(codexArtifactTransferTimeoutMs(68)).toBe(11_000);
+  });
+
+  test("budgets the observed Codex executable size above the floor and below the hard maximum", () => {
+    const timeoutMs = codexArtifactTransferTimeoutMs(286_750_056);
+    expect(timeoutMs).toBe(28_000);
+    expect(timeoutMs).toBeGreaterThan(10_000);
+    expect(timeoutMs).toBeLessThanOrEqual(60_000);
+  });
+
+  test("keeps a maximum-size entry bounded by the configured transfer maximum", () => {
+    expect(codexArtifactTransferTimeoutMs(512 * 1024 * 1024)).toBe(42_000);
+    expect(codexArtifactTransferTimeoutMs(512 * 1024 * 1024)).toBeLessThanOrEqual(60_000);
+  });
+
+  test("hard caps oversized safe inputs and keeps invalid sizes at a bounded floor", () => {
+    expect(codexArtifactTransferTimeoutMs(512 * 1024 * 1024 + 1)).toBe(43_000);
+    expect(codexArtifactTransferTimeoutMs(Number.MAX_SAFE_INTEGER)).toBe(60_000);
+    expect(codexArtifactTransferTimeoutMs(Number.MAX_SAFE_INTEGER + 1)).toBe(10_000);
+    expect(codexArtifactTransferTimeoutMs(Number.POSITIVE_INFINITY)).toBe(10_000);
+    expect(codexArtifactTransferTimeoutMs(Number.NaN)).toBe(10_000);
+    expect(codexArtifactTransferTimeoutMs(-1)).toBe(10_000);
+  });
+
+  test("uses the byte-sized deadline for regular uploads and readbacks", async () => {
+    const transferByteLength = 16 * 1024 * 1024 + 1;
+    const fixtureValue = await fixture(transferByteLength);
+    const capturedDeadlines: number[] = [];
+    const readbackFrames = await Promise.all(fixtureValue.artifact.entries.map(async (entry) =>
+      dockerReadbackFrame(entry, await readFile(path.join(
+        fixtureValue.staged.stagingRoot, ...entry.relativePath.split("/")
+      )))
+    ));
+    const stager = createCodexArtifactStager({
+      docker: fakeDocker([], readbackFrames), readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      scheduleTimeout: (_callback, timeoutMs) => {
+        capturedDeadlines.push(timeoutMs);
+        return () => {};
+      }
+    });
+
+    await stager.stageIntoManagedProvider({
+      containerId: "managed-container", launchArtifact: launchArtifact(fixtureValue.staged),
+      sessionId: "018f0000-0000-7000-8000-000000000001", processGeneration: 1
+    });
+
+    expect(capturedDeadlines.filter((timeoutMs) => timeoutMs === 12_000)).toHaveLength(2);
+  });
+
   test("parses bounded tree listings and rejects malformed or escaping paths", () => {
     const frame = (entries: readonly { kind: number; path: string }[], status = 0): Buffer => {
       const parts = [Buffer.alloc(20)];
@@ -523,10 +612,71 @@ describe("Codex artifact stager", () => {
     })).rejects.toThrow("codex-artifact-readback-mismatch");
   });
 
+  test("surfaces bounded diagnostics when managed-provider failure cleanup is unproven", async () => {
+    const fixtureValue = await fixture();
+    const diagnostics: CodexArtifactStagingDiagnostic[] = [];
+    const deadlines: number[] = [];
+    const docker = fakeDocker([]);
+    docker.inspectExec = async (id: string) => ({
+      ID: id, Running: false, ExitCode: 1, ContainerID: "managed-container"
+    });
+    const stager = createCodexArtifactStager({
+      docker, readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      onFailure: (diagnostic) => diagnostics.push(diagnostic),
+      scheduleTimeout: (_callback, timeoutMs) => {
+        deadlines.push(timeoutMs);
+        return () => {};
+      }
+    });
+
+    await expect(stager.stageIntoManagedProvider({
+      containerId: "managed-container", launchArtifact: launchArtifact(fixtureValue.staged),
+      sessionId: "018f0000-0000-7000-8000-000000000001", processGeneration: 1
+    })).rejects.toThrow("codex-artifact-cleanup-unproven");
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      phase: "failure-cleanup", failureCode: "codex-artifact-cleanup-unproven", errorClass: "Error"
+    });
+    expect(deadlines).toContain(30_000);
+  });
+
+  test("fails closed on readback timeout and reports only the bounded private diagnostic", async () => {
+    const fixtureValue = await fixture();
+    const diagnostics: CodexArtifactStagingDiagnostic[] = [];
+    const deadlines: number[] = [];
+    let scheduledDeadlines = 0;
+    const stager = createCodexArtifactStager({
+      docker: fakeDocker([]), readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      onFailure: (diagnostic) => diagnostics.push(diagnostic),
+      scheduleTimeout: (callback, timeoutMs) => {
+        deadlines.push(timeoutMs);
+        scheduledDeadlines += 1;
+        if (scheduledDeadlines === 3) queueMicrotask(callback);
+        return () => {};
+      },
+      listArtifactTree: async () => null
+    });
+
+    await expect(stager.stageIntoRunningContainer({
+      containerId: "a".repeat(64), staged: fixtureValue.staged,
+      destinationRoot: `/opt/devspace/codex-artifact/${fixtureValue.artifact.closureDigest}`
+    })).rejects.toThrow("codex-artifact-readback-timeout");
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      phase: "artifact-entry-readback", failureCode: "codex-artifact-readback-timeout",
+      errorClass: "Error", artifactLayout: "self-contained-native"
+    });
+    expect(diagnostics[0]).not.toHaveProperty("errorMessage");
+    expect(deadlines).toContain(30_000);
+  });
+
   test("reports bounded private diagnostics for the first running-container upload failure", async () => {
     const fixtureValue = await fixture();
     const captured: Array<Record<string, unknown>> = [];
     const diagnostics: CodexArtifactStagingDiagnostic[] = [];
+    const deadlines: number[] = [];
     const docker = fakeDocker(captured);
     let attachCount = 0;
     docker.startExecAttached = async () => {
@@ -536,6 +686,10 @@ describe("Codex artifact stager", () => {
     };
     const stager = createCodexArtifactStager({
       docker, readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      scheduleTimeout: (_callback, timeoutMs) => {
+        deadlines.push(timeoutMs);
+        return () => {};
+      },
       onFailure: (diagnostic) => diagnostics.push(diagnostic)
     });
     const destinationRoot = `/opt/devspace/codex-artifact/${fixtureValue.artifact.closureDigest}`;
@@ -553,6 +707,7 @@ describe("Codex artifact stager", () => {
     });
     expect(diagnostic?.elapsedMs).toBeGreaterThanOrEqual(0);
     expect(diagnostic?.cleanupElapsedMs).toBeGreaterThanOrEqual(0);
+    expect(deadlines).toContain(30_000);
     expect(diagnostics[0]).not.toHaveProperty("errorMessage");
     expect(JSON.stringify(diagnostics)).not.toContain("/private/host/secret");
     expect(captured.some((item) => {
