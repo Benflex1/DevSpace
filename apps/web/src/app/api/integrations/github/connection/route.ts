@@ -28,10 +28,11 @@ export async function GET(request: Request) {
             );
             if (cleanup.connectionId === state.connection.connectionId
               && cleanup.lifecycleGeneration === state.connection.lifecycleGeneration
-              && cleanup.lifecycleState === "disconnected" && cleanup.cleanupState === "settled") {
+              && cleanup.lifecycleState === "disconnected"
+              && (cleanup.cleanupState === "settled" || cleanup.cleanupState === "degraded")) {
               const completed = database.completeGithubDisconnect({ actor: actor.identity,
                 connectionId: state.connection.connectionId, lifecycleGeneration: state.connection.lifecycleGeneration,
-                cleanupState: "settled" });
+                cleanupState: cleanup.cleanupState });
               return NextResponse.json({ status: completed.lifecycleState, connectionId: completed.connectionId,
                 lifecycleGeneration: completed.lifecycleGeneration, cleanupState: completed.cleanupState,
                 lastAuthorityFailureCode: completed.lastAuthorityFailureCode,
