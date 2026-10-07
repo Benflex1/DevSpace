@@ -11,6 +11,7 @@ import { ExecutionManager, type HarnessRecoveryIdentity } from "./execution-mana
 import { createHarnessHomeStore } from "./harness-home.js";
 import { createHarnessRuntime } from "./harness-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
+import { durableJsonWriter } from "./private-state.js";
 
 const projectId = "018f1f34-7000-7000-8000-000000000001";
 const workspaceId = "018f1f34-7000-7000-8000-000000000002";
@@ -21,7 +22,9 @@ const shellTerminalId = "018f1f34-7000-7000-8000-000000000006";
 const wsB = "018f1f34-7000-7000-8000-00000000000b";
 
 const roots: string[] = [];
+const fixtureCleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  await Promise.all(fixtureCleanups.splice(0).map((cleanup) => cleanup()));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -89,6 +92,21 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
   throw new Error("timed out waiting for harness lifecycle");
 }
 
+async function waitForTerminalDetachment(manager: ExecutionManager, id: string): Promise<void> {
+  await waitFor(async () => {
+    const disconnected = manager.snapshotResources().some((resource) =>
+      resource.type === "terminal" && resource.identity.terminalId === id && resource.state === "disconnected");
+    if (!disconnected) return false;
+    try {
+      const reservation = manager.reserveTerminalAttachment(id);
+      reservation.release();
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 class HarnessTerminalSocket extends EventEmitter {
   readonly OPEN = 1;
   readonly CLOSING = 2;
@@ -110,13 +128,38 @@ async function nativeAdmissionFixture(engine: object, onSettled?: () => void | P
   roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
   const home = createHarnessHomeStore(root);
+  const pendingOperations = new Set<Promise<unknown>>();
+  const track = <Result>(operation: () => Promise<Result>): Promise<Result> => {
+    const pending = Promise.resolve().then(operation);
+    pendingOperations.add(pending);
+    void pending.then(
+      () => { pendingOperations.delete(pending); },
+      () => { pendingOperations.delete(pending); }
+    );
+    return pending;
+  };
+  const fixtureEngine = engine as {
+    inspectExec(execId: string): Promise<{ ID: string; Running: boolean; ExitCode: number | null; ContainerID: string }>;
+  };
+  const inspectExec = fixtureEngine.inspectExec.bind(engine);
+  let stopping = false;
+  fixtureEngine.inspectExec = (execId) => stopping
+    ? Promise.resolve({ ID: execId, Running: false, ExitCode: 0, ContainerID: "container-owned" })
+    : track(() => inspectExec(execId));
+  const writer = {
+    write: (filePath: string, value: unknown) => track(() => durableJsonWriter.write(filePath, value))
+  };
   let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
   const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
-    undefined, undefined, {
-      onHarnessRecovered: async (identity) => { await runtime.finalizeRecoveredLoss(identity); },
+    writer, undefined, {
+      onHarnessRecovered: async (identity) => {
+        await track(() => runtime.finalizeRecoveredLoss(identity));
+      },
       onHarnessSettled: async (event) => {
-        await onSettled?.();
-        await runtime.settleByProcess(event.processId);
+        await track(async () => {
+          await onSettled?.();
+          await runtime.settleByProcess(event.processId);
+        });
       }
     });
   runtime = createHarnessRuntime({
@@ -127,6 +170,16 @@ async function nativeAdmissionFixture(engine: object, onSettled?: () => void | P
     imageCodex: { present: true, version: null }
   });
   await manager.initialize();
+  fixtureCleanups.push(async () => {
+    stopping = true;
+    manager.shutdownTransports();
+    const inspections = manager.snapshotResources().flatMap((resource) => resource.type === "process"
+      ? [manager.inspect(resource.observation.projectId, resource.observation.workspaceId, resource.observation.processId)]
+      : []);
+    await Promise.all(inspections);
+    await manager.flushHarnessSettlements();
+    while (pendingOperations.size > 0) await Promise.all([...pendingOperations]);
+  });
   return { root, home, manager, runtime };
 }
 
@@ -314,6 +367,8 @@ test("same-Agent retry admits a running harness only with its retained PTY strea
     type: "terminal", identity: expect.objectContaining({ terminalId }), state: "active"
   }));
   socket.terminate();
+  await waitForTerminalDetachment(manager, terminalId);
+  stream.destroy();
 });
 
 test("same-Agent retry settles an exact already-exited harness without relaunch or replay", async () => {
