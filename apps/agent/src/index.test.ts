@@ -8,6 +8,8 @@ import { agentApiV1EndpointByOperation, f10AgentApiV1EndpointByOperation, github
 import { createLogger } from "@devspace/diagnostics";
 import type { PreviewGatewayAdapterContract } from "@devspace/gateway-caddy";
 import { AgentExecutionError, ManagedWorkspaces } from "./managed-workspaces.js";
+import { externalExecutionMarkerSchema } from "./external-execution.js";
+import { runtimeCreationSchema } from "./workspace-runtime.js";
 import type { GithubAppAuthority } from "./github-app.js";
 import type { PreviewInspectionResult } from "./preview-runtime.js";
 import { createAgentServer } from "./server.js";
@@ -323,6 +325,73 @@ test("failed startup preview reconciliation degrades health, preserves state, an
     await expect(request(socketPath, { method: "GET", path: "/v1/health", headers })).resolves.toMatchObject({ body: { data: { status: "ok" } } });
     expect(reconciliationCalls).toBe(2);
     await expect(readFile(fixture.statePath, "utf8")).resolves.toBe(fixture.contents);
+  } finally { await server.stop(); }
+});
+
+test("logs the safe creation-journal corruption reason while startup remains fail-closed", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-startup-validation-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const root = path.join(path.dirname(socketPath), ".devspace-managed");
+  const roots = { projects: path.join(root, "projects"), workspaces: path.join(root, "workspaces"), state: path.join(root, "state") } as const;
+  const workspaceId = "018f0f00-0000-7000-8000-000000000020";
+  const runtimeCreation = runtimeCreationSchema.parse({
+    version: 1, operationId: "018f0f00-0000-7000-8000-000000000021",
+    projectId: "018f0f00-0000-7000-8000-000000000022", workspaceId,
+    revisionId: "018f0f00-0000-7000-8000-000000000023",
+    revisionHash: `sha256-jcs-v1:${"1".repeat(64)}`, runtimePlanHash: `sha256-jcs-v1:${"2".repeat(64)}`,
+    generation: 1, worktreePath: path.join(directory, "worktree"),
+    resources: { cpuMillicores: 2000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256 }, previewBindings: [],
+    networkName: "devspace-test-network", containerName: "devspace-test-development",
+    networkId: "test-network-id", containerId: null, phase: "network-created"
+  });
+  const creationRoot = path.join(roots.state, "runtime-creations");
+  await mkdir(creationRoot, { recursive: true });
+  await writeFile(path.join(creationRoot, `${workspaceId}.json`), `${JSON.stringify(runtimeCreation)}\n`, { mode: 0o600 });
+  const logs: string[] = [];
+  const server = createAgentServer({ socketPath, managedRoots: roots, now: () => now, createId: () => id,
+    logger: createLogger({ component: "agent", subsystem: "test", environment: {}, sink: (line) => logs.push(line) }) });
+  await server.start();
+  try {
+    const health = await request(socketPath, { method: "GET", path: "/v1/health", headers });
+    expect(health.body).toMatchObject({ data: { status: "degraded" } });
+    const diagnostics = logs.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.event === "agent.startup.managed_validation.failed");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ stage: "creation-journal-bindings",
+      corruptionReason: "runtime-creation-record-is-not-bound-to-its-durable-operation" });
+    expect(JSON.stringify(diagnostics)).not.toContain(workspaceId);
+    expect(JSON.stringify(diagnostics)).not.toContain(directory);
+  } finally { await server.stop(); }
+});
+
+test("logs execution-journal validation failure with a safe stage and reason", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-agent-startup-validation-")); temporaryDirectories.push(directory);
+  const socketPath = path.join(directory, "agent.sock");
+  await provisionDefaultRoots(socketPath);
+  const root = path.join(path.dirname(socketPath), ".devspace-managed");
+  const roots = { projects: path.join(root, "projects"), workspaces: path.join(root, "workspaces"), state: path.join(root, "state") } as const;
+  const operationId = "018f0f00-0000-7000-8000-000000000024";
+  const marker = externalExecutionMarkerSchema.parse({ version: 1, operationId,
+    projectId: "018f0f00-0000-7000-8000-000000000025", executionId: "018f0f00-0000-7000-8000-000000000026",
+    role: "workspace-add", createdAt: "2026-07-17T12:00:00.000Z", deadlineAt: "2026-07-17T12:01:00.000Z", phase: "reserved" });
+  const executionRoot = path.join(roots.state, "executions");
+  await mkdir(executionRoot, { recursive: true });
+  await writeFile(path.join(executionRoot, `${operationId}.json`), `${JSON.stringify(marker)}\n`, { mode: 0o600 });
+  const logs: string[] = [];
+  const server = createAgentServer({ socketPath, managedRoots: roots, now: () => now, createId: () => id,
+    logger: createLogger({ component: "agent", subsystem: "test", environment: {}, sink: (line) => logs.push(line) }) });
+  await server.start();
+  try {
+    const health = await request(socketPath, { method: "GET", path: "/v1/health", headers });
+    expect(health.body).toMatchObject({ data: { status: "degraded" } });
+    const diagnostics = logs.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((record) => record.event === "agent.startup.managed_validation.failed");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ stage: "execution-journal-bindings",
+      corruptionReason: "execution-marker-is-not-bound-to-durable-operation" });
+    expect(JSON.stringify(diagnostics)).not.toContain(operationId);
+    expect(JSON.stringify(diagnostics)).not.toContain(directory);
   } finally { await server.stop(); }
 });
 

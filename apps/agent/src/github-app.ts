@@ -81,6 +81,12 @@ export type GithubHttpTransport = (request: GithubHttpRequest) => Promise<Github
 export type GithubLaunchFence = () => Promise<() => void>;
 
 function failure(code: string): Error { return new Error(`github-${code}`); }
+function publicLifecycleInspection(value: Pick<GithubLifecycleInspection,
+  "connectionId" | "lifecycleGeneration" | "lifecycleState" | "cleanupState" | "installationId">): GithubLifecycleInspection {
+  return githubLifecycleInspectionSchema.parse({ connectionId: value.connectionId,
+    lifecycleGeneration: value.lifecycleGeneration, lifecycleState: value.lifecycleState,
+    cleanupState: value.cleanupState, installationId: value.installationId });
+}
 type OperationOutcome<T> =
   | { readonly completed: false }
   | { readonly completed: true; readonly value: T };
@@ -625,31 +631,31 @@ export async function createGithubAppAuthority(options: {
     if (lifecycle === null || (lifecycle.lifecycleState !== "disconnect-pending" && lifecycle.lifecycleState !== "disconnected")) {
       throw failure("connection-not-found");
     }
-    if (activeFor(connectionId) > 0) return lifecycle;
+    if (activeFor(connectionId) > 0) return publicLifecycleInspection(lifecycle);
     const lease = await readLeaseIfPresent(connectionId);
     if (lease !== null) {
       const expiry = new Date(lease.expiresAt).valueOf();
       if (!Number.isFinite(expiry) || expiry > now().valueOf()) {
         const pending = lifecycle.cleanupState === "pending" ? lifecycle : { ...lifecycle, cleanupState: "pending" as const };
         if (pending !== lifecycle) await writeLifecycle(pending);
-        return pending;
+        return publicLifecycleInspection(pending);
       }
       try { await removeLease(leaseFile(connectionId)); leaseBlocks.delete(connectionId); recoveredUncertainConnections.delete(connectionId); }
       catch {
         const degraded = { ...lifecycle, lifecycleState: "disconnected" as const, cleanupState: "degraded" as const };
         await writeLifecycle(degraded).catch(() => undefined);
-        return degraded;
+        return publicLifecycleInspection(degraded);
       }
     }
     try { await unlinkExactBinding(connectionId); }
     catch {
       const degraded = { ...lifecycle, lifecycleState: "disconnected" as const, cleanupState: "degraded" as const };
       await writeLifecycle(degraded);
-      return degraded;
+      return publicLifecycleInspection(degraded);
     }
     const settled = { ...lifecycle, lifecycleState: "disconnected" as const, cleanupState: "settled" as const, installationId: lifecycle.installationId };
     await writeLifecycle(settled);
-    return settled;
+    return publicLifecycleInspection(settled);
   });
   const inspectEffective = async (connectionId: string) => {
     const binding = await readBinding(connectionId);

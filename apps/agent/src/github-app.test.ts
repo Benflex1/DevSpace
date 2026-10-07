@@ -1246,6 +1246,7 @@ describe("GitHub App authority", () => {
     await authority.verifyInstallation({ connectionId, installationId: "77", lifecycleGeneration: 1 });
     const disconnected = await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
     expect(disconnected).toMatchObject({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled" });
+    expect(disconnected).toEqual({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled", installationId: "77" });
     await expect(authority.assertGithubAdmission(connectionId, 1)).rejects.toThrow("github-authority-generation-stale");
     await expect(authority.assertGithubAdmission(connectionId, 2)).rejects.toThrow("github-connection-disabled");
     await expect(authority.listRepositories({ connectionId, pageSize: 20, lifecycleGeneration: 2 })).rejects.toThrow("github-connection-disabled");
@@ -1253,6 +1254,29 @@ describe("GitHub App authority", () => {
     expect(await readFile(path.join(localWorktree, "dirty.txt"), "utf8")).toBe("uncommitted local work\n");
     const tombstone = JSON.parse(await readFile(path.join(stateRoot, "github-app", "lifecycle", `${connectionId}.json`), "utf8")) as Record<string, unknown>;
     expect(tombstone).toMatchObject({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected" });
+    expect(tombstone).toHaveProperty("version", 1);
+    expect(tombstone).toHaveProperty("updatedAt");
+    expect(disconnected).not.toHaveProperty("version");
+    expect(disconnected).not.toHaveProperty("updatedAt");
+  });
+
+  it("returns only the public lifecycle shape when disconnect reads persisted private lifecycle metadata", async () => {
+    const { stateRoot } = await fixture();
+    const authority = await createGithubAppAuthority({ stateRoot, now: () => new Date("2026-08-04T12:00:00.000Z") });
+    const lifecycleFile = path.join(stateRoot, "github-app", "lifecycle", `${connectionId}.json`);
+    await writeFile(lifecycleFile, JSON.stringify({ version: 1, connectionId, lifecycleGeneration: 2,
+      lifecycleState: "disconnect-pending", cleanupState: "pending", installationId: "77",
+      updatedAt: "2026-08-04T12:00:00.000Z" }), { mode: 0o600 });
+
+    const disconnected = await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
+
+    expect(disconnected).toEqual({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected",
+      cleanupState: "settled", installationId: "77" });
+    expect(disconnected).not.toHaveProperty("version");
+    expect(disconnected).not.toHaveProperty("updatedAt");
+    const persisted = JSON.parse(await readFile(lifecycleFile, "utf8")) as Record<string, unknown>;
+    expect(persisted).toHaveProperty("version", 1);
+    expect(persisted).toHaveProperty("updatedAt");
   });
 
   it("recovers an interrupted disconnect on restart and isolates another connection", async () => {
@@ -1362,7 +1386,10 @@ describe("GitHub App authority", () => {
       return "settled";
     });
     await operationStarted;
-    expect((await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 })).lifecycleState).toBe("disconnect-pending");
+    const pending = await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
+    expect(pending.lifecycleState).toBe("disconnect-pending");
+    expect(pending).not.toHaveProperty("version");
+    expect(pending).not.toHaveProperty("updatedAt");
     releaseOperation();
     await expect(operation).resolves.toMatchObject({ value: "settled" });
     for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -1397,6 +1424,8 @@ describe("GitHub App authority", () => {
     await mintStarted;
     const disconnected = await authority.disconnectInstallation({ connectionId, lifecycleGeneration: 2 });
     expect(disconnected.lifecycleState).toBe("disconnect-pending");
+    expect(disconnected).not.toHaveProperty("version");
+    expect(disconnected).not.toHaveProperty("updatedAt");
     await expect(authority.prepareGithubReconnect({ connectionId, lifecycleGeneration: 3 })).rejects.toThrow("github-token-lease-active");
     release();
     await tokenWork.catch(() => undefined);

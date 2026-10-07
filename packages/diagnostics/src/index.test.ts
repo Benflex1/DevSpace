@@ -27,6 +27,15 @@ describe("structured diagnostics logging", () => {
     expect(output).not.toContain("requestBody");
   });
 
+  test("keeps startup corruption diagnostics to known stages and reason classes", () => {
+    expect(sanitizeLogFields({ stage: "creation-journal-bindings",
+      corruptionReason: "runtime-creation-record-is-not-bound-to-its-durable-operation" })).toEqual({
+      stage: "creation-journal-bindings",
+      corruptionReason: "runtime-creation-record-is-not-bound-to-its-durable-operation"
+    });
+    expect(sanitizeLogFields({ stage: "/private/path", corruptionReason: "private path contains workspace id" })).toEqual({});
+  });
+
   test("keeps only bounded native artifact staging diagnostics", () => {
     const fields = sanitizeLogFields({
       phase: "artifact-entry-readback", failureCode: "codex-artifact-readback-timeout", errorClass: "Error",
