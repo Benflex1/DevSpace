@@ -25,6 +25,9 @@ const MAX_READBACK_BYTES = MAX_ENTRY_BYTES + 64;
 const MAX_TREE_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TREE_READBACK_BYTES = MAX_TREE_OUTPUT_BYTES + 64 * 1024;
 const EXEC_TIMEOUT_MS = 10_000;
+const CLEANUP_TIMEOUT_MS = 30_000;
+const MAX_ARTIFACT_TRANSFER_TIMEOUT_MS = 60_000;
+const MIN_ARTIFACT_TRANSFER_RATE_BYTES_PER_SECOND = 16 * 1024 * 1024;
 const ARTIFACT_READBACK_HEADER_BYTES = 32;
 const ARTIFACT_READBACK_MAGIC = "DSARTF01";
 const ARTIFACT_READBACK_VERSION = 1;
@@ -84,6 +87,7 @@ export interface CodexArtifactStagerOptions {
     readonly artifactRoot: string;
     readonly entry: CodexArtifactEntry;
     readonly readbackPath: string;
+    readonly timeoutMs: number;
   }) => Promise<CodexArtifactReadback>;
   /** Agent-private deterministic tree-listing seam; production invokes the native helper. */
   readonly listArtifactTree?: (input: {
@@ -91,6 +95,8 @@ export interface CodexArtifactStagerOptions {
     readonly artifactRoot: string;
     readonly readbackPath: string;
   }) => Promise<readonly CodexArtifactTreeEntry[] | null>;
+  /** Agent-private deterministic timer seam for bounded exec deadlines. */
+  readonly scheduleTimeout?: (callback: () => void, timeoutMs: number) => () => void;
 }
 
 export type { CodexArtifactStagingDiagnostic } from "./artifact-staging-diagnostics.js";
@@ -111,19 +117,39 @@ function entryPath(root: string, entry: CodexArtifactEntry): string {
   return path.posix.join(root, ...components);
 }
 
-async function waitForClose(stream: Duplex): Promise<void> {
+export function codexArtifactTransferTimeoutMs(byteLength: number): number {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0) return EXEC_TIMEOUT_MS;
+  const rate = BigInt(MIN_ARTIFACT_TRANSFER_RATE_BYTES_PER_SECOND);
+  const transferBudgetSeconds = (BigInt(byteLength) + rate - 1n) / rate;
+  const timeoutMs = BigInt(EXEC_TIMEOUT_MS) + transferBudgetSeconds * 1_000n;
+  const maxTimeoutMs = BigInt(MAX_ARTIFACT_TRANSFER_TIMEOUT_MS);
+  return Number(timeoutMs > maxTimeoutMs ? maxTimeoutMs : timeoutMs);
+}
+
+type ScheduleTimeout = (callback: () => void, timeoutMs: number) => () => void;
+
+const scheduleRealTimeout: ScheduleTimeout = (callback, timeoutMs) => {
+  const timer = setTimeout(callback, timeoutMs);
+  return () => clearTimeout(timer);
+};
+
+async function waitForClose(
+  stream: Duplex,
+  timeoutMs = EXEC_TIMEOUT_MS,
+  scheduleTimeout: ScheduleTimeout = scheduleRealTimeout
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    const cancelTimeout = scheduleTimeout(() => {
       if (settled) return;
       settled = true;
       stream.destroy();
       reject(new Error("codex-artifact-exec-unproven"));
-    }, EXEC_TIMEOUT_MS);
+    }, timeoutMs);
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cancelTimeout();
       stream.removeListener("close", onClose);
       stream.removeListener("error", onError);
       if (error === undefined) resolve(); else reject(error);
@@ -136,24 +162,30 @@ async function waitForClose(stream: Duplex): Promise<void> {
   });
 }
 
-async function collectOutput(stream: Duplex, maxBytes = MAX_READBACK_BYTES + 16 * 1024): Promise<Buffer> {
+async function collectOutput(
+  stream: Duplex,
+  maxBytes = MAX_READBACK_BYTES + 16 * 1024,
+  timeoutMs = EXEC_TIMEOUT_MS,
+  scheduleTimeout: ScheduleTimeout = scheduleRealTimeout
+): Promise<Buffer> {
   return await new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     let settled = false;
+    let cancelTimeout = () => {};
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cancelTimeout();
       stream.removeAllListeners("data");
       stream.removeAllListeners("close");
       stream.removeAllListeners("error");
       if (error === undefined) resolve(Buffer.concat(chunks)); else reject(error);
     };
-    const timer = setTimeout(() => {
+    cancelTimeout = scheduleTimeout(() => {
       stream.destroy();
       finish(new Error("codex-artifact-readback-timeout"));
-    }, EXEC_TIMEOUT_MS);
+    }, timeoutMs);
     stream.on("data", (chunk: Buffer) => {
       const bytes = Buffer.from(chunk);
       total += bytes.length;
@@ -308,6 +340,8 @@ function exactArtifactTree(
 }
 
 export function createCodexArtifactStager(options: CodexArtifactStagerOptions): CodexArtifactStager {
+  const scheduleTimeout = options.scheduleTimeout ?? scheduleRealTimeout;
+
   async function assertManagedRuntime(containerId: string, launchArtifact: CodexLaunchArtifact): Promise<void> {
     const container = await options.docker.inspectContainer(containerId).catch(() => null);
     if (container === null || container.Id !== containerId || container.State.Running !== true
@@ -322,7 +356,13 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
     }
   }
 
-  async function upload(containerId: string, targetPath: string, bytes: Buffer, mode: number): Promise<void> {
+  async function upload(
+    containerId: string,
+    targetPath: string,
+    bytes: Buffer,
+    mode: number,
+    timeoutMs = EXEC_TIMEOUT_MS
+  ): Promise<void> {
     const targetDirectory = path.posix.dirname(targetPath);
     const execId = await options.docker.createExec(containerId, {
       command: ["sh", "-c", 'set -eu; umask 077; mkdir -p -- "$DEVSPACE_TARGET_DIR"; set -C; cat > "$DEVSPACE_TARGET_PATH"; chmod "$DEVSPACE_TARGET_MODE" "$DEVSPACE_TARGET_PATH"'],
@@ -332,7 +372,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
     });
     const stream = await options.docker.startExecAttached(execId, false);
     stream.end(bytes);
-    await waitForClose(stream);
+    await waitForClose(stream, timeoutMs, scheduleTimeout);
     const inspection = await options.docker.inspectExec(execId).catch(() => null);
     if (inspection === null || inspection.Running || inspection.ExitCode !== 0) throw new Error("codex-artifact-upload-failed");
   }
@@ -345,7 +385,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
       attachStdin: false, tty: false
     });
     const stream = await options.docker.startExecAttached(execId, false);
-    await waitForClose(stream);
+    await waitForClose(stream, EXEC_TIMEOUT_MS, scheduleTimeout);
     const inspection = await options.docker.inspectExec(execId).catch(() => null);
     if (inspection === null || inspection.Running || inspection.ExitCode !== 0) throw new Error("codex-artifact-upload-failed");
   }
@@ -356,14 +396,16 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
     readonly entry: CodexArtifactEntry;
     readonly readbackPath: string;
   }): Promise<CodexArtifactReadback> {
-    if (options.readbackEntry !== undefined) return await options.readbackEntry(input);
+    const timeoutMs = codexArtifactTransferTimeoutMs(input.entry.kind === "file" ? input.entry.byteLength : 0);
+    const timedInput = { ...input, timeoutMs };
+    if (options.readbackEntry !== undefined) return await options.readbackEntry(timedInput);
     const targetPath = entryPath(input.artifactRoot, input.entry);
     const execId = await options.docker.createExec(input.containerId, {
       command: [input.readbackPath], workingDirectory: "/workspace",
       environment: { DEVSPACE_ARTIFACT_ROOT: input.artifactRoot, DEVSPACE_ARTIFACT_TARGET: targetPath }, attachStdin: false, tty: false
     });
     const stream = await options.docker.startExecAttached(execId, false);
-    const output = await collectOutput(stream);
+    const output = await collectOutput(stream, MAX_READBACK_BYTES + 16 * 1024, timeoutMs, scheduleTimeout);
     const inspection = await options.docker.inspectExec(execId).catch(() => null);
     if (inspection === null || inspection.Running || inspection.ExitCode !== 0) throw new Error("codex-artifact-readback-failed");
     return parseCodexArtifactReadback(decodeDockerFrames(output));
@@ -381,7 +423,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
       attachStdin: false, tty: false
     });
     const stream = await options.docker.startExecAttached(execId, false);
-    const output = await collectOutput(stream, MAX_TREE_READBACK_BYTES);
+    const output = await collectOutput(stream, MAX_TREE_READBACK_BYTES, EXEC_TIMEOUT_MS, scheduleTimeout);
     const inspection = await options.docker.inspectExec(execId).catch(() => null);
     if (inspection === null || inspection.Running || inspection.ExitCode !== 0) {
       throw new Error("codex-artifact-tree-verification-unproven");
@@ -397,7 +439,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
         environment: { DEVSPACE_TARGET_DIR: root }, attachStdin: false, tty: false
       });
       const stream = await options.docker.startExecAttached(execId, false);
-      await waitForClose(stream);
+      await waitForClose(stream, CLEANUP_TIMEOUT_MS, scheduleTimeout);
       const inspection = await options.docker.inspectExec(execId).catch(() => null);
       if (inspection === null || inspection.Running || inspection.ExitCode !== 0) {
         return { elapsedMs: performance.now() - startedAt, error: new Error("codex-artifact-cleanup-unproven") };
@@ -432,7 +474,7 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
       }, attachStdin: false, tty: false
     });
     const stream = await options.docker.startExecAttached(execId, false);
-    await waitForClose(stream);
+    await waitForClose(stream, EXEC_TIMEOUT_MS, scheduleTimeout);
     const inspection = await options.docker.inspectExec(execId).catch(() => null);
     if (inspection === null || inspection.Running || inspection.ExitCode !== 0) {
       throw new Error("codex-artifact-cache-publication-unproven");
@@ -574,7 +616,8 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
                 if (read.bytes.length !== entry.byteLength || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) {
                   throw artifactReadbackMismatch();
                 }
-                await upload(input.containerId, targetPath, read.bytes, entry.mode);
+                await upload(input.containerId, targetPath, read.bytes, entry.mode,
+                  codexArtifactTransferTimeoutMs(read.bytes.length));
               }
               reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: uploadStartedAt,
                 outcome: "success", cacheState, entryRelative: entry.relativePath });
@@ -696,7 +739,8 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
           } else {
             const read = await readRegularFileNoFollow(path.join(launchArtifact.staged.stagingRoot, ...entry.relativePath.split("/")), MAX_ENTRY_BYTES);
             if (read.bytes.length !== entry.byteLength || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) throw artifactReadbackMismatch();
-            await upload(input.containerId, targetPath, read.bytes, entry.mode);
+            await upload(input.containerId, targetPath, read.bytes, entry.mode,
+              codexArtifactTransferTimeoutMs(read.bytes.length));
           }
           const actual = await readbackEntry({ containerId: input.containerId, artifactRoot, entry, readbackPath: artifactReadbackPath });
           if (!sameEntry(entry, actual)) throw artifactReadbackMismatch();
@@ -717,7 +761,14 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
           artifactReadbackPath
         };
       } catch (error) {
-        await removeRemote(input.containerId, containerRoot);
+        const cleanup = await removeRemote(input.containerId, containerRoot);
+        if (cleanup.error !== undefined) {
+          reportFailure(codexArtifactStagingDiagnostic({
+            phase: "failure-cleanup", error: cleanup.error, containerId: input.containerId,
+            artifactLayout: launchArtifact.staged.artifact.layout, elapsedMs: cleanup.elapsedMs
+          }));
+          throw new Error("codex-artifact-cleanup-unproven", { cause: error });
+        }
         throw error;
       }
     }
