@@ -26,10 +26,12 @@ export async function GET(request: Request) {
             const cleanup = await createAgentClient(config.agentSocketPath).disconnectGithubInstallation(
               state.connection.connectionId, state.connection.lifecycleGeneration
             );
-            if (cleanup.cleanupState !== "pending") {
+            if (cleanup.connectionId === state.connection.connectionId
+              && cleanup.lifecycleGeneration === state.connection.lifecycleGeneration
+              && cleanup.lifecycleState === "disconnected" && cleanup.cleanupState === "settled") {
               const completed = database.completeGithubDisconnect({ actor: actor.identity,
                 connectionId: state.connection.connectionId, lifecycleGeneration: state.connection.lifecycleGeneration,
-                cleanupState: cleanup.cleanupState });
+                cleanupState: "settled" });
               return NextResponse.json({ status: completed.lifecycleState, connectionId: completed.connectionId,
                 lifecycleGeneration: completed.lifecycleGeneration, cleanupState: completed.cleanupState,
                 lastAuthorityFailureCode: completed.lastAuthorityFailureCode,

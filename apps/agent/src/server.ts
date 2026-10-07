@@ -42,6 +42,7 @@ import { createHarnessRuntime, HarnessRuntimeError } from "./harness-runtime.js"
 import { AiOutboxError } from "./ai-session-outbox.js";
 import { createAiStreamAdmission } from "./ai-stream-admission.js";
 import { createGithubAppAuthority, type GithubAppAuthority } from "./github-app.js";
+import { PrivateStateCorruptionError } from "./private-state.js";
 import {
   AI_STREAM_BACKPRESSURE_TIMEOUT_MS,
   AI_STREAM_LIVE_QUEUE_MAX_BYTES,
@@ -56,6 +57,15 @@ const runtimeStatusEndpoint = agentApiV1EndpointByOperation["agent.runtime-statu
 const inspectEndpoint = agentApiV1EndpointByOperation["project.source.inspect"];
 const snapshotEndpoint = f10AgentApiV1EndpointByOperation["snapshot.get"];
 const eventEndpoint = f10AgentApiV1EndpointByOperation["event.stream"];
+
+function safeStartupCorruptionReason(error: unknown): string {
+  if (!(error instanceof PrivateStateCorruptionError)) return "private-state-corruption";
+  if (error.reason === "runtime-creation-record-is-not-bound-to-its-durable-operation") return error.reason;
+  if (error.reason === "execution marker is not bound to its nonterminal durable journal operation") {
+    return "execution-marker-is-not-bound-to-durable-operation";
+  }
+  return "private-state-corruption";
+}
 
 export interface AgentServerOptions {
   readonly socketPath?: string;
@@ -1263,10 +1273,19 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         await harnessRuntime.recoverAfterAgentRestart();
       }
       if (managed.isHealthy && journal.isHealthy) {
-        await managed.validateCreationJournalBindings((operationId) => journal.get(operationId)).catch(() => undefined);
+        try { await managed.validateCreationJournalBindings((operationId) => journal.get(operationId)); }
+        catch (error) {
+          logger.error("agent.startup.managed_validation.failed", "Managed workspace startup journal validation failed", {
+            stage: "creation-journal-bindings", corruptionReason: safeStartupCorruptionReason(error)
+          });
+        }
         if (managed.isHealthy) {
           try { managed.validateExecutionJournalBindings((operationId) => journal.get(operationId)); }
-          catch { /* health remains degraded and recovery stays disabled */ }
+          catch (error) {
+            logger.error("agent.startup.managed_validation.failed", "Managed workspace startup journal validation failed", {
+              stage: "execution-journal-bindings", corruptionReason: safeStartupCorruptionReason(error)
+            });
+          }
         }
       }
       if (managed.isHealthy && journal.isHealthy) {

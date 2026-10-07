@@ -107,6 +107,8 @@ export interface LogFields extends LogContext {
   readonly incidentId?: string;
   readonly retryable?: boolean;
   readonly healthBreakdown?: Readonly<Record<string, string>>;
+  readonly stage?: string;
+  readonly corruptionReason?: string;
   readonly [key: string]: unknown;
 }
 
@@ -154,7 +156,7 @@ const safeKeys = new Set([
   "mode", "phase", "failureCode", "errorClass", "containerId", "artifactLayout", "entryRelative", "reason", "action",
   "operationName", "operationState", "observedState", "previousState", "currentState", "desiredState", "routePresent",
   "routeStatus", "statusCode", "pending", "errorCategory", "errorCode", "retryable", "healthBreakdown", "endpoint",
-  "failureCategory", "incidentId", "detailKeys"
+  "failureCategory", "incidentId", "detailKeys", "stage", "corruptionReason"
 ]);
 const sensitiveKey = /(?:authorization|cookie|credential|environment|password|secret|token|body|header|content|file|path|url|command|output)/iu;
 const sensitiveText = /(?:(?:authorization|cookie|password|secret|token|credential|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?|bearer\s+)[^\s,;]+/giu;
@@ -205,6 +207,16 @@ function safeValue(key: string, value: unknown): unknown {
   }
   if (key === "failureCategory") {
     return typeof value === "string" && failureCategories.includes(value as FailureCategory) ? value : undefined;
+  }
+  if (key === "stage") {
+    return value === "creation-journal-bindings" || value === "execution-journal-bindings" ? value : undefined;
+  }
+  if (key === "corruptionReason") {
+    return typeof value === "string" && [
+      "runtime-creation-record-is-not-bound-to-its-durable-operation",
+      "execution-marker-is-not-bound-to-durable-operation",
+      "private-state-corruption"
+    ].includes(value) ? value : undefined;
   }
   if (typeof value === "string") return safeText(value.slice(0, 512));
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;

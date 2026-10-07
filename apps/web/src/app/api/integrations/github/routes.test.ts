@@ -49,6 +49,28 @@ beforeEach(async () => {
 });
 afterEach(async () => { vi.clearAllMocks(); vi.unstubAllEnvs(); await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
+async function createDisconnectPendingConnection(): Promise<string> {
+  const started = await begin(new Request("http://localhost:3000/api/integrations/github/connection-attempts", { method: "POST",
+    headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1" } }));
+  const body = await started.json() as { connectionId: string; installationUrl: string };
+  const state = new URL(body.installationUrl).searchParams.get("state");
+  if (state === null) throw new Error("test state missing");
+  mocks.verify.mockResolvedValue({ connectionId: body.connectionId, installationId: "77", accountId: "99", accountType: "Organization",
+    accountLogin: "owner-org", repositorySelection: "selected", permissions: { metadata: "read" }, status: "connected",
+    verifiedAt: "2026-08-04T12:00:00.000Z", cleanupDegraded: false });
+  await setup(new Request(`http://localhost:3000/api/integrations/github/setup?state=${state}&installation_id=77&setup_action=install`));
+  mocks.disconnect.mockResolvedValue({ connectionId: body.connectionId, lifecycleGeneration: 2,
+    lifecycleState: "disconnect-pending", cleanupState: "pending", installationId: "77" });
+  const response = await disconnect(new Request("http://localhost:3000/api/integrations/github/disconnect", {
+    method: "POST", headers: { origin: "http://localhost:3000", "x-devspace-csrf": "1", "content-type": "application/json" },
+    body: JSON.stringify({ connectionId: body.connectionId })
+  }));
+  expect(response.status).toBe(202);
+  expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
+    .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnect-pending", cleanupState: "pending" });
+  return body.connectionId;
+}
+
 describe("GitHub Web routes", () => {
   it("initiates, verifies, projects identity, and lists without browser-supplied authority", async () => {
     const started = await begin(new Request("http://localhost:3000/api/integrations/github/connection-attempts", { method: "POST",
@@ -227,6 +249,54 @@ describe("GitHub Web routes", () => {
     }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ connectionId: body.connectionId, status: "disconnect-pending", cleanupState: "pending" });
+    expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
+      .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnect-pending", cleanupState: "pending" });
+  });
+
+  it("completes a pending Web disconnect from the exact settled Agent lifecycle", async () => {
+    const connectionId = await createDisconnectPendingConnection();
+    mocks.disconnect.mockResolvedValue({ connectionId, lifecycleGeneration: 2, lifecycleState: "disconnected",
+      cleanupState: "settled", installationId: "77" });
+
+    const response = await connection(new Request("http://localhost:3000/api/integrations/github/connection"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ connectionId, lifecycleGeneration: 2, status: "disconnected", cleanupState: "settled" });
+    expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
+      .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled" });
+    expect(mocks.disconnect).toHaveBeenLastCalledWith(connectionId, 2);
+  });
+
+  it.each([
+    ["wrong Agent connection identity", (_connectionId: string) => ({ connectionId: "018f0f00-0000-7000-8000-000000000099",
+      lifecycleGeneration: 2, lifecycleState: "disconnected", cleanupState: "settled", installationId: "77" })],
+    ["stale Agent generation", (connectionId: string) => ({ connectionId, lifecycleGeneration: 1,
+      lifecycleState: "disconnected", cleanupState: "settled", installationId: "77" })],
+    ["cleanup that remains pending", (connectionId: string) => ({ connectionId, lifecycleGeneration: 2,
+      lifecycleState: "disconnect-pending", cleanupState: "pending", installationId: "77" })],
+    ["cleanup that is degraded", (connectionId: string) => ({ connectionId, lifecycleGeneration: 2,
+      lifecycleState: "disconnected", cleanupState: "degraded", installationId: "77" })],
+    ["an ambiguous response without identity", (_connectionId: string) => ({ lifecycleState: "disconnected", cleanupState: "settled" })]
+  ] as const)("keeps the Web disconnect fence after %s", async (_label, makeResponse) => {
+    const connectionId = await createDisconnectPendingConnection();
+    mocks.disconnect.mockResolvedValue(makeResponse(connectionId));
+
+    const response = await connection(new Request("http://localhost:3000/api/integrations/github/connection"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "disconnect-pending", lifecycleGeneration: 2, cleanupState: "pending" });
+    expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
+      .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnect-pending", cleanupState: "pending" });
+  });
+
+  it("keeps the Web disconnect fence when the Agent is unavailable during GET reconciliation", async () => {
+    await createDisconnectPendingConnection();
+    mocks.disconnect.mockRejectedValue(new AgentUnavailableError());
+
+    const response = await connection(new Request("http://localhost:3000/api/integrations/github/connection"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "disconnect-pending", lifecycleGeneration: 2, cleanupState: "pending" });
     expect(getProjectDatabase(process.env.DEVSPACE_DATABASE_PATH!).getGithubConnectionState("local-dev@example.invalid")?.connection)
       .toMatchObject({ lifecycleGeneration: 2, lifecycleState: "disconnect-pending", cleanupState: "pending" });
   });
