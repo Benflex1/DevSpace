@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-if [[ ! -v DEVSPACE_ROOTLESS_RUNNER_TEMP || -z "$DEVSPACE_ROOTLESS_RUNNER_TEMP" ]]; then
-  echo "missing canonical test runner temp path" >&2
-  exit 1
-fi
-runner_temp="$DEVSPACE_ROOTLESS_RUNNER_TEMP"
+runner_temp="${DEVSPACE_ROOTLESS_RUNNER_TEMP:?missing canonical test runner temp path}"
 root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 runtime="$root/runtime"
 data="$root/data"

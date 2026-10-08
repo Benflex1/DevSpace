@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-if [[ -v DEVSPACE_ROOTLESS_RUNNER_TEMP && -n "$DEVSPACE_ROOTLESS_RUNNER_TEMP" ]]; then
-  runner_temp="$DEVSPACE_ROOTLESS_RUNNER_TEMP"
-else
-  runner_temp="$RUNNER_TEMP"
-fi
+runner_temp="${DEVSPACE_ROOTLESS_RUNNER_TEMP:-$RUNNER_TEMP}"
 root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 if [[ ! -d "$root" || -L "$root" ]]; then
   echo "Disposable daemon root is absent or is a symlink; nothing to remove."

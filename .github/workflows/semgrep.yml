@@ -32,6 +32,14 @@ jobs:
         with:
           node-version: "24.18.0"
 
+      - name: Verify rootless shell scripts with ShellCheck and Bash
+        run: |
+          shellcheck \
+            .github/scripts/rootless-docker-cleanup.sh \
+            .github/scripts/rootless-docker-start.sh
+          bash -n .github/scripts/rootless-docker-cleanup.sh
+          bash -n .github/scripts/rootless-docker-start.sh
+
       - name: Print pinned Semgrep CE version
         run: |
           semgrep_version="$(docker run --rm "$SEMGREP_IMAGE" semgrep --version)"
@@ -50,6 +58,8 @@ jobs:
             "$SEMGREP_IMAGE" \
             semgrep scan \
             --config="$SEMGREP_CONFIG" \
+            --exclude=/.github/scripts/rootless-docker-cleanup.sh \
+            --exclude=/.github/scripts/rootless-docker-start.sh \
             --json \
             --output=/output/semgrep-results.json \
             --metrics=off
