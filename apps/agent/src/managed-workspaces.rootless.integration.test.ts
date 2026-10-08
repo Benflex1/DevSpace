@@ -136,6 +136,32 @@ async function cleanupOwnedRuntime(fixture: NonNullable<typeof activeFixture>): 
   }
 }
 
+async function failedStartDiagnostics(fixture: NonNullable<typeof activeFixture>): Promise<string> {
+  const runtimeDirectory = path.join(fixture.root, "managed/state/ownership/runtimes");
+  const creationDirectory = path.join(fixture.root, "managed/state/runtime-creations");
+  const workspaceId = fixture.workspaceIds[0];
+  if (workspaceId === undefined) return "No primary workspace ID was recorded.";
+  for (const file of [path.join(runtimeDirectory, `${workspaceId}.json`), path.join(creationDirectory, `${workspaceId}.json`)]) {
+    let record: Record<string, unknown>;
+    try { record = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+    const candidate = record.developmentContainer;
+    const containerId = typeof candidate === "object" && candidate !== null && "id" in candidate
+      && typeof candidate.id === "string" ? candidate.id : typeof record.containerId === "string" ? record.containerId : null;
+    if (containerId === null) continue;
+    try {
+      const container = await fixture.engine.inspectContainer(containerId);
+      return JSON.stringify({ id: container.Id, name: container.Name, state: container.State,
+        labels: container.Config.Labels, workingDirectory: container.Config.WorkingDir,
+        hostConfig: container.HostConfig, networks: container.NetworkSettings.Networks,
+        mounts: container.Mounts.map(({ Type, Source, Destination, RW, Propagation }) => ({ Type, Source, Destination, RW, Propagation })) }, null, 2);
+    } catch (error) {
+      return `Container ${containerId} could not be inspected after failed start: ${error instanceof Error ? error.message : "unknown error"}`;
+    }
+  }
+  return "No created development container was recorded before the failed start.";
+}
+
 afterEach(async () => {
   if (activeFixture === null) return;
   const fixture = activeFixture;
@@ -213,7 +239,11 @@ test.skipIf(dockerSocketPath === undefined)("real managed containers provide iso
   const worktreePath = managed.worktreePath(workspaceId);
   const peerWorktreePath = managed.worktreePath(peerWorkspaceId);
 
-  await managed.startWorkspace(projectId, workspaceId, startOperation);
+  try { await managed.startWorkspace(projectId, workspaceId, startOperation); }
+  catch (error) {
+    const diagnostics = await failedStartDiagnostics(activeFixture);
+    throw new Error(`Managed container start failed: ${error instanceof Error ? error.message : "unknown error"}\n${diagnostics}`, { cause: error });
+  }
   const execution = await managed.executionContext(projectId, workspaceId);
   const containerId = execution.ownership.developmentContainer.id;
   const container = await engine.inspectContainer(containerId);
