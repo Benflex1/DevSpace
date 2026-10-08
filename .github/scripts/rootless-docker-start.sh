@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-runner_temp="$(realpath -e "$RUNNER_TEMP")"
+runner_temp=$(realpath -e "$RUNNER_TEMP")
 root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 runtime="$root/runtime"
 data="$root/data"
