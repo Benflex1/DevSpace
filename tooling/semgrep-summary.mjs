@@ -144,6 +144,16 @@ function scannedFileCount(report) {
 
 function scannerErrorMessage(error) {
   if (!isRecord(error)) return "(diagnostic omitted)";
+  if (Array.isArray(error.type) && error.type[0] === "PartialParsing" && Array.isArray(error.type[1])) {
+    const locations = error.type[1].filter(isRecord);
+    const displayed = locations.slice(0, 3).map((location) => scannerErrorLocation({
+      path: location.path,
+      start: location.start
+    }));
+    const suffix = locations.length > 3 ? `; ${locations.length - 3} more omitted` : "";
+    const positions = displayed.length > 0 ? `: ${displayed.join(", ")}${suffix}` : "";
+    return truncateMessage(`partial parser recovery; ${locations.length} skipped-token location(s)${positions}`, MAX_SCANNER_ERROR_DIAGNOSTIC_LENGTH);
+  }
   return safeScannerText(error.short_msg, "(diagnostic omitted)");
 }
 
