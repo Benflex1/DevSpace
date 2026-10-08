@@ -64,6 +64,32 @@ async function containerCommandOkay(engine: DockerEngineClient, containerId: str
   return result.stdout;
 }
 
+async function containerLogs(socketPath: string, containerId: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const request = httpRequest({ socketPath, method: "GET",
+      path: `/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&timestamps=0` }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      response.once("end", () => {
+        const body = Buffer.concat(chunks);
+        if (response.statusCode !== 200) {
+          resolve(`Docker logs unavailable (${response.statusCode ?? 0}): ${body.toString("utf8").slice(0, 2000)}`);
+          return;
+        }
+        try {
+          const decoded = decodeDockerFrames(body);
+          resolve(`${decoded.stdout}${decoded.stderr}`.slice(-6000));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.setTimeout(5_000, () => request.destroy(new Error("rootless-git-test-log-request-timeout")));
+    request.once("error", reject);
+    request.end();
+  });
+}
+
 function recordLabelsMatch(labels: Record<string, string>, input: {
   readonly projectId: string; readonly workspaceId: string; readonly operationIds: readonly string[]; readonly role: string;
 }): boolean {
@@ -153,8 +179,11 @@ async function failedStartDiagnostics(fixture: NonNullable<typeof activeFixture>
       const container = await fixture.engine.inspectContainer(containerId);
       return JSON.stringify({ id: container.Id, name: container.Name, state: container.State,
         labels: container.Config.Labels, workingDirectory: container.Config.WorkingDir,
+        entrypoint: container.Config.Entrypoint, command: container.Config.Cmd,
         hostConfig: container.HostConfig, networks: container.NetworkSettings.Networks,
-        mounts: container.Mounts.map(({ Type, Source, Destination, RW, Propagation }) => ({ Type, Source, Destination, RW, Propagation })) }, null, 2);
+        mounts: container.Mounts.map(({ Type, Source, Destination, RW, Propagation }) => ({ Type, Source, Destination, RW, Propagation })),
+        logs: await containerLogs(fixture.engine.socketPath, containerId).catch((error: unknown) =>
+          `Container logs unavailable: ${error instanceof Error ? error.message : "unknown error"}`) }, null, 2);
     } catch (error) {
       return `Container ${containerId} could not be inspected after failed start: ${error instanceof Error ? error.message : "unknown error"}`;
     }
