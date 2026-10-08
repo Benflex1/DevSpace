@@ -67,7 +67,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     });
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (selection?: { readonly exactSessionId: string | null }) => {
     if (scope.current.projectId !== projectId || scope.current.workspaceId !== workspaceId) {
       scope.current = { projectId, workspaceId };
       sessionsRef.current = [];
@@ -87,7 +87,19 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     sessionsRef.current = nextSessions;
     setSessions(nextSessions);
     let selectedId = selectedNativeSessionIdRef.current;
-    if (selectedId !== null && !nextSessions.some((item) => item.id === selectedId)) {
+    if (selection !== undefined) {
+      const exactSession = selection.exactSessionId === null
+        ? null
+        : nextSessions.find((item) => item.id === selection.exactSessionId) ?? null;
+      if (exactSession !== null) {
+        selectedId = exactSession.id;
+      } else if (selectedId !== null && !nextSessions.some((item) => item.id === selectedId)) {
+        selectedId = null;
+      }
+      autoSelectPending.current = false;
+      selectedNativeSessionIdRef.current = selectedId;
+      setSelectedNativeSessionId(selectedId);
+    } else if (selectedId !== null && !nextSessions.some((item) => item.id === selectedId)) {
       selectedId = null;
       selectedNativeSessionIdRef.current = null;
       autoSelectPending.current = false;
@@ -137,19 +149,20 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         headers: { "content-type": "application/json", "x-devspace-csrf": "1" },
         body: JSON.stringify(body)
       });
-      const payload = await response.json() as { message?: string };
+      const payload = await response.json() as { message?: string; sessionId?: string };
       if (!response.ok) {
         setMessage(payload.message ?? "The harness action failed.");
         return;
       }
-      await refresh();
+      await refresh(body.action === "create-native"
+        ? { exactSessionId: typeof payload.sessionId === "string" ? payload.sessionId : null }
+        : undefined);
     } finally {
       setPending(false);
     }
   };
 
   const startHarness = () => {
-    autoSelectPending.current = true;
     post({ action: "create-native", workspaceId, harnessId }).catch(() => undefined);
   };
   const resumeSelectedHarness = () => {

@@ -109,6 +109,15 @@ function findSelectNode(node: FakeNode, label: string): FakeNode | null {
   return null;
 }
 
+function findClassNode(node: FakeNode, className: string): FakeNode | null {
+  if (node.getAttribute("class")?.split(/\s+/u).includes(className) === true) return node;
+  for (const child of node.children) {
+    const found = findClassNode(child, className);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 function selectedOptionValue(node: FakeNode): string {
   return node.options?.find((option) => option.selected)?.value ?? node.value;
 }
@@ -186,6 +195,54 @@ test("an empty native session shows Start and a provider chooser, not Resume", a
   expect(buttons(body)).not.toContain("Resume");
   expect(body.children.some((node) => node.nodeName === "SECTION" && findSelect(node))).toBe(true);
   expect(visibleText(body)).not.toContain("agent-artifact");
+});
+
+test("successful Start selects the returned active session and attaches its terminal", async () => {
+  const lostSessionId = "018f1f34-7000-7000-8000-000000000020";
+  const createdSessionId = "018f1f34-7000-7000-8000-000000000010";
+  const lostTerminalId = "018f1f34-7000-7000-8000-000000000021";
+  const createdTerminalId = "018f1f34-7000-7000-8000-000000000011";
+  let projected: unknown[] = [session("lost", false, { id: lostSessionId, terminalId: lostTerminalId })];
+  posts.length = 0;
+  vi.stubGlobal("fetch", vi.fn((url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
+    if (String(url).includes("/harness")) {
+      if (init?.method === "POST") {
+        posts.push({ body: JSON.parse(init.body ?? "{}"), headers: init.headers ?? {} });
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ sessionId: createdSessionId, terminalId: createdTerminalId, workspaceId, harnessId: "codex" })
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(harnessBody(structuredClone(projected))) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ profile: null, sessions: [], session: null }) });
+  }));
+
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  const body = await mount(createElement(HarnessSessionTab, { projectId, workspaceId, active: true }));
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Connection lost");
+  expect(buttons(body)).toContain("Start");
+
+  projected = [
+    session("lost", false, { id: lostSessionId, terminalId: lostTerminalId }),
+    session("active", false, { id: createdSessionId, terminalId: createdTerminalId })
+  ];
+  const start = findButtons(body).find((button) => buttonText(button) === "Start");
+  await act(async () => {
+    reactClick(start!)();
+    await settleReact();
+  });
+  await settleReact();
+
+  const selector = findSelectNode(body, "Native session");
+  expect(selector).not.toBeNull();
+  expect(selector?.options?.map((option) => option.value)).toEqual([lostSessionId, createdSessionId]);
+  expect(selectedOptionValue(selector!)).toBe(createdSessionId);
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Running");
+  expect(FakeSocket.instances.at(-1)?.url).toContain(`/terminals/${createdTerminalId}/stream`);
+  expect(FakeSocket.instances.at(-1)?.url).not.toContain(`/terminals/${lostTerminalId}/stream`);
+  expect(posts).toHaveLength(1);
+  expect(posts[0]?.body).toMatchObject({ action: "create-native", workspaceId, harnessId: "codex" });
 });
 
 test("a live native session shows one terminal and neither Start nor a provider switch", async () => {
