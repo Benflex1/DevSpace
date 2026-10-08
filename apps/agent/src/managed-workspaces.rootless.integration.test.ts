@@ -371,6 +371,9 @@ test.skipIf(dockerSocketPath === undefined)("real managed containers provide iso
     branchName: "container-feature", headCommit: containerCommit, dirty: false
   });
 
+  await runtime.validateCreationJournalBindings((operationId) => operationId === startOperation
+    ? { operationName: "workspace.start", request: { projectId, workspaceId } }
+    : undefined);
   engine.simulateLegacyContainerWithoutHarnessSlot(containerId);
   await expect(managed.recreateHarnessSlot(projectId, workspaceId)).resolves.toMatchObject({ state: "present-and-exact" });
   const recreated = await managed.executionContext(projectId, workspaceId);
