@@ -58,7 +58,7 @@ jobs:
           # pre-existing rootful Docker service.
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            apparmor ca-certificates curl fuse-overlayfs iptables slirp4netns uidmap
+            apparmor ca-certificates curl dbus-user-session fuse-overlayfs iptables slirp4netns uidmap
 
           # Use Docker's signed package repository for the officially supported rootless
           # components. Refuse any package plan that would install, remove, or replace the
@@ -174,6 +174,23 @@ jobs:
               if total < needed:
                   raise SystemExit(f'{path} does not provide 65,536 IDs for {user}')
           PY
+          uid="$(id -u)"
+          delegate_dropin="/etc/systemd/system/user@.service.d/devspace-rootless-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.conf"
+          if [[ -e "$delegate_dropin" || -L "$delegate_dropin" ]]; then
+            echo "Refusing to overwrite an existing systemd delegation drop-in: $delegate_dropin" >&2
+            exit 1
+          fi
+          touch "$root/systemd-delegate-created"
+          sudo install -d -m 0755 /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+            | sudo tee "$delegate_dropin" >/dev/null
+          sudo systemctl daemon-reload
+          if [[ "$(systemctl is-active "user@$uid.service" 2>/dev/null || true)" == active ]]; then
+            sudo systemctl restart "user@$uid.service"
+          elif [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || true)" != yes ]]; then
+            sudo loginctl enable-linger "$USER"
+            touch "$root/linger-enabled"
+          fi
           printf 'Prepared rootless Docker tools and subordinate ID mappings in the hosted VM.\n'
 
       - name: Start and verify isolated rootless Docker daemon
@@ -189,6 +206,30 @@ jobs:
           socket="$runtime/docker.sock"
           install -d -m 0700 "$runtime" "$data" "$exec_root"
           case "$runtime" in /tmp|/tmp/*) echo "XDG_RUNTIME_DIR must not be under /tmp" >&2; exit 1 ;; esac
+          user_runtime="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR="$user_runtime"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime/bus"
+          for attempt in $(seq 1 30); do
+            if [[ -S "$user_runtime/bus" ]] && systemctl --user show-environment >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          if [[ ! -S "$user_runtime/bus" ]] || ! systemctl --user show-environment >/dev/null 2>&1; then
+            echo "The hosted VM did not provide a usable rootless systemd user bus" >&2
+            exit 1
+          fi
+          if ! systemctl --user is-active --quiet dbus; then
+            systemctl --user start dbus
+            touch "$root/dbus-started"
+          fi
+          cgroup_controllers="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers"
+          test -r "$cgroup_controllers"
+          available_controllers="$(cat "$cgroup_controllers")"
+          for controller in cpu cpuset io memory pids; do
+            if ! grep -qw "$controller" <<<"$available_controllers"; then
+              echo "Rootless systemd user scope lacks delegated $controller controller: $available_controllers" >&2
+              exit 1
+            fi
+          done
           export XDG_RUNTIME_DIR="$runtime"
           rootless_script="$(command -v dockerd-rootless.sh)"
           rootless_bin="$(dirname "$rootless_script")"
@@ -206,6 +247,7 @@ jobs:
               os.close(null)
               os.close(log)
               env = dict(os.environ, XDG_RUNTIME_DIR=runtime,
+                         DBUS_SESSION_BUS_ADDRESS=os.environ['DBUS_SESSION_BUS_ADDRESS'],
                          PATH=binary_dir + os.pathsep + os.environ['PATH'],
                          DOCKERD_ROOTLESS_ROOTLESSKIT_NET='slirp4netns')
               argv = [script, '--host=unix://' + socket, '--data-root=' + data,
@@ -257,7 +299,16 @@ jobs:
             echo "Docker data root is outside the disposable test root: $actual_data_root" >&2
             exit 1
           fi
-          printf 'socket=%s\ndata-root=%s\nsecurity-options=%s\n' "$socket" "$actual_data_root" "$security_options"
+          cgroup_driver="$(env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+            DOCKER_CONFIG="$root/docker-config" docker --host="unix://$socket" info --format '{{.CgroupDriver}}')"
+          cgroup_version="$(env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+            DOCKER_CONFIG="$root/docker-config" docker --host="unix://$socket" info --format '{{.CgroupVersion}}')"
+          if [[ "$cgroup_driver" != systemd || "$cgroup_version" != 2 ]]; then
+            echo "Rootless resource limits require systemd with cgroup v2; got $cgroup_driver / v$cgroup_version" >&2
+            exit 1
+          fi
+          printf 'socket=%s\ndata-root=%s\nsecurity-options=%s\ncgroup-driver=%s\ncgroup-version=%s\n' \
+            "$socket" "$actual_data_root" "$security_options" "$cgroup_driver" "$cgroup_version"
           printf 'DEVSPACE_TEST_DOCKER_SOCKET_PATH=%s\n' "$socket" >>"$GITHUB_ENV"
 
       - name: Run real managed-workspace Git acceptance test
@@ -359,6 +410,16 @@ jobs:
           if [[ -f "$root/apt-key-created" ]]; then
             sudo rm -f -- /etc/apt/keyrings/devspace-rootless-ci.asc
           fi
+          if [[ -f "$root/dbus-started" ]]; then
+            user_runtime="/run/user/$(id -u)"
+            XDG_RUNTIME_DIR="$user_runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$user_runtime/bus" \
+              systemctl --user stop dbus || true
+          fi
+          if [[ -f "$root/systemd-delegate-created" ]]; then
+            sudo rm -f -- "/etc/systemd/system/user@.service.d/devspace-rootless-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.conf"
+            sudo systemctl daemon-reload
+          fi
+          if [[ -f "$root/linger-enabled" ]]; then sudo loginctl disable-linger "$USER"; fi
           # Rootless overlay layers contain host files owned by the configured subordinate IDs.
           # The daemon is stopped and the exact private root was verified above, so remove only
           # this test-owned tree as root to clean those shifted-UID files as well.
