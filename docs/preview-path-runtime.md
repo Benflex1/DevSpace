@@ -35,6 +35,29 @@ mount configuration is:
 --mount type=bind,src=/run/devspace/gateway/preview-lease-resolver.sock,dst=/run/devspace/gateway/preview-lease-resolver.sock
 ```
 
+Workspace container bind-mount sources have a separate namespace requirement:
+the dedicated rootless Docker daemon resolves each source path in its own mount
+namespace. Every absolute source path sent by the Agent must exist there and
+resolve to the same intended workspace files as it does in the Agent's
+namespace. A path visible inside code-server is not automatically visible to a
+host daemon. Configure a deployment-appropriate host-side bind mount or source
+path mapping so both namespaces resolve the path consistently; do not assume a
+particular host directory layout.
+
+Verify this without creating or changing containers: set `SOURCE` to the exact
+absolute source path sent by the Agent, then run these read-only commands from
+both the Agent's and daemon's mount namespaces, using the deployment's
+namespace-entry tooling:
+
+```sh
+realpath -- "$SOURCE"
+stat -Lc '%d:%i' -- "$SOURCE"
+```
+
+Confirm the path exists and both results identify the intended worktree. For an
+existing workspace container, also inspect Docker's reported
+`.Mounts[].Source` to confirm which source was attached.
+
 The optional `@devspace/preview-gateway-host` runtime owns the host-side
 `DEVSPACE_PREVIEW_PROBE_SOCKET`. It uses the resolver transport over
 `DEVSPACE_PREVIEW_LEASE_RESOLVER_SOCKET`, then starts `GatewayHostProbeServer`;
