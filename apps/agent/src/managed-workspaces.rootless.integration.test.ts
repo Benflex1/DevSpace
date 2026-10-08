@@ -48,8 +48,12 @@ async function containerCommand(engine: DockerEngineClient, containerId: string,
     command, workingDirectory: "/workspace", environment: {}, attachStdin: false, tty: false
   });
   const stream = await engine.startExecAttached(execId, false);
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  const chunks: Uint8Array[] = [];
+  for await (const rawChunk of stream) {
+    const chunk: unknown = rawChunk;
+    if (!(chunk instanceof Uint8Array)) throw new Error("rootless-git-test-exec-stream-chunk-invalid");
+    chunks.push(chunk);
+  }
   const output = decodeDockerFrames(Buffer.concat(chunks));
   const inspection = await engine.inspectExec(execId);
   if (inspection.Running || inspection.ExitCode === null) throw new Error("rootless-git-test-exec-did-not-finish");
@@ -80,7 +84,7 @@ async function containerLogs(socketPath: string, containerId: string): Promise<s
           const decoded = decodeDockerFrames(body);
           resolve(`${decoded.stdout}${decoded.stderr}`.slice(-6000));
         } catch (error) {
-          reject(error);
+          reject(error instanceof Error ? error : new Error("rootless-git-test-log-decoding-failed"));
         }
       });
     });
