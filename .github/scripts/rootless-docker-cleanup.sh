@@ -19,6 +19,8 @@ if [[ -f "$pid_file" ]]; then
       exit 1
     fi
     /bin/kill -TERM -- "-$daemon_pid"
+    # The sequence value is intentionally unused; it only bounds the retry count.
+    # shellcheck disable=SC2034
     for attempt in $(seq 1 20); do
       if ! kill -0 -- "-$daemon_pid" 2>/dev/null; then break; fi
       sleep 1

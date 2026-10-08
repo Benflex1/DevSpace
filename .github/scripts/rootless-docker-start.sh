@@ -59,6 +59,8 @@ print(pid)
 PY
 )"
 printf '%s\n' "$daemon_pid" >"$root/daemon-session.pid"
+# The sequence value is intentionally unused; it only bounds the retry count.
+# shellcheck disable=SC2034
 for attempt in $(seq 1 90); do
   if ! kill -0 "$daemon_pid" 2>/dev/null; then
     cat "$root/daemon.log" >&2
@@ -86,6 +88,8 @@ test ! -L "$runtime/dockerd.pid"
 test "$(stat -c '%u' "$socket")" = "$(id -u)"
 security_options="$(env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
   DOCKER_CONFIG="$root/docker-config" docker --host="unix://$socket" info --format '{{json .SecurityOptions}}')"
+# The single-quoted JavaScript body must remain literal to Bash.
+# shellcheck disable=SC2016
 printf '%s\n' "$security_options" | node --input-type=module -e '
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
