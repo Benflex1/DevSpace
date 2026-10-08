@@ -22,6 +22,21 @@ const dockerSocketPath = process.env.DEVSPACE_TEST_DOCKER_SOCKET_PATH;
 const gitImage = process.env.DEVSPACE_TEST_GIT_IMAGE || "mcr.microsoft.com/devcontainers/base:ubuntu-24.04";
 let activeFixture: { root: string; engine: DockerEngineClient; projectId: string; workspaceIds: string[]; operationIds: string[] } | null = null;
 
+class RootlessIntegrationDockerEngine extends DockerEngineClient {
+  private readonly legacyContainersMissingHarnessSlot = new Set<string>();
+
+  simulateLegacyContainerWithoutHarnessSlot(containerId: string): void {
+    this.legacyContainersMissingHarnessSlot.add(containerId);
+  }
+
+  override async inspectContainer(id: string): Promise<DockerContainerInspection> {
+    const container = await super.inspectContainer(id);
+    if (!this.legacyContainersMissingHarnessSlot.has(container.Id)) return container;
+    // Model the inspect result from a pre-harness-slot container to exercise real replacement.
+    return { ...container, Mounts: container.Mounts.filter((mount) => mount.Destination !== "/opt/devspace/harness-home") };
+  }
+}
+
 async function hostGit(repositoryPath: string, args: readonly string[]): Promise<string> {
   const result = await execFileAsync("/usr/bin/git", ["-C", repositoryPath, ...args], { encoding: "utf8" });
   return result.stdout.trimEnd();
@@ -205,7 +220,7 @@ afterEach(async () => {
 
 test.skipIf(dockerSocketPath === undefined)("real managed containers provide isolated, persistent workspace Git repositories", async () => {
   if (dockerSocketPath === undefined) throw new Error("DEVSPACE_TEST_DOCKER_SOCKET_PATH is required; no Docker socket fallback is permitted.");
-  const engine = new DockerEngineClient(dockerSocketPath);
+  const engine = new RootlessIntegrationDockerEngine(dockerSocketPath);
   await engine.assertRootlessAvailable();
 
   const root = await mkdtemp(path.join(tmpdir(), "devspace-rootless-git-integration-"));
@@ -351,6 +366,24 @@ test.skipIf(dockerSocketPath === undefined)("real managed containers provide iso
   expect(restarted.ownership.developmentContainer.id).toBe(containerId);
   expect(await containerCommandOkay(engine, containerId, ["git", "status", "--short", "--branch"])).toBe("## container-feature\n");
   expect(await containerCommandOkay(engine, containerId, ["git", "log", "-1", "--format=%H"]))
+    .toBe(`${containerCommit}\n`);
+  await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({
+    branchName: "container-feature", headCommit: containerCommit, dirty: false
+  });
+
+  engine.simulateLegacyContainerWithoutHarnessSlot(containerId);
+  await expect(managed.recreateHarnessSlot(projectId, workspaceId)).resolves.toMatchObject({ state: "present-and-exact" });
+  const recreated = await managed.executionContext(projectId, workspaceId);
+  const recreatedContainerId = recreated.ownership.developmentContainer.id;
+  expect(recreatedContainerId).not.toBe(containerId);
+  const recreatedContainer = await engine.inspectContainer(recreatedContainerId);
+  expect(recreatedContainer.State.Running).toBe(true);
+  expect(recreatedContainer.Mounts.map((mount) => mount.Destination).sort()).toEqual([
+    "/opt/devspace/harness-home", "/workspace"
+  ]);
+  expect(await containerCommandOkay(engine, recreatedContainerId, ["git", "status", "--short", "--branch"]))
+    .toBe("## container-feature\n");
+  expect(await containerCommandOkay(engine, recreatedContainerId, ["git", "log", "-1", "--format=%H"]))
     .toBe(`${containerCommit}\n`);
   await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({
     branchName: "container-feature", headCommit: containerCommit, dirty: false
