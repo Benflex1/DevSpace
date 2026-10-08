@@ -43,15 +43,19 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const [selectedNativeSessionId, setSelectedNativeSessionId] = useState<string | null>(null);
   const [terminal, setTerminal] = useState<TerminalView | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"create-native" | "resume" | null>(null);
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const pending = pendingAction !== null;
   const sessionsRef = useRef<NativeSession[]>([]);
   const selectedNativeSessionIdRef = useRef<string | null>(null);
   const autoSelectPending = useRef(true);
+  const awaitingSessionId = useRef<string | null>(null);
   const refreshSequence = useRef(0);
   const scope = useRef({ projectId, workspaceId });
 
   const selectNativeSession = useCallback((id: string | null) => {
     selectedNativeSessionIdRef.current = id;
+    if (awaitingSessionId.current !== id) awaitingSessionId.current = null;
     autoSelectPending.current = false;
     setSelectedNativeSessionId(id);
     const selected = id === null ? null : sessionsRef.current.find((item) => item.id === id) ?? null;
@@ -73,15 +77,19 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       sessionsRef.current = [];
       selectedNativeSessionIdRef.current = null;
       autoSelectPending.current = true;
+      awaitingSessionId.current = null;
       setSessions([]);
       setSelectedNativeSessionId(null);
       setTerminal(null);
     }
     const requestSequence = ++refreshSequence.current;
     const response = await fetch(`/api/projects/${projectId}/harness?workspaceId=${workspaceId}`, { cache: "no-store" });
-    if (!response.ok) return;
+    if (!response.ok) throw new Error("native-harness-refresh-failed");
     const body = await response.json() as { definitions?: Definition[]; sessions?: NativeSession[] };
-    if (requestSequence !== refreshSequence.current || scope.current.projectId !== projectId || scope.current.workspaceId !== workspaceId) return;
+    if (requestSequence !== refreshSequence.current || scope.current.projectId !== projectId || scope.current.workspaceId !== workspaceId) {
+      if (selection !== undefined) throw new Error("native-harness-refresh-superseded");
+      return;
+    }
     if (Array.isArray(body.definitions) && body.definitions.length > 0) setDefinitions(body.definitions);
     const nextSessions = Array.isArray(body.sessions) ? body.sessions : [];
     sessionsRef.current = nextSessions;
@@ -93,6 +101,11 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         : nextSessions.find((item) => item.id === selection.exactSessionId) ?? null;
       if (exactSession !== null) {
         selectedId = exactSession.id;
+        awaitingSessionId.current = null;
+      } else if (selection.exactSessionId !== null) {
+        // Admission succeeded; do not fall back to an older session while projection catches up.
+        selectedId = selection.exactSessionId;
+        awaitingSessionId.current = selectedId;
       } else if (selectedId !== null && !nextSessions.some((item) => item.id === selectedId)) {
         selectedId = null;
       }
@@ -100,10 +113,12 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       selectedNativeSessionIdRef.current = selectedId;
       setSelectedNativeSessionId(selectedId);
     } else if (selectedId !== null && !nextSessions.some((item) => item.id === selectedId)) {
-      selectedId = null;
-      selectedNativeSessionIdRef.current = null;
-      autoSelectPending.current = false;
-      setSelectedNativeSessionId(null);
+      if (awaitingSessionId.current !== selectedId) {
+        selectedId = null;
+        selectedNativeSessionIdRef.current = null;
+        autoSelectPending.current = false;
+        setSelectedNativeSessionId(null);
+      }
     } else if (selectedId === null && autoSelectPending.current && nextSessions.length > 0) {
       selectedId = preferredInitialSession(nextSessions)?.id ?? null;
       selectedNativeSessionIdRef.current = selectedId;
@@ -111,6 +126,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       setSelectedNativeSessionId(selectedId);
     }
     const current = selectedId === null ? null : nextSessions.find((item) => item.id === selectedId) ?? null;
+    if (current !== null && awaitingSessionId.current === current.id) awaitingSessionId.current = null;
     if (current?.terminalSessionId) {
       setTerminal((existing) => {
         const nextState = nativeHarnessTerminalState(current.state);
@@ -127,6 +143,9 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     } else {
       setTerminal(null);
     }
+    if (selection?.exactSessionId != null && current === null) {
+      throw new Error("native-harness-session-not-projected");
+    }
   }, [projectId, workspaceId]);
 
   useEffect(() => {
@@ -136,13 +155,25 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const onRefresh = useCallback(() => {
     refresh().catch(() => undefined);
   }, [refresh]);
+  const retryRefresh = () => {
+    setRefreshFailed(false);
+    setMessage(null);
+    const expected = awaitingSessionId.current;
+    refresh(expected === null ? undefined : { exactSessionId: expected }).catch(() => {
+      setRefreshFailed(true);
+      setMessage("The native session list could not be refreshed. Retry to attach.");
+    });
+  };
   const onTerminalStateChange = useCallback((id: string, state: string) => {
     setTerminal((current) => current?.id === id ? { ...current, state } : current);
   }, []);
 
   const post = async (body: Record<string, unknown>) => {
-    setPending(true);
+    const isCreate = body.action === "create-native";
+    setPendingAction(isCreate ? "create-native" : "resume");
+    setRefreshFailed(false);
     setMessage(null);
+    let admitted = false;
     try {
       const response = await fetch(`/api/projects/${projectId}/harness`, {
         method: "POST",
@@ -151,14 +182,26 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       });
       const payload = await response.json() as { message?: string; sessionId?: string };
       if (!response.ok) {
-        setMessage(payload.message ?? "The harness action failed.");
+        setRefreshFailed(true);
+        setMessage(payload.message ?? "The harness action failed. Refresh before retrying.");
         return;
       }
-      await refresh(body.action === "create-native"
-        ? { exactSessionId: typeof payload.sessionId === "string" ? payload.sessionId : null }
-        : undefined);
+      admitted = true;
+      if (isCreate) {
+        if (typeof payload.sessionId !== "string" || payload.sessionId.length === 0) {
+          throw new Error("native-harness-session-id-missing");
+        }
+        awaitingSessionId.current = payload.sessionId;
+        selectNativeSession(payload.sessionId);
+      }
+      await refresh(isCreate ? { exactSessionId: awaitingSessionId.current } : undefined);
+    } catch {
+      setRefreshFailed(true);
+      setMessage(admitted
+        ? "The session started, but its list could not be refreshed. Retry to attach."
+        : "The harness request could not be confirmed. Refresh the session list before trying again.");
     } finally {
-      setPending(false);
+      setPendingAction(null);
     }
   };
 
@@ -178,7 +221,13 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const session = selectedNativeSessionId === null
     ? null
     : sessions.find((item) => item.id === selectedNativeSessionId) ?? null;
-  const presentation = nativeAiPresentation(session);
+  const awaitingProjection = selectedNativeSessionId !== null && session === null
+    && awaitingSessionId.current === selectedNativeSessionId;
+  const presentation = pending || awaitingProjection || refreshFailed
+    ? { action: "none" as const, showProviderChooser: false,
+        status: pending ? (pendingAction === "resume" ? "Resuming…" : "Starting…")
+          : awaitingProjection ? "Waiting for session" : "Refresh required" }
+    : nativeAiPresentation(session);
   const selected = definitions.find((definition) => definition.id === (session?.harnessId ?? harnessId)) ?? definitions[0];
   const displayName = selected?.displayName ?? "Codex";
 
@@ -209,11 +258,16 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       {presentation.action === "start" && <button type="button" disabled={pending} onClick={startHarness}>Start</button>}
       {presentation.action === "resume" && session !== null && <button type="button" disabled={pending || session.resume !== true} onClick={resumeSelectedHarness}>Resume</button>}
       {message !== null && <span className="native-ai-message" role="status">{message}</span>}
+      {refreshFailed && <button type="button" disabled={pending} onClick={retryRefresh}>Retry refresh</button>}
     </header>
     <div className="native-ai-terminal">
-      {terminal !== null
-        ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
-        : <p className="native-ai-empty">Start a harness to open its terminal.</p>}
+      {pending
+        ? <p className="native-ai-empty" role="status">{pendingAction === "resume" ? "Resuming native session…" : "Starting native session…"}</p>
+        : awaitingProjection
+          ? <p className="native-ai-empty" role="status">Waiting for the new session. Retry refresh if needed.</p>
+          : terminal !== null
+            ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
+            : <p className="native-ai-empty">Start a harness to open its terminal.</p>}
     </div>
   </section>;
 }
