@@ -220,6 +220,18 @@ describe("exact Docker runtime ownership", () => {
     expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(1);
   });
 
+  test("accepts image labels while rejecting unrecorded DevSpace ownership labels", async () => {
+    const fixture = await runtimeFixture();
+    await start(fixture);
+    const container = onlyContainer(fixture);
+    container.Config.Labels["org.opencontainers.image.title"] = "Git-enabled test image";
+    container.Config.Labels["dev.containers.features"] = "git";
+    await expect(fixture.manager.inspect(fixture.association)).resolves.toMatchObject({ observedState: "running" });
+
+    container.Config.Labels["devspace.unrecorded-owner"] = "foreign";
+    await expect(fixture.manager.inspect(fixture.association)).resolves.toMatchObject({ observedState: "lost" });
+  });
+
   test("clears a private slot with a restricted helper bound to the exact stopped workspace owner", async () => {
     const fixture = await runtimeFixture();
     await start(fixture);
