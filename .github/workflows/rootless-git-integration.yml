@@ -83,7 +83,25 @@ jobs:
           sudo tee /etc/apt/sources.list.d/devspace-rootless-ci.list \
             <"$root/docker-source.list" >/dev/null
           sudo apt-get update
-          package_plan="$(sudo apt-get --simulate install --no-install-recommends --no-upgrade docker-ce-rootless-extras)"
+          engine_package_version="$(dpkg-query -W -f='${Version}' docker-ce)"
+          cli_package_version="$(dpkg-query -W -f='${Version}' docker-ce-cli)"
+          engine_binary_version="$(dockerd --version | sed -En 's/^Docker version ([0-9.]+),.*/\1/p')"
+          engine_deb_version="$(sed -E 's/^[0-9]+://' <<<"$engine_package_version" | sed -E 's/-.*$//')"
+          if [[ -z "$engine_binary_version" || "$engine_binary_version" != "$engine_deb_version" ]]; then
+            echo "Installed dockerd binary and package version do not match: $engine_binary_version / $engine_package_version" >&2
+            exit 1
+          fi
+          if ! apt-cache madison docker-ce-rootless-extras \
+            | awk -F '|' -v expected="$engine_package_version" '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 == expected) found = 1 } END { exit !found }'; then
+            echo "Docker's repository has no rootless-extras package matching installed engine $engine_package_version" >&2
+            exit 1
+          fi
+          package_specs=(
+            "docker-ce-rootless-extras=$engine_package_version"
+            "docker-ce=$engine_package_version"
+            "docker-ce-cli=$cli_package_version"
+          )
+          package_plan="$(sudo apt-get --simulate install --no-install-recommends --no-upgrade "${package_specs[@]}")"
           printf '%s\n' "$package_plan"
           if grep -E '^Remv ' <<<"$package_plan"; then
             echo "Rootless prerequisite installation would remove an existing package" >&2
@@ -93,7 +111,7 @@ jobs:
             echo "Rootless prerequisite installation would modify the runner's pre-existing Docker engine or CLI" >&2
             exit 1
           fi
-          sudo apt-get install --yes --no-install-recommends --no-upgrade docker-ce-rootless-extras
+          sudo apt-get install --yes --no-install-recommends --no-upgrade "${package_specs[@]}"
           rootless_script="$(command -v dockerd-rootless.sh)"
           rootlesskit="$(command -v rootlesskit)"
           test -x "$rootless_script"
