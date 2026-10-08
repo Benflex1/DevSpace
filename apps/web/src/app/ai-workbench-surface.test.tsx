@@ -245,6 +245,72 @@ test("successful Start selects the returned active session and attaches its term
   expect(posts[0]?.body).toMatchObject({ action: "create-native", workspaceId, harnessId: "codex" });
 });
 
+test("a slow Native start replaces stale lost feedback and allows refresh retry without another POST", async () => {
+  const lostSessionId = "018f1f34-7000-7000-8000-000000000020";
+  const createdSessionId = "018f1f34-7000-7000-8000-000000000010";
+  const lostTerminalId = "018f1f34-7000-7000-8000-000000000021";
+  const createdTerminalId = "018f1f34-7000-7000-8000-000000000011";
+  let projected: unknown[] = [session("lost", false, { id: lostSessionId, terminalId: lostTerminalId })];
+  let failNextRefresh = false;
+  let resolveStart!: (response: { ok: boolean; json: () => Promise<unknown> }) => void;
+  const delayedStart = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => { resolveStart = resolve; });
+  posts.length = 0;
+  vi.stubGlobal("fetch", vi.fn((url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
+    if (String(url).includes("/harness")) {
+      if (init?.method === "POST") {
+        posts.push({ body: JSON.parse(init.body ?? "{}"), headers: init.headers ?? {} });
+        return delayedStart;
+      }
+      if (failNextRefresh) {
+        failNextRefresh = false;
+        return Promise.resolve({ ok: false, json: () => Promise.resolve({ message: "Unavailable" }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(harnessBody(structuredClone(projected))) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ profile: null, sessions: [], session: null }) });
+  }));
+
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  const body = await mount(createElement(HarnessSessionTab, { projectId, workspaceId, active: true }));
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Connection lost");
+
+  const start = findButtons(body).find((button) => buttonText(button) === "Start");
+  act(() => { reactClick(start!)(); });
+  await settleReact(2);
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Starting…");
+  expect(visibleText(body)).toContain("Starting native session…");
+  expect(visibleText(body)).not.toContain("Connection lost");
+  expect(buttons(body)).not.toContain("Start");
+  expect(posts).toHaveLength(1);
+
+  projected = [
+    session("lost", false, { id: lostSessionId, terminalId: lostTerminalId }),
+    session("active", false, { id: createdSessionId, terminalId: createdTerminalId })
+  ];
+  failNextRefresh = true;
+  await act(async () => {
+    resolveStart({ ok: true, json: () => Promise.resolve({
+      sessionId: createdSessionId, terminalId: createdTerminalId, workspaceId, harnessId: "codex"
+    }) });
+    await settleReact(2);
+  });
+  await settleReact(2);
+
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Waiting for session");
+  expect(buttons(body)).toContain("Retry refresh");
+  expect(buttons(body)).not.toContain("Start");
+  expect(FakeSocket.instances).toHaveLength(0);
+
+  const retry = findButtons(body).find((button) => buttonText(button) === "Retry refresh");
+  act(() => { reactClick(retry!)(); });
+  await settleReact();
+
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Running");
+  expect(selectedOptionValue(findSelectNode(body, "Native session")!)).toBe(createdSessionId);
+  expect(FakeSocket.instances.at(-1)?.url).toContain(`/terminals/${createdTerminalId}/stream`);
+  expect(posts).toHaveLength(1);
+});
+
 test("a live native session shows one terminal and neither Start nor a provider switch", async () => {
   installFetch([session("active")]);
   const { HarnessSessionTab } = await import("./harness-session-tab.js");
