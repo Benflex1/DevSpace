@@ -301,12 +301,16 @@ jobs:
           NODE
           test -S "$socket"
 
-      - name: Show rootless daemon log on failure
+      - name: Show rootless test and daemon logs on failure
         if: failure()
         shell: bash
         run: |
           runner_temp="$(realpath -e "$RUNNER_TEMP")"
           root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -f "$root/vitest.json" ]]; then
+            echo "Rootless Git integration Vitest report:"
+            cat "$root/vitest.json"
+          fi
           if [[ -f "$root/daemon.log" ]]; then cat "$root/daemon.log"; fi
 
       - name: Stop and remove only the disposable rootless daemon
@@ -345,10 +349,17 @@ jobs:
           fi
           expected_prefix="$runner_temp/devspace-rootless-git-"
           case "$root" in "$expected_prefix"*) ;; *) echo "Unsafe cleanup path: $root" >&2; exit 1 ;; esac
+          if [[ "$(realpath -e "$root")" != "$root" ]]; then
+            echo "Refusing to remove a non-canonical test root: $root" >&2
+            exit 1
+          fi
           if [[ -f "$root/apt-source-created" ]]; then
             sudo rm -f -- /etc/apt/sources.list.d/devspace-rootless-ci.list
           fi
           if [[ -f "$root/apt-key-created" ]]; then
             sudo rm -f -- /etc/apt/keyrings/devspace-rootless-ci.asc
           fi
-          rm -rf -- "$root"
+          # Rootless overlay layers contain host files owned by the configured subordinate IDs.
+          # The daemon is stopped and the exact private root was verified above, so remove only
+          # this test-owned tree as root to clean those shifted-UID files as well.
+          sudo rm -rf --one-file-system -- "$root"
