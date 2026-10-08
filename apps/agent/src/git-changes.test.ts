@@ -186,6 +186,9 @@ test("confines Git mutations to the managed workspace and rejects invalid paths"
   await expect(managed.stageWorkspaceFile(projectId, workspaceId, "../outside.txt")).rejects.toMatchObject({ failure: { code: "WORKSPACE_PATH_INVALID" } });
   await expect(managed.stageWorkspaceFile(projectId, workspaceId, "/tmp/outside.txt")).rejects.toMatchObject({ failure: { code: "WORKSPACE_PATH_INVALID" } });
   await expect(managed.stageWorkspaceFile(projectId, workspaceId, ".git/config")).rejects.toMatchObject({ failure: { code: "WORKSPACE_PATH_INVALID" } });
+  await expect(managed.stageWorkspaceFile(projectId, workspaceId, ".devspace-git/config")).rejects.toMatchObject({ failure: { code: "WORKSPACE_PATH_INVALID" } });
+  await expect(managed.unstageWorkspaceFile(projectId, workspaceId, ".devspace-git/config")).rejects.toMatchObject({ failure: { code: "WORKSPACE_PATH_INVALID" } });
+  await expect(managed.diffGit(projectId, workspaceId, ".devspace-git/config", "unstaged")).rejects.toMatchObject({ failure: { code: "WORKSPACE_PATH_INVALID" } });
   await writeFile(path.join(worktree, "README.md"), "changed\n", "utf8");
   await managed.stageWorkspaceFile(projectId, workspaceId, "README.md");
   expect(failureCode(await managed.inspectGit(projectId, workspaceId))).toBeUndefined();
