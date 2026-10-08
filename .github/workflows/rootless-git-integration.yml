@@ -196,7 +196,7 @@ jobs:
       - name: Start and verify isolated rootless Docker daemon
         id: daemon
         shell: bash
-        run: bash .github/scripts/rootless-docker-start.sh
+        run: bash -euo pipefail .github/scripts/rootless-docker-start.sh
       - name: Run real managed-workspace Git acceptance test
         shell: bash
         run: |
@@ -253,4 +253,4 @@ jobs:
       - name: Stop and remove only the disposable rootless daemon
         if: always()
         shell: bash
-        run: bash .github/scripts/rootless-docker-cleanup.sh
+        run: bash -euo pipefail .github/scripts/rootless-docker-cleanup.sh
