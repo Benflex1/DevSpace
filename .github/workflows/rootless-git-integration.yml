@@ -47,6 +47,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          printf 'DEVSPACE_ROOTLESS_RUNNER_TEMP=%s\n' "$runner_temp" >>"$GITHUB_ENV"
           root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           if [[ -e "$root" || -L "$root" ]]; then
             echo "Refusing to reuse an existing test root: $root" >&2
