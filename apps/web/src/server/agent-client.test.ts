@@ -592,6 +592,40 @@ test("native harness inspection returns only bounded lifecycle state, capability
   } finally { await service.close(); }
 });
 
+test("native harness Agent request logs correlate safe IDs and classify uncertain admission", async () => {
+  const lines: string[] = [];
+  let requestId: string | undefined;
+  const sessionId = "018f0f00-0000-7000-8000-000000000020";
+  const workspaceId = "018f0f00-0000-7000-8000-000000000021";
+  const terminalId = "018f0f00-0000-7000-8000-000000000022";
+  const service = await listen((request, response) => {
+    requestId = request.headers["x-devspace-request-id"] as string;
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ meta: { protocolVersion: 1, requestId, respondedAt: timestamp }, error: {
+      code: "HARNESS_ADMISSION_UNCERTAIN", message: "retry the same process", retryable: true, details: {}
+    } }));
+  });
+  try {
+    const client = createAgentClient(service.socketPath, {
+      logger: createLogger({ component: "web", subsystem: "agent-client", sink: (line) => lines.push(line) })
+    });
+    await expect(client.startNativeHarness({
+      projectId: id, workspaceId, sessionId, harnessId: "codex", processId: terminalId, terminalId,
+      processGeneration: 1, definition: { environment: { TOKEN: "must-not-appear-in-timing" } }
+    })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  } finally { await service.close(); }
+
+  const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(records).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      event: "web.harness.agent_request.failed", requestId, sessionId, workspaceId, terminalId,
+      processGeneration: 1, phase: "agent-request", outcome: "uncertain",
+      errorCode: "HARNESS_ADMISSION_UNCERTAIN", durationMs: expect.any(Number)
+    })
+  ]));
+  expect(lines.join("\n")).not.toContain("must-not-appear-in-timing");
+});
+
 test("allows Codex profile discovery to complete beyond the general observation timeout", async () => {
   const profile = {
     profileId: "codex",

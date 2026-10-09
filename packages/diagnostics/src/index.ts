@@ -79,6 +79,12 @@ export interface LogContext {
 }
 
 export interface LogFields extends LogContext {
+  readonly sessionId?: string;
+  readonly terminalId?: string;
+  readonly harnessId?: string;
+  readonly processGeneration?: number;
+  readonly outcome?: "success" | "failure" | "uncertain" | "skipped";
+  readonly cacheState?: "hit" | "miss" | "repaired";
   readonly durationMs?: number;
   readonly elapsedMs?: number;
   readonly cleanupElapsedMs?: number;
@@ -119,6 +125,12 @@ export interface LogRecord extends LogContext {
   readonly subsystem: string;
   readonly event: string;
   readonly message: string;
+  readonly sessionId?: string;
+  readonly terminalId?: string;
+  readonly harnessId?: string;
+  readonly processGeneration?: number;
+  readonly outcome?: "success" | "failure" | "uncertain" | "skipped";
+  readonly cacheState?: "hit" | "miss" | "repaired";
   readonly durationMs?: number;
   readonly elapsedMs?: number;
   readonly cleanupElapsedMs?: number;
@@ -152,7 +164,8 @@ export interface LogRecord extends LogContext {
 export type LogSink = (line: string, level: LogLevel) => void;
 
 const safeKeys = new Set([
-  "requestId", "operationId", "projectId", "workspaceId", "previewId", "durationMs", "elapsedMs", "cleanupElapsedMs",
+  "requestId", "operationId", "projectId", "workspaceId", "previewId", "sessionId", "terminalId", "harnessId",
+  "processGeneration", "durationMs", "elapsedMs", "cleanupElapsedMs", "outcome", "cacheState",
   "mode", "phase", "failureCode", "errorClass", "containerId", "artifactLayout", "entryRelative", "reason", "action",
   "operationName", "operationState", "observedState", "previousState", "currentState", "desiredState", "routePresent",
   "routeStatus", "statusCode", "pending", "errorCategory", "errorCode", "retryable", "healthBreakdown", "endpoint",
@@ -174,6 +187,9 @@ function safeValue(key: string, value: unknown): unknown {
   if (sensitiveKey.test(key)) return undefined;
   if (key === "phase") {
     return typeof value === "string" && [
+      "agent-request", "serialization-wait", "admission-execution", "total-admission", "runtime-validation",
+      "workspace-validation", "workspace-runtime-validation", "executable-probe", "codex-session-baseline", "harness-home-lease",
+      "harness-home-materialization", "docker-exec-creation", "web-request",
       "artifact-resolution", "agent-side-stage-copy", "readback-helper-load", "readback-helper-integrity",
       "staged-artifact-verification", "readback-helper-upload", "artifact-entry-upload",
       "artifact-entry-readback", "final-closure-verification", "failure-cleanup"
@@ -190,6 +206,22 @@ function safeValue(key: string, value: unknown): unknown {
   }
   if (key === "containerId") {
     return typeof value === "string" && (value === "unknown" || /^[a-f0-9]{12,64}$/u.test(value)) ? value : undefined;
+  }
+  if (key === "sessionId" || key === "terminalId") {
+    return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+      ? value.toLowerCase() : undefined;
+  }
+  if (key === "harnessId") {
+    return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(value) ? value : undefined;
+  }
+  if (key === "processGeneration") {
+    return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 1_000_000 ? value : undefined;
+  }
+  if (key === "outcome") {
+    return value === "success" || value === "failure" || value === "uncertain" || value === "skipped" ? value : undefined;
+  }
+  if (key === "cacheState") {
+    return value === "hit" || value === "miss" || value === "repaired" ? value : undefined;
   }
   if (key === "artifactLayout") {
     return typeof value === "string" && [

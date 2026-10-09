@@ -1,4 +1,5 @@
 import http from "node:http";
+import { performance } from "node:perf_hooks";
 import {
   AGENT_API_VERSION,
   agentApiV1EndpointByOperation,
@@ -545,6 +546,29 @@ export function createAgentClient(socketPath: string, options: {
   async function callHarness(path: string, data: unknown): Promise<{ settled: boolean; state?: string; resume?: boolean; processGeneration?: number }> {
     const requestId = uuidv7();
     const body = JSON.stringify({ data });
+    const requestStartedAt = performance.now();
+    const resource = data !== null && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+    const operationName = path.endsWith("/start") ? "native-harness.start"
+      : path.endsWith("/resume") ? "native-harness.resume" : "native-harness.inspect";
+    const resourceFields = {
+      ...(typeof resource.sessionId === "string" ? { sessionId: resource.sessionId } : {}),
+      ...(typeof resource.workspaceId === "string" ? { workspaceId: resource.workspaceId } : {}),
+      ...(typeof resource.terminalId === "string" ? { terminalId: resource.terminalId } : {}),
+      ...(typeof resource.harnessId === "string" ? { harnessId: resource.harnessId } : {}),
+      ...(typeof resource.processGeneration === "number" ? { processGeneration: resource.processGeneration } : {})
+    };
+    const logOutcome = (outcome: "success" | "failure" | "uncertain", statusCode?: number, errorCode?: string): void => {
+      try {
+        const fields = {
+          requestId, operationName, phase: "agent-request", outcome,
+          durationMs: Math.max(0, performance.now() - requestStartedAt),
+          ...(statusCode === undefined ? {} : { statusCode }), ...(errorCode === undefined ? {} : { errorCode }),
+          ...resourceFields
+        };
+        if (outcome === "success") logger.info("web.harness.agent_request.completed", "Native harness Agent request completed.", fields);
+        else logger.warn("web.harness.agent_request.failed", "Native harness Agent request did not complete.", fields);
+      } catch { /* request diagnostics must not change the Agent response */ }
+    };
     return await new Promise((resolve, reject) => {
       const request = http.request({
         socketPath,
@@ -565,9 +589,13 @@ export function createAgentClient(socketPath: string, options: {
           const status = response.statusCode ?? 0;
           let parsed: unknown;
           try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-          catch { return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId)); }
+          catch {
+            logOutcome("uncertain", status, "MALFORMED_RESPONSE");
+            return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId));
+          }
           if (status === 200) {
             const data = (parsed as { data?: { settled?: boolean; state?: string; resume?: boolean; processGeneration?: number } }).data;
+            logOutcome("success", status);
             return resolve({
               settled: data?.settled === true,
               ...(typeof data?.state === "string" ? { state: data.state } : {}),
@@ -577,6 +605,8 @@ export function createAgentClient(socketPath: string, options: {
           }
           const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };
           if (typeof envelope.error?.code === "string") {
+            logOutcome(envelope.error.code === "HARNESS_ADMISSION_UNCERTAIN" || envelope.error.retryable === true ? "uncertain" : "failure",
+              status, envelope.error.code);
             return reject(new AgentResponseError(
               envelope.error.code,
               envelope.error.message ?? "harness-failure",
@@ -586,10 +616,14 @@ export function createAgentClient(socketPath: string, options: {
               requestId
             ));
           }
+          logOutcome("uncertain", status, "INVALID_RESPONSE_CONTRACT");
           return reject(new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId));
         });
       });
-      request.on("error", () => reject(new AgentUnavailableError("AGENT_UNAVAILABLE", "dependency-unavailable", requestId)));
+      request.on("error", () => {
+        logOutcome("uncertain", undefined, "AGENT_UNAVAILABLE");
+        reject(new AgentUnavailableError("AGENT_UNAVAILABLE", "dependency-unavailable", requestId));
+      });
       request.write(body);
       request.end();
     });

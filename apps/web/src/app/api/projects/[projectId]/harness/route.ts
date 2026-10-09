@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { performance } from "node:perf_hooks";
 import { uuidV7Schema } from "@devspace/contracts";
-import { AgentResponseError, createAgentClient } from "../../../../../server/agent-client.js";
+import { createLogger } from "@devspace/diagnostics";
+import { AgentResponseError, AgentUnavailableError, createAgentClient } from "../../../../../server/agent-client.js";
 import { AuthenticationError, assertCsrf, authenticateHeaders } from "../../../../../server/auth.js";
 import { readWebRuntimeConfig } from "../../../../../server/config.js";
 import { getProjectDatabase, ProjectSetupConflictError } from "../../../../../server/database.js";
@@ -14,6 +16,7 @@ import {
 import { readBoundedJsonBody } from "../../../../../server/request-body.js";
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
+const harnessAdmissionLogger = createLogger({ component: "web", subsystem: "harness-admission" });
 
 export async function GET(request: Request, context: { params: Promise<{ projectId: string }> }) {
   try {
@@ -39,6 +42,11 @@ export async function GET(request: Request, context: { params: Promise<{ project
 }
 
 export async function POST(request: Request, context: { params: Promise<{ projectId: string }> }) {
+  const requestReceivedAt = performance.now();
+  let admissionOperation: string | undefined;
+  let admissionSessionId: string | undefined;
+  let admissionWorkspaceId: string | undefined;
+  let admissionHarnessId: string | undefined;
   try {
     const config = readWebRuntimeConfig();
     const actor = await authenticateHeaders(request.headers, config.auth);
@@ -52,10 +60,50 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       return json({ definition: saveCustomHarnessDefinition(database, parsed.definition) });
     }
     if (parsed.action === "create-native") {
-      return json(await createNativeHarnessSession(projectId, actor.identity, parsed.workspaceId, parsed.harnessId, { database, agent }));
+      admissionOperation = "native-harness.start";
+      admissionWorkspaceId = parsed.workspaceId;
+      admissionHarnessId = parsed.harnessId;
+      const result = await createNativeHarnessSession(projectId, actor.identity, parsed.workspaceId, parsed.harnessId, { database, agent });
+      admissionSessionId = result.sessionId;
+      try {
+        harnessAdmissionLogger.info("web.harness.admission.completed", "Native harness admission response is ready.", {
+          phase: "web-request", operationName: admissionOperation, outcome: "success", sessionId: result.sessionId,
+          terminalId: result.terminalId, workspaceId: result.workspaceId, harnessId: result.harnessId,
+          durationMs: Math.max(0, performance.now() - requestReceivedAt)
+        });
+      } catch { /* diagnostics must not affect admission */ }
+      return json(result);
     }
-    return json(await resumeNativeHarnessSession(projectId, actor.identity, parsed.workspaceId, parsed.sessionId, { database, agent }));
+    admissionOperation = "native-harness.resume";
+    admissionSessionId = parsed.sessionId;
+    admissionWorkspaceId = parsed.workspaceId;
+    const result = await resumeNativeHarnessSession(projectId, actor.identity, parsed.workspaceId, parsed.sessionId, { database, agent });
+    try {
+      harnessAdmissionLogger.info("web.harness.admission.completed", "Native harness admission response is ready.", {
+        phase: "web-request", operationName: admissionOperation, outcome: "success", sessionId: result.sessionId,
+        terminalId: result.terminalId, workspaceId: result.workspaceId,
+        durationMs: Math.max(0, performance.now() - requestReceivedAt)
+      });
+    } catch { /* diagnostics must not affect admission */ }
+    return json(result);
   } catch (error) {
+    if (admissionOperation !== undefined) {
+      const uncertain = error instanceof AgentUnavailableError
+        || error instanceof AgentResponseError && (error.code === "HARNESS_ADMISSION_UNCERTAIN" || error.retryable);
+      const errorCode = error instanceof AgentResponseError || error instanceof AgentUnavailableError
+        ? error.code : error instanceof ProjectSetupConflictError ? "PROJECT_SETUP_CONFLICT" : "ADMISSION_FAILED";
+      const requestId = error instanceof AgentResponseError || error instanceof AgentUnavailableError ? error.requestId : undefined;
+      try {
+        harnessAdmissionLogger.warn("web.harness.admission.failed", "Native harness admission response is a failure or uncertain.", {
+          phase: "web-request", operationName: admissionOperation, outcome: uncertain ? "uncertain" : "failure",
+          errorCode, durationMs: Math.max(0, performance.now() - requestReceivedAt),
+          ...(typeof requestId === "string" ? { requestId } : {}),
+          ...(admissionSessionId === undefined ? {} : { sessionId: admissionSessionId }),
+          ...(admissionWorkspaceId === undefined ? {} : { workspaceId: admissionWorkspaceId }),
+          ...(admissionHarnessId === undefined ? {} : { harnessId: admissionHarnessId })
+        });
+      } catch { /* diagnostics must not affect admission */ }
+    }
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     if (error instanceof ProjectSetupConflictError) return json({ message: error.message }, 409);
     if (error instanceof AgentResponseError) return json({ message: error.message, code: error.code }, error.code === "HARNESS_HOME_IN_USE" ? 409 : 422);

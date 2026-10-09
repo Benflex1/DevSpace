@@ -72,6 +72,62 @@ test("codex launch env contains CODEX_HOME and not CLAUDE_CONFIG_DIR", async () 
   expect(createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon"]);
 });
 
+test("reports admission queue wait separately from execution with safe session correlation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-timing-"));
+  roots.push(root);
+  const home = createHarnessHomeStore(root);
+  const timings: Array<Record<string, unknown>> = [];
+  let releaseFirstExec!: () => void;
+  let markFirstExecStarted!: () => void;
+  const firstExecGate = new Promise<void>((resolve) => { releaseFirstExec = resolve; });
+  const firstExecStarted = new Promise<void>((resolve) => { markFirstExecStarted = resolve; });
+  let firstExec = true;
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => await input.measureAdmissionPhase("docker-exec-creation", async () => {
+      if (firstExec) {
+        firstExec = false;
+        markFirstExecStarted();
+        await firstExecGate;
+      }
+    }),
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    onAdmissionTiming: (timing) => timings.push({ ...timing })
+  });
+  const definition = {
+    id: "my-agent", displayName: "My Agent", origin: "custom" as const,
+    launch: { executable: "my-agent", args: [] }, resume: null, environment: {
+      PROVIDER_KEY: { kind: "literal" as const, value: "must-not-appear-in-timing" }
+    }, privateState: { kind: "none" as const }
+  };
+  runtime.registerCustom(definition);
+
+  const first = runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "my-agent", processId, terminalId, processGeneration: 1
+  }, "018f1f34-7000-7000-8000-000000000006");
+  await firstExecStarted;
+  const secondSessionId = "018f1f34-7000-7000-8000-000000000007";
+  const second = runtime.start({
+    projectId, workspaceId: wsB, sessionId: secondSessionId, harnessId: "my-agent",
+    processId: "018f1f34-7000-7000-8000-000000000008",
+    terminalId: "018f1f34-7000-7000-8000-000000000009", processGeneration: 1
+  }, "018f1f34-7000-7000-8000-00000000000a");
+  await Promise.resolve();
+  releaseFirstExec();
+  await Promise.all([first, second]);
+
+  const firstPhases = timings.filter((timing) => timing.sessionId === sessionId);
+  const secondQueueWait = timings.find((timing) => timing.sessionId === secondSessionId && timing.phase === "serialization-wait");
+  expect(firstPhases.map((timing) => timing.phase)).toEqual(expect.arrayContaining([
+    "serialization-wait", "runtime-validation", "docker-exec-creation", "admission-execution", "total-admission"
+  ]));
+  expect(firstPhases[0]).toMatchObject({ requestId: "018f1f34-7000-7000-8000-000000000006", outcome: "success" });
+  expect(secondQueueWait).toMatchObject({
+    requestId: "018f1f34-7000-7000-8000-00000000000a", outcome: "success", durationMs: expect.any(Number)
+  });
+  expect(JSON.stringify(timings)).not.toContain("must-not-appear-in-timing");
+});
+
 test("image codex wins over artifact on start", async () => {
   const { createdExecs, runtime } = await fixture({ imageHasCodex: true });
   await runtime.start({
@@ -490,11 +546,15 @@ test("exec-create failure after materialize releases the lease and keeps home by
   const home = createHarnessHomeStore(root);
   await mkdir(home.persistentHomePath("codex"), { recursive: true });
   await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
+  const timings: Array<Record<string, unknown>> = [];
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
-    createHarnessExec: async () => { throw new Error("exec-create-failed"); },
+    createHarnessExec: async (input) => await input.measureAdmissionPhase("docker-exec-creation", async () => {
+      throw new Error("exec-create-failed");
+    }),
     inspectSlot: async () => ({ state: "present-and-exact" }),
-    imageCodex: { present: true, version: null }
+    imageCodex: { present: true, version: null },
+    onAdmissionTiming: (timing) => timings.push({ ...timing })
   });
   await expect(runtime.start({
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
@@ -502,6 +562,7 @@ test("exec-create failure after materialize releases the lease and keeps home by
   expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
   expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
   await expect(runtime.publicSnapshot(sessionId)).resolves.toMatchObject({ state: "stopped" });
+  expect(timings.find((timing) => timing.phase === "docker-exec-creation")).toMatchObject({ outcome: "failure" });
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
@@ -513,15 +574,20 @@ test("uncertain exec admission keeps the lease and does not destroy the home", a
   const home = createHarnessHomeStore(root);
   await mkdir(home.persistentHomePath("codex"), { recursive: true });
   await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
+  const timings: Array<Record<string, unknown>> = [];
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
-    createHarnessExec: async () => { throw new TaskStartRecoveryRequiredError(); },
+    createHarnessExec: async (input) => await input.measureAdmissionPhase("docker-exec-creation", async () => {
+      throw new TaskStartRecoveryRequiredError();
+    }),
     inspectSlot: async () => ({ state: "present-and-exact" }),
-    imageCodex: { present: true, version: null }
+    imageCodex: { present: true, version: null },
+    onAdmissionTiming: (timing) => timings.push({ ...timing })
   });
   await expect(runtime.start({
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  expect(timings.find((timing) => timing.phase === "docker-exec-creation")).toMatchObject({ outcome: "uncertain" });
   expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1

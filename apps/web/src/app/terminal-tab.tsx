@@ -7,11 +7,12 @@ import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFra
 import { isTerminalAttachableState, isTerminalOpenableState, reconcileTerminalState, terminalSocketCloseAction, terminalStateMessage, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
 export type TerminalView = { id: string; processId: string; title: string; state: string };
 
-export function TerminalTab({ projectId, workspaceId, terminal, active, onRefresh, onTerminalStateChange }: {
+export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHarnessSessionId, onRefresh, onTerminalStateChange }: {
   projectId: string;
   workspaceId: string;
   terminal: TerminalView;
   active: boolean;
+  nativeHarnessSessionId?: string;
   onRefresh: () => void;
   onTerminalStateChange: (terminalId: string, state: string) => void;
 }) {
@@ -22,6 +23,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
   const fitAddon = useRef<FitAddon | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const nativeHarnessSessionIdRef = useRef(nativeHarnessSessionId);
+  nativeHarnessSessionIdRef.current = nativeHarnessSessionId;
   const socket = useRef<WebSocket | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -68,6 +71,18 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
     let currentSocket: WebSocket | null = null;
     let ready = false;
     let terminalEnded = false;
+    let nativeAttachStarted = false;
+    let nativeAttached = false;
+    let nativeFirstOutput = false;
+    const markNativeHarness = (name: string) => {
+      const sessionId = nativeHarnessSessionIdRef.current;
+      if (sessionId === undefined) return;
+      try {
+        performance.mark(name, { detail: {
+          sessionId, workspaceId, terminalId: terminal.id
+        } });
+      } catch { /* performance diagnostics must not affect terminal attachment */ }
+    };
     let disposeResources = () => undefined;
     const requestRefresh = () => {
       onRefreshRef.current();
@@ -131,6 +146,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
       window.addEventListener("resize", scheduleResize);
       const connectSocket = () => {
         if (cancelled || terminalEnded) return;
+        if (!nativeAttachStarted) {
+          nativeAttachStarted = true;
+          markNativeHarness("devspace.native-harness.terminal-attach-started");
+        }
         const webSocket = new WebSocket(`${protocol}//${window.location.host}/api/projects/${projectId}/workspaces/${workspaceId}/terminals/${terminal.id}/stream`, TERMINAL_SUBPROTOCOL);
         webSocket.binaryType = "arraybuffer";
         currentSocket = webSocket;
@@ -143,6 +162,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
           if (!decoded.ok) { webSocket.close(1002); return; }
           if (decoded.frame.type === "ready") {
             ready = true;
+            if (!nativeAttached) {
+              nativeAttached = true;
+              markNativeHarness("devspace.native-harness.terminal-attached");
+            }
             updateState("active");
             onTerminalStateChangeRef.current(terminal.id, "active");
             requestRefresh();
@@ -151,7 +174,14 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, onRefres
             stableConnectionTimer = window.setTimeout(() => { reconnectAttempts = 0; }, 1_000);
             return;
           }
-          if (decoded.frame.type === "output") { terminalInstance.write(decoded.frame.data); return; }
+          if (decoded.frame.type === "output") {
+            if (!nativeFirstOutput) {
+              nativeFirstOutput = true;
+              markNativeHarness("devspace.native-harness.first-terminal-output");
+            }
+            terminalInstance.write(decoded.frame.data);
+            return;
+          }
           terminalEnded = true;
           updateState("closed");
           onTerminalStateChangeRef.current(terminal.id, "closed");
