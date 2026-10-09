@@ -1838,10 +1838,12 @@ export class ManagedWorkspaces {
       phase = "git-migration-stage-fetch";
       phaseStartedAt = performance.now();
       await this.git(["-C", stageTree, "remote", "add", "origin", store.git.originUrl]);
-      await this.git(["-C", stageTree, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath, headCommit]);
+      // loadStoreOwnership validated this Agent-owned bare repository path. Keep file transport
+      // enabled only for these two fetches; protectedGitInvocation denies it everywhere else.
+      await this.git(["-C", stageTree, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath, headCommit]);
       await this.git(["-C", stageTree, "update-ref", `refs/heads/${branchName}`, headCommit]);
       await this.git(["-C", stageTree, "reset", "--hard", headCommit]);
-      await this.git(["-C", stageTree, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
+      await this.git(["-C", stageTree, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
         "+refs/remotes/origin/*:refs/remotes/origin/*"]);
       if (stagedPatch !== "") {
         phase = "git-migration-stage-index";
