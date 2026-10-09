@@ -70,6 +70,7 @@ afterEach(() => {
   roots.length = 0;
   FakeSocket.instances = [];
   xtermState.writes = [];
+  vi.restoreAllMocks();
 });
 
 test("parent refresh after ready does not open a second terminal socket", async () => {
@@ -173,6 +174,36 @@ test("valid PTY output after ready reaches xterm with ANSI and screen-control by
   act(() => { socket?.emitOutput(bytes); });
 
   expect(xtermState.writes).toEqual([bytes]);
+});
+
+test("Native harness terminal marks attachment and first output without recording PTY bytes", async () => {
+  const rootElement = installTerminalTestDom(FakeSocket);
+  const { TerminalTab } = await import("./terminal-tab.js");
+  const mark = vi.spyOn(performance, "mark");
+  const root = createRoot(rootElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(TerminalTab, {
+    projectId, workspaceId, nativeHarnessSessionId: "018f1f34-7000-7000-8000-000000000006",
+    terminal: { id: terminalId, processId: terminalId, title: "Codex", state: "active" },
+    active: true, onRefresh: () => undefined, onTerminalStateChange: () => undefined
+  })); });
+  await settleReact();
+  const socket = FakeSocket.instances[0];
+  expect(socket).toBeDefined();
+  act(() => { socket?.emitReady(); });
+  await settleReact(2);
+  const output = new TextEncoder().encode("private terminal output");
+  act(() => { socket?.emitOutput(output); });
+  await settleReact(2);
+
+  const markNames = mark.mock.calls.map(([name]) => name);
+  expect(markNames).toEqual(expect.arrayContaining([
+    "devspace.native-harness.terminal-attach-started",
+    "devspace.native-harness.terminal-attached",
+    "devspace.native-harness.first-terminal-output"
+  ]));
+  expect(JSON.stringify(mark.mock.calls)).toContain("018f1f34-7000-7000-8000-000000000006");
+  expect(JSON.stringify(mark.mock.calls)).not.toContain("private terminal output");
 });
 
 test("a closed fast-exit terminal receives its one-shot retained output and exit frame", async () => {

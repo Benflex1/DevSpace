@@ -44,6 +44,7 @@ const definition = {
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -85,6 +86,8 @@ test("native harness mutations fail closed on the wrong origin", async () => {
 
 test("native harness mutations succeed with the app origin and CSRF marker", async () => {
   configure();
+  const admissionLines: string[] = [];
+  vi.spyOn(console, "log").mockImplementation((line) => { admissionLines.push(String(line)); });
   mocks.create.mockResolvedValue({ sessionId, terminalId: sessionId, workspaceId, harnessId: "codex" });
   mocks.resume.mockResolvedValue({ sessionId, terminalId: sessionId, workspaceId, harnessId: "codex" });
   mocks.save.mockReturnValue(definition);
@@ -94,4 +97,20 @@ test("native harness mutations succeed with the app origin and CSRF marker", asy
   expect(mocks.create).toHaveBeenCalledOnce();
   expect(mocks.resume).toHaveBeenCalledOnce();
   expect(mocks.save).toHaveBeenCalledWith({}, definition);
+  const admissionRecords = admissionLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(admissionRecords).toEqual(expect.arrayContaining([
+    expect.objectContaining({ event: "web.harness.admission.completed", operationName: "native-harness.start",
+      sessionId, terminalId: sessionId, workspaceId, harnessId: "codex", phase: "web-request",
+      outcome: "success" }),
+    expect.objectContaining({ event: "web.harness.admission.completed", operationName: "native-harness.resume",
+      sessionId, workspaceId, phase: "web-request", outcome: "success" })
+  ]));
+  for (const operationName of ["native-harness.start", "native-harness.resume"]) {
+    const durationMs = admissionRecords.find((record) => record.operationName === operationName)?.durationMs;
+    expect(typeof durationMs).toBe("number");
+    if (typeof durationMs === "number") {
+      expect(Number.isFinite(durationMs)).toBe(true);
+      expect(durationMs).toBeGreaterThanOrEqual(0);
+    }
+  }
 });

@@ -170,6 +170,15 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
 
   const post = async (body: Record<string, unknown>) => {
     const isCreate = body.action === "create-native";
+    const operation = isCreate ? "native-harness.start" : "native-harness.resume";
+    const requestDetail = {
+      action: operation,
+      workspaceId,
+      ...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}),
+      ...(typeof body.harnessId === "string" ? { harnessId: body.harnessId } : {})
+    };
+    try { performance.mark("devspace.native-harness.request-started", { detail: requestDetail }); }
+    catch { /* performance diagnostics must not affect admission */ }
     setPendingAction(isCreate ? "create-native" : "resume");
     setRefreshFailed(false);
     setMessage(null);
@@ -181,6 +190,15 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         body: JSON.stringify(body)
       });
       const payload = await response.json() as { message?: string; sessionId?: string };
+      try {
+        performance.mark(response.ok ? "devspace.native-harness.request-succeeded" : "devspace.native-harness.request-failed", {
+          detail: {
+            ...requestDetail,
+            ...(typeof payload.sessionId === "string" ? { sessionId: payload.sessionId } : {}),
+            statusCode: response.status
+          }
+        });
+      } catch { /* performance diagnostics must not affect admission */ }
       if (!response.ok) {
         setRefreshFailed(true);
         setMessage(payload.message ?? "The harness action failed. Refresh before retrying.");
@@ -196,6 +214,10 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       }
       await refresh(isCreate ? { exactSessionId: awaitingSessionId.current } : undefined);
     } catch {
+      if (!admitted) {
+        try { performance.mark("devspace.native-harness.request-uncertain", { detail: requestDetail }); }
+        catch { /* performance diagnostics must not affect admission */ }
+      }
       setRefreshFailed(true);
       setMessage(admitted
         ? "The session started, but its list could not be refreshed. Retry to attach."
@@ -266,7 +288,9 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         : awaitingProjection
           ? <p className="native-ai-empty" role="status">Waiting for the new session. Retry refresh if needed.</p>
           : terminal !== null
-            ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active} onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
+            ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active}
+                {...(selectedNativeSessionId === null ? {} : { nativeHarnessSessionId: selectedNativeSessionId })}
+                onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange} />
             : <p className="native-ai-empty">Start a harness to open its terminal.</p>}
     </div>
   </section>;

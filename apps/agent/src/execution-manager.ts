@@ -211,6 +211,11 @@ export type HarnessAdmissionReconciliation =
   | "settled"
   | "uncertain";
 
+export type HarnessAdmissionPhaseRunner = <T>(
+  phase: "workspace-runtime-validation" | "executable-probe" | "docker-exec-creation",
+  operation: () => Promise<T>
+) => Promise<T>;
+
 export type TerminalResizeFailureDiagnostic = {
   readonly processId: string;
   readonly terminalId: string;
@@ -838,24 +843,28 @@ export class ExecutionManager {
     sessionId: string;
     processGeneration: number;
     leaseId: string | null;
+    measureAdmissionPhase?: HarnessAdmissionPhaseRunner;
   }): Promise<void> {
     const harnessSessionId = uuidV7Schema.parse(input.sessionId);
     if (!Number.isInteger(input.processGeneration) || input.processGeneration < 1) {
       throw new Error("harness-process-generation-invalid");
     }
-    const context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    const measureAdmissionPhase: HarnessAdmissionPhaseRunner = input.measureAdmissionPhase
+      ?? ((_phase, operation) => operation());
+    const context = await measureAdmissionPhase("workspace-runtime-validation", async () =>
+      await this.managed.executionContext(input.projectId, input.workspaceId));
     const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId);
     if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
       resource: { type: "terminal", id: input.terminalId }, action: "create"
     });
     this.harnessProcessIds.add(input.processId);
-    await this.createExec(context, {
+    await measureAdmissionPhase("docker-exec-creation", async () => await this.createExec(context, {
       kind: "terminal", executionRole: "harness", harnessSessionId, harnessGeneration: input.processGeneration,
       harnessLeaseId: input.leaseId,
       processId: input.processId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
       successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
       environment: { TERM: "xterm-256color", ...input.environment }, attachStdin: true, tty: true, operationId: null
-    });
+    }));
   }
 
   async reconcileHarnessAdmission(input: HarnessAdmissionIdentity): Promise<HarnessAdmissionReconciliation> {

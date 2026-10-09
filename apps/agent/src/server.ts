@@ -1,5 +1,6 @@
 import { chmod, link, lstat, unlink } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 import {
@@ -375,13 +376,16 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     inspectSlot: async (workspaceId) => await managed.observeHarnessSlot(workspaceId),
     recreateWorkspace: async (input) => await managed.recreateHarnessSlot(input.projectId, input.workspaceId),
     probeImageCodex: async (input) => {
-      const context = await managed.executionContext(input.projectId, input.workspaceId);
-      return probeImageCodex(new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
-        context.ownership.developmentContainer.id);
+      const context = await input.measureAdmissionPhase("workspace-runtime-validation", async () =>
+        await managed.executionContext(input.projectId, input.workspaceId));
+      return await input.measureAdmissionPhase("executable-probe", async () =>
+        await probeImageCodex(new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
+          context.ownership.developmentContainer.id));
     },
     stageNativeCodex: async (input) => {
-      const context = await managed.executionContext(input.projectId, input.workspaceId);
-      return stageAgentCodexIntoContainer({
+      const context = await input.measureAdmissionPhase("workspace-runtime-validation", async () =>
+        await managed.executionContext(input.projectId, input.workspaceId));
+      return await stageAgentCodexIntoContainer({
         docker: new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()),
         containerId: context.ownership.developmentContainer.id,
         stateRoot: managedRoots.state,
@@ -390,15 +394,20 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
         onStagingDiagnostic: (diagnostic) => logger.error(
           "agent.harness.codex_artifact_staging_failed",
           "Native Codex artifact staging failed.",
-          { ...diagnostic, workspaceId: input.workspaceId }
+          { ...diagnostic, workspaceId: input.workspaceId, sessionId: input.sessionId }
         ),
         onStagingTiming: (timing) => logger.info(
           "agent.harness.codex_artifact_staging_timing",
           "Native Codex artifact staging phase completed.",
-          { ...timing, workspaceId: input.workspaceId }
+          { ...timing, workspaceId: input.workspaceId, sessionId: input.sessionId }
         )
       });
-    }
+    },
+    onAdmissionTiming: (timing) => logger.info(
+      "agent.harness.admission.phase",
+      "Native harness admission phase completed.",
+      timing
+    )
   });
   harnessHooks.onHarnessSettled = async (event) => {
     await harnessRuntime.settleByProcess(event.processId);
@@ -443,6 +452,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   // Node's request listener is intentionally promise-backed; all handler paths produce a response.
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
   const server = http.createServer(async (request, response) => {
+    const requestReceivedAt = performance.now();
     const fallbackRequestId = createId();
     const url = new URL(request.url ?? "/", "http://agent.local");
     const aiMutationEndpoint = (["ai-session.start", "ai-session.resume", "ai-session.turn.send", "ai-session.turn.interrupt", "ai-session.approval.respond", "ai-session.input.respond", "ai-session.stop"] as const)
@@ -826,6 +836,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       catch { return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" }); }
       const envelope = z.strictObject({ data: z.unknown() }).safeParse(raw);
       if (!envelope.success) return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
+      let sessionId: string | undefined;
+      let workspaceId: string | undefined;
+      let terminalId: string | undefined;
+      let processGeneration: number | undefined;
+      const operationName = url.pathname.endsWith("/start") ? "native-harness.start"
+        : "native-harness.resume";
       try {
         if (url.pathname.endsWith("/inspect")) {
           const data = nativeHarnessInspectDataSchema.parse(envelope.data.data);
@@ -834,29 +850,54 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
             : await harnessRuntime.capability(data.sessionId, data.definition);
           return sendJson(response, 200, { meta: meta(requestId, now), data: nativeHarnessInspectResponseSchema.parse(capability) });
         }
-        let sessionId: string;
         if (url.pathname.endsWith("/start")) {
           const data = nativeHarnessStartDataSchema.parse(envelope.data.data);
           sessionId = data.sessionId;
+          workspaceId = data.workspaceId;
+          terminalId = data.terminalId;
+          processGeneration = data.processGeneration;
           if (data.definition !== undefined) harnessRuntime.registerCustom(data.definition);
-          await harnessRuntime.start(data);
+          await harnessRuntime.start(data, requestId);
         } else {
           const data = nativeHarnessResumeDataSchema.parse(envelope.data.data);
           sessionId = data.sessionId;
+          workspaceId = data.workspaceId;
+          terminalId = data.terminalId;
+          processGeneration = data.processGeneration;
           await harnessRuntime.resumeExec({
             sessionId: data.sessionId, projectId: data.projectId, processId: data.processId,
             terminalId: data.terminalId, processGeneration: data.processGeneration,
             ...(data.definition === undefined ? {} : { definition: data.definition })
-          });
+          }, requestId);
         }
+        if (sessionId === undefined) throw new Error("native-harness-session-id-missing");
         const snapshot = await harnessRuntime.publicSnapshot(sessionId);
+        try {
+          logger.info("agent.harness.admission.completed", "Native harness admission completed.", {
+            requestId, sessionId, ...(workspaceId === undefined ? {} : { workspaceId }),
+            ...(terminalId === undefined ? {} : { terminalId }), ...(processGeneration === undefined ? {} : { processGeneration }),
+            operationName, phase: "agent-request", outcome: "success", observedState: snapshot.state,
+            durationMs: Math.max(0, performance.now() - requestReceivedAt)
+          });
+        } catch { /* diagnostics must not affect the admission response */ }
         return sendJson(response, 200, { meta: meta(requestId, now), data: { ok: true, settled: snapshot.state !== "live" } });
       } catch (error) {
         const code = error instanceof HarnessRuntimeError || error instanceof HarnessHomeError ? error.code : "AGENT_INTERNAL_ERROR";
         const status = code === "HARNESS_ADMISSION_UNCERTAIN" ? 503
           : code === "HARNESS_HOME_IN_USE" || code === "RESOURCE_STATE_CONFLICT" || code === "HARNESS_DEFINITION_CONFLICT" ? 409
             : code === "AI_CAPABILITY_UNSUPPORTED" || code === "HARNESS_SLOT_MOUNT_MISSING" || code === "HARNESS_EXECUTABLE_UNAVAILABLE" ? 422
-              : code === "RESOURCE_NOT_FOUND" ? 404 : 500;
+            : code === "RESOURCE_NOT_FOUND" ? 404 : 500;
+        if (!url.pathname.endsWith("/inspect")) {
+          try {
+            logger.warn("agent.harness.admission.failed", "Native harness admission did not complete.", {
+              requestId, operationName, phase: "agent-request",
+              outcome: code === "HARNESS_ADMISSION_UNCERTAIN" ? "uncertain" : "failure",
+              errorCode: code, statusCode: status, durationMs: Math.max(0, performance.now() - requestReceivedAt),
+              ...(typeof sessionId === "string" ? { sessionId } : {}), ...(typeof workspaceId === "string" ? { workspaceId } : {}),
+              ...(typeof terminalId === "string" ? { terminalId } : {}), ...(typeof processGeneration === "number" ? { processGeneration } : {})
+            });
+          } catch { /* diagnostics must not affect the admission response */ }
+        }
         return sendJson(response, status, {
           meta: meta(requestId, now),
           error: {

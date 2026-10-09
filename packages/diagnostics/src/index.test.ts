@@ -40,22 +40,43 @@ describe("structured diagnostics logging", () => {
     const fields = sanitizeLogFields({
       phase: "artifact-entry-readback", failureCode: "codex-artifact-readback-timeout", errorClass: "Error",
       containerId: "a".repeat(64), artifactLayout: "standalone-package", entryRelative: "bin/codex",
-      elapsedMs: 10_000, cleanupElapsedMs: 12,
+      elapsedMs: 10_000, cleanupElapsedMs: 12, cacheState: "hit",
       hostPath: "/private/host/secret", stderr: "credential=hidden", entryRelativeBad: "../../etc/passwd"
     });
 
     expect(fields).toMatchObject({
       phase: "artifact-entry-readback", failureCode: "codex-artifact-readback-timeout", errorClass: "Error",
       containerId: "a".repeat(64), artifactLayout: "standalone-package", entryRelative: "bin/codex",
-      elapsedMs: 10_000, cleanupElapsedMs: 12
+      elapsedMs: 10_000, cleanupElapsedMs: 12, cacheState: "hit"
     });
     expect(fields).not.toHaveProperty("hostPath");
     expect(fields).not.toHaveProperty("stderr");
     expect(sanitizeLogFields({
       phase: "unexpected", failureCode: "secret=/private/path", errorClass: "VeryLongUntrustedClassName",
       containerId: "not-a-container", artifactLayout: "unknown-layout", entryRelative: "../secret",
-      elapsedMs: -1, cleanupElapsedMs: 999_999_999
+      elapsedMs: -1, cleanupElapsedMs: 999_999_999, cacheState: "private-cache" as never
     })).toEqual({});
+  });
+
+  test("keeps bounded native admission timing identifiers and rejects sensitive timing fields", () => {
+    const sessionId = "018f1f34-7000-7000-8000-000000000003";
+    const terminalId = "018f1f34-7000-7000-8000-000000000005";
+    expect(sanitizeLogFields({
+      requestId: "018f1f34-7000-7000-8000-000000000006", sessionId, terminalId,
+      harnessId: "codex", processGeneration: 2, phase: "serialization-wait",
+      durationMs: 18.75, outcome: "success", environment: { CODEX_HOME: "/private" },
+      prompt: "do not log", terminalOutput: "do not log", privatePath: "/private/home"
+    })).toEqual({
+      requestId: "018f1f34-7000-7000-8000-000000000006", sessionId, terminalId,
+      harnessId: "codex", processGeneration: 2, phase: "serialization-wait",
+      durationMs: 18.75, outcome: "success"
+    });
+    expect(sanitizeLogFields({
+      sessionId: "not-an-id", harnessId: "/private/path", processGeneration: 0,
+      phase: "private-home-copy", outcome: "unknown" as never
+    })).toEqual({});
+    expect(sanitizeLogFields({ phase: "workspace-runtime-validation", durationMs: 1, outcome: "success" }))
+      .toEqual({ phase: "workspace-runtime-validation", durationMs: 1, outcome: "success" });
   });
 
   test("filters debug records at the safe info default and enables them explicitly", () => {

@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import {
   harnessExecutionAdmissionUncertain,
   type HarnessAdmissionIdentity,
+  type HarnessAdmissionPhaseRunner,
   type HarnessAdmissionReconciliation,
   type HarnessRecoveryIdentity,
   type HarnessRecoveryReport
@@ -23,7 +25,7 @@ import {
 } from "./harness-codex-discovery.js";
 import type { ExecutableSource } from "./harness-executable.js";
 import { CODEX_HARNESS_ID, CODEX_PRESET, HARNESS_SLOT_ENV } from "./harness-presets.js";
-import type { HarnessHomeStore } from "./harness-home.js";
+import { HarnessHomeError, type HarnessHomeStore } from "./harness-home.js";
 import type { HarnessSlotMountObservation } from "./workspace-runtime.js";
 import * as z from "zod";
 
@@ -43,6 +45,27 @@ export type CustomHarnessDefinition = {
   environment: Record<string, { kind: "literal"; value: string }>;
   privateState: { kind: "none" };
 };
+
+type HarnessAdmissionOperation = "native-harness.start" | "native-harness.resume";
+type HarnessAdmissionPhase = "serialization-wait" | "admission-execution" | "total-admission"
+  | "runtime-validation" | "workspace-validation" | "executable-probe" | "codex-session-baseline"
+  | "workspace-runtime-validation" | "harness-home-lease" | "harness-home-materialization"
+  | "docker-exec-creation";
+type HarnessAdmissionOutcome = "success" | "failure" | "uncertain";
+type HarnessAdmissionTiming = {
+  readonly operationName: HarnessAdmissionOperation;
+  readonly phase: HarnessAdmissionPhase;
+  readonly outcome: HarnessAdmissionOutcome;
+  readonly durationMs: number;
+  readonly requestId?: string;
+  readonly sessionId: string;
+  readonly workspaceId?: string;
+  readonly terminalId?: string;
+  readonly harnessId?: string;
+  readonly processGeneration: number;
+  readonly errorCode?: string;
+};
+type HarnessAdmissionTimingContext = Omit<HarnessAdmissionTiming, "phase" | "outcome" | "durationMs" | "errorCode">;
 
 type SessionRecord = {
   workspaceId: string;
@@ -83,17 +106,23 @@ export interface HarnessRuntimeDependencies {
     projectId: string; workspaceId: string; processId: string; terminalId: string;
     command: readonly string[]; environment: Readonly<Record<string, string>>;
     sessionId: string; processGeneration: number; leaseId: string | null;
+    measureAdmissionPhase: HarnessAdmissionPhaseRunner;
   }) => Promise<void>;
   readonly reconcileHarnessAdmission?: (input: HarnessAdmissionIdentity) => Promise<HarnessAdmissionReconciliation>;
   readonly observeHarnessRecovery?: () => readonly HarnessRecoveryReport[];
   readonly inspectSlot: (workspaceId: string) => Promise<HarnessSlotMountObservation>;
   readonly recreateWorkspace?: (input: { workspaceId: string; projectId: string }) => Promise<HarnessSlotMountObservation>;
   readonly imageCodex?: { present: boolean; version: string | null };
-  readonly probeImageCodex?: (input: { projectId: string; workspaceId: string }) => Promise<{ present: boolean; version: string | null }>;
+  readonly probeImageCodex?: (input: {
+    projectId: string; workspaceId: string; measureAdmissionPhase: HarnessAdmissionPhaseRunner;
+  }) => Promise<{ present: boolean; version: string | null }>;
   readonly artifact?: { available: boolean; version: string | null; command: readonly string[] };
-  readonly stageNativeCodex?: (input: { projectId: string; workspaceId: string }) => Promise<{
+  readonly stageNativeCodex?: (input: {
+    projectId: string; workspaceId: string; sessionId: string; measureAdmissionPhase: HarnessAdmissionPhaseRunner;
+  }) => Promise<{
     entrypointPath: string; reportedVersion: string | null;
   }>;
+  readonly onAdmissionTiming?: (timing: HarnessAdmissionTiming) => void;
   readonly now?: () => Date;
 }
 
@@ -165,6 +194,69 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     return run;
   };
 
+  const reportAdmissionTiming = (
+    context: HarnessAdmissionTimingContext,
+    phase: HarnessAdmissionPhase,
+    durationMs: number,
+    outcome: HarnessAdmissionOutcome,
+    error?: unknown
+  ): void => {
+    if (dependencies.onAdmissionTiming === undefined) return;
+    const errorCode = error instanceof HarnessRuntimeError || error instanceof HarnessHomeError
+      ? error.code
+      : error !== undefined && harnessExecutionAdmissionUncertain(error) ? "HARNESS_ADMISSION_UNCERTAIN"
+        : error === undefined ? undefined : "AGENT_INTERNAL_ERROR";
+    try {
+      dependencies.onAdmissionTiming({
+        ...context, phase, durationMs: Math.max(0, durationMs), outcome,
+        ...(errorCode === undefined ? {} : { errorCode })
+      });
+    } catch { /* diagnostic callbacks must not affect admission */ }
+  };
+
+  const measureAdmissionPhase = async <T>(
+    context: HarnessAdmissionTimingContext,
+    phase: HarnessAdmissionPhase,
+    operation: () => Promise<T>
+  ): Promise<T> => {
+    const startedAt = performance.now();
+    try {
+      const result = await operation();
+      reportAdmissionTiming(context, phase, performance.now() - startedAt, "success");
+      return result;
+    } catch (error) {
+      const outcome = ((error instanceof HarnessRuntimeError && error.code === "HARNESS_ADMISSION_UNCERTAIN")
+        || harnessExecutionAdmissionUncertain(error)) ? "uncertain" : "failure";
+      reportAdmissionTiming(context, phase, performance.now() - startedAt, outcome, error);
+      throw error;
+    }
+  };
+
+  const runAdmission = <T>(
+    context: HarnessAdmissionTimingContext,
+    operation: () => Promise<T>
+  ): Promise<T> => {
+    const queuedAt = performance.now();
+    return exclusive(async () => {
+      const executionStartedAt = performance.now();
+      reportAdmissionTiming(context, "serialization-wait", executionStartedAt - queuedAt, "success");
+      let outcome: HarnessAdmissionOutcome = "success";
+      let failure: unknown;
+      try {
+        return await operation();
+      } catch (error) {
+        failure = error;
+        outcome = ((error instanceof HarnessRuntimeError && error.code === "HARNESS_ADMISSION_UNCERTAIN")
+          || harnessExecutionAdmissionUncertain(error)) ? "uncertain" : "failure";
+        throw error;
+      } finally {
+        const completedAt = performance.now();
+        reportAdmissionTiming(context, "admission-execution", completedAt - executionStartedAt, outcome, failure);
+        reportAdmissionTiming(context, "total-admission", completedAt - queuedAt, outcome, failure);
+      }
+    });
+  };
+
   const releaseAdmittedHome = async (workspaceId: string, harnessId: string, leaseId: string | null) => {
     if (leaseId === null) return;
     try { await dependencies.home.writeBackAndClear({ workspaceId, leaseId }); }
@@ -225,7 +317,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     await saveSession(identity.sessionId, record);
   };
 
-  const probeCodex = async (input: { projectId: string; workspaceId: string }) => dependencies.probeImageCodex !== undefined
+  const probeCodex = async (input: { projectId: string; workspaceId: string; measureAdmissionPhase: HarnessAdmissionPhaseRunner }) => dependencies.probeImageCodex !== undefined
     ? await dependencies.probeImageCodex(input)
     : { present: dependencies.imageCodex?.present === true, version: dependencies.imageCodex?.version ?? null };
 
@@ -237,12 +329,15 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     return value;
   };
 
-  const stageCodexCommand = async (input: { projectId: string; workspaceId: string }, base: readonly string[]) => {
+  const stageCodexCommand = async (
+    input: { projectId: string; workspaceId: string; sessionId: string },
+    base: readonly string[], measureAdmissionPhase: HarnessAdmissionPhaseRunner
+  ) => {
     if (dependencies.stageNativeCodex === undefined) {
       throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available in the workspace image or as an Agent artifact.");
     }
     try {
-      const staged = await dependencies.stageNativeCodex(input);
+      const staged = await dependencies.stageNativeCodex({ ...input, measureAdmissionPhase });
       return {
         command: [assertInContainerEntrypoint(staged.entrypointPath), ...base.slice(1)],
         executableSource: { kind: "agent-artifact" as const, reportedVersion: staged.reportedVersion }
@@ -309,64 +404,82 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     async start(input: {
       projectId: string; workspaceId: string; sessionId: string; harnessId: string;
       processId: string; terminalId: string; processGeneration: number;
-    }) {
-      return exclusive(async () => {
-        const existingEarly = await loadSession(input.sessionId).catch(() => null);
-        if (existingEarly !== null && existingEarly.processId === input.processId
-          && existingEarly.processGeneration === input.processGeneration && existingEarly.state !== "live") {
-          if (existingEarly.state === "lost") throw new HarnessRuntimeError(
-            "HARNESS_ADMISSION_UNCERTAIN", "The exact harness process was lost; reconcile its Agent state before completing admission."
-          );
-          return {};
-        }
-        if (existingEarly?.recoveryPending === true) {
-          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A lost harness process is still being recovered.");
-        }
-        if (existingEarly?.state === "live" && existingEarly.processId === input.processId) {
-          if (existingEarly.workspaceId !== input.workspaceId || existingEarly.harnessId !== input.harnessId
-            || existingEarly.processGeneration !== input.processGeneration) {
-            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The retry does not match the live harness generation.");
+    }, requestId?: string) {
+      const timingContext: HarnessAdmissionTimingContext = {
+        operationName: "native-harness.start", sessionId: input.sessionId, workspaceId: input.workspaceId,
+        terminalId: input.terminalId, harnessId: input.harnessId, processGeneration: input.processGeneration,
+        ...(requestId === undefined ? {} : { requestId })
+      };
+      return runAdmission(timingContext, async () => {
+        const preflight = await measureAdmissionPhase(timingContext, "runtime-validation", async () => {
+          const existingEarly = await loadSession(input.sessionId).catch(() => null);
+          if (existingEarly !== null && existingEarly.processId === input.processId
+            && existingEarly.processGeneration === input.processGeneration && existingEarly.state !== "live") {
+            if (existingEarly.state === "lost") throw new HarnessRuntimeError(
+              "HARNESS_ADMISSION_UNCERTAIN", "The exact harness process was lost; reconcile its Agent state before completing admission."
+            );
+            return { kind: "complete" as const };
           }
-          liveByWorkspace.set(input.workspaceId, input.sessionId);
-          if (existingEarly.admission === "uncertain") {
-            await reconcileUncertainAdmission({
-              projectId: input.projectId, workspaceId: input.workspaceId, processId: input.processId,
-              terminalId: input.terminalId, sessionId: input.sessionId,
-              processGeneration: input.processGeneration, leaseId: existingEarly.leaseId
-            });
+          if (existingEarly?.recoveryPending === true) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A lost harness process is still being recovered.");
           }
-          return {};
-        }
-        if ((existingEarly !== null && (existingEarly.state === "live" || existingEarly.leaseId !== null))
-          || (liveByWorkspace.has(input.workspaceId) && liveByWorkspace.get(input.workspaceId) !== input.sessionId)
-          || await workspaceHarnessBusy(input.workspaceId, input.sessionId)) {
-          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A native harness is already live in this workspace.");
-        }
-        const definition = definitionOf(input.harnessId);
-        const env: Record<string, string> = {};
-        for (const [name, binding] of Object.entries(definition.environment ?? {})) {
-          if (binding.kind === "literal") env[name] = binding.value;
-        }
+          if (existingEarly?.state === "live" && existingEarly.processId === input.processId) {
+            if (existingEarly.workspaceId !== input.workspaceId || existingEarly.harnessId !== input.harnessId
+              || existingEarly.processGeneration !== input.processGeneration) {
+              throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The retry does not match the live harness generation.");
+            }
+            liveByWorkspace.set(input.workspaceId, input.sessionId);
+            if (existingEarly.admission === "uncertain") {
+              await reconcileUncertainAdmission({
+                projectId: input.projectId, workspaceId: input.workspaceId, processId: input.processId,
+                terminalId: input.terminalId, sessionId: input.sessionId,
+                processGeneration: input.processGeneration, leaseId: existingEarly.leaseId
+              });
+            }
+            return { kind: "complete" as const };
+          }
+          if ((existingEarly !== null && (existingEarly.state === "live" || existingEarly.leaseId !== null))
+            || (liveByWorkspace.has(input.workspaceId) && liveByWorkspace.get(input.workspaceId) !== input.sessionId)
+            || await workspaceHarnessBusy(input.workspaceId, input.sessionId)) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A native harness is already live in this workspace.");
+          }
+          const definition = definitionOf(input.harnessId);
+          const env: Record<string, string> = {};
+          for (const [name, binding] of Object.entries(definition.environment ?? {})) {
+            if (binding.kind === "literal") env[name] = binding.value;
+          }
+          return {
+            kind: "admit" as const, previous: existingEarly, definition, env,
+            command: [definition.launch.executable, ...definition.launch.args]
+          };
+        });
+        if (preflight.kind === "complete") return {};
+        const { previous, definition, env } = preflight;
         let leaseId: string | null = null;
-        let command = [definition.launch.executable, ...definition.launch.args];
+        let command = preflight.command;
         let executableSource: ExecutableSource | null = null;
-        const previous = existingEarly;
-        const discoveryBaseline = dedicatedHome(input.harnessId) && (previous === null || previous.nativeSessionId === null)
-          ? await codexSessionIdBaseline(dependencies.home.persistentHomePath(CODEX_HARNESS_ID))
+        const needsDiscoveryBaseline = dedicatedHome(input.harnessId) && (previous === null || previous.nativeSessionId === null);
+        const discoveryBaseline = needsDiscoveryBaseline
+          ? await measureAdmissionPhase(timingContext, "codex-session-baseline", async () =>
+            await codexSessionIdBaseline(dependencies.home.persistentHomePath(CODEX_HARNESS_ID)))
           : undefined;
         try {
           if (dedicatedHome(input.harnessId)) {
-            let slot = await dependencies.inspectSlot(input.workspaceId);
-            if (slot.state !== "present-and-exact") {
-              if (dependencies.recreateWorkspace === undefined) {
-                throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
-              }
-              slot = await dependencies.recreateWorkspace({ workspaceId: input.workspaceId, projectId: input.projectId });
+            await measureAdmissionPhase(timingContext, "workspace-validation", async () => {
+              let slot = await dependencies.inspectSlot(input.workspaceId);
               if (slot.state !== "present-and-exact") {
-                throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                if (dependencies.recreateWorkspace === undefined) {
+                  throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                }
+                slot = await dependencies.recreateWorkspace({ workspaceId: input.workspaceId, projectId: input.projectId });
+                if (slot.state !== "present-and-exact") {
+                  throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                }
               }
-            }
-            const probed = await probeCodex(input);
+            });
+            const probed = await probeCodex({
+              ...input, measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(timingContext, phase, operation)
+            });
             const stageAfterMaterialize = !probed.present;
             if (probed.present) {
               executableSource = { kind: "image-path", command: "codex", reportedVersion: probed.version };
@@ -374,17 +487,20 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
             } else if (dependencies.stageNativeCodex === undefined) {
               throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available in the workspace image or as an Agent artifact.");
             }
-            const lease = await dependencies.home.acquireLease({
-              harnessId: input.harnessId, workspaceId: input.workspaceId,
-              aiSessionId: input.sessionId, processGeneration: input.processGeneration
-            });
+            const lease = await measureAdmissionPhase(timingContext, "harness-home-lease", async () =>
+              await dependencies.home.acquireLease({
+                harnessId: input.harnessId, workspaceId: input.workspaceId,
+                aiSessionId: input.sessionId, processGeneration: input.processGeneration
+              }));
             leaseId = lease.leaseId;
-            await dependencies.home.materialize({
-              workspaceId: input.workspaceId, harnessId: input.harnessId, leaseId: lease.leaseId
-            });
+            await measureAdmissionPhase(timingContext, "harness-home-materialization", async () =>
+              await dependencies.home.materialize({
+                workspaceId: input.workspaceId, harnessId: input.harnessId, leaseId: lease.leaseId
+              }));
             env.CODEX_HOME = HARNESS_SLOT_ENV;
             if (stageAfterMaterialize) {
-              const staged = await stageCodexCommand(input, command);
+              const staged = await stageCodexCommand(input, command,
+                (phase, operation) => measureAdmissionPhase(timingContext, phase, operation));
               command = staged.command;
               executableSource = staged.executableSource;
             }
@@ -401,7 +517,8 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           await dependencies.createHarnessExec({
             projectId: input.projectId, workspaceId: input.workspaceId,
             processId: input.processId, terminalId: input.terminalId,
-            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId
+            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId,
+            measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(timingContext, phase, operation)
           });
         } catch (error) {
           if (harnessExecutionAdmissionUncertain(error)) {
@@ -463,81 +580,100 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     async resumeExec(input: {
       sessionId: string; projectId: string; processId: string; terminalId: string; processGeneration: number;
       definition?: CustomHarnessDefinition;
-    }) {
-      return exclusive(async () => {
-        const record = await loadSession(input.sessionId);
-        if (record.state === "live" && record.processId === input.processId && record.processGeneration === input.processGeneration) {
-          liveByWorkspace.set(record.workspaceId, input.sessionId);
-          if (record.admission === "uncertain") {
-            await reconcileUncertainAdmission({
-              projectId: input.projectId, workspaceId: record.workspaceId, processId: input.processId,
-              terminalId: input.terminalId, sessionId: input.sessionId,
-              processGeneration: input.processGeneration, leaseId: record.leaseId
-            });
+    }, requestId?: string) {
+      const timingContext: HarnessAdmissionTimingContext = {
+        operationName: "native-harness.resume", sessionId: input.sessionId,
+        terminalId: input.terminalId, processGeneration: input.processGeneration,
+        ...(requestId === undefined ? {} : { requestId })
+      };
+      return runAdmission(timingContext, async () => {
+        const preflight = await measureAdmissionPhase(timingContext, "runtime-validation", async () => {
+          const record = await loadSession(input.sessionId);
+          if (record.state === "live" && record.processId === input.processId && record.processGeneration === input.processGeneration) {
+            liveByWorkspace.set(record.workspaceId, input.sessionId);
+            if (record.admission === "uncertain") {
+              await reconcileUncertainAdmission({
+                projectId: input.projectId, workspaceId: record.workspaceId, processId: input.processId,
+                terminalId: input.terminalId, sessionId: input.sessionId,
+                processGeneration: input.processGeneration, leaseId: record.leaseId
+              });
+            }
+            return { kind: "complete" as const };
           }
-          return { command: [], env: {} };
-        }
-        if (record.processId === input.processId && record.processGeneration === input.processGeneration
-          && record.state !== "live") {
-          if (record.state === "lost") throw new HarnessRuntimeError(
-            "HARNESS_ADMISSION_UNCERTAIN", "The exact harness process was lost; reconcile its Agent state before completing admission."
-          );
-          return { command: [], env: {} };
-        }
-        if (record.recoveryPending === true) {
-          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A lost harness process is still being recovered.");
-        }
-        if (input.definition !== undefined) {
-          if (input.definition.id !== record.harnessId) {
-            throw new HarnessRuntimeError("HARNESS_DEFINITION_CONFLICT", "The harness definition does not match this session.");
+          if (record.processId === input.processId && record.processGeneration === input.processGeneration
+            && record.state !== "live") {
+            if (record.state === "lost") throw new HarnessRuntimeError(
+              "HARNESS_ADMISSION_UNCERTAIN", "The exact harness process was lost; reconcile its Agent state before completing admission."
+            );
+            return { kind: "complete" as const };
           }
-          const digest = authorityDigest(input.definition);
-          if (record.definitionDigest !== null && digest !== record.definitionDigest) {
-            throw new HarnessRuntimeError("HARNESS_DEFINITION_CONFLICT", "The harness definition changed since this session started.");
+          if (record.recoveryPending === true) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A lost harness process is still being recovered.");
           }
-          customs.set(input.definition.id, input.definition);
-        }
-        if (input.processGeneration !== record.processGeneration + 1) {
-          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The harness generation is stale.");
-        }
-        if (dedicatedHome(record.harnessId) && record.leaseId !== null) {
-          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The dedicated harness home is still leased to a recovered process.");
-        }
-        if (record.state === "live" || liveByWorkspace.has(record.workspaceId)) {
-          throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A native harness is already live in this workspace.");
-        }
-        const definition = definitionOf(record.harnessId);
-        const classified = classifyResumeArgv(definition.resume);
-        if (classified.kind === "none") throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "Resume is not configured.");
-        if (classified.kind === "native-id" && (record.nativeSessionId === null || record.nativeSessionId === undefined)) {
-          throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "A native session id is not available.");
-        }
-        if (dedicatedHome(record.harnessId) && classified.kind === "native-id"
-          && !uuidV7Schema.safeParse(record.nativeSessionId).success) {
-          throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "A canonical Codex conversation id is not available.");
-        }
-        let command: string[];
-        if (classified.kind === "provider-handled") command = [definition.resume!.executable, ...definition.resume!.args];
-        else {
-          const substituted = substituteResumeArgv(definition.resume!, record.nativeSessionId!);
-          command = [substituted.executable, ...substituted.args];
-        }
+          if (input.definition !== undefined) {
+            if (input.definition.id !== record.harnessId) {
+              throw new HarnessRuntimeError("HARNESS_DEFINITION_CONFLICT", "The harness definition does not match this session.");
+            }
+            const digest = authorityDigest(input.definition);
+            if (record.definitionDigest !== null && digest !== record.definitionDigest) {
+              throw new HarnessRuntimeError("HARNESS_DEFINITION_CONFLICT", "The harness definition changed since this session started.");
+            }
+            customs.set(input.definition.id, input.definition);
+          }
+          if (input.processGeneration !== record.processGeneration + 1) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The harness generation is stale.");
+          }
+          if (dedicatedHome(record.harnessId) && record.leaseId !== null) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The dedicated harness home is still leased to a recovered process.");
+          }
+          if (record.state === "live" || liveByWorkspace.has(record.workspaceId)) {
+            throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "A native harness is already live in this workspace.");
+          }
+          const definition = definitionOf(record.harnessId);
+          const classified = classifyResumeArgv(definition.resume);
+          if (classified.kind === "none") throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "Resume is not configured.");
+          if (classified.kind === "native-id" && (record.nativeSessionId === null || record.nativeSessionId === undefined)) {
+            throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "A native session id is not available.");
+          }
+          if (dedicatedHome(record.harnessId) && classified.kind === "native-id"
+            && !uuidV7Schema.safeParse(record.nativeSessionId).success) {
+            throw new HarnessRuntimeError("AI_CAPABILITY_UNSUPPORTED", "A canonical Codex conversation id is not available.");
+          }
+          const command = classified.kind === "provider-handled"
+            ? [definition.resume!.executable, ...definition.resume!.args]
+            : (() => {
+              const substituted = substituteResumeArgv(definition.resume!, record.nativeSessionId!);
+              return [substituted.executable, ...substituted.args];
+            })();
+          return { kind: "resume" as const, record, definition, command };
+        });
+        if (preflight.kind === "complete") return { command: [], env: {} };
+        const { record, definition } = preflight;
+        const phaseContext: HarnessAdmissionTimingContext = {
+          ...timingContext, workspaceId: record.workspaceId, harnessId: record.harnessId
+        };
+        let command = preflight.command;
         const env: Record<string, string> = {};
         let leaseId: string | null = null;
         let executableSource = record.executableSource;
         try {
           if (dedicatedHome(record.harnessId)) {
-            let slot = await dependencies.inspectSlot(record.workspaceId);
-            if (slot.state !== "present-and-exact") {
-              if (dependencies.recreateWorkspace === undefined) {
-                throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
-              }
-              slot = await dependencies.recreateWorkspace({ workspaceId: record.workspaceId, projectId: input.projectId });
+            await measureAdmissionPhase(phaseContext, "workspace-validation", async () => {
+              let slot = await dependencies.inspectSlot(record.workspaceId);
               if (slot.state !== "present-and-exact") {
-                throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                if (dependencies.recreateWorkspace === undefined) {
+                  throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                }
+                slot = await dependencies.recreateWorkspace({ workspaceId: record.workspaceId, projectId: input.projectId });
+                if (slot.state !== "present-and-exact") {
+                  throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                }
               }
-            }
-            const probed = await probeCodex({ projectId: input.projectId, workspaceId: record.workspaceId });
+            });
+            const probed = await probeCodex({
+              projectId: input.projectId, workspaceId: record.workspaceId,
+              measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(phaseContext, phase, operation)
+            });
             const stageAfterMaterialize = !probed.present;
             if (probed.present) {
               executableSource = { kind: "image-path", command: "codex", reportedVersion: probed.version };
@@ -545,17 +681,21 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
             } else if (dependencies.stageNativeCodex === undefined) {
               throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available.");
             }
-            const lease = await dependencies.home.acquireLease({
-              harnessId: record.harnessId, workspaceId: record.workspaceId,
-              aiSessionId: input.sessionId, processGeneration: input.processGeneration
-            });
+            const lease = await measureAdmissionPhase(phaseContext, "harness-home-lease", async () =>
+              await dependencies.home.acquireLease({
+                harnessId: record.harnessId, workspaceId: record.workspaceId,
+                aiSessionId: input.sessionId, processGeneration: input.processGeneration
+              }));
             leaseId = lease.leaseId;
-            await dependencies.home.materialize({
-              workspaceId: record.workspaceId, harnessId: record.harnessId, leaseId: lease.leaseId
-            });
+            await measureAdmissionPhase(phaseContext, "harness-home-materialization", async () =>
+              await dependencies.home.materialize({
+                workspaceId: record.workspaceId, harnessId: record.harnessId, leaseId: lease.leaseId
+              }));
             env.CODEX_HOME = HARNESS_SLOT_ENV;
             if (stageAfterMaterialize) {
-              const staged = await stageCodexCommand({ projectId: input.projectId, workspaceId: record.workspaceId }, command);
+              const staged = await stageCodexCommand(
+                { projectId: input.projectId, workspaceId: record.workspaceId, sessionId: input.sessionId }, command,
+                (phase, operation) => measureAdmissionPhase(phaseContext, phase, operation));
               command = staged.command;
               executableSource = staged.executableSource;
             }
@@ -570,7 +710,8 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           await dependencies.createHarnessExec({
             projectId: input.projectId, workspaceId: record.workspaceId,
             processId: input.processId, terminalId: input.terminalId,
-            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId
+            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId,
+            measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(phaseContext, phase, operation)
           });
         } catch (error) {
           if (harnessExecutionAdmissionUncertain(error)) {
