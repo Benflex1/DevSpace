@@ -101,8 +101,16 @@ test("native harness mutations succeed with the app origin and CSRF marker", asy
   expect(admissionRecords).toEqual(expect.arrayContaining([
     expect.objectContaining({ event: "web.harness.admission.completed", operationName: "native-harness.start",
       sessionId, terminalId: sessionId, workspaceId, harnessId: "codex", phase: "web-request",
-      outcome: "success", durationMs: expect.any(Number) }),
+      outcome: "success" }),
     expect.objectContaining({ event: "web.harness.admission.completed", operationName: "native-harness.resume",
-      sessionId, workspaceId, phase: "web-request", outcome: "success", durationMs: expect.any(Number) })
+      sessionId, workspaceId, phase: "web-request", outcome: "success" })
   ]));
+  for (const operationName of ["native-harness.start", "native-harness.resume"]) {
+    const durationMs = admissionRecords.find((record) => record.operationName === operationName)?.durationMs;
+    expect(typeof durationMs).toBe("number");
+    if (typeof durationMs === "number") {
+      expect(Number.isFinite(durationMs)).toBe(true);
+      expect(durationMs).toBeGreaterThanOrEqual(0);
+    }
+  }
 });

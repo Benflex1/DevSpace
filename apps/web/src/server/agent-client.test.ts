@@ -620,9 +620,15 @@ test("native harness Agent request logs correlate safe IDs and classify uncertai
     expect.objectContaining({
       event: "web.harness.agent_request.failed", requestId, sessionId, workspaceId, terminalId,
       processGeneration: 1, phase: "agent-request", outcome: "uncertain",
-      errorCode: "HARNESS_ADMISSION_UNCERTAIN", durationMs: expect.any(Number)
+      errorCode: "HARNESS_ADMISSION_UNCERTAIN"
     })
   ]));
+  const durationMs = records.find((record) => record.event === "web.harness.agent_request.failed")?.durationMs;
+  expect(typeof durationMs).toBe("number");
+  if (typeof durationMs === "number") {
+    expect(Number.isFinite(durationMs)).toBe(true);
+    expect(durationMs).toBeGreaterThanOrEqual(0);
+  }
   expect(lines.join("\n")).not.toContain("must-not-appear-in-timing");
 });
 
