@@ -54,7 +54,7 @@ describe("structured diagnostics logging", () => {
     expect(sanitizeLogFields({
       phase: "unexpected", failureCode: "secret=/private/path", errorClass: "VeryLongUntrustedClassName",
       containerId: "not-a-container", artifactLayout: "unknown-layout", entryRelative: "../secret",
-      elapsedMs: -1, cleanupElapsedMs: 999_999_999, cacheState: "private-cache"
+      elapsedMs: -1, cleanupElapsedMs: 999_999_999, cacheState: "private-cache" as never
     })).toEqual({});
   });
 
@@ -73,7 +73,7 @@ describe("structured diagnostics logging", () => {
     });
     expect(sanitizeLogFields({
       sessionId: "not-an-id", harnessId: "/private/path", processGeneration: 0,
-      phase: "private-home-copy", outcome: "unknown"
+      phase: "private-home-copy", outcome: "unknown" as never
     })).toEqual({});
     expect(sanitizeLogFields({ phase: "workspace-runtime-validation", durationMs: 1, outcome: "success" }))
       .toEqual({ phase: "workspace-runtime-validation", durationMs: 1, outcome: "success" });
