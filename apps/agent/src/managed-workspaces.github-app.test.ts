@@ -550,6 +550,21 @@ test("rejects a push intent when the captured commit no longer matches the works
   expect(calls).toEqual([]);
 });
 
+test("rejects a push intent when the local branch no longer matches the captured branch", async () => {
+  const calls: AuthorityCall[] = [];
+  const h = await createHarness(createAuthority(calls));
+  await prepareWorkspace(h);
+  const worktree = h.managed.worktreePath(workspaceId);
+  const capturedCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+  await exec("/usr/bin/git", ["-C", worktree, "switch", "-c", "local-only"]);
+  calls.splice(0);
+
+  await expect(h.managed.push({ projectId, workspaceId, source: sourceLocator, branchName: pushBranch,
+    commitOid: capturedCommit, githubAuthorityGeneration: 1 }, "018f0f00-0000-7000-8000-000000000117"))
+    .rejects.toMatchObject({ failure: { code: "GITHUB_PUSH_INTENT_STALE" } });
+  expect(calls).toEqual([]);
+});
+
 test("does not put Git trace or curl-verbose controls in the positive Git environment", () => {
   const environment = protectedGitInvocation(["version"]).env;
   for (const variable of ["GIT_TRACE", "GIT_TRACE_PACKET", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_SETUP", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE"]) {

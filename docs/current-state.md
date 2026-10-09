@@ -107,11 +107,12 @@ the sole SQLite writer; the Agent owns filesystem, Git, Docker, PTY, task, previ
 authority; and the browser communicates only with Web over contract-validated routes. The TypeScript
 7 acceleration slice is complete without changing runtime authority boundaries.
 
-The implemented M1 path includes trusted HTTPS repository onboarding, managed bare stores and
-primary worktrees, immutable Project Options and runtime-plan compilation, the dedicated rootless
-Docker workspace lifecycle, browser terminal and structured foreground tasks, and normal Web/Agent
-restart reconciliation. Projects retain explicit registering/ready state and exact ownership
-records; unowned or drifted resources fail closed rather than being adopted.
+The implemented M1 path includes trusted HTTPS repository onboarding, Agent-managed bare fetch
+stores and independent workspace repositories, immutable Project Options and runtime-plan
+compilation, the dedicated rootless Docker workspace lifecycle, browser terminal and structured
+foreground tasks, and normal Web/Agent restart reconciliation. Projects retain explicit
+registering/ready state and exact ownership records; unowned or drifted resources fail closed rather
+than being adopted.
 
 The preview path is workspace-targeted and loopback-only. Agent-owned leases, exact workspace and
 generation identities, the private Caddy adapter, and the gateway-host probe keep Docker sockets and
@@ -126,6 +127,14 @@ The current dashboard and Workbench expose project onboarding, workspace runtime
 tasks, previews, AI sessions, and the Agent-backed Files + Monaco editor slice. File browsing,
 editing, and the Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime
 is stopped.
+
+Workspace Git metadata now lives inside each workspace at `.devspace-git`, so `/workspace` is a
+complete Git repository in managed containers. Each workspace owns copied objects and private refs;
+the Agent bare repository remains the authenticated fetch cache, and the Agent retains authenticated
+Push authority. Existing linked-worktree metadata migrates on Start only after the Agent confirms the
+container is stopped or absent, preserving local commits and index/worktree changes. Agent typecheck
+and the full Agent suite pass. The real rootless-Docker acceptance test needs a configured dedicated
+test daemon and was skipped in this environment.
 The confirmed Workbench 1B dogfood corrections reconcile stale Changes entries, preserve unsaved
 editor buffers across Edit/Changes presentation toggles, and use deterministic local Monaco model
 identity and disposal ownership.
@@ -218,7 +227,8 @@ binds a random 256-bit operation capability to the connection, repository, Agent
 execution ID, process-group evidence, deadline, and exact prompt sequence. The native helper emits
 only the requested username or password.
 
-Clone and fetch use the normal managed bare store and primary worktree path. Private ownership
+Clone and authenticated fetch use the normal managed bare store; fetched remote-tracking refs are
+also synchronized into each independent workspace repository. Private ownership
 records retain `{connectionId, repositoryId}` and v2 origin-transition state; a rename retaining the
 same numeric ID may transition only through the exact recorded old/new clean HTTPS pair. Browser
 Fetch repository starts a distinct operation and retries accepted/running operations by the same

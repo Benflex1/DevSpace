@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { open, readFile, readdir, realpath, rename, rm, unlink, type FileHandle } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import {
   configurationRevisionDataSchema,
@@ -35,6 +35,7 @@ import {
   type WorkspaceFilesListResult,
   uuidV7Schema,
   workspaceRelativePathSchema,
+  gitBranchNameSchema,
   workspaceInspectionDataSchema,
   type AgentExecutionFailure,
   type AgentSnapshotResource,
@@ -88,6 +89,7 @@ const MAX_OUTPUT_BYTES = 512 * 1024;
 const WORKSPACE_DIRECTORY_FLAGS = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
 const WORKSPACE_READ_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
 const WORKSPACE_WRITE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
+const WORKSPACE_GIT_METADATA_NAME = ".devspace-git";
 const objectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
 const absolutePathSchema = z.string().refine((value) => path.isAbsolute(value), "Expected absolute path");
 
@@ -107,7 +109,7 @@ const storeOwnershipV2Schema = z.strictObject({
 });
 const storeOwnershipSchema = z.union([storeOwnershipV1Schema, storeOwnershipV2Schema]);
 type StoreOwnership = z.infer<typeof storeOwnershipSchema>;
-const workspaceOwnershipSchema = z.strictObject({
+const workspaceOwnershipV1Schema = z.strictObject({
   version: z.literal(1), projectId: uuidV7Schema, workspaceId: uuidV7Schema,
   projectSlug: configurationKeySchema,
   workspaceSlug: configurationKeySchema,
@@ -115,12 +117,28 @@ const workspaceOwnershipSchema = z.strictObject({
   parentPath: absolutePathSchema, parentIdentity: fileIdentitySchema,
   store: z.strictObject({ repositoryPath: absolutePathSchema, identity: fileIdentitySchema }),
   revision: z.strictObject({ revisionId: uuidV7Schema, revisionHash: projectOptionsRevisionHashSchema }),
-  branchName: z.string().min(1), baseRef: z.union([
+  branchName: gitBranchNameSchema, baseRef: z.union([
     z.strictObject({ kind: z.literal("branch"), branchName: z.string().min(1) }),
     z.strictObject({ kind: z.literal("commit"), commit: objectIdSchema })
   ]),
   creationCommit: objectIdSchema
 });
+const workspaceOwnershipV2Schema = z.strictObject({
+  version: z.literal(2), projectId: uuidV7Schema, workspaceId: uuidV7Schema,
+  projectSlug: configurationKeySchema,
+  workspaceSlug: configurationKeySchema,
+  kind: z.enum(["primary", "isolated"]), worktreePath: absolutePathSchema, identity: fileIdentitySchema,
+  parentPath: absolutePathSchema, parentIdentity: fileIdentitySchema,
+  store: z.strictObject({ repositoryPath: absolutePathSchema, identity: fileIdentitySchema }),
+  revision: z.strictObject({ revisionId: uuidV7Schema, revisionHash: projectOptionsRevisionHashSchema }),
+  branchName: gitBranchNameSchema, baseRef: z.union([
+    z.strictObject({ kind: z.literal("branch"), branchName: z.string().min(1) }),
+    z.strictObject({ kind: z.literal("commit"), commit: objectIdSchema })
+  ]),
+  creationCommit: objectIdSchema,
+  git: z.strictObject({ metadataPath: absolutePathSchema, identity: fileIdentitySchema, originUrl: remoteRepositoryUrlSchema })
+});
+const workspaceOwnershipSchema = z.union([workspaceOwnershipV1Schema, workspaceOwnershipV2Schema]);
 type WorkspaceOwnership = z.infer<typeof workspaceOwnershipSchema>;
 const storeCreationSchema = z.strictObject({
   version: z.literal(1), resourceType: z.literal("store"), operationId: uuidV7Schema, projectId: uuidV7Schema,
@@ -140,6 +158,7 @@ const workspaceCreationSchema = z.strictObject({
   store: z.strictObject({ repositoryPath: absolutePathSchema, identity: fileIdentitySchema }),
   worktreeIdentity: fileIdentitySchema.nullable(), intendedCommit: objectIdSchema,
   gitAdministration: z.strictObject({ path: absolutePathSchema, identity: fileIdentitySchema }).nullable(),
+  creationMode: z.enum(["branch-worktree", "detached-worktree"]).default("branch-worktree"),
   phase: z.enum(["parent-created", "worktree-partial", "worktree-created"])
 }).superRefine((record, context) => {
   const invalid = record.phase === "parent-created"
@@ -148,6 +167,17 @@ const workspaceCreationSchema = z.strictObject({
       ? record.worktreeIdentity === null || record.gitAdministration === null
       : record.worktreeIdentity === null || record.gitAdministration === null;
   if (invalid) context.addIssue({ code: "custom", message: "Workspace creation phase identities are inconsistent." });
+});
+const gitMigrationSchema = z.strictObject({
+  version: z.literal(1), projectId: uuidV7Schema, workspaceId: uuidV7Schema, operationId: uuidV7Schema.nullable(),
+  worktreePath: absolutePathSchema, worktreeIdentity: fileIdentitySchema,
+  storePath: absolutePathSchema, storeIdentity: fileIdentitySchema,
+  gitAdministration: z.strictObject({ path: absolutePathSchema, identity: fileIdentitySchema }),
+  stagingPath: absolutePathSchema, stagingIdentity: fileIdentitySchema,
+  metadataPath: absolutePathSchema, metadataIdentity: fileIdentitySchema.nullable(),
+  oldGitPointer: z.string().min(1).max(4096),
+  ownership: workspaceOwnershipV2Schema.nullable(),
+  phase: z.enum(["building", "prepared", "installed"])
 });
 const creationSchema = z.union([storeCreationSchema, workspaceCreationSchema]);
 type CreationRecord = z.infer<typeof creationSchema>;
@@ -265,7 +295,7 @@ function parseWorkspaceRelativePath(relativePath: string): string[] {
     if (component === "") throw workspacePathFailure(relativePath, "empty-component");
     if (component === ".") throw workspacePathFailure(relativePath, "dot");
     if (component === "..") throw workspacePathFailure(relativePath, "dot-dot");
-    if (component === ".git") throw workspacePathFailure(relativePath, "git");
+    if (component === ".git" || component === WORKSPACE_GIT_METADATA_NAME) throw workspacePathFailure(relativePath, "git");
   }
   return components;
 }
@@ -552,6 +582,7 @@ export class ManagedWorkspaces {
     const internalDirectories = [
       path.join(this.stateRoot, "revisions"), path.join(this.stateRoot, "ownership", "projects"),
       path.join(this.stateRoot, "ownership", "workspaces"), path.join(this.stateRoot, "ownership", "runtimes"), path.join(this.stateRoot, "creations"),
+      path.join(this.stateRoot, "git-migrations"),
       path.join(this.stateRoot, "runtime-creations"), path.join(this.stateRoot, "executions"), path.join(this.stateRoot, "previews"),
       path.join(this.stateRoot, "preview-leases"), path.join(this.stateRoot, "codex-artifacts"),
       path.join(this.stateRoot, "ai", "codex-discovery-cache"), path.join(this.projectRoot, ".staging"),
@@ -583,6 +614,7 @@ export class ManagedWorkspaces {
     await this.validateStateTree(path.join(this.stateRoot, "ownership", "projects"), "project");
     await this.validateStateTree(path.join(this.stateRoot, "ownership", "workspaces"), "workspace");
     await this.validateStateTree(path.join(this.stateRoot, "creations"), "creation");
+    await this.validateStateTree(path.join(this.stateRoot, "git-migrations"), "git-migration");
     try { await this.runtime.validateStateTree(); }
     catch (error) { this.corruption ??= new PrivateStateCorruptionError(path.join(this.stateRoot, "ownership", "runtimes"), error instanceof Error ? error.message : "runtime ownership state validation failed"); }
     try { await this.preview.initialize(); }
@@ -600,7 +632,7 @@ export class ManagedWorkspaces {
     this.initialized = false;
   }
 
-  private async validateStateTree(root: string, kind: "revision" | "project" | "workspace" | "creation"): Promise<void> {
+  private async validateStateTree(root: string, kind: "revision" | "project" | "workspace" | "creation" | "git-migration"): Promise<void> {
     const walk = async (directory: string): Promise<void> => {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const target = path.join(directory, entry.name);
@@ -621,10 +653,14 @@ export class ManagedWorkspaces {
           } else if (kind === "workspace") {
             const record = await readStrictJson(target, workspaceOwnershipSchema);
             if (entry.name !== `${record.workspaceId}.json`) throw new PrivateStateCorruptionError(target, "workspace filename/content mismatch");
-          } else {
+          } else if (kind === "creation") {
             const record = await readStrictJson(target, creationSchema);
             if (entry.name !== `${record.operationId}.json`) throw new PrivateStateCorruptionError(target, "creation filename/content mismatch");
             await this.validateCreationSemantics(record);
+          } else {
+            const record = await readStrictJson(target, gitMigrationSchema);
+            if (entry.name !== `${record.workspaceId}.json`) throw new PrivateStateCorruptionError(target, "Git migration filename/content mismatch");
+            await this.validateGitMigrationSemantics(record);
           }
         } catch (error) {
           this.corruption ??= error instanceof PrivateStateCorruptionError ? error : new PrivateStateCorruptionError(target, "state validation failed");
@@ -918,6 +954,7 @@ export class ManagedWorkspaces {
   private storeOwnershipPath(projectId: string): string { return path.join(this.stateRoot, "ownership", "projects", `${uuidV7Schema.parse(projectId)}.json`); }
   private workspaceOwnershipPath(workspaceId: string): string { return path.join(this.stateRoot, "ownership", "workspaces", `${uuidV7Schema.parse(workspaceId)}.json`); }
   private creationPath(operationId: string): string { return path.join(this.stateRoot, "creations", `${uuidV7Schema.parse(operationId)}.json`); }
+  private gitMigrationPath(workspaceId: string): string { return path.join(this.stateRoot, "git-migrations", `${uuidV7Schema.parse(workspaceId)}.json`); }
 
   private creationCorruption(record: CreationRecord, reason: string): PrivateStateCorruptionError {
     return new PrivateStateCorruptionError(this.creationPath(record.operationId), reason);
@@ -1004,6 +1041,14 @@ export class ManagedWorkspaces {
       const gitdir = await readFile(path.join(record.gitAdministration.path, "gitdir"), "utf8");
       if (path.resolve(gitdir.trim()) !== path.join(record.worktreePath, ".git")) {
         throw this.creationCorruption(record, "workspace Git administration path is inconsistent");
+      }
+      if (record.phase !== "parent-created") {
+        const registration = (await this.registeredWorktrees(record.store.repositoryPath))
+          .find((entry) => entry.path === record.worktreePath);
+        const expectedBranch = record.creationMode === "detached-worktree" ? null : `refs/heads/${record.request.branchName}`;
+        if (registration === undefined || registration.branch !== expectedBranch) {
+          throw this.creationCorruption(record, "workspace Git registration does not match its creation mode");
+        }
       }
     }
   }
@@ -1346,10 +1391,32 @@ export class ManagedWorkspaces {
       }
       throw new AgentExecutionError(executionFailure("SOURCE_UNAVAILABLE", "The repository source is currently unavailable.", {}));
     }
-    try { await this.loadStoreOwnership(projectId); }
+    try {
+      store = await this.loadStoreOwnership(projectId);
+      await this.syncWorkspaceRemoteRefs(projectId, store);
+    }
     catch (error) {
       if (mutationCompleted) throw recoveryRequired(error);
       throw error;
+    }
+  }
+
+  private async syncWorkspaceRemoteRefs(projectId: string, store: StoreOwnership): Promise<void> {
+    const ownershipDirectory = path.join(this.stateRoot, "ownership", "workspaces");
+    for (const name of await readdir(ownershipDirectory)) {
+      if (!name.endsWith(".json")) continue;
+      const workspaceId = uuidV7Schema.parse(name.slice(0, -".json".length));
+      let raw: WorkspaceOwnership;
+      try { raw = await this.readPrivate(path.join(ownershipDirectory, name), workspaceOwnershipSchema); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (raw.workspaceId !== workspaceId || raw.projectId !== projectId || raw.version !== 2) continue;
+      const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+      if (workspace.version !== 2) continue;
+      await this.git(["-C", workspace.worktreePath, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
+        "+refs/remotes/origin/*:refs/remotes/origin/*"]);
     }
   }
 
@@ -1359,8 +1426,7 @@ export class ManagedWorkspaces {
     let store = await this.loadStoreOwnership(data.projectId);
     const workspace = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
     if (store.source.kind !== "github-app"
-      || store.source.connectionId !== data.source.connectionId || store.source.repositoryId !== data.source.repositoryId
-      || workspace.branchName !== data.branchName) {
+      || store.source.connectionId !== data.source.connectionId || store.source.repositoryId !== data.source.repositoryId) {
       throw new AgentExecutionError(executionFailure("GITHUB_PUSH_INTENT_STALE", "The captured push intent no longer matches the managed workspace.", {}));
     }
     const assertCapturedWorkspace = async (): Promise<void> => {
@@ -1412,6 +1478,7 @@ export class ManagedWorkspaces {
   }
 
   private async loadWorkspaceOwnership(projectId: string, workspaceId: string): Promise<WorkspaceOwnership> {
+    await this.recoverWorkspaceGitMigration(projectId, workspaceId);
     await this.assertManagedDirectories();
     this.assertHealthy();
     let record: WorkspaceOwnership;
@@ -1428,33 +1495,69 @@ export class ManagedWorkspaces {
     const storeIdentityComparison = comparePersistedIdentity(record.store.identity, store.identity);
     const parentIdentityComparison = comparePersistedIdentity(record.parentIdentity, parentNow.identity);
     const worktreeIdentityComparison = comparePersistedIdentity(record.identity, worktreeNow.identity);
+    let metadataNow: Awaited<ReturnType<typeof lstatIdentity>> = null;
+    let metadataIdentityComparison: ReturnType<typeof comparePersistedIdentity> = "exact";
+    if (record.version === 2) {
+      if (record.git.metadataPath !== path.join(record.worktreePath, WORKSPACE_GIT_METADATA_NAME)) throw workspaceConflict(workspaceId);
+      metadataNow = await lstatIdentity(record.git.metadataPath);
+      if (metadataNow === null || !metadataNow.stats.isDirectory() || metadataNow.stats.isSymbolicLink()) throw workspaceConflict(workspaceId);
+      metadataIdentityComparison = comparePersistedIdentity(record.git.identity, metadataNow.identity);
+    }
     if (storeIdentityComparison === "mismatch" || parentIdentityComparison === "mismatch" || worktreeIdentityComparison === "mismatch") {
       throw workspaceConflict(workspaceId);
     }
+    if (metadataIdentityComparison === "mismatch") throw workspaceConflict(workspaceId);
     const revision = await this.loadRevisionRecord(projectId, record.revision.revisionId).catch(() => null);
     if (revision === null || revision.data.configuration.hash !== record.revision.revisionHash) throw workspaceConflict(workspaceId);
     try {
-      const commonText = (await this.git(["-C", record.worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
-      if (await realpath(commonText) !== store.repositoryPath) throw new Error("common-dir-mismatch");
-      const branch = (await this.git(["-C", record.worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
-      if (branch !== record.branchName) throw new Error("branch-mismatch");
-      const registrations = await this.registeredWorktrees(store.repositoryPath);
-      if (!registrations.some((entry) => entry.path === record.worktreePath && entry.branch === `refs/heads/${record.branchName}`)) {
-        throw new Error("worktree-registration-mismatch");
+      if (record.version === 1) {
+        const commonText = (await this.git(["-C", record.worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+        if (await realpath(commonText) !== store.repositoryPath) throw new Error("common-dir-mismatch");
+        const branch = (await this.git(["-C", record.worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
+        if (branch !== record.branchName) throw new Error("branch-mismatch");
+        const registrations = await this.registeredWorktrees(store.repositoryPath);
+        if (!registrations.some((entry) => entry.path === record.worktreePath && entry.branch === `refs/heads/${record.branchName}`)) {
+          throw new Error("worktree-registration-mismatch");
+        }
+      } else {
+        const gitPointerEntry = await lstatIdentity(path.join(record.worktreePath, ".git"));
+        if (gitPointerEntry === null || !gitPointerEntry.stats.isFile() || gitPointerEntry.stats.isSymbolicLink()
+          || await readFile(path.join(record.worktreePath, ".git"), "utf8") !== `gitdir: ${WORKSPACE_GIT_METADATA_NAME}\n`) {
+          throw new Error("workspace-git-pointer-invalid");
+        }
+        if (await realpath(record.git.metadataPath) !== record.git.metadataPath) throw new Error("workspace-git-metadata-path-invalid");
+        const topLevel = (await this.git(["-C", record.worktreePath, "rev-parse", "--show-toplevel"])).stdout.trim();
+        const commonText = (await this.git(["-C", record.worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+        if (path.resolve(topLevel) !== record.worktreePath || await realpath(commonText) !== record.git.metadataPath) {
+          throw new Error("workspace-git-common-dir-mismatch");
+        }
+        const branch = await this.git(["-C", record.worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"])
+          .then((result) => result.stdout.trim()).catch(() => "");
+        if (branch !== "" && !gitBranchNameSchema.safeParse(branch).success) throw new Error("workspace-git-branch-invalid");
+        await this.git(["-C", record.worktreePath, "cat-file", "-e", `refs/heads/${record.branchName}^{commit}`]);
+        const originUrl = (await this.git(["-C", record.worktreePath, "config", "--local", "--no-includes", "--get", "remote.origin.url"])).stdout.trim();
+        if (originUrl !== record.git.originUrl) throw new Error("workspace-git-origin-mismatch");
+        const alternatesPath = (await this.git(["-C", record.worktreePath, "rev-parse", "--git-path", "objects/info/alternates"])).stdout.trim();
+        if (await lstatIdentity(alternatesPath) !== null) throw new Error("workspace-git-alternates-forbidden");
+        const objectDirectory = (await this.git(["-C", record.worktreePath, "rev-parse", "--git-path", "objects"])).stdout.trim();
+        if (await realpath(objectDirectory) !== path.join(record.git.metadataPath, "objects")) throw new Error("workspace-git-objects-outside-metadata");
       }
+      await this.git(["-C", record.worktreePath, "cat-file", "-e", "HEAD^{commit}"]);
       await this.git(["-C", record.worktreePath, "cat-file", "-e", `${record.creationCommit}^{commit}`]);
     } catch { throw workspaceConflict(workspaceId); }
     if (storeIdentityComparison === "device-only-rebind" || parentIdentityComparison === "device-only-rebind"
-      || worktreeIdentityComparison === "device-only-rebind") {
+      || worktreeIdentityComparison === "device-only-rebind" || metadataIdentityComparison === "device-only-rebind") {
       await this.assertManagedDirectories();
-      const rebound = workspaceOwnershipSchema.parse({ ...record,
-        identity: worktreeNow.identity,
-        parentIdentity: parentNow.identity,
-        store: { ...record.store, identity: store.identity }
-      });
+      const rebound = record.version === 1
+        ? workspaceOwnershipV1Schema.parse({ ...record, identity: worktreeNow.identity, parentIdentity: parentNow.identity,
+          store: { ...record.store, identity: store.identity } })
+        : workspaceOwnershipV2Schema.parse({ ...record, identity: worktreeNow.identity, parentIdentity: parentNow.identity,
+          store: { ...record.store, identity: store.identity }, git: { ...record.git, identity: metadataNow!.identity } });
       await this.writer.write(this.workspaceOwnershipPath(workspaceId), rebound);
-      const previousDevice = { worktree: record.identity.device, parent: record.parentIdentity.device, store: record.store.identity.device };
-      const currentDevice = { worktree: worktreeNow.identity.device, parent: parentNow.identity.device, store: store.identity.device };
+      const previousDevice = { worktree: record.identity.device, parent: record.parentIdentity.device,
+        store: record.store.identity.device, ...(record.version === 2 ? { git: record.git.identity.device } : {}) };
+      const currentDevice = { worktree: worktreeNow.identity.device, parent: parentNow.identity.device,
+        store: store.identity.device, ...(record.version === 2 ? { git: metadataNow!.identity.device } : {}) };
       logOwnershipDeviceRebind("workspace", workspaceId, previousDevice, currentDevice);
       return rebound;
     }
@@ -1493,9 +1596,300 @@ export class ManagedWorkspaces {
     return { path: administrativePath, identity: administration.identity };
   }
 
+  private async validateGitMigrationSemantics(record: z.infer<typeof gitMigrationSchema>): Promise<void> {
+    const expectedWorktree = this.worktreePath(record.workspaceId);
+    const expectedParent = this.workspaceParent(record.workspaceId);
+    const expectedStore = this.repositoryPath(record.projectId);
+    const stageName = `.git-migration-${record.operationId ?? record.workspaceId}`;
+    if (record.worktreePath !== expectedWorktree || record.storePath !== expectedStore
+      || record.stagingPath !== path.join(expectedParent, stageName)
+      || record.metadataPath !== path.join(expectedWorktree, WORKSPACE_GIT_METADATA_NAME)) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration paths do not match their resource identities");
+    }
+    assertContained(this.workspaceRoot, expectedParent);
+    assertContained(expectedParent, record.stagingPath);
+    assertContained(record.worktreePath, record.metadataPath);
+    const storeRecord = await this.readPrivate(this.storeOwnershipPath(record.projectId), storeOwnershipSchema);
+    if (storeRecord.repositoryPath !== expectedStore || !identitiesEqual(storeRecord.identity, record.storeIdentity)) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration store binding is inconsistent");
+    }
+    const [store, worktree, stage, metadataInStage, metadataAtTarget, administration] = await Promise.all([
+      lstatIdentity(record.storePath), lstatIdentity(record.worktreePath), lstatIdentity(record.stagingPath),
+      lstatIdentity(path.join(record.stagingPath, "metadata")), lstatIdentity(record.metadataPath),
+      lstatIdentity(record.gitAdministration.path)
+    ]);
+    if (store === null || !store.stats.isDirectory() || store.stats.isSymbolicLink()
+      || !identitiesEqual(store.identity, record.storeIdentity)
+      || worktree === null || !worktree.stats.isDirectory() || worktree.stats.isSymbolicLink()
+      || !identitiesEqual(worktree.identity, record.worktreeIdentity)) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration root identity changed");
+    }
+    if (stage !== null && (!stage.stats.isDirectory() || stage.stats.isSymbolicLink()
+      || !identitiesEqual(stage.identity, record.stagingIdentity))) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration staging identity changed");
+    }
+    if (record.phase !== "installed" && stage === null) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration staging directory is missing");
+    }
+    if (record.phase === "building") {
+      if (record.metadataIdentity !== null || record.ownership !== null || metadataAtTarget !== null) {
+        throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration build phase contains an unrecorded repository");
+      }
+    } else {
+      if (record.metadataIdentity === null || record.ownership === null
+        || (metadataInStage === null) === (metadataAtTarget === null)) {
+        throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration metadata location is inconsistent");
+      }
+      const metadata = metadataInStage ?? metadataAtTarget!;
+      if (!metadata.stats.isDirectory() || metadata.stats.isSymbolicLink()
+        || !identitiesEqual(metadata.identity, record.metadataIdentity)
+        || record.ownership.git.metadataPath !== record.metadataPath
+        || !identitiesEqual(record.ownership.git.identity, record.metadataIdentity)
+        || record.ownership.projectId !== record.projectId || record.ownership.workspaceId !== record.workspaceId
+        || record.ownership.worktreePath !== record.worktreePath
+        || !identitiesEqual(record.ownership.identity, record.worktreeIdentity)
+        || record.ownership.store.repositoryPath !== record.storePath
+        || !identitiesEqual(record.ownership.store.identity, record.storeIdentity)) {
+        throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration repository identity is inconsistent");
+      }
+      if (record.phase === "installed" && (metadataAtTarget === null || metadataInStage !== null)) {
+        throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Installed Git metadata is not at its workspace path");
+      }
+    }
+    const adminRoot = path.join(record.storePath, "worktrees");
+    assertContained(adminRoot, record.gitAdministration.path);
+    if (administration !== null) {
+      if (!administration.stats.isDirectory() || administration.stats.isSymbolicLink()
+        || !identitiesEqual(administration.identity, record.gitAdministration.identity)) {
+        throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration administration identity changed");
+      }
+      const registeredGitFile = await readFile(path.join(record.gitAdministration.path, "gitdir"), "utf8");
+      if (path.resolve(registeredGitFile.trim()) !== path.join(record.worktreePath, ".git")) {
+        throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration administration binding changed");
+      }
+    } else if (record.phase !== "installed") {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration administration directory is missing");
+    }
+    const pointer = await readFile(path.join(record.worktreePath, ".git"), "utf8");
+    const relativePointer = `gitdir: ${WORKSPACE_GIT_METADATA_NAME}\n`;
+    if (record.oldGitPointer.trim() !== `gitdir: ${record.gitAdministration.path}`
+      || (record.phase === "installed" ? pointer !== relativePointer : pointer !== record.oldGitPointer && pointer !== relativePointer)) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration pointer state is inconsistent");
+    }
+  }
+
+  private async saveGitMigration(record: z.infer<typeof gitMigrationSchema>): Promise<void> {
+    await this.assertManagedDirectories();
+    await this.validateGitMigrationSemantics(record);
+    await this.writer.write(this.gitMigrationPath(record.workspaceId), record);
+  }
+
+  private gitMigrationCleanupPath(workspaceId: string, role: "stage" | "metadata", operationId: string | null): string {
+    const suffix = operationId ?? workspaceId;
+    return assertContained(path.join(this.workspaceRoot, ".cleanup"),
+      path.join(this.workspaceRoot, ".cleanup", `${workspaceId}-git-migration-${suffix}-${role}`));
+  }
+
+  private async removeGitMigrationStage(record: z.infer<typeof gitMigrationSchema>): Promise<void> {
+    const stage = await lstatIdentity(record.stagingPath);
+    if (stage === null) return;
+    if (!stage.stats.isDirectory() || stage.stats.isSymbolicLink() || !identitiesEqual(stage.identity, record.stagingIdentity)) {
+      throw new PrivateStateCorruptionError(record.stagingPath, "Git migration staging identity changed during cleanup");
+    }
+    await this.quarantineAndRemove(record.stagingPath, record.stagingIdentity,
+      this.gitMigrationCleanupPath(record.workspaceId, "stage", record.operationId));
+  }
+
+  private async removeGitMigrationMetadata(record: z.infer<typeof gitMigrationSchema>): Promise<void> {
+    const metadata = await lstatIdentity(record.metadataPath);
+    if (metadata === null) return;
+    if (!metadata.stats.isDirectory() || metadata.stats.isSymbolicLink() || record.metadataIdentity === null
+      || !identitiesEqual(metadata.identity, record.metadataIdentity)) {
+      throw new PrivateStateCorruptionError(record.metadataPath, "Git migration metadata identity changed during cleanup");
+    }
+    await this.quarantineAndRemove(record.metadataPath, record.metadataIdentity,
+      this.gitMigrationCleanupPath(record.workspaceId, "metadata", record.operationId));
+  }
+
+  private async removeMigratedWorktreeAdministration(record: z.infer<typeof gitMigrationSchema>): Promise<void> {
+    const administration = await lstatIdentity(record.gitAdministration.path);
+    if (administration === null) return;
+    if (!administration.stats.isDirectory() || administration.stats.isSymbolicLink()
+      || !identitiesEqual(administration.identity, record.gitAdministration.identity)) {
+      throw new PrivateStateCorruptionError(record.gitAdministration.path, "Git administration identity changed during migration");
+    }
+    const registeredGitFile = await readFile(path.join(record.gitAdministration.path, "gitdir"), "utf8");
+    if (path.resolve(registeredGitFile.trim()) !== path.join(record.worktreePath, ".git")) {
+      throw new PrivateStateCorruptionError(record.gitAdministration.path, "Git administration binding changed during migration");
+    }
+    const root = path.join(record.storePath, "worktrees");
+    const quarantine = path.join(root, `.devspace-migrated-${record.operationId ?? record.workspaceId}`);
+    await this.quarantineAndRemove(record.gitAdministration.path, record.gitAdministration.identity, quarantine);
+  }
+
+  private async finishGitMigration(record: z.infer<typeof gitMigrationSchema>): Promise<z.infer<typeof workspaceOwnershipV2Schema>> {
+    const current = await this.readPrivate(this.gitMigrationPath(record.workspaceId), gitMigrationSchema);
+    await this.validateGitMigrationSemantics(current);
+    if (current.phase !== "installed" || current.ownership === null || current.metadataIdentity === null) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Git migration was not installed");
+    }
+    const pointer = await readFile(path.join(current.worktreePath, ".git"), "utf8");
+    if (pointer !== `gitdir: ${WORKSPACE_GIT_METADATA_NAME}\n`) throw new PrivateStateCorruptionError(this.gitMigrationPath(record.workspaceId), "Installed Git pointer changed");
+    await this.writer.write(this.workspaceOwnershipPath(current.workspaceId), current.ownership);
+    if (current.operationId !== null) await this.removeCreation(current.operationId);
+    await this.removeMigratedWorktreeAdministration(current);
+    await this.removeGitMigrationStage(current);
+    await unlink(this.gitMigrationPath(current.workspaceId));
+    return current.ownership;
+  }
+
+  private async recoverWorkspaceGitMigration(projectId: string, workspaceId: string): Promise<void> {
+    let record: z.infer<typeof gitMigrationSchema>;
+    try { record = await this.readPrivate(this.gitMigrationPath(workspaceId), gitMigrationSchema); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (record.projectId !== projectId || record.workspaceId !== workspaceId) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(workspaceId), "Git migration workspace identity mismatch");
+    }
+    await this.validateGitMigrationSemantics(record);
+    const pointer = await readFile(path.join(record.worktreePath, ".git"), "utf8");
+    if (pointer === `gitdir: ${WORKSPACE_GIT_METADATA_NAME}\n`) {
+      const installed = gitMigrationSchema.parse({ ...record, phase: "installed" });
+      await this.saveGitMigration(installed);
+      await this.finishGitMigration(installed);
+      return;
+    }
+    if (pointer !== record.oldGitPointer) {
+      throw new PrivateStateCorruptionError(this.gitMigrationPath(workspaceId), "Git migration pointer no longer matches either owned state");
+    }
+    await this.removeGitMigrationMetadata(record);
+    await this.removeGitMigrationStage(record);
+    await unlink(this.gitMigrationPath(workspaceId));
+  }
+
+  private async installWorkspaceGitRepository(input: {
+    readonly base: Omit<z.infer<typeof workspaceOwnershipV2Schema>, "git">;
+    readonly store: StoreOwnership;
+    readonly gitAdministration: { readonly path: string; readonly identity: FileIdentity };
+    readonly operationId: string | null;
+    readonly preserveIndex: boolean;
+  }): Promise<z.infer<typeof workspaceOwnershipV2Schema>> {
+    const { base, store, gitAdministration, operationId, preserveIndex } = input;
+    const workspacePath = base.worktreePath;
+    const metadataPath = path.join(workspacePath, WORKSPACE_GIT_METADATA_NAME);
+    const pointerPath = path.join(workspacePath, ".git");
+    const oldGitPointer = await readFile(pointerPath, "utf8");
+    if (oldGitPointer.trim() !== `gitdir: ${gitAdministration.path}`) throw workspaceConflict(base.workspaceId);
+    if (await lstatIdentity(metadataPath) !== null) throw workspaceConflict(base.workspaceId);
+    const headCommit = objectIdSchema.parse((await this.git(["-C", workspacePath, "rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim());
+    const branchName = gitBranchNameSchema.parse(base.branchName);
+    const currentBranch = await this.git(["-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD"])
+      .then((result) => result.stdout.trim()).catch(() => "");
+    if (preserveIndex && currentBranch !== branchName) throw workspaceConflict(base.workspaceId);
+    const unmerged = (await this.git(["-C", workspacePath, "ls-files", "-u", "-z"])).stdout;
+    if (unmerged !== "") throw workspaceConflict(base.workspaceId);
+    if ((await this.git(["-C", workspacePath, "ls-files", "--error-unmatch", "--", WORKSPACE_GIT_METADATA_NAME])
+      .then(() => true).catch(() => false)) || await lstatIdentity(metadataPath) !== null) {
+      throw workspaceConflict(base.workspaceId);
+    }
+    const stagedPatch = preserveIndex
+      ? (await this.git(["-C", workspacePath, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD"])).stdout
+      : "";
+    const stagePath = path.join(base.parentPath, `.git-migration-${operationId ?? base.workspaceId}`);
+    if (await lstatIdentity(stagePath) !== null) throw workspaceConflict(base.workspaceId);
+    await mkdir(stagePath, { mode: 0o700 });
+    const staging = await lstatIdentity(stagePath);
+    if (staging === null || !staging.stats.isDirectory() || staging.stats.isSymbolicLink()) throw workspaceConflict(base.workspaceId);
+    let migration = gitMigrationSchema.parse({
+      version: 1, projectId: base.projectId, workspaceId: base.workspaceId, operationId,
+      worktreePath: workspacePath, worktreeIdentity: base.identity,
+      storePath: store.repositoryPath, storeIdentity: store.identity,
+      gitAdministration, stagingPath: stagePath, stagingIdentity: staging.identity,
+      metadataPath, metadataIdentity: null, oldGitPointer, ownership: null, phase: "building"
+    });
+    await this.saveGitMigration(migration);
+    try {
+      const stageTree = path.join(stagePath, "tree");
+      const stageMetadata = path.join(stagePath, "metadata");
+      await mkdir(stageTree, { mode: 0o700 });
+      await this.git(["init", "--quiet", "--template=/dev/null", `--initial-branch=${branchName}`,
+        `--separate-git-dir=${stageMetadata}`, stageTree]);
+      await this.git(["-C", stageTree, "remote", "add", "origin", store.git.originUrl]);
+      await this.git(["-C", stageTree, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath, headCommit]);
+      await this.git(["-C", stageTree, "update-ref", `refs/heads/${branchName}`, headCommit]);
+      await this.git(["-C", stageTree, "reset", "--hard", headCommit]);
+      await this.git(["-C", stageTree, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
+        "+refs/remotes/origin/*:refs/remotes/origin/*"]);
+      if (stagedPatch !== "") {
+        const patchPath = path.join(stagePath, "staged.patch");
+        await writeFile(patchPath, stagedPatch, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        await this.git(["-C", stageTree, "apply", "--cached", "--binary", "--whitespace=nowarn", "--", patchPath]);
+      }
+      const identity = await this.readGitIdentity(["-C", workspacePath]);
+      if (identity.name !== null) await this.git(["-C", stageTree, "config", "--local", "user.name", identity.name]);
+      if (identity.email !== null) await this.git(["-C", stageTree, "config", "--local", "user.email", identity.email]);
+      const upstream = await this.git(["-C", workspacePath, "rev-parse", "--symbolic-full-name", "@{upstream}"])
+        .then((result) => result.stdout.trim()).catch(() => "");
+      if (upstream.startsWith("refs/remotes/origin/")) {
+        const upstreamBranch = gitBranchNameSchema.safeParse(upstream.slice("refs/remotes/origin/".length));
+        if (upstreamBranch.success) {
+          await this.git(["-C", stageTree, "config", "--local", `branch.${branchName}.remote`, "origin"]);
+          await this.git(["-C", stageTree, "config", "--local", `branch.${branchName}.merge`, `refs/heads/${upstreamBranch.data}`]);
+        }
+      }
+      await mkdir(path.join(stageMetadata, "info"), { recursive: true, mode: 0o700 });
+      const excludePath = path.join(stageMetadata, "info", "exclude");
+      const currentExclude = await readFile(excludePath, "utf8").catch(() => "");
+      const metadataIgnore = `/${WORKSPACE_GIT_METADATA_NAME}/`;
+      if (!currentExclude.split(/\r?\n/u).includes(metadataIgnore)) {
+        const separator = currentExclude === "" || currentExclude.endsWith("\n") ? "" : "\n";
+        await writeFile(excludePath, `${currentExclude}${separator}${metadataIgnore}\n`, { encoding: "utf8", mode: 0o644 });
+      }
+      const metadata = await lstatIdentity(stageMetadata);
+      if (metadata === null || !metadata.stats.isDirectory() || metadata.stats.isSymbolicLink()) throw workspaceConflict(base.workspaceId);
+      const ownership = workspaceOwnershipV2Schema.parse({ ...base, version: 2,
+        git: { metadataPath, identity: metadata.identity, originUrl: remoteRepositoryUrlSchema.parse(store.git.originUrl) } });
+      migration = gitMigrationSchema.parse({ ...migration, metadataIdentity: metadata.identity, ownership, phase: "prepared" });
+      await this.saveGitMigration(migration);
+      await rename(stageMetadata, metadataPath);
+      await this.writeWorkspaceGitPointer(workspacePath, base.identity, oldGitPointer);
+      migration = gitMigrationSchema.parse({ ...migration, phase: "installed" });
+      await this.saveGitMigration(migration);
+      return await this.finishGitMigration(migration);
+    } catch (error) {
+      await this.recoverWorkspaceGitMigration(base.projectId, base.workspaceId).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async writeWorkspaceGitPointer(workspacePath: string, expectedIdentity: FileIdentity, oldPointer: string): Promise<void> {
+    const directory = await open(workspacePath, WORKSPACE_DIRECTORY_FLAGS);
+    const temporaryName = `.git-devspace-${uuidv7()}`;
+    try {
+      const stats = await directory.stat({ bigint: true });
+      if (!stats.isDirectory() || !sameFileIdentity(stats, expectedIdentity)) throw new Error("workspace-git-root-changed");
+      const pointerPath = procDirectoryPath(directory, ".git");
+      const current = await readFile(pointerPath, "utf8");
+      if (current !== oldPointer) throw new Error("workspace-git-pointer-changed");
+      const temporary = await open(procDirectoryPath(directory, temporaryName), WORKSPACE_WRITE_FLAGS, 0o644);
+      try {
+        await temporary.writeFile(`gitdir: ${WORKSPACE_GIT_METADATA_NAME}\n`, "utf8");
+        await temporary.sync();
+      } finally { await temporary.close(); }
+      await rename(procDirectoryPath(directory, temporaryName), pointerPath);
+      await directory.sync();
+    } finally {
+      await unlink(procDirectoryPath(directory, temporaryName)).catch(() => undefined);
+      await directory.close();
+    }
+  }
+
   async createWorkspace(input: CreateWorkspaceData, operationId: string): Promise<void> {
     this.assertHealthy();
     const data = createWorkspaceDataSchema.parse(input);
+    await this.recoverWorkspaceGitMigration(data.projectId, data.workspaceId);
     const revision = await this.loadRevision(data.projectId, data.revision.revisionId);
     if (revision.configuration.hash !== data.revision.revisionHash) {
       throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The configuration revision is not registered.", data.revision));
@@ -1518,14 +1912,13 @@ export class ManagedWorkspaces {
     const worktreePath = this.worktreePath(data.workspaceId);
     if (creation === null) {
       if (await lstatIdentity(parentPath) !== null) throw workspaceConflict(data.workspaceId);
-      const { mkdir } = await import("node:fs/promises");
       await mkdir(parentPath, { mode: 0o700 });
       const parent = await lstatIdentity(parentPath);
       if (parent === null || !parent.stats.isDirectory()) throw workspaceConflict(data.workspaceId);
       creation = workspaceCreationSchema.parse({ version: 1, resourceType: "workspace", operationId, request: data,
         parentPath, worktreePath, parentIdentity: parent.identity,
         store: { repositoryPath: store.repositoryPath, identity: store.identity },
-        worktreeIdentity: null, intendedCommit, gitAdministration: null, phase: "parent-created" });
+        worktreeIdentity: null, intendedCommit, gitAdministration: null, creationMode: "detached-worktree", phase: "parent-created" });
       await this.saveCreation(creation);
     }
     if (creation.resourceType !== "workspace" || creation.intendedCommit !== intendedCommit) throw workspaceConflict(data.workspaceId);
@@ -1538,7 +1931,8 @@ export class ManagedWorkspaces {
         if (existingWorktree !== null && existingWorktree.stats.isDirectory() && !existingWorktree.stats.isSymbolicLink() && registrations.includes(worktreePath)) {
           const recoveredHead = await this.git(["-C", worktreePath, "rev-parse", "--verify", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "");
           const recoveredBranch = await this.git(["-C", worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "");
-          if (recoveredHead === intendedCommit && recoveredBranch === data.branchName) {
+          const expectedBranch = creation.creationMode === "detached-worktree" ? "" : data.branchName;
+          if (recoveredHead === intendedCommit && recoveredBranch === expectedBranch) {
             const gitAdministration = await this.worktreeAdministration(store.repositoryPath, worktreePath);
             if (gitAdministration === null) throw workspaceConflict(data.workspaceId);
             creation = workspaceCreationSchema.parse({ ...creation, worktreeIdentity: existingWorktree.identity,
@@ -1554,13 +1948,8 @@ export class ManagedWorkspaces {
     }
     if (creation.phase === "parent-created") {
       try {
-        const conflictingBranch = (await this.registeredWorktrees(store.repositoryPath)).some((record) =>
-          record.branch === `refs/heads/${data.branchName}` && record.path !== worktreePath);
-        if (conflictingBranch) throw new Error("branch-already-registered");
-        await this.operationGit(operationId, data.projectId, "workspace-branch-update",
-          ["--git-dir", store.repositoryPath, "update-ref", `refs/heads/${data.branchName}`, intendedCommit]);
         await this.operationGit(operationId, data.projectId, "workspace-add",
-          ["--git-dir", store.repositoryPath, "worktree", "add", "--", worktreePath, data.branchName]);
+          ["--git-dir", store.repositoryPath, "worktree", "add", "--detach", "--", worktreePath, intendedCommit]);
       } catch {
         const partial = await lstatIdentity(worktreePath);
         if (partial !== null && partial.stats.isDirectory() && !partial.stats.isSymbolicLink()) {
@@ -1587,17 +1976,17 @@ export class ManagedWorkspaces {
     }
     const worktreeNow = await lstatIdentity(worktreePath);
     if (worktreeNow === null || creation.worktreeIdentity === null || !identitiesEqual(worktreeNow.identity, creation.worktreeIdentity)) throw workspaceConflict(data.workspaceId);
-    const ownership = workspaceOwnershipSchema.parse({
-      version: 1, projectId: data.projectId, workspaceId: data.workspaceId,
+    const ownershipBase = {
+      version: 2 as const, projectId: data.projectId, workspaceId: data.workspaceId,
       projectSlug: data.projectSlug, workspaceSlug: data.workspaceSlug, kind: data.kind,
       worktreePath, identity: worktreeNow.identity, parentPath, parentIdentity: creation.parentIdentity,
       store: { repositoryPath: store.repositoryPath, identity: store.identity }, revision: data.revision,
       branchName: data.branchName, baseRef: data.baseRef, creationCommit: intendedCommit
-    });
+    };
     await this.validateCreationSemantics(creation);
-    await this.assertManagedDirectories();
-    await this.writer.write(this.workspaceOwnershipPath(data.workspaceId), ownership);
-    await this.removeCreation(creation.operationId);
+    if (creation.gitAdministration === null) throw workspaceConflict(data.workspaceId, "provisioning");
+    await this.installWorkspaceGitRepository({ base: ownershipBase, store,
+      gitAdministration: creation.gitAdministration, operationId: creation.operationId, preserveIndex: false });
     const revalidated = await this.loadWorkspaceOwnership(data.projectId, data.workspaceId);
     const finalHead = (await this.git(["-C", revalidated.worktreePath, "rev-parse", "--verify", "HEAD"])).stdout.trim();
     if (finalHead !== intendedCommit) throw workspaceConflict(data.workspaceId);
@@ -1999,7 +2388,8 @@ export class ManagedWorkspaces {
       if (entries.length > WORKSPACE_DIRECTORY_ENTRY_MAX) throw workspaceDirectoryTooLarge(canonicalPath);
       const visible: WorkspaceFileEntry[] = [];
       for (const entry of entries) {
-        if (entry.name === ".git" || entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) continue;
+        if (entry.name === ".git" || entry.name === WORKSPACE_GIT_METADATA_NAME
+          || entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) continue;
         const entryPath = canonicalPath === "" ? entry.name : `${canonicalPath}/${entry.name}`;
         if (entry.isDirectory()) {
           visible.push({ path: entryPath, name: entry.name, kind: "directory" });
@@ -2142,13 +2532,29 @@ export class ManagedWorkspaces {
   }
 
   async startWorkspace(projectId: string, workspaceId: string, operationId: string): Promise<void> {
-    const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    let workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
     const revision = await this.loadRevisionRecord(projectId, workspace.revision.revisionId);
     if (revision.runtimePlan === null) {
       throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The runtime plan is not registered.", workspace.revision));
     }
     const association = { projectId, workspaceId, revisionId: workspace.revision.revisionId,
       revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 };
+    if (workspace.version === 1) {
+      let currentRuntime;
+      try { currentRuntime = await this.runtime.inspect(association); }
+      catch (error) { throw this.runtimeFailure(error, workspaceId, "start"); }
+      if (currentRuntime.observedState === "stopped" || currentRuntime.observedState === "absent") {
+        const store = await this.loadStoreOwnership(projectId);
+        const administration = await this.worktreeAdministration(store.repositoryPath, workspace.worktreePath);
+        if (administration === null) throw workspaceConflict(workspaceId);
+        const { version: _version, ...base } = workspace;
+        workspace = await this.installWorkspaceGitRepository({ base: { ...base, version: 2 }, store,
+          gitAdministration: administration, operationId, preserveIndex: true });
+      } else if (currentRuntime.observedState !== "running") {
+        throw this.runtimeFailure(new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT",
+          "The legacy workspace Git metadata cannot be changed until its container is confirmed stopped."), workspaceId, "start");
+      }
+    }
     let bindings;
     try {
       const options = parseProjectOptionsV1(JSON.parse(revision.data.configuration.canonicalJson));

@@ -38,6 +38,27 @@ coverage, Playwright results, `.devspace-local`, and caches. No broad `.semgrepi
 tests, tooling, workflows, deployment configuration, and security-sensitive infrastructure remain
 in scope.
 
+## Bash parser compatibility exception
+
+Semgrep CE 1.171.0 currently emits one `PartialParsing` scanner error for each of these two
+rootless-Docker scripts, with partial recovery reported at line 2:
+
+- `.github/scripts/rootless-docker-cleanup.sh`
+- `.github/scripts/rootless-docker-start.sh`
+
+The scripts pass `bash -n` and are executed by the disposable rootless-Docker acceptance workflow.
+A behavior-preserving rewrite of their first-line parameter-expansion fallback/error forms still
+produced the same parser errors. The diagnostics do not isolate a construct that can be replaced
+without further changing these working process-management scripts, so `p/default` excludes only
+these two exact paths with separate `--exclude` arguments.
+
+This exception removes all Semgrep `p/default` analysis of the contents of those two files. It does
+not exclude other Bash or shell files, alter the ruleset or finding summary, or change the scanner
+error gate for any other target. The two scripts remain covered by ShellCheck and `bash -n` in the
+Semgrep workflow, and by executable real-container coverage in the rootless acceptance workflow.
+Remove the two exclusions when a pinned Semgrep CE version scans both scripts without scanner
+errors; confirm both paths are included in `paths.scanned`, then keep the scanner-error gate active.
+
 ## Enforcement and artifacts
 
 The initial policy is monitoring-only: findings appear in the GitHub Actions job summary and do not

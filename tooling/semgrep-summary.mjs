@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MAX_FINDINGS = 25;
 export const DEFAULT_MESSAGE_LENGTH = 240;
+const MAX_SCANNER_ERROR_DIAGNOSTIC_LENGTH = 180;
+const MAX_SCANNER_ERRORS_DISPLAYED = 10;
 
 const severityOrder = new Map([
   ["ERROR", 0],
@@ -141,9 +143,84 @@ function scannedFileCount(report) {
 }
 
 function scannerErrorMessage(error) {
-  if (typeof error === "string") return error;
-  if (!isRecord(error)) return "(unstructured scanner error)";
-  return stringOr(error.message, stringOr(error.error, stringOr(error.long_msg, "(unstructured scanner error)")));
+  if (!isRecord(error)) return "(diagnostic omitted)";
+  if (Array.isArray(error.type) && error.type[0] === "PartialParsing" && Array.isArray(error.type[1])) {
+    const locations = error.type[1].filter(isRecord);
+    const displayed = locations.slice(0, 3).map((location) => scannerErrorLocation({
+      path: location.path,
+      start: location.start
+    }));
+    const suffix = locations.length > 3 ? `; ${locations.length - 3} more omitted` : "";
+    const positions = displayed.length > 0 ? `: ${displayed.join(", ")}${suffix}` : "";
+    return truncateMessage(`partial parser recovery; ${locations.length} skipped-token location(s)${positions}`, MAX_SCANNER_ERROR_DIAGNOSTIC_LENGTH);
+  }
+  return safeScannerText(error.short_msg, "(diagnostic omitted)");
+}
+
+function safeScannerText(value, fallback, maxLength = MAX_SCANNER_ERROR_DIAGNOSTIC_LENGTH) {
+  if (typeof value !== "string") return fallback;
+  const sanitized = value
+    .replace(/\p{Cc}/gu, " ")
+    .replace(/\b([A-Z0-9_-]*(?:ACCESS[_-]?TOKEN|TOKEN|SECRET|PASSWORD|CREDENTIALS?|PRIVATE[_-]?KEY|API[_-]?KEY|AUTHORIZATION)\s*[:=]\s*)(?:Bearer\s+)?[^\s,;]+/giu, "$1[REDACTED]")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/giu, "[REDACTED]")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return sanitized === "" ? fallback : truncateMessage(sanitized, maxLength);
+}
+
+function errorPathValue(value) {
+  if (typeof value === "string") return value;
+  if (!isRecord(value)) return "";
+  return stringOr(value.ppath, stringOr(value.fpath, ""));
+}
+
+function scannerErrorPath(error) {
+  const firstSpan = Array.isArray(error?.spans) ? error.spans.find(isRecord) : undefined;
+  const rawPath = errorPathValue(error?.path) || errorPathValue(firstSpan?.file);
+  if (rawPath === "") return "unknown";
+  const normalized = rawPath.trim().replaceAll("\\", "/");
+  if (normalized.startsWith("/src/")) return safeScannerText(normalized.slice("/src/".length), "unknown", 120);
+  if (normalized.startsWith("./")) return safeScannerText(normalized.slice(2), "unknown", 120);
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//u.test(normalized)
+    || normalized.split("/").some((segment) => segment === "..")) {
+    return "(absolute path omitted)";
+  }
+  return safeScannerText(normalized, "unknown", 120);
+}
+
+function scannerErrorLocation(error) {
+  const firstSpan = Array.isArray(error?.spans) ? error.spans.find(isRecord) : undefined;
+  const start = isRecord(firstSpan?.start) ? firstSpan.start : isRecord(error?.start) ? error.start : null;
+  const line = Number.isInteger(start?.line) && start.line > 0 ? start.line : null;
+  const column = Number.isInteger(start?.col) && start.col > 0 ? start.col : null;
+  const position = line === null ? "" : `:${line}${column === null ? "" : `:${column}`}`;
+  return `${scannerErrorPath(error)}${position}`;
+}
+
+function scannerErrorType(error) {
+  if (!isRecord(error)) return "unknown";
+  const value = Array.isArray(error.type) ? error.type.filter((part) => typeof part === "string").join("/") : error.type;
+  return safeScannerText(value, "unknown", 80);
+}
+
+function scannerErrorCode(error) {
+  return isRecord(error) && Number.isSafeInteger(error.code) ? String(error.code) : "unknown";
+}
+
+function formatScannerError(error, index) {
+  return `scanner error ${index}: type=${scannerErrorType(error)}; code=${scannerErrorCode(error)}; location=${scannerErrorLocation(error)}; diagnostic=${scannerErrorMessage(error)}`;
+}
+
+export function formatScannerErrorDiagnostics(errors) {
+  if (!Array.isArray(errors)) throw new Error("Scanner errors must be an array.");
+  const lines = ["Semgrep scanner errors:"];
+  for (const [index, error] of errors.slice(0, MAX_SCANNER_ERRORS_DISPLAYED).entries()) {
+    lines.push(formatScannerError(error, index + 1));
+  }
+  if (errors.length > MAX_SCANNER_ERRORS_DISPLAYED) {
+    lines.push(`${errors.length - MAX_SCANNER_ERRORS_DISPLAYED} additional scanner errors omitted.`);
+  }
+  return lines.join("\n");
 }
 
 export function renderSummary(report, options = {}) {
@@ -191,11 +268,8 @@ export function renderSummary(report, options = {}) {
   if (report.errors.length === 0) {
     lines.push("None.");
   } else {
-    for (const error of report.errors.slice(0, 10)) {
-      lines.push(`- ${escapeMarkdownTableCell(truncateMessage(scannerErrorMessage(error), maxMessageLength))}`);
-    }
-    if (report.errors.length > 10) {
-      lines.push(`- ${report.errors.length - 10} additional scanner errors are available in the complete JSON report.`);
+    for (const line of formatScannerErrorDiagnostics(report.errors).split("\n").slice(1)) {
+      lines.push(`- ${escapeMarkdownTableCell(line)}`);
     }
   }
 
@@ -273,6 +347,7 @@ async function main() {
   const report = parseSemgrepReportText(await readInput(options.input));
   if (options.checkScannerErrors) {
     if (report.errors.length > 0) {
+      process.stderr.write(`${formatScannerErrorDiagnostics(report.errors)}\n`);
       throw new Error(`Semgrep JSON report contains ${report.errors.length} scanner error(s).`);
     }
     return;

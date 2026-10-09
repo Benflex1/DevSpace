@@ -103,6 +103,21 @@ test("rejects .git as an exact component while keeping .github visible", async (
   await expect(managed.listWorkspaceDirectory(projectId, workspaceId, ".github")).resolves.toMatchObject({ entries: [{ name: "workflow.yml" }] });
 });
 
+test("hides and denies access to the workspace-local Git administration directory", async () => {
+  const { managed } = await setup();
+  const rootListing = await managed.listWorkspaceDirectory(projectId, workspaceId, "");
+  expect(rootListing.entries.some((entry) => entry.name === ".devspace-git")).toBe(false);
+  await expect(managed.readWorkspaceFile(projectId, workspaceId, ".devspace-git/config")).rejects.toMatchObject({
+    failure: { code: "WORKSPACE_PATH_INVALID" }
+  });
+  await expect(managed.saveWorkspaceFile(projectId, workspaceId, ".devspace-git/config", "overwrite", "0".repeat(64))).rejects.toMatchObject({
+    failure: { code: "WORKSPACE_PATH_INVALID" }
+  });
+  await expect(managed.listWorkspaceDirectory(projectId, workspaceId, ".devspace-git")).rejects.toMatchObject({
+    failure: { code: "WORKSPACE_PATH_INVALID" }
+  });
+});
+
 test("reads strict UTF-8 text with a SHA-256 revision", async () => {
   const { managed } = await setup();
   const result = await managed.readWorkspaceFile(projectId, workspaceId, "README.md");

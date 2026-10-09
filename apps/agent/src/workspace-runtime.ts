@@ -165,6 +165,11 @@ function equalLabels(actual: Record<string, string>, expected: Record<string, st
   const expectedEntries = Object.entries(expected).sort(([left], [right]) => left.localeCompare(right));
   return JSON.stringify(actualEntries) === JSON.stringify(expectedEntries);
 }
+function containerLabelsMatch(actual: Record<string, string>, expected: Record<string, string>): boolean {
+  // Docker inspection merges image labels into the container label map; keep the DevSpace authority namespace exact.
+  const devspaceLabels = Object.fromEntries(Object.entries(actual).filter(([key]) => key.startsWith("devspace.")));
+  return equalLabels(devspaceLabels, expected);
+}
 function associationMatches(record: RuntimeOwnership, expected: RuntimeAssociation): boolean {
   return record.projectId === expected.projectId && record.workspaceId === expected.workspaceId
     && record.revisionId === expected.revisionId && record.revisionHash === expected.revisionHash
@@ -488,7 +493,7 @@ export class WorkspaceRuntimeManager {
       const occupying = await this.inspectOptionalContainer(names.container);
       let replacementContainerId: string;
       if (occupying !== null) {
-        if (!equalLabels(occupying.Config.Labels ?? {}, expectedLabels)) {
+        if (!containerLabelsMatch(occupying.Config.Labels ?? {}, expectedLabels)) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The development container name is occupied by an unrelated resource.");
         }
         const slot = classifyHarnessSlotMount({
@@ -652,7 +657,7 @@ export class WorkspaceRuntimeManager {
         && container.State.Running === false && container.State.Status === "created");
     if (container.Id !== record.developmentContainer.id
       || container.Name.replace(/^\//u, "") !== record.developmentContainer.name
-      || !equalLabels(container.Config.Labels ?? {}, record.developmentContainer.labels)
+      || !containerLabelsMatch(container.Config.Labels ?? {}, record.developmentContainer.labels)
       || container.Config.WorkingDir !== "/workspace"
       || container.HostConfig.Privileged !== false || container.HostConfig.PublishAllPorts !== false
       || container.HostConfig.PidMode !== "" || container.HostConfig.IpcMode !== "private"
@@ -765,7 +770,7 @@ export class WorkspaceRuntimeManager {
         const provisional = runtimeOwnershipSchema.parse({ ...this.ownershipFromCreation(runtimeCreationSchema.parse({
           ...creation, containerId: container.Id, phase: "container-created"
         })) });
-        if (!equalLabels(container.Config.Labels ?? {}, containerLabels)) {
+        if (!containerLabelsMatch(container.Config.Labels ?? {}, containerLabels)) {
           throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The derived development container name is occupied by an unrelated resource.");
         }
         this.validateContainer(container, provisional, "operation-owned-pre-activation");

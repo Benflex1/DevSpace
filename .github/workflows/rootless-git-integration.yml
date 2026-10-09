@@ -1,0 +1,257 @@
+name: Rootless managed-workspace Git integration
+
+on:
+  pull_request:
+    paths:
+      - "apps/agent/src/**"
+      - "packages/contracts/**"
+      - "packages/project-options/**"
+      - ".github/workflows/rootless-git-integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rootless-git-integration-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rootless-git:
+    name: Disposable rootless Docker acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.18.0"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
+        with:
+          version: "11.13.0"
+          run_install: false
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare official rootless Docker components
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          printf 'DEVSPACE_ROOTLESS_RUNNER_TEMP=%s\n' "$runner_temp" >>"$GITHUB_ENV"
+          root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -e "$root" || -L "$root" ]]; then
+            echo "Refusing to reuse an existing test root: $root" >&2
+            exit 1
+          fi
+          install -d -m 0700 "$root" "$root/docker-config"
+
+          # Install only rootless prerequisites. Do not install, start, or query the runner's
+          # pre-existing rootful Docker service.
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            apparmor ca-certificates curl dbus-user-session fuse-overlayfs iptables slirp4netns uidmap
+
+          # Use Docker's signed package repository for the officially supported rootless
+          # components. Refuse any package plan that would install, remove, or replace the
+          # runner's pre-existing Docker engine or CLI.
+          sudo install -m 0755 -d /etc/apt/keyrings
+          if [[ -e /etc/apt/keyrings/devspace-rootless-ci.asc || -e /etc/apt/sources.list.d/devspace-rootless-ci.list ]]; then
+            echo "Refusing to overwrite existing temporary Docker repository configuration" >&2
+            exit 1
+          fi
+          touch "$root/apt-key-created"
+          curl --fail --silent --show-error --location \
+            https://download.docker.com/linux/ubuntu/gpg \
+            | sudo tee /etc/apt/keyrings/devspace-rootless-ci.asc >/dev/null
+          sudo chmod a+r /etc/apt/keyrings/devspace-rootless-ci.asc
+          . /etc/os-release
+          codename="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+          architecture="$(dpkg --print-architecture)"
+          printf 'deb [arch=%s signed-by=/etc/apt/keyrings/devspace-rootless-ci.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+            "$architecture" "$codename" \
+            >"$root/docker-source.list"
+          touch "$root/apt-source-created"
+          sudo tee /etc/apt/sources.list.d/devspace-rootless-ci.list \
+            <"$root/docker-source.list" >/dev/null
+          sudo apt-get update
+          engine_package_version="$(dpkg-query -W -f='${Version}' docker-ce)"
+          cli_package_version="$(dpkg-query -W -f='${Version}' docker-ce-cli)"
+          engine_binary_version="$(dockerd --version | sed -En 's/^Docker version ([0-9.]+),.*/\1/p')"
+          engine_deb_version="$(sed -E 's/^[0-9]+://' <<<"$engine_package_version" | sed -E 's/-.*$//')"
+          if [[ -z "$engine_binary_version" || "$engine_binary_version" != "$engine_deb_version" ]]; then
+            echo "Installed dockerd binary and package version do not match: $engine_binary_version / $engine_package_version" >&2
+            exit 1
+          fi
+          if ! apt-cache madison docker-ce-rootless-extras \
+            | awk -F '|' -v expected="$engine_package_version" '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 == expected) found = 1 } END { exit !found }'; then
+            echo "Docker's repository has no rootless-extras package matching installed engine $engine_package_version" >&2
+            exit 1
+          fi
+          package_specs=(
+            "docker-ce-rootless-extras=$engine_package_version"
+            "docker-ce=$engine_package_version"
+            "docker-ce-cli=$cli_package_version"
+          )
+          package_plan="$(sudo apt-get --simulate install --no-install-recommends --no-upgrade "${package_specs[@]}")"
+          printf '%s\n' "$package_plan"
+          if grep -E '^Remv ' <<<"$package_plan"; then
+            echo "Rootless prerequisite installation would remove an existing package" >&2
+            exit 1
+          fi
+          if grep -E '^(Inst|Remv) (docker-ce|docker-ce-cli|docker.io|moby-engine|moby-cli|containerd.io)([ :]|$)' <<<"$package_plan"; then
+            echo "Rootless prerequisite installation would modify the runner's pre-existing Docker engine or CLI" >&2
+            exit 1
+          fi
+          sudo apt-get install --yes --no-install-recommends --no-upgrade "${package_specs[@]}"
+          rootless_script="$(command -v dockerd-rootless.sh)"
+          rootlesskit="$(command -v rootlesskit)"
+          test -x "$rootless_script"
+          test -x "$rootlesskit"
+          command -v dockerd >/dev/null
+          command -v newuidmap >/dev/null
+          command -v newgidmap >/dev/null
+          command -v slirp4netns >/dev/null
+
+          # Give this VM user one unused, private 65,536-ID mapping range if the image did not
+          # already provision one. Select a range disjoint from every existing subuid/subgid.
+          range_start="$(python3 - "$USER" <<'PY'
+          import pathlib, pwd, sys
+          user = sys.argv[1]
+          uid = str(pwd.getpwnam(user).pw_uid)
+          needed = 65536
+          paths = (pathlib.Path('/etc/subuid'), pathlib.Path('/etc/subgid'))
+          all_ranges = []
+          complete = True
+          for path in paths:
+              ranges = []
+              assigned = 0
+              for line in path.read_text().splitlines() if path.exists() else []:
+                  fields = line.split(':')
+                  if len(fields) != 3:
+                      continue
+                  try:
+                      start, count = int(fields[1]), int(fields[2])
+                  except ValueError:
+                      continue
+                  all_ranges.append((start, start + count))
+                  if fields[0] in (user, uid):
+                      ranges.append((start, start + count))
+                      assigned += count
+              complete = complete and assigned >= needed
+          if complete:
+              print('existing')
+          else:
+              candidate = 1_000_000
+              while any(candidate < end and start < candidate + needed for start, end in all_ranges):
+                  candidate += needed
+              print(candidate)
+          PY
+          )"
+          if [[ "$range_start" != existing ]]; then
+            range_end=$((range_start + 65535))
+            sudo usermod --add-subuids "$range_start-$range_end" --add-subgids "$range_start-$range_end" "$USER"
+          fi
+          python3 - "$USER" <<'PY'
+          import pathlib, pwd, sys
+          user = sys.argv[1]
+          uid = str(pwd.getpwnam(user).pw_uid)
+          needed = 65536
+          for path in (pathlib.Path('/etc/subuid'), pathlib.Path('/etc/subgid')):
+              total = 0
+              for line in path.read_text().splitlines():
+                  fields = line.split(':')
+                  if len(fields) == 3 and fields[0] in (user, uid):
+                      total += int(fields[2])
+              if total < needed:
+                  raise SystemExit(f'{path} does not provide 65,536 IDs for {user}')
+          PY
+          uid="$(id -u)"
+          delegate_dropin="/etc/systemd/system/user@.service.d/devspace-rootless-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.conf"
+          if [[ -e "$delegate_dropin" || -L "$delegate_dropin" ]]; then
+            echo "Refusing to overwrite an existing systemd delegation drop-in: $delegate_dropin" >&2
+            exit 1
+          fi
+          touch "$root/systemd-delegate-created"
+          sudo install -d -m 0755 /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+            | sudo tee "$delegate_dropin" >/dev/null
+          sudo systemctl daemon-reload
+          if [[ "$(systemctl is-active "user@$uid.service" 2>/dev/null || true)" == active ]]; then
+            sudo systemctl restart "user@$uid.service"
+          elif [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || true)" != yes ]]; then
+            sudo loginctl enable-linger "$USER"
+            touch "$root/linger-enabled"
+          fi
+          printf 'Prepared rootless Docker tools and subordinate ID mappings in the hosted VM.\n'
+
+      - name: Start and verify isolated rootless Docker daemon
+        id: daemon
+        shell: bash
+        run: bash -euo pipefail .github/scripts/rootless-docker-start.sh
+      - name: Run real managed-workspace Git acceptance test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          socket="$root/runtime/docker.sock"
+          test -S "$socket"
+          test -f "$root/runtime/dockerd.pid"
+          test "$DEVSPACE_TEST_DOCKER_SOCKET_PATH" = "$socket"
+          export DEVSPACE_TEST_GIT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+          report="$root/vitest.json"
+          env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+            DEVSPACE_TEST_DOCKER_SOCKET_PATH="$socket" \
+            DEVSPACE_TEST_GIT_IMAGE="$DEVSPACE_TEST_GIT_IMAGE" \
+            DOCKER_CONFIG="$root/docker-config" \
+            pnpm exec vitest run \
+              --project @devspace/agent \
+              apps/agent/src/managed-workspaces.rootless.integration.test.ts \
+              --reporter=json \
+              --outputFile="$report"
+          node --input-type=module - "$report" <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          const report = JSON.parse(await readFile(process.argv[2], 'utf8'));
+          const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+          if (report.success !== true
+            || report.numTotalTests !== 1
+            || report.numPassedTests !== 1
+            || report.numFailedTests !== 0
+            || report.numPendingTests !== 0
+            || report.numTodoTests !== 0
+            || assertions.length !== 1
+            || assertions[0]?.status !== 'passed'
+            || !String(assertions[0]?.fullName ?? assertions[0]?.title ?? '').includes('real managed containers provide isolated, persistent workspace Git repositories')) {
+            console.error(JSON.stringify(report, null, 2));
+            throw new Error('Rootless managed-workspace acceptance must run exactly once and pass; skipped tests are failures.');
+          }
+          console.log('Verified one passed real-container acceptance test with no skipped or pending tests.');
+          NODE
+          test -S "$socket"
+
+      - name: Show rootless test and daemon logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -f "$root/vitest.json" ]]; then
+            echo "Rootless Git integration Vitest report:"
+            cat "$root/vitest.json"
+          fi
+          if [[ -f "$root/daemon.log" ]]; then cat "$root/daemon.log"; fi
+
+      - name: Stop and remove only the disposable rootless daemon
+        if: always()
+        shell: bash
+        run: bash -euo pipefail .github/scripts/rootless-docker-cleanup.sh

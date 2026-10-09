@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   escapeMarkdownTableCell,
+  formatScannerErrorDiagnostics,
   parseSemgrepReportText,
   renderSummary,
   truncateMessage
@@ -85,14 +86,49 @@ test("rejects malformed JSON", () => {
   assert.throws(() => parseSemgrepReportText(JSON.stringify({ results: [] })), /results and errors arrays/u);
 });
 
-test("renders Semgrep error entries without assuming optional fields", () => {
+test("omits raw diagnostics from Semgrep errors when safe structured fields are absent", () => {
   const summary = renderSummary(report({ errors: [
     { code: "parse-error", long_msg: "Could not parse the file." },
     { error: "Rule loading failed." }
   ] }));
   assert.match(summary, /Scanner errors: \*\*2\*\*/u);
-  assert.match(summary, /Could not parse the file\./u);
-  assert.match(summary, /Rule loading failed\./u);
+  assert.match(summary, /diagnostic=\(diagnostic omitted\)/u);
+  assert.doesNotMatch(summary, /Could not parse the file|Rule loading failed/u);
+});
+
+test("formats bounded scanner-error diagnostics without source excerpts or sensitive values", () => {
+  const output = formatScannerErrorDiagnostics([
+    {
+      type: "SourceParseError",
+      code: 3,
+      path: "/src/apps/agent/src/workspace.ts",
+      short_msg: "parse error",
+      long_msg: "Full source excerpt: const credential = 'do-not-print';",
+      spans: [{ file: "/src/apps/agent/src/workspace.ts", start: { line: 17, col: 9 }, end: { line: 17, col: 10 } }]
+    },
+    {
+      type: "SemgrepError",
+      code: 2,
+      path: "/runner/private/source.ts",
+      short_msg: "token=secret-value ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 GITHUB_TOKEN=another-secret",
+      long_msg: "Must not be printed either."
+    },
+    {
+      type: ["PartialParsing", [{
+        path: "/src/.github/workflows/rootless-git-integration.yml",
+        start: { line: 201, col: 11 },
+        end: { line: 201, col: 12 }
+      }]],
+      code: 3,
+      path: "/src/.github/workflows/rootless-git-integration.yml"
+    }
+  ]);
+
+  assert.match(output, /type=SourceParseError; code=3; location=apps\/agent\/src\/workspace\.ts:17:9; diagnostic=parse error/u);
+  assert.match(output, /location=\(absolute path omitted\); diagnostic=token=\[REDACTED\] \[REDACTED\] GITHUB_TOKEN=\[REDACTED\]/u);
+  assert.match(output, /type=PartialParsing; code=3; location=\.github\/workflows\/rootless-git-integration\.yml; diagnostic=partial parser recovery; 1 skipped-token location\(s\): \.github\/workflows\/rootless-git-integration\.yml:201:11/u);
+  assert.doesNotMatch(output, /do-not-print|Full source excerpt|Must not be printed|\/runner\/private/u);
+  assert.doesNotMatch(output, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456|secret-value|another-secret/u);
 });
 
 test("limits displayed findings while retaining the total", () => {

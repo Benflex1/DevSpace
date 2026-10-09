@@ -409,7 +409,7 @@ A `registered-local` source ID names one administrator-configured source locatio
 carry its host path. A remote URL must contain no embedded credential. A `github-app` source is
 authorized only by the exact `{ connectionId, repositoryId }` pair; its URL/name fields are
 refreshable metadata and are not request authority. `workspaceId: null` asks for the managed project
-store; a UUID asks for that project's workspace worktree.
+store; a UUID asks for that project's independent workspace repository.
 
 ### Workspace shapes
 
@@ -458,12 +458,15 @@ RemoveWorkspaceData = {
 its private workspace ownership record and uses them to validate later preview hostnames; they
 are never browser input.
 
-`branchName` is the validated branch shorthand to create or attach. `baseRef` is either one
-validated branch name or one exact Git object ID from which a new worktree is based. The Agent
-resolves both within the managed project store. Archive
-with `preserve` retains the worktree and its changes. Remove with `discard` explicitly authorizes
-destruction of uncommitted workspace changes. `reject` fails if an isolated workspace is dirty.
-Primary-workspace policy may reject archive or removal with `RUNTIME_POLICY_VIOLATION`.
+`branchName` is the validated initial branch for the workspace repository. `baseRef` is either one
+validated branch name or one exact Git object ID from which it is initialized. The Agent resolves
+both within the managed project store. The repository's refs and objects are private to that
+workspace, so local branch switches and commits do not mutate another workspace's Git state. The
+Agent's authenticated Push uses the currently inspected branch and commit and revalidates them
+against the captured request. Archive with `preserve` retains the workspace repository and its
+changes. Remove with `discard` explicitly authorizes destruction of uncommitted workspace changes.
+`reject` fails if an isolated workspace is dirty. Primary-workspace policy may reject archive or
+removal with `RUNTIME_POLICY_VIOLATION`.
 
 ### Task and process shapes
 
