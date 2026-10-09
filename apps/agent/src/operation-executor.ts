@@ -1,4 +1,6 @@
-import type { AgentExecutionFailure, AgentResourceReference, AgentSnapshotResource, GitInspectionData } from "@devspace/contracts";
+import { agentApiV1EndpointByOperation, type AgentExecutionFailure, type AgentResourceReference, type AgentSnapshotResource,
+  type GitInspectionData } from "@devspace/contracts";
+import { performance } from "node:perf_hooks";
 import { v7 as uuidv7 } from "uuid";
 import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
@@ -19,6 +21,13 @@ function resourceFor(record: JournalRecord): AgentResourceReference | null {
     return { type: "workspace", projectId: request.projectId, workspaceId: request.workspaceId };
   }
   return { type: "project", projectId: request.projectId };
+}
+
+function diagnosticErrorClass(error: unknown): string {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof RangeError) return "RangeError";
+  if (error instanceof SyntaxError) return "SyntaxError";
+  return error instanceof Error ? "Error" : "UnknownError";
 }
 
 export class OperationExecutor {
@@ -141,6 +150,8 @@ export class OperationExecutor {
     let taskStartCompleted = false;
     let fetchMutationCompleted = false;
     let gitMutationCompleted = false;
+    let phase = "operation-setup";
+    const operationStartedAt = performance.now();
     try {
       this.logger.info("agent.operation.started", "Agent operation execution started", {
         operationId, operationName: record.operationName, operationState: record.state, ...resourceFields
@@ -152,10 +163,12 @@ export class OperationExecutor {
       if ((record.operationName === "workspace.start" || record.operationName === "workspace.stop")
         && typeof (record.request as { workspaceId?: string }).workspaceId === "string") {
         const request = record.request as { projectId: string; workspaceId: string };
-        const before = await this.managed.inspectWorkspace(request.projectId, request.workspaceId);
-        previousRuntime = before.runtimeStack.observedState === "running" ? "running"
-          : before.runtimeStack.observedState === "stopped" ? "stopped" : "absent";
+        phase = "operation-inspection";
+        const runtimeStack = await this.managed.inspectWorkspaceRuntime(request.projectId, request.workspaceId);
+        previousRuntime = runtimeStack.observedState === "running" ? "running"
+          : runtimeStack.observedState === "stopped" ? "stopped" : "absent";
       }
+      phase = "operation-dispatch";
       switch (record.operationName) {
         case "configuration-revision.register":
           await this.managed.registerRevision(record.request as Parameters<ManagedWorkspaces["registerRevision"]>[0]);
@@ -233,6 +246,7 @@ export class OperationExecutor {
           await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
           break;
       }
+      phase = "operation-finalization";
       if (previewMutation) await this.refreshAfterPreviewMutation(operationId, record.operationName, resourceFields);
       if (localGitMutation) {
         const request = record.request as { projectId: string; workspaceId: string };
@@ -290,18 +304,24 @@ export class OperationExecutor {
         });
         return;
       }
-      const failure: AgentExecutionFailure = error instanceof AgentExecutionError ? error.failure : {
+      const originalFailure = error instanceof AgentExecutionError ? error.failure : undefined;
+      const incompatibleFailure = originalFailure !== undefined
+        && !agentApiV1EndpointByOperation[record.operationName].errors.some((candidate) => candidate.code === originalFailure.code);
+      const journalFailure: AgentExecutionFailure = originalFailure !== undefined && !incompatibleFailure ? originalFailure : {
         code: "AGENT_INTERNAL_ERROR", message: "The Agent encountered an unexpected error.", retryable: true,
         details: { incidentId: this.createId() }
       };
       const internalReason = error instanceof AgentExecutionError ? error.internalReason : undefined;
-      await this.journal.fail(operationId, failure);
-      this.events.failed(operationId, resource, failure);
-      const incidentId = "incidentId" in failure.details ? failure.details.incidentId : undefined;
+      await this.journal.fail(operationId, journalFailure);
+      this.events.failed(operationId, resource, journalFailure);
+      const incidentId = "incidentId" in journalFailure.details ? journalFailure.details.incidentId : undefined;
       this.logger.error("agent.operation.failed", "Agent operation failed", {
         operationId, operationName: record.operationName, operationState: "failed", errorCategory: "operation",
-        failureCategory: classifyFailureCode(failure.code), errorCode: failure.code, retryable: failure.retryable,
-        ...(incidentId === undefined ? {} : { incidentId }), ...(internalReason === undefined ? {} : { internalReason }), ...resourceFields
+        failureCategory: classifyFailureCode(journalFailure.code), errorCode: journalFailure.code, retryable: journalFailure.retryable,
+        ...(incompatibleFailure && originalFailure !== undefined ? { failureCode: originalFailure.code } : {}),
+        ...(incidentId === undefined ? {} : { incidentId }), ...(internalReason === undefined ? {} : { internalReason }),
+        ...(record.operationName === "workspace.start" ? { phase, errorClass: diagnosticErrorClass(error),
+          durationMs: Math.max(0, performance.now() - operationStartedAt) } : {}), ...resourceFields
       });
     }
   }
