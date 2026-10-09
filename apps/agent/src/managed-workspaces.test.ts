@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "vitest";
 import { createWorkspaceDataSchema, gitBranchNameSchema } from "@devspace/contracts";
+import { createLogger } from "@devspace/diagnostics";
 import {
   canonicalizeProjectOptionsV1, canonicalizeRuntimePlanV1, compileRuntimePlanV1, hashProjectOptionsV1, hashRuntimePlanV1,
   parseProjectOptionsV1
@@ -77,6 +78,20 @@ class StoppedFailingStartRuntime extends WorkspaceRuntimeManager {
   }
 }
 
+class FailingLegacyInspectionRuntime extends StoppedFailingStartRuntime {
+  override inspect(..._args: Parameters<WorkspaceRuntimeManager["inspect"]>): Promise<never> {
+    return Promise.reject(new TypeError("token=fixture-only; path=/fixture-only"));
+  }
+}
+
+class FailingRuntimeInspection extends WorkspaceRuntimeManager {
+  readonly inspectedAssociations: Parameters<WorkspaceRuntimeManager["inspect"]>[0][] = [];
+  override inspect(...args: Parameters<WorkspaceRuntimeManager["inspect"]>): Promise<never> {
+    this.inspectedAssociations.push(args[0]);
+    return Promise.reject(new TypeError("runtime inspection failed"));
+  }
+}
+
 async function commit(source: string, content: string): Promise<string> {
   await writeFile(path.join(source, "README.md"), content, "utf8");
   await exec("/usr/bin/git", ["-C", source, "add", "README.md"]);
@@ -146,16 +161,18 @@ async function makeLegacyDirtyWorkspace(h: Awaited<ReturnType<typeof harness>>) 
   return { worktreePath, repository, localCommit, status, oldGitPointer, adminPath };
 }
 
-async function migrationManager(h: Awaited<ReturnType<typeof harness>>, writer: AtomicJsonWriter = durableJsonWriter) {
+async function migrationManager(h: Awaited<ReturnType<typeof harness>>, writer: AtomicJsonWriter = durableJsonWriter,
+  runtimeOverride?: WorkspaceRuntimeManager, logger?: ReturnType<typeof createLogger>) {
   const options = parseProjectOptionsV1({ schemaVersion: 1,
     developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
   const plan = compileRuntimePlanV1(options);
   const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
   const policy = { cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
     stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
-  const runtime = new StoppedFailingStartRuntime(h.roots.state, engine, policy);
+  const runtime = runtimeOverride ?? new StoppedFailingStartRuntime(h.roots.state, engine, policy);
   const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
-  const managed = new ManagedWorkspaces(h.roots, h.git, writer, runtime, preview);
+  const managed = new ManagedWorkspaces(h.roots, h.git, writer, runtime, preview,
+    undefined, undefined, undefined, undefined, logger);
   await managed.initialize();
   await managed.registerRuntimePlan({ projectId, revisionId, revisionHash: hashProjectOptionsV1(options),
     runtimePlan: { format: plan.format, hash: hashRuntimePlanV1(plan), canonicalJson: canonicalizeRuntimePlanV1(plan) } });
@@ -207,6 +224,37 @@ test("creates, owns, revalidates, and reloads a real store and worktree", async 
   await restarted.initialize();
   await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ workspaceId: null });
   await expect(restarted.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "main", headCommit: h.firstCommit, dirty: false });
+});
+
+test("runtime-only workspace inspection avoids Git status and keeps ownership validation", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId); await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const statusFailingGit: GitRunner = async (args) => {
+    if (args.includes("status")) throw new Error("Git status failed");
+    return await h.git(args);
+  };
+  const managed = new ManagedWorkspaces(h.roots, statusFailingGit);
+  await managed.initialize();
+
+  await expect(managed.inspectWorkspace(projectId, workspaceId)).rejects.toMatchObject({ failure: { code: "GIT_OPERATION_FAILED" } });
+  await expect(managed.inspectWorkspaceRuntime(projectId, workspaceId))
+    .resolves.toEqual({ desiredState: "absent", observedState: "absent" });
+  await expect(managed.inspectWorkspaceRuntime("018f0f00-0000-7000-8000-000000000099", workspaceId))
+    .rejects.toMatchObject({ failure: { code: "WORKSPACE_STATE_CONFLICT" } });
+});
+
+test("runtime-only workspace inspection still blocks on runtime inspection failure", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId); await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
+  const policy = { cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
+    stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
+  const runtime = new FailingRuntimeInspection(h.roots.state, engine, policy);
+  const managed = await migrationManager(h, durableJsonWriter, runtime);
+
+  await expect(managed.inspectWorkspaceRuntime(projectId, workspaceId)).rejects.toBeInstanceOf(TypeError);
+  expect(runtime.inspectedAssociations).toHaveLength(1);
+  expect(runtime.inspectedAssociations[0]).toMatchObject({ projectId, workspaceId, revisionId, generation: 1 });
 });
 
 test("keeps each workspace Git repository container-local and visible to Agent inspection", async () => {
@@ -341,6 +389,29 @@ test("migrates a stopped legacy workspace without losing local commits or index 
   expect(runtime.startedWorktreePath).toBe(legacy.worktreePath);
 });
 
+test("identifies an unexpected runtime inspection failure before legacy Git migration", async () => {
+  const h = await harness();
+  const legacy = await makeLegacyDirtyWorkspace(h);
+  const runtime = new FailingLegacyInspectionRuntime(h.roots.state,
+    new DockerEngineClient(path.join(h.root, "fixture-docker.sock")), {
+      cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
+      stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50
+    });
+  const logLines: string[] = [];
+  const logger = createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) });
+  const managed = await migrationManager(h, durableJsonWriter, runtime, logger);
+
+  await expect(managed.startWorkspace(projectId, workspaceId, "018f0f00-0000-7000-8000-000000000017"))
+    .rejects.toMatchObject({ failure: { code: "AGENT_INTERNAL_ERROR" } });
+  const runtimeFailure = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.event === "agent.workspace.start.phase_failed");
+  expect(runtimeFailure).toMatchObject({ phase: "runtime-inspection", errorClass: "TypeError", outcome: "failure" });
+  expect(logLines.join("\n")).not.toContain("fixture-only");
+  await expect(readFile(path.join(legacy.worktreePath, ".git"), "utf8")).resolves.toBe(legacy.oldGitPointer);
+  await expect(lstat(path.join(legacy.worktreePath, ".devspace-git"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(legacy.adminPath)).resolves.toBeTruthy();
+});
+
 test("a failed legacy workspace migration leaves its original Git state recoverable", async () => {
   const h = await harness();
   const legacy = await makeLegacyDirtyWorkspace(h);
@@ -350,7 +421,7 @@ test("a failed legacy workspace migration leaves its original Git state recovera
   await h.managed.registerRuntimePlan({ projectId, revisionId, revisionHash: hashProjectOptionsV1(options),
     runtimePlan: { format: plan.format, hash: hashRuntimePlanV1(plan), canonicalJson: canonicalizeRuntimePlanV1(plan) } });
   const failingGit: GitRunner = async (args) => {
-    if (args.includes("apply")) throw new Error("fixture-migration-copy-failure");
+    if (args.includes("apply")) throw new TypeError("token=fixture-only; path=/fixture-only");
     return await h.git(args);
   };
   const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
@@ -358,17 +429,31 @@ test("a failed legacy workspace migration leaves its original Git state recovera
     stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
   const runtime = new StoppedFailingStartRuntime(h.roots.state, engine, policy);
   const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
-  const managed = new ManagedWorkspaces(h.roots, failingGit, durableJsonWriter, runtime, preview);
+  const logLines: string[] = [];
+  const logger = createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) });
+  const managed = new ManagedWorkspaces(h.roots, failingGit, durableJsonWriter, runtime, preview,
+    undefined, undefined, undefined, undefined, logger);
   await managed.initialize();
 
   await expect(managed.startWorkspace(projectId, workspaceId, "018f0f00-0000-7000-8000-000000000014"))
-    .rejects.toThrow("fixture-migration-copy-failure");
+    .rejects.toThrow("token=fixture-only; path=/fixture-only");
+  const migrationFailure = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.event === "agent.workspace.start.phase_failed");
+  expect(migrationFailure).toMatchObject({ phase: "git-migration-stage-index", errorClass: "TypeError", outcome: "failure" });
+  const migrationRecovery = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.event === "agent.workspace.git_migration.recovered");
+  expect(migrationRecovery).toMatchObject({ phase: "git-migration-recovery", outcome: "success" });
+  expect(logLines.join("\n")).not.toContain("fixture-only");
   await expect(readFile(path.join(legacy.worktreePath, ".git"), "utf8")).resolves.toBe(legacy.oldGitPointer);
   await expect(exec("/usr/bin/git", ["-C", legacy.worktreePath, "status", "--porcelain=v1", "--untracked-files=all"]))
     .resolves.toMatchObject({ stdout: legacy.status });
   await expect(exec("/usr/bin/git", ["-C", legacy.worktreePath, "rev-parse", "HEAD"]))
     .resolves.toMatchObject({ stdout: `${legacy.localCommit}\n` });
   await expect(lstat(path.join(legacy.worktreePath, ".devspace-git"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(path.join(path.dirname(legacy.worktreePath), ".git-migration-018f0f00-0000-7000-8000-000000000014")))
+    .rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(path.join(h.roots.state, "git-migrations", `${workspaceId}.json`)))
+    .rejects.toMatchObject({ code: "ENOENT" });
   await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ headCommit: legacy.localCommit, dirty: true });
   expect(runtime.startedWorktreePath).toBeNull();
 });
@@ -781,7 +866,10 @@ test("reports an unexpected runtime-start exception as an Agent internal error",
     stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
   const runtime = new UnexpectedRuntimeStart(h.roots.state, engine, policy);
   const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
-  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, runtime, preview);
+  const logLines: string[] = [];
+  const logger = createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) });
+  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, runtime, preview,
+    undefined, undefined, undefined, undefined, logger);
   await managed.initialize();
 
   let failure: AgentExecutionError | null = null;
@@ -797,6 +885,10 @@ test("reports an unexpected runtime-start exception as an Agent internal error",
   const details = failure.failure.details;
   if (!("incidentId" in details)) throw new Error("Agent internal error did not include an incident ID");
   expect(typeof details.incidentId).toBe("string");
+  const startFailure = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.event === "agent.workspace.start.phase_failed");
+  expect(startFailure).toMatchObject({ phase: "runtime-startup", errorClass: "Error", outcome: "failure" });
+  expect(logLines.join("\n")).not.toContain("unexpected-runtime-start");
 });
 
 test.each(["directory", "worktree", "symlink"])("rejects an unowned existing workspace %s", async (kind) => {

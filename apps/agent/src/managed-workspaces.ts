@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import {
   configurationRevisionDataSchema,
@@ -206,6 +207,14 @@ function executionFailure(code: AgentExecutionFailure["code"], message: string, 
     "ROOTLESS_RUNTIME_UNAVAILABLE", "AGENT_INTERNAL_ERROR", "GATEWAY_UPDATE_FAILED"].includes(code);
   return { code, message, retryable, details } as AgentExecutionFailure;
 }
+
+function diagnosticErrorClass(error: unknown): string {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof RangeError) return "RangeError";
+  if (error instanceof SyntaxError) return "SyntaxError";
+  return error instanceof Error ? "Error" : "UnknownError";
+}
+
 function storeConflict(projectId: string): AgentExecutionError {
   return new AgentExecutionError(executionFailure("RESOURCE_STATE_CONFLICT", "The managed store path is not provably owned by DevSpace.", {
     resource: { type: "project", id: projectId }, action: "create"
@@ -1778,44 +1787,56 @@ export class ManagedWorkspaces {
   }): Promise<z.infer<typeof workspaceOwnershipV2Schema>> {
     const { base, store, gitAdministration, operationId, preserveIndex } = input;
     const workspacePath = base.worktreePath;
-    const metadataPath = path.join(workspacePath, WORKSPACE_GIT_METADATA_NAME);
-    const pointerPath = path.join(workspacePath, ".git");
-    const oldGitPointer = await readFile(pointerPath, "utf8");
-    if (oldGitPointer.trim() !== `gitdir: ${gitAdministration.path}`) throw workspaceConflict(base.workspaceId);
-    if (await lstatIdentity(metadataPath) !== null) throw workspaceConflict(base.workspaceId);
-    const headCommit = objectIdSchema.parse((await this.git(["-C", workspacePath, "rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim());
-    const branchName = gitBranchNameSchema.parse(base.branchName);
-    const currentBranch = await this.git(["-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD"])
-      .then((result) => result.stdout.trim()).catch(() => "");
-    if (preserveIndex && currentBranch !== branchName) throw workspaceConflict(base.workspaceId);
-    const unmerged = (await this.git(["-C", workspacePath, "ls-files", "-u", "-z"])).stdout;
-    if (unmerged !== "") throw workspaceConflict(base.workspaceId);
-    if ((await this.git(["-C", workspacePath, "ls-files", "--error-unmatch", "--", WORKSPACE_GIT_METADATA_NAME])
-      .then(() => true).catch(() => false)) || await lstatIdentity(metadataPath) !== null) {
-      throw workspaceConflict(base.workspaceId);
-    }
-    const stagedPatch = preserveIndex
-      ? (await this.git(["-C", workspacePath, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD"])).stdout
-      : "";
-    const stagePath = path.join(base.parentPath, `.git-migration-${operationId ?? base.workspaceId}`);
-    if (await lstatIdentity(stagePath) !== null) throw workspaceConflict(base.workspaceId);
-    await mkdir(stagePath, { mode: 0o700 });
-    const staging = await lstatIdentity(stagePath);
-    if (staging === null || !staging.stats.isDirectory() || staging.stats.isSymbolicLink()) throw workspaceConflict(base.workspaceId);
-    let migration = gitMigrationSchema.parse({
-      version: 1, projectId: base.projectId, workspaceId: base.workspaceId, operationId,
-      worktreePath: workspacePath, worktreeIdentity: base.identity,
-      storePath: store.repositoryPath, storeIdentity: store.identity,
-      gitAdministration, stagingPath: stagePath, stagingIdentity: staging.identity,
-      metadataPath, metadataIdentity: null, oldGitPointer, ownership: null, phase: "building"
-    });
-    await this.saveGitMigration(migration);
+    let phase = "git-migration-preflight";
+    let phaseStartedAt = performance.now();
+    let migration: z.infer<typeof gitMigrationSchema>;
+    let migrationRecorded = false;
     try {
+      const metadataPath = path.join(workspacePath, WORKSPACE_GIT_METADATA_NAME);
+      const pointerPath = path.join(workspacePath, ".git");
+      const oldGitPointer = await readFile(pointerPath, "utf8");
+      if (oldGitPointer.trim() !== `gitdir: ${gitAdministration.path}`) throw workspaceConflict(base.workspaceId);
+      if (await lstatIdentity(metadataPath) !== null) throw workspaceConflict(base.workspaceId);
+      const headCommit = objectIdSchema.parse((await this.git(["-C", workspacePath, "rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim());
+      const branchName = gitBranchNameSchema.parse(base.branchName);
+      const currentBranch = await this.git(["-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD"])
+        .then((result) => result.stdout.trim()).catch(() => "");
+      if (preserveIndex && currentBranch !== branchName) throw workspaceConflict(base.workspaceId);
+      const unmerged = (await this.git(["-C", workspacePath, "ls-files", "-u", "-z"])).stdout;
+      if (unmerged !== "") throw workspaceConflict(base.workspaceId);
+      if ((await this.git(["-C", workspacePath, "ls-files", "--error-unmatch", "--", WORKSPACE_GIT_METADATA_NAME])
+        .then(() => true).catch(() => false)) || await lstatIdentity(metadataPath) !== null) {
+        throw workspaceConflict(base.workspaceId);
+      }
+      const stagedPatch = preserveIndex
+        ? (await this.git(["-C", workspacePath, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD"])).stdout
+        : "";
+      const stagePath = path.join(base.parentPath, `.git-migration-${operationId ?? base.workspaceId}`);
+      phase = "git-migration-stage-create";
+      phaseStartedAt = performance.now();
+      if (await lstatIdentity(stagePath) !== null) throw workspaceConflict(base.workspaceId);
+      await mkdir(stagePath, { mode: 0o700 });
+      const staging = await lstatIdentity(stagePath);
+      if (staging === null || !staging.stats.isDirectory() || staging.stats.isSymbolicLink()) throw workspaceConflict(base.workspaceId);
+      migration = gitMigrationSchema.parse({
+        version: 1, projectId: base.projectId, workspaceId: base.workspaceId, operationId,
+        worktreePath: workspacePath, worktreeIdentity: base.identity,
+        storePath: store.repositoryPath, storeIdentity: store.identity,
+        gitAdministration, stagingPath: stagePath, stagingIdentity: staging.identity,
+        metadataPath, metadataIdentity: null, oldGitPointer, ownership: null, phase: "building"
+      });
+      await this.saveGitMigration(migration);
+      migrationRecorded = true;
+
+      phase = "git-migration-stage-init";
+      phaseStartedAt = performance.now();
       const stageTree = path.join(stagePath, "tree");
       const stageMetadata = path.join(stagePath, "metadata");
       await mkdir(stageTree, { mode: 0o700 });
       await this.git(["init", "--quiet", "--template=/dev/null", `--initial-branch=${branchName}`,
         `--separate-git-dir=${stageMetadata}`, stageTree]);
+      phase = "git-migration-stage-fetch";
+      phaseStartedAt = performance.now();
       await this.git(["-C", stageTree, "remote", "add", "origin", store.git.originUrl]);
       await this.git(["-C", stageTree, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath, headCommit]);
       await this.git(["-C", stageTree, "update-ref", `refs/heads/${branchName}`, headCommit]);
@@ -1823,10 +1844,14 @@ export class ManagedWorkspaces {
       await this.git(["-C", stageTree, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
         "+refs/remotes/origin/*:refs/remotes/origin/*"]);
       if (stagedPatch !== "") {
+        phase = "git-migration-stage-index";
+        phaseStartedAt = performance.now();
         const patchPath = path.join(stagePath, "staged.patch");
         await writeFile(patchPath, stagedPatch, { encoding: "utf8", mode: 0o600, flag: "wx" });
         await this.git(["-C", stageTree, "apply", "--cached", "--binary", "--whitespace=nowarn", "--", patchPath]);
       }
+      phase = "git-migration-stage-config";
+      phaseStartedAt = performance.now();
       const identity = await this.readGitIdentity(["-C", workspacePath]);
       if (identity.name !== null) await this.git(["-C", stageTree, "config", "--local", "user.name", identity.name]);
       if (identity.email !== null) await this.git(["-C", stageTree, "config", "--local", "user.email", identity.email]);
@@ -1852,14 +1877,45 @@ export class ManagedWorkspaces {
       const ownership = workspaceOwnershipV2Schema.parse({ ...base, version: 2,
         git: { metadataPath, identity: metadata.identity, originUrl: remoteRepositoryUrlSchema.parse(store.git.originUrl) } });
       migration = gitMigrationSchema.parse({ ...migration, metadataIdentity: metadata.identity, ownership, phase: "prepared" });
+      phase = "git-migration-prepare";
+      phaseStartedAt = performance.now();
       await this.saveGitMigration(migration);
+      phase = "git-migration-metadata-install";
+      phaseStartedAt = performance.now();
       await rename(stageMetadata, metadataPath);
+      phase = "git-migration-pointer-switch";
+      phaseStartedAt = performance.now();
       await this.writeWorkspaceGitPointer(workspacePath, base.identity, oldGitPointer);
       migration = gitMigrationSchema.parse({ ...migration, phase: "installed" });
+      phase = "git-migration-install-marker";
+      phaseStartedAt = performance.now();
       await this.saveGitMigration(migration);
+      phase = "git-migration-finalize";
+      phaseStartedAt = performance.now();
       return await this.finishGitMigration(migration);
     } catch (error) {
-      await this.recoverWorkspaceGitMigration(base.projectId, base.workspaceId).catch(() => undefined);
+      if (preserveIndex) {
+        this.logWorkspaceStartPhaseFailure(operationId ?? base.workspaceId, base.projectId, base.workspaceId, phase, phaseStartedAt, error);
+      }
+      if (migrationRecorded) {
+        const recoveryStartedAt = performance.now();
+        try {
+          await this.recoverWorkspaceGitMigration(base.projectId, base.workspaceId);
+          if (preserveIndex) {
+            try {
+              this.logger.info("agent.workspace.git_migration.recovered", "Workspace Git migration recovery completed.", {
+                ...(operationId === null ? {} : { operationId }), projectId: base.projectId, workspaceId: base.workspaceId,
+                phase: "git-migration-recovery", outcome: "success", durationMs: Math.max(0, performance.now() - recoveryStartedAt)
+              });
+            } catch { /* diagnostics must not affect workspace recovery */ }
+          }
+        } catch (recoveryError) {
+          if (preserveIndex) {
+            this.logWorkspaceStartPhaseFailure(operationId ?? base.workspaceId, base.projectId, base.workspaceId,
+              "git-migration-recovery", recoveryStartedAt, recoveryError);
+          }
+        }
+      }
       throw error;
     }
   }
@@ -2298,9 +2354,8 @@ export class ManagedWorkspaces {
     }
   }
 
-  async inspectWorkspace(projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> {
-    const record = await this.loadWorkspaceOwnership(projectId, workspaceId);
-    const revision = await this.loadRevisionRecord(projectId, record.revision.revisionId);
+  private async inspectWorkspaceRuntimeState(projectId: string, workspaceId: string, record: WorkspaceOwnership,
+    revision: z.infer<typeof revisionRecordSchema>): Promise<Pick<WorkspaceInspectionData, "desiredState" | "observedState" | "runtimeStack">> {
     const runtime = revision.runtimePlan === null
       ? { observedState: "absent" as const, serviceState: "absent" as const, errorCode: null, containerIdentity: null }
       : await this.runtime.inspect({ projectId, workspaceId, revisionId: record.revision.revisionId,
@@ -2310,10 +2365,23 @@ export class ManagedWorkspaces {
       : runtime.observedState === "lost" ? "lost" : "failed";
     const desiredState = workspaceObserved === "running" ? "running" : "stopped";
     const runtimeDesired = runtime.observedState === "absent" ? "absent" : desiredState;
+    return { desiredState, observedState: workspaceObserved,
+      runtimeStack: { desiredState: runtimeDesired, observedState: runtime.observedState } };
+  }
+
+  async inspectWorkspaceRuntime(projectId: string, workspaceId: string): Promise<WorkspaceInspectionData["runtimeStack"]> {
+    const record = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, record.revision.revisionId);
+    return (await this.inspectWorkspaceRuntimeState(projectId, workspaceId, record, revision)).runtimeStack;
+  }
+
+  async inspectWorkspace(projectId: string, workspaceId: string): Promise<WorkspaceInspectionData> {
+    const record = await this.loadWorkspaceOwnership(projectId, workspaceId);
+    const revision = await this.loadRevisionRecord(projectId, record.revision.revisionId);
+    const runtimeState = await this.inspectWorkspaceRuntimeState(projectId, workspaceId, record, revision);
     return workspaceInspectionDataSchema.parse({
       projectId, workspaceId, kind: record.kind, revisionId: record.revision.revisionId, revisionHash: record.revision.revisionHash,
-      desiredState, observedState: workspaceObserved, dirty: (await this.inspectGit(projectId, workspaceId)).dirty,
-      runtimeStack: { desiredState: runtimeDesired, observedState: runtime.observedState }
+      ...runtimeState, dirty: (await this.inspectGit(projectId, workspaceId)).dirty
     });
   }
 
@@ -2508,6 +2576,16 @@ export class ManagedWorkspaces {
     return new AgentExecutionError(executionFailure("AGENT_INTERNAL_ERROR", "The workspace runtime operation failed safely.", { incidentId: uuidv7() }));
   }
 
+  private logWorkspaceStartPhaseFailure(operationId: string, projectId: string, workspaceId: string, phase: string,
+    startedAt: number, error: unknown): void {
+    try {
+      this.logger.error("agent.workspace.start.phase_failed", "Workspace start phase failed.", {
+        operationId, projectId, workspaceId, phase, outcome: "failure",
+        durationMs: Math.max(0, performance.now() - startedAt), errorClass: diagnosticErrorClass(error)
+      });
+    } catch { /* diagnostics must not affect workspace recovery */ }
+  }
+
   async observeHarnessSlot(workspaceId: string) {
     return await this.runtime.observeHarnessSlot(workspaceId);
   }
@@ -2541,12 +2619,25 @@ export class ManagedWorkspaces {
       revisionHash: workspace.revision.revisionHash, runtimePlanHash: revision.runtimePlan.hash, generation: 1 };
     if (workspace.version === 1) {
       let currentRuntime;
+      const runtimeInspectionStartedAt = performance.now();
       try { currentRuntime = await this.runtime.inspect(association); }
-      catch (error) { throw this.runtimeFailure(error, workspaceId, "start"); }
+      catch (error) {
+        this.logWorkspaceStartPhaseFailure(operationId, projectId, workspaceId, "runtime-inspection", runtimeInspectionStartedAt, error);
+        throw this.runtimeFailure(error, workspaceId, "start");
+      }
       if (currentRuntime.observedState === "stopped" || currentRuntime.observedState === "absent") {
-        const store = await this.loadStoreOwnership(projectId);
-        const administration = await this.worktreeAdministration(store.repositoryPath, workspace.worktreePath);
-        if (administration === null) throw workspaceConflict(workspaceId);
+        let store: StoreOwnership;
+        let administration: { path: string; identity: FileIdentity };
+        const migrationPreflightStartedAt = performance.now();
+        try {
+          store = await this.loadStoreOwnership(projectId);
+          const existingAdministration = await this.worktreeAdministration(store.repositoryPath, workspace.worktreePath);
+          if (existingAdministration === null) throw workspaceConflict(workspaceId);
+          administration = existingAdministration;
+        } catch (error) {
+          this.logWorkspaceStartPhaseFailure(operationId, projectId, workspaceId, "git-migration-preflight", migrationPreflightStartedAt, error);
+          throw error;
+        }
         const { version: _version, ...base } = workspace;
         workspace = await this.installWorkspaceGitRepository({ base: { ...base, version: 2 }, store,
           gitAdministration: administration, operationId, preserveIndex: true });
@@ -2556,14 +2647,26 @@ export class ManagedWorkspaces {
       }
     }
     let bindings;
+    let startupPhase = "runtime-admission";
+    let startupPhaseStartedAt = performance.now();
+    const advanceStartupPhase = (phase: string): void => {
+      startupPhase = phase;
+      startupPhaseStartedAt = performance.now();
+    };
     try {
       const options = parseProjectOptionsV1(JSON.parse(revision.data.configuration.canonicalJson));
+      advanceStartupPhase("preview-lease-reservation");
       bindings = await this.preview.reserveWorkspaceLeases(association, options, operationId);
+      advanceStartupPhase("runtime-startup");
       await this.runtime.start(association, JSON.parse(revision.runtimePlan.canonicalJson), workspace.worktreePath, operationId, bindings);
+      advanceStartupPhase("runtime-verification");
       const ownership = await this.runtime.exactRunningOwnership(association);
+      advanceStartupPhase("preview-binding");
       await this.preview.bindRuntimeContainer(association, ownership.developmentContainer.id, bindings);
+      advanceStartupPhase("preview-settled");
       await this.preview.workspaceStarted(association);
     } catch (error) {
+      this.logWorkspaceStartPhaseFailure(operationId, projectId, workspaceId, startupPhase, startupPhaseStartedAt, error);
       await this.preview.releaseOperationLeases(association, operationId).catch(() => undefined);
       if (error instanceof PreviewRuntimeError) {
         const code = error.code === "ROOTLESS_RUNTIME_UNAVAILABLE" ? "ROOTLESS_RUNTIME_UNAVAILABLE"

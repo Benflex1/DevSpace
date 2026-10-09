@@ -91,6 +91,148 @@ test("dispatches project.push through ManagedWorkspaces exactly once", async () 
   expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
 });
 
+test("records a safe phase when workspace start fails during its initial inspection", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-start-inspection-diagnostic-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const operationId = "018f0f00-0000-7000-8000-000000000009";
+  const request = { projectId: project, workspaceId: targetWorkspace };
+  const startWorkspace = vi.fn(async () => undefined);
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    inspectWorkspaceRuntime: async () => { throw new TypeError("runtime inspection failed"); },
+    startWorkspace,
+    snapshotResources: async () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const logLines: string[] = [];
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)), undefined, undefined,
+    createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) }));
+  const accepted = await journal.accept(operationId, "workspace.start", request);
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(journal.get(operationId)?.failure?.code).toBe("AGENT_INTERNAL_ERROR");
+  expect(startWorkspace).not.toHaveBeenCalled();
+  const operationFailure = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.event === "agent.operation.failed");
+  expect(operationFailure).toMatchObject({ phase: "operation-inspection", errorClass: "TypeError" });
+  expect(logLines.join("\n")).not.toContain("fixture-only");
+});
+
+test.each([
+  { name: "workspace.start", operationId: operation2, lifecycleMethod: "startWorkspace", resultingState: "running" as const },
+  { name: "workspace.stop", operationId: operation3, lifecycleMethod: "stopWorkspace", resultingState: "stopped" as const }
+] as const)("workspace lifecycle $name proceeds when Git status inspection fails", async ({ name, operationId, lifecycleMethod, resultingState }) => {
+  const root = await mkdtemp(path.join(tmpdir(), `devspace-${name.replaceAll(".", "-")}-status-failure-`)); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const request = { projectId: project, workspaceId: targetWorkspace };
+  const statusFailure = new AgentExecutionError({
+    code: "GIT_OPERATION_FAILED", message: "The Git operation failed safely.", retryable: false, details: { action: "inspect" }
+  });
+  const inspectWorkspace = vi.fn(async () => { throw statusFailure; });
+  const inspectWorkspaceRuntime = vi.fn(async () => ({ desiredState: "stopped" as const, observedState: "stopped" as const }));
+  const startWorkspace = vi.fn(async () => undefined);
+  const stopWorkspace = vi.fn(async () => undefined);
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    inspectWorkspace,
+    inspectWorkspaceRuntime,
+    startWorkspace,
+    stopWorkspace,
+    snapshotResources: async () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const accepted = await journal.accept(operationId, name, request);
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const runtimeConverged = vi.spyOn(events, "workspaceRuntimeConverged");
+  const executor = new OperationExecutor(journal, managed, events, undefined,
+    { snapshotResources: () => [], startTask: async () => undefined, stop: async () => undefined,
+      createTerminal: async () => undefined, closeTerminal: async () => undefined, stopWorkspace: async () => undefined });
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(inspectWorkspaceRuntime).toHaveBeenCalledOnce();
+  expect(inspectWorkspace).not.toHaveBeenCalled();
+  expect(managed[lifecycleMethod]).toHaveBeenCalledOnce();
+  expect(runtimeConverged).toHaveBeenCalledWith(operationId, project, targetWorkspace, "stopped", resultingState);
+  expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+});
+
+test.each([
+  { name: "workspace.start", operationId: operation4, lifecycleMethod: "startWorkspace", action: "start" as const, desiredState: "running" as const },
+  { name: "workspace.stop", operationId: "018f0f00-0000-7000-8000-000000000010", lifecycleMethod: "stopWorkspace", action: "stop" as const, desiredState: "stopped" as const }
+] as const)("workspace lifecycle $name remains blocked by an ownership or runtime preflight failure", async ({ name, operationId, lifecycleMethod, action, desiredState }) => {
+  const root = await mkdtemp(path.join(tmpdir(), `devspace-${name.replaceAll(".", "-")}-preflight-failure-`)); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const request = { projectId: project, workspaceId: targetWorkspace };
+  const startWorkspace = vi.fn(async () => undefined);
+  const stopWorkspace = vi.fn(async () => undefined);
+  const preflightFailure = new AgentExecutionError({
+    code: "WORKSPACE_STATE_CONFLICT", message: "The workspace state conflicts with the requested action.", retryable: false,
+    details: { workspaceId: targetWorkspace, desiredState, observedState: "lost", action }
+  });
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    inspectWorkspaceRuntime: async () => { throw preflightFailure; },
+    startWorkspace,
+    stopWorkspace,
+    snapshotResources: async () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const accepted = await journal.accept(operationId, name, request);
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)));
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(managed[lifecycleMethod]).not.toHaveBeenCalled();
+  expect(journal.get(operationId)).toMatchObject({ state: "failed", failure: { code: "WORKSPACE_STATE_CONFLICT" } });
+  expect(journal.get(operationId)?.failure).toEqual(preflightFailure.failure);
+});
+
+test("normalizes an operation-incompatible failure before journal persistence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-incompatible-operation-failure-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const operationId = "018f0f00-0000-7000-8000-000000000013";
+  const request = { projectId: project, workspaceId: targetWorkspace };
+  const incompatibleFailure = new AgentExecutionError({
+    code: "GIT_OPERATION_FAILED", message: "token=fixture-secret path=/fixture-private", retryable: false, details: { action: "inspect" }
+  });
+  const startWorkspace = vi.fn(async () => { throw incompatibleFailure; });
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    inspectWorkspaceRuntime: async () => ({ desiredState: "stopped" as const, observedState: "stopped" as const }),
+    startWorkspace,
+    snapshotResources: async () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const logLines: string[] = [];
+  const events = new AgentEventLog(boot, () => new Date(timestamp));
+  const failedEvent = vi.spyOn(events, "failed");
+  const executor = new OperationExecutor(journal, managed, events, undefined, undefined,
+    createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) }));
+  const accepted = await journal.accept(operationId, "workspace.start", request);
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(startWorkspace).toHaveBeenCalledOnce();
+  const terminal = journal.get(operationId);
+  expect(terminal?.state).toBe("failed");
+  expect(terminal?.failure?.code).toBe("AGENT_INTERNAL_ERROR");
+  expect(terminal?.failure?.message).toBe("The Agent encountered an unexpected error.");
+  expect(terminal?.failure?.retryable).toBe(true);
+  expect(terminal?.failure?.details).toHaveProperty("incidentId");
+  expect(failedEvent).toHaveBeenCalledWith(operationId, expect.anything(), terminal?.failure);
+  const failureLog = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.event === "agent.operation.failed");
+  expect(failureLog).toMatchObject({ errorCode: "AGENT_INTERNAL_ERROR", failureCode: "GIT_OPERATION_FAILED", phase: "operation-dispatch" });
+  expect(logLines.join("\n")).not.toContain("fixture-secret");
+  expect(logLines.join("\n")).not.toContain("fixture-private");
+});
+
 test.each([
   { name: "project.fetch", request: { projectId: project }, method: "fetch" },
   { name: "project.push", request: {

@@ -190,6 +190,12 @@ function safeValue(key: string, value: unknown): unknown {
       "agent-request", "serialization-wait", "admission-execution", "total-admission", "runtime-validation",
       "workspace-validation", "workspace-runtime-validation", "executable-probe", "codex-session-baseline", "harness-home-lease",
       "harness-home-materialization", "docker-exec-creation", "web-request",
+      "operation-setup", "operation-inspection", "operation-dispatch", "operation-finalization",
+      "runtime-inspection", "git-migration-preflight", "git-migration-stage-create", "git-migration-stage-init",
+      "git-migration-stage-fetch", "git-migration-stage-index", "git-migration-stage-config", "git-migration-prepare",
+      "git-migration-metadata-install", "git-migration-pointer-switch", "git-migration-install-marker",
+      "git-migration-finalize", "git-migration-recovery", "runtime-admission", "preview-lease-reservation",
+      "runtime-startup", "runtime-verification", "preview-binding", "preview-settled",
       "artifact-resolution", "agent-side-stage-copy", "readback-helper-load", "readback-helper-integrity",
       "staged-artifact-verification", "readback-helper-upload", "artifact-entry-upload",
       "artifact-entry-readback", "final-closure-verification", "failure-cleanup"
