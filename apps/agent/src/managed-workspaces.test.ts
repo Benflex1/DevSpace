@@ -162,7 +162,7 @@ async function makeLegacyDirtyWorkspace(h: Awaited<ReturnType<typeof harness>>) 
 }
 
 async function migrationManager(h: Awaited<ReturnType<typeof harness>>, writer: AtomicJsonWriter = durableJsonWriter,
-  runtimeOverride?: WorkspaceRuntimeManager, logger?: ReturnType<typeof createLogger>) {
+  runtimeOverride?: WorkspaceRuntimeManager, logger?: ReturnType<typeof createLogger>, git: GitRunner = h.git) {
   const options = parseProjectOptionsV1({ schemaVersion: 1,
     developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
   const plan = compileRuntimePlanV1(options);
@@ -171,7 +171,7 @@ async function migrationManager(h: Awaited<ReturnType<typeof harness>>, writer: 
     stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
   const runtime = runtimeOverride ?? new StoppedFailingStartRuntime(h.roots.state, engine, policy);
   const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
-  const managed = new ManagedWorkspaces(h.roots, h.git, writer, runtime, preview,
+  const managed = new ManagedWorkspaces(h.roots, git, writer, runtime, preview,
     undefined, undefined, undefined, undefined, logger);
   await managed.initialize();
   await managed.registerRuntimePlan({ projectId, revisionId, revisionHash: hashProjectOptionsV1(options),
@@ -214,13 +214,23 @@ async function writeJson(file: string, value: JsonRecord): Promise<void> {
 test("creates, owns, revalidates, and reloads a real store and worktree", async () => {
   const h = await harness();
   await h.register(); await h.createStore(); await h.managed.fetch(projectId);
-  await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const productionManaged = new ManagedWorkspaces(h.roots, runGit);
+  await productionManaged.initialize();
+  await productionManaged.createWorkspace(h.workspace, workspaceOperation);
   await h.createStore("018f0f00-0000-7000-8000-000000000020");
-  await h.managed.createWorkspace(h.workspace, "018f0f00-0000-7000-8000-000000000021");
-  await expect(h.managed.inspectWorkspace(projectId, workspaceId)).resolves.toMatchObject({ observedState: "stopped", dirty: false });
-  const restarted = new ManagedWorkspaces(h.roots, async (args) => await runGit([
-    "-c", `url.${h.source}.insteadOf=${sourceUrl}`, "-c", "protocol.file.allow=always", ...args
-  ]));
+  await productionManaged.createWorkspace(h.workspace, "018f0f00-0000-7000-8000-000000000021");
+  await expect(productionManaged.inspectWorkspace(projectId, workspaceId)).resolves.toMatchObject({ observedState: "stopped", dirty: false });
+  const owner = await readJson<WorkspaceOwnershipTestRecord>(path.join(h.roots.state, "ownership/workspaces", `${workspaceId}.json`));
+  expect(owner.version).toBe(2);
+  await expect(readFile(path.join(productionManaged.worktreePath(workspaceId), ".git"), "utf8"))
+    .resolves.toBe("gitdir: .devspace-git\n");
+  await expect(exec("/usr/bin/git", ["-C", productionManaged.worktreePath(workspaceId), "rev-parse", "HEAD"]))
+    .resolves.toMatchObject({ stdout: `${h.firstCommit}\n` });
+  await expect(exec("/usr/bin/git", ["-C", productionManaged.worktreePath(workspaceId), "rev-parse", "refs/remotes/origin/main"]))
+    .resolves.toMatchObject({ stdout: `${h.firstCommit}\n` });
+  await expect(lstat(path.join(productionManaged.worktreePath(workspaceId), ".devspace-git", "objects", "info", "alternates")))
+    .rejects.toMatchObject({ code: "ENOENT" });
+  const restarted = new ManagedWorkspaces(h.roots, runGit);
   await restarted.initialize();
   await expect(restarted.inspectGit(projectId, null)).resolves.toMatchObject({ workspaceId: null });
   await expect(restarted.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "main", headCommit: h.firstCommit, dirty: false });
@@ -260,9 +270,11 @@ test("runtime-only workspace inspection still blocks on runtime inspection failu
 test("keeps each workspace Git repository container-local and visible to Agent inspection", async () => {
   const h = await harness();
   await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  const managed = new ManagedWorkspaces(h.roots, runGit);
+  await managed.initialize();
   const secondWorkspaceId = "018f0f00-0000-7000-8000-000000000099";
-  await h.managed.createWorkspace(h.workspace, workspaceOperation);
-  await h.managed.createWorkspace({ ...h.workspace, workspaceId: secondWorkspaceId, workspaceSlug: "second", kind: "isolated",
+  await managed.createWorkspace(h.workspace, workspaceOperation);
+  await managed.createWorkspace({ ...h.workspace, workspaceId: secondWorkspaceId, workspaceSlug: "second", kind: "isolated",
     branchName: gitBranchNameSchema.parse("peer") }, "018f0f00-0000-7000-8000-000000000012");
   const firstPath = h.managed.worktreePath(workspaceId);
   const secondPath = h.managed.worktreePath(secondWorkspaceId);
@@ -325,10 +337,10 @@ test("keeps each workspace Git repository container-local and visible to Agent i
   await exec("/usr/bin/git", ["-C", firstPath, "add", "container-commit.txt"]);
   await exec("/usr/bin/git", ["-C", firstPath, "commit", "-m", "Commit from workspace Git"]);
   const localCommit = (await exec("/usr/bin/git", ["-C", firstPath, "rev-parse", "HEAD"])).stdout.trim();
-  await expect(h.managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ headCommit: localCommit, dirty: false });
+  await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ headCommit: localCommit, dirty: false });
 
   await exec("/usr/bin/git", ["-C", firstPath, "switch", "-c", "local-only"]);
-  await expect(h.managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "local-only", headCommit: localCommit });
+  await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "local-only", headCommit: localCommit });
   const fetchedCommit = await commit(h.source, "remote fetch update\n");
   await h.managed.fetch(projectId);
   await expect(exec("/usr/bin/git", ["-C", firstPath, "rev-parse", "refs/remotes/origin/main"]))
@@ -337,9 +349,21 @@ test("keeps each workspace Git repository container-local and visible to Agent i
     .resolves.toMatchObject({ stdout: `${localCommit}\n` });
   await expect(exec("/usr/bin/git", ["-C", firstPath, "rev-parse", "refs/heads/local-only"]))
     .resolves.toMatchObject({ stdout: `${localCommit}\n` });
-  await expect(h.managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "local-only", headCommit: localCommit });
+  await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({ branchName: "local-only", headCommit: localCommit });
   await expect(exec("/usr/bin/git", ["-C", secondPath, "show-ref", "--verify", "refs/heads/local-only"])).rejects.toBeDefined();
   await expect(exec("/usr/bin/git", ["-C", secondPath, "cat-file", "-e", `${localCommit}^{commit}`])).rejects.toBeDefined();
+});
+
+test("the protected production Git runner rejects unrelated local file transport", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId);
+  const target = path.join(h.root, "unrelated-target.git");
+  await exec("/usr/bin/git", ["init", "--bare", target]);
+
+  await expect(runGit(["--git-dir", target, "fetch", "--no-tags", h.managed.repositoryPath(projectId), "refs/remotes/origin/main"]))
+    .rejects.toThrow("git-command-failed");
+  await expect(exec("/usr/bin/git", ["--git-dir", target, "show-ref", "--verify", "refs/remotes/origin/main"]))
+    .rejects.toBeDefined();
 });
 
 test("migrates a stopped legacy workspace without losing local commits or index state", async () => {
@@ -355,11 +379,16 @@ test("migrates a stopped legacy workspace without losing local commits or index 
     stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
   const runtime = new StoppedFailingStartRuntime(h.roots.state, engine, policy);
   const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
-  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, runtime, preview);
+  const logLines: string[] = [];
+  const logger = createLogger({ component: "agent", subsystem: "test", sink: (line) => logLines.push(line) });
+  const managed = new ManagedWorkspaces(h.roots, runGit, durableJsonWriter, runtime, preview,
+    undefined, undefined, undefined, undefined, logger);
   await managed.initialize();
 
   await expect(managed.startWorkspace(projectId, workspaceId, "018f0f00-0000-7000-8000-000000000013"))
     .rejects.toMatchObject({ failure: { code: "AGENT_INTERNAL_ERROR" } });
+  expect(logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+    .some((record) => record.event === "agent.workspace.start.phase_failed" && record.phase === "runtime-startup")).toBe(true);
 
   const metadataPath = path.join(legacy.worktreePath, ".devspace-git");
   await expect(readFile(path.join(legacy.worktreePath, ".git"), "utf8")).resolves.toBe("gitdir: .devspace-git\n");
@@ -377,6 +406,8 @@ test("migrates a stopped legacy workspace without losing local commits or index 
     .resolves.toMatchObject({ stdout: legacy.status });
   await expect(exec("/usr/bin/git", ["-C", legacy.worktreePath, "rev-parse", "HEAD"]))
     .resolves.toMatchObject({ stdout: `${legacy.localCommit}\n` });
+  await expect(exec("/usr/bin/git", ["-C", legacy.worktreePath, "rev-parse", "refs/remotes/origin/main"]))
+    .resolves.toMatchObject({ stdout: `${h.firstCommit}\n` });
   await expect(exec("/usr/bin/git", ["-C", legacy.worktreePath, "show", ":staged.txt"]))
     .resolves.toMatchObject({ stdout: "staged version\n" });
   await expect(readFile(path.join(legacy.worktreePath, "staged.txt"), "utf8")).resolves.toBe("staged and unstaged version\n");
@@ -385,6 +416,9 @@ test("migrates a stopped legacy workspace without losing local commits or index 
   await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({
     branchName: "main", headCommit: legacy.localCommit, dirty: true, identity: { name: "Legacy Workspace Owner", email: "legacy@example.invalid" }
   });
+  const owner = await readJson<WorkspaceOwnershipTestRecord>(path.join(h.roots.state, "ownership/workspaces", `${workspaceId}.json`));
+  expect(owner.version).toBe(2);
+  await expect(lstat(path.join(metadataPath, "objects", "info", "alternates"))).rejects.toMatchObject({ code: "ENOENT" });
   await expect(lstat(legacy.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
   expect(runtime.startedWorktreePath).toBe(legacy.worktreePath);
 });
@@ -422,7 +456,7 @@ test("a failed legacy workspace migration leaves its original Git state recovera
     runtimePlan: { format: plan.format, hash: hashRuntimePlanV1(plan), canonicalJson: canonicalizeRuntimePlanV1(plan) } });
   const failingGit: GitRunner = async (args) => {
     if (args.includes("apply")) throw new TypeError("token=fixture-only; path=/fixture-only");
-    return await h.git(args);
+    return await runGit(args);
   };
   const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
   const policy = { cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
@@ -471,7 +505,7 @@ test("a failure immediately before the Git pointer switch retains legacy adminis
       throw new Error("simulated-interruption-before-git-pointer-switch");
     }
   } };
-  const managed = await migrationManager(h, writer);
+  const managed = await migrationManager(h, writer, undefined, undefined, runGit);
 
   await expect(managed.startWorkspace(projectId, workspaceId, "018f0f00-0000-7000-8000-000000000015"))
     .rejects.toThrow("simulated-interruption-before-git-pointer-switch");
@@ -495,7 +529,7 @@ test("a restart immediately after the Git pointer switch recovers before pruning
     }
     await durableJsonWriter.write(file, value);
   } };
-  const managed = await migrationManager(h, writer);
+  const managed = await migrationManager(h, writer, undefined, undefined, runGit);
 
   await expect(managed.startWorkspace(projectId, workspaceId, "018f0f00-0000-7000-8000-000000000016"))
     .rejects.toThrow("simulated-interruption-after-git-pointer-switch");
@@ -510,7 +544,7 @@ test("a restart immediately after the Git pointer switch recovers before pruning
   await expect(exec("/usr/bin/git", ["-C", legacy.worktreePath, "status", "--porcelain=v1", "--untracked-files=all"]))
     .resolves.toMatchObject({ stdout: legacy.status });
 
-  const restarted = new ManagedWorkspaces(h.roots, h.git);
+  const restarted = new ManagedWorkspaces(h.roots, runGit);
   await restarted.initialize();
   await expect(restarted.inspectGit(projectId, workspaceId)).resolves.toMatchObject({
     branchName: "main", headCommit: legacy.localCommit, dirty: true
