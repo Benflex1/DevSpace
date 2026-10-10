@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { configurationKeySchema, uuidV7Schema } from "@devspace/contracts";
 import * as z from "zod";
+import { BoundedFileCopyQueue } from "./bounded-file-copy.js";
 import {
   durableJsonWriter,
   establishPinnedDirectory,
@@ -16,6 +17,8 @@ export const HARNESS_HOME_MAX_ENTRIES = 16_384;
 export const HARNESS_HOME_MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const HARNESS_HOME_MAX_TREE_BYTES = 256 * 1024 * 1024;
 export const HARNESS_SLOT_CONTAINER_PATH = "/opt/devspace/harness-home" as const;
+const HARNESS_HOME_COPY_MAX_CONCURRENT_FILES = 8;
+const HARNESS_HOME_COPY_MAX_IN_FLIGHT_BYTES = 64 * 1024 * 1024;
 
 export class HarnessHomeError extends Error {
   constructor(readonly code: string, message: string) {
@@ -175,12 +178,18 @@ async function walkCopy(
 ): Promise<void> {
   let entries = 0;
   let totalBytes = 0;
+  const copies = new BoundedFileCopyQueue(
+    HARNESS_HOME_COPY_MAX_CONCURRENT_FILES,
+    HARNESS_HOME_COPY_MAX_IN_FLIGHT_BYTES
+  );
   const visit = async (relative: string, depth: number, insideCodexCache: boolean): Promise<void> => {
+    copies.assertHealthy();
     if (depth > HARNESS_HOME_MAX_DEPTH) rejectUnsupported("directory depth exceeds the bound");
     const source = relative === "" ? sourceRoot : path.join(sourceRoot, relative);
     const destination = relative === "" ? destinationRoot : path.join(destinationRoot, relative);
     const codexEphemeral = harnessId === "codex" && CODEX_EPHEMERAL_PATHS.has(relative);
     const stats = await lstat(source);
+    copies.assertHealthy();
     if (stats.isSymbolicLink()) {
       entries += 1;
       if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
@@ -192,7 +201,9 @@ async function walkCopy(
         if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
       }
       if (insideCodexCache || codexEphemeral) return;
+      copies.assertHealthy();
       await ensureDirectory(path.dirname(destination));
+      copies.assertHealthy();
       // Retain the link itself without resolving its target on the host.
       await symlink(target, destination);
       return;
@@ -210,7 +221,10 @@ async function walkCopy(
       entries += 1;
       if (entries > HARNESS_HOME_MAX_ENTRIES) rejectUnsupported("entry count exceeds the bound");
       const omitDirectory = insideCodexCache || codexEphemeral;
-      if (relative !== "" && !omitDirectory) await ensureDirectory(destination);
+      if (relative !== "" && !omitDirectory) {
+        await ensureDirectory(destination);
+        copies.assertHealthy();
+      }
       const children = await readdir(source, { withFileTypes: true });
       for (const child of children) {
         if (relative === "" && skip.has(child.name)) continue;
@@ -228,18 +242,26 @@ async function walkCopy(
     if (stats.size > HARNESS_HOME_MAX_FILE_BYTES) rejectUnsupported("file exceeds the size bound");
     totalBytes += Number(stats.size);
     if (totalBytes > HARNESS_HOME_MAX_TREE_BYTES) rejectUnsupported("tree exceeds the size bound");
-    const { bytes } = await readRegularFileNoFollow(source, HARNESS_HOME_MAX_FILE_BYTES);
     await ensureDirectory(path.dirname(destination));
-    const handle = await open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
-    try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+    await copies.schedule(Number(stats.size), async () => {
+      const { bytes } = await readRegularFileNoFollow(source, HARNESS_HOME_MAX_FILE_BYTES, Number(stats.size));
+      const handle = await open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    });
   };
-  await ensureDirectory(destinationRoot);
-  await visit("", 0, false);
+  try {
+    await ensureDirectory(destinationRoot);
+    await visit("", 0, false);
+    await copies.drain();
+  } catch (error) {
+    await copies.settle();
+    throw error;
+  }
 }
 
 async function rotatePayload(homePath: string, incomingPath: string): Promise<void> {
