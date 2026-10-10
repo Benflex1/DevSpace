@@ -2,9 +2,10 @@
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Duplex } from "node:stream";
+import { Duplex, PassThrough, type Readable } from "node:stream";
+import * as tar from "tar-stream";
 import { afterEach, describe, expect, test } from "vitest";
-import type { DockerEngineClient } from "../docker-runtime.js";
+import { DockerEngineError, type DockerEngineClient } from "../docker-runtime.js";
 import {
   codexExecutionArtifactClosureDigest,
   resolveCodexExecutionArtifact,
@@ -15,8 +16,8 @@ import {
   codexArtifactTransferTimeoutMs,
   createCodexArtifactStager,
   parseCodexArtifactTree,
-  type CodexArtifactReadback,
   type CodexArtifactStagingDiagnostic,
+  type CodexArtifactReadback,
   type CodexLaunchArtifact
 } from "./artifact-stager.js";
 import type { CodexArtifactStagingTiming } from "./artifact-staging-diagnostics.js";
@@ -70,6 +71,29 @@ function dockerReadbackFrame(entry: CodexExecutionArtifact["entrypoint"], bytes:
   frame[0] = 1;
   frame.writeUInt32BE(payload.length, 4);
   return Buffer.concat([frame, payload]);
+}
+
+function dockerOutputFrame(payload: Buffer): Buffer {
+  const frame = Buffer.alloc(8);
+  frame[0] = 1;
+  frame.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([frame, payload]);
+}
+
+function dockerTreeFrame(entries: Awaited<ReturnType<typeof listRemoteTree>>): Buffer {
+  const header = Buffer.alloc(20);
+  header.write("DSARTL01", 0, "ascii");
+  header.writeUInt32BE(1, 8);
+  header.writeUInt32BE(entries === null ? 1 : 0, 12);
+  header.writeUInt32BE(entries?.length ?? 0, 16);
+  const records = (entries ?? []).map((entry) => {
+    const name = Buffer.from(entry.relativePath, "utf8");
+    const record = Buffer.alloc(8);
+    record.writeUInt32BE(({ directory: 1, file: 2, symlink: 3, special: 4 } as const)[entry.kind], 0);
+    record.writeUInt32BE(name.length, 4);
+    return Buffer.concat([record, name]);
+  });
+  return dockerOutputFrame(Buffer.concat([header, ...records]));
 }
 
 function fakeDocker(captured: Array<Record<string, unknown>>, readbackFrames: readonly Buffer[] = []): DockerEngineClient {
@@ -169,17 +193,116 @@ async function standaloneFixture(): Promise<{
   return { root, staged, artifact };
 }
 
-function statefulContainerDocker(remoteRoot: string, options: { readonly failPublish?: boolean } = {}): {
+function appendTestArchiveEntry(pack: tar.Pack, header: tar.Header, bytes?: Buffer): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const callback = (error?: Error | null) => error == null ? resolve() : reject(error);
+    try {
+      if (bytes === undefined) pack.entry(header, callback);
+      else pack.entry(header, bytes, callback);
+    } catch (error) { reject(error instanceof Error ? error : new Error("fixture-archive-entry-failed", { cause: error })); }
+  });
+}
+
+function archiveDirectoryContents(root: string): Readable {
+  const pack = tar.pack();
+  const stream = new PassThrough();
+  pack.pipe(stream);
+  stream.once("close", () => pack.destroy());
+  void (async () => {
+    const visit = async (directory: string, prefix: string): Promise<void> => {
+      for (const name of (await readdir(directory)).sort()) {
+        const target = path.join(directory, name);
+        const relative = prefix.length === 0 ? name : `${prefix}/${name}`;
+        const stats = await lstat(target);
+        if (stats.isDirectory()) {
+          await appendTestArchiveEntry(pack, { name: `${relative}/`, type: "directory", mode: Number(stats.mode & 0o777) });
+          await visit(target, relative);
+        } else if (stats.isSymbolicLink()) {
+          await appendTestArchiveEntry(pack, {
+            name: relative, type: "symlink", linkname: await readlink(target), mode: Number(stats.mode & 0o777)
+          });
+        } else if (stats.isFile()) {
+          const bytes = await readFile(target);
+          await appendTestArchiveEntry(pack, {
+            name: relative, type: "file", size: bytes.length, mode: Number(stats.mode & 0o777)
+          }, bytes);
+        } else throw new Error("fixture-archive-entry-invalid");
+      }
+    };
+    await appendTestArchiveEntry(pack, { name: "./", type: "directory", mode: 0o700 });
+    await visit(root, ".");
+    pack.finalize();
+  })().catch((error: unknown) => {
+    if (stream.destroyed) return;
+    pack.destroy(error instanceof Error ? error : new Error("fixture-archive-failed"));
+    stream.destroy(error instanceof Error ? error : new Error("fixture-archive-failed"));
+  });
+  return stream;
+}
+
+function singleEntryArchive(name: string): Readable {
+  const pack = tar.pack();
+  const stream = new PassThrough();
+  pack.pipe(stream);
+  stream.once("close", () => pack.destroy());
+  void appendTestArchiveEntry(pack, { name, type: "file", mode: 0o755, size: 4 }, Buffer.from("nope"))
+    .then(() => pack.finalize())
+    .catch((error: unknown) => {
+      if (stream.destroyed) return;
+      pack.destroy(error instanceof Error ? error : new Error("fixture-archive-failed"));
+      stream.destroy(error instanceof Error ? error : new Error("fixture-archive-failed"));
+    });
+  return stream;
+}
+
+async function extractTestArchive(archive: Readable, destination: string): Promise<void> {
+  const extract = tar.extract();
+  await new Promise<void>((resolve, reject) => {
+    extract.on("entry", (header, body, next) => {
+      void (async () => {
+        const name = header.type === "directory" && header.name.endsWith("/")
+          ? header.name.slice(0, -1) : header.name;
+        if (name.startsWith("/") || name.split("/").some((part) => part.length === 0 || part === "." || part === "..")) {
+          throw new Error("fixture-archive-path-invalid");
+        }
+        const target = path.join(destination, ...name.split("/"));
+        if (header.type === "directory") {
+          await mkdir(target, { recursive: true });
+          await chmod(target, header.mode ?? 0o755);
+        } else if (header.type === "symlink") {
+          await mkdir(path.dirname(target), { recursive: true });
+          await symlink(header.linkname ?? "", target);
+        } else if (header.type === "file") {
+          await mkdir(path.dirname(target), { recursive: true });
+          const chunks: Buffer[] = [];
+          for await (const chunk of body) chunks.push(Buffer.from(chunk as Uint8Array));
+          await writeFile(target, Buffer.concat(chunks));
+          await chmod(target, header.mode ?? 0o644);
+        } else throw new Error("fixture-archive-type-invalid");
+        if (header.type !== "file") for await (const _chunk of body) { /* no payload */ }
+        next();
+      })().catch(reject);
+    });
+    extract.once("finish", resolve);
+    extract.once("error", reject);
+    archive.pipe(extract);
+  });
+}
+
+function statefulContainerDocker(remoteRoot: string, options: { readonly failPublish?: boolean; readonly failArchiveUpload?: boolean } = {}): {
   readonly docker: DockerEngineClient;
   readonly captured: Array<Record<string, unknown>>;
+  readonly archiveCalls: string[];
   readonly remotePath: (containerPath: string) => string;
   readonly exitCodes: Map<string, number>;
 } {
   const captured: Array<Record<string, unknown>> = [];
+  const archiveCalls: string[] = [];
   const execInputs = new Map<string, DockerExecInput>();
   const exitCodes = new Map<string, number>();
   let execNumber = 0;
   let failPublish = options.failPublish ?? false;
+  let failArchiveUpload = options.failArchiveUpload ?? false;
   const remotePath = (containerPath: string): string => path.join(remoteRoot, containerPath.replace(/^\/+/, ""));
   const applyCommand = async (execId: string, bytes: Buffer): Promise<void> => {
     const input = execInputs.get(execId)!;
@@ -196,6 +319,9 @@ function statefulContainerDocker(remoteRoot: string, options: { readonly failPub
         const directory = remotePath(environment.DEVSPACE_TARGET_DIR!);
         await mkdir(directory, { recursive: true });
         await symlink(environment.DEVSPACE_LINK_TARGET!, remotePath(environment.DEVSPACE_TARGET_PATH!));
+      } else if (command.includes("DEVSPACE_STAGE_ROOT")) {
+        await mkdir(remotePath(environment.DEVSPACE_STAGE_PARENT!), { recursive: true });
+        await mkdir(remotePath(environment.DEVSPACE_STAGE_ROOT!), { mode: 0o700 });
       } else if (command.includes("DEVSPACE_CACHE_STAGE") && command.includes("mv -T --")) {
         if (failPublish) {
           failPublish = false;
@@ -239,6 +365,10 @@ function statefulContainerDocker(remoteRoot: string, options: { readonly failPub
     startExecAttached: async (execId: string) => {
       const input = execInputs.get(execId)!;
       if (!input.attachStdin) {
+        if (input.environment.DEVSPACE_ARTIFACT_MODE === "tree") {
+          const tree = await listRemoteTree(remoteRoot, input.environment.DEVSPACE_ARTIFACT_ROOT!);
+          return outputStream(dockerTreeFrame(tree));
+        }
         await applyCommand(execId, Buffer.alloc(0));
         return endStream();
       }
@@ -265,17 +395,31 @@ function statefulContainerDocker(remoteRoot: string, options: { readonly failPub
     },
     inspectExec: async (id: string) => ({
       ID: id, Running: false, ExitCode: exitCodes.get(id) ?? 0, ContainerID: "managed-container"
-    })
+    }),
+    putContainerArchive: async (_containerId: string, destination: string, archive: Readable) => {
+      archiveCalls.push("PUT");
+      captured.push({ archiveOperation: "PUT", destination });
+      if (failArchiveUpload) {
+        failArchiveUpload = false;
+        throw new Error("fixture-archive-upload-failure");
+      }
+      await extractTestArchive(archive, remotePath(destination));
+    },
+    getContainerArchive: async (_containerId: string, source: string) => {
+      archiveCalls.push("GET");
+      captured.push({ archiveOperation: "GET", source });
+      const root = remotePath(source.endsWith("/.") ? source.slice(0, -2) : source);
+      try {
+        const stats = await lstat(root);
+        if (!stats.isDirectory()) throw new Error("fixture-archive-source-not-directory");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new DockerEngineError(404, "not found");
+        throw error;
+      }
+      return archiveDirectoryContents(root);
+    }
   } as unknown as DockerEngineClient;
-  return { docker, captured, remotePath, exitCodes };
-}
-
-async function readRemoteEntry(remotePath: string): Promise<CodexArtifactReadback> {
-  const stats = await lstat(remotePath);
-  if (stats.isSymbolicLink()) {
-    return { kind: "symlink", mode: Number(stats.mode & 0o777), bytes: Buffer.alloc(0), linkTarget: await readlink(remotePath) };
-  }
-  return { kind: "file", mode: Number(stats.mode & 0o777), bytes: await readFile(remotePath), linkTarget: null };
+  return { docker, captured, archiveCalls, remotePath, exitCodes };
 }
 
 async function listRemoteTree(remoteRoot: string, containerRoot: string): Promise<readonly {
@@ -316,11 +460,7 @@ function runningStager(input: {
   return createCodexArtifactStager({
     docker: input.remote.docker, readbackHelperBytes: Buffer.from("fixture-helper"), createId: () => "fixture-id",
     ...(input.diagnostics === undefined ? {} : { onFailure: (diagnostic) => input.diagnostics!.push(diagnostic) }),
-    ...(input.timings === undefined ? {} : { onTiming: (timing) => input.timings!.push(timing) }),
-    listArtifactTree: async ({ artifactRoot }) => await listRemoteTree(input.remoteRoot, artifactRoot),
-    readbackEntry: async ({ artifactRoot, entry }) => await readRemoteEntry(
-      input.remote.remotePath(path.posix.join(artifactRoot, entry.relativePath))
-    )
+    ...(input.timings === undefined ? {} : { onTiming: (timing) => input.timings!.push(timing) })
   });
 }
 
@@ -430,7 +570,14 @@ describe("Codex artifact stager", () => {
     expect(first.entrypointPath).toBe(`${destinationRoot}/artifact/bin/codex`);
     expect(await lstat(symlinkPath).then((stats) => stats.isSymbolicLink())).toBe(true);
     expect(await readlink(symlinkPath)).toBe("bin/codex");
+    expect((await lstat(remote.remotePath(`${destinationRoot}/artifact/bin/codex`))).mode & 0o777).toBe(0o755);
+    expect((await lstat(remote.remotePath(`${destinationRoot}/artifact/bin`))).mode & 0o777).toBe(0o700);
+    expect(remote.archiveCalls.filter((call) => call === "PUT")).toHaveLength(1);
+    expect(remote.archiveCalls.filter((call) => call === "GET")).toHaveLength(1);
+    expect(remote.captured.filter((captured) => captured.input !== undefined)).toHaveLength(6);
+    const execCountAfterFirst = remote.captured.filter((captured) => captured.input !== undefined).length;
     const artifactUploadsAfterFirst = remote.captured.filter((captured) => {
+      if (captured.input === undefined) return false;
       const env = (captured.input as DockerExecInput).environment;
       return env.DEVSPACE_TARGET_PATH?.includes("/artifact/") === true;
     }).length;
@@ -440,9 +587,13 @@ describe("Codex artifact stager", () => {
     expect(await lstat(symlinkPath).then((stats) => stats.isSymbolicLink())).toBe(true);
     expect(await readlink(symlinkPath)).toBe("bin/codex");
     expect(remote.captured.filter((captured) => {
+      if (captured.input === undefined) return false;
       const env = (captured.input as DockerExecInput).environment;
       return env.DEVSPACE_TARGET_PATH?.includes("/artifact/") === true;
     })).toHaveLength(artifactUploadsAfterFirst);
+    expect(remote.captured.filter((captured) => captured.input !== undefined)).toHaveLength(execCountAfterFirst + 3);
+    expect(remote.archiveCalls.filter((call) => call === "PUT")).toHaveLength(1);
+    expect(remote.archiveCalls.filter((call) => call === "GET")).toHaveLength(2);
     expect(diagnostics).toEqual([]);
     expect(timings.some((timing) => timing.phase === "artifact-cache-verification" && timing.cacheState === "miss")).toBe(true);
     expect(timings.some((timing) => timing.phase === "artifact-cache-verification" && timing.cacheState === "hit")).toBe(true);
@@ -502,9 +653,9 @@ describe("Codex artifact stager", () => {
     await runningStager({ remoteRoot, remote }).stageIntoRunningContainer({
       containerId: "a".repeat(64), staged: fixtureValue.staged, destinationRoot
     });
+    remote.docker.getContainerArchive = async () => { throw new Error("codex-artifact-tree-verification-unproven"); };
     const failing = createCodexArtifactStager({
       docker: remote.docker, readbackHelperBytes: Buffer.from("fixture-helper"), createId: () => "retry-id",
-      listArtifactTree: async () => { throw new Error("codex-artifact-tree-verification-unproven"); }
     });
 
     await expect(failing.stageIntoRunningContainer({
@@ -529,11 +680,8 @@ describe("Codex artifact stager", () => {
     ]);
     expect(results[0]?.entrypointPath).toBe(`${destinationRoot}/artifact/bin/codex`);
     expect(results[1]?.entrypointPath).toBe(results[0]?.entrypointPath);
-    const artifactUploads = remote.captured.filter((captured) => {
-      const environment = (captured.input as DockerExecInput).environment;
-      return environment.DEVSPACE_TARGET_PATH?.includes("/artifact/") === true;
-    });
-    expect(artifactUploads).toHaveLength(fixtureValue.artifact.entries.length);
+    expect(remote.archiveCalls.filter((call) => call === "PUT")).toHaveLength(1);
+    expect(remote.captured.filter((captured) => captured.input !== undefined)).toHaveLength(9);
     expect(await readlink(remote.remotePath(`${destinationRoot}/artifact/codex`))).toBe("bin/codex");
   });
 
@@ -643,19 +791,20 @@ describe("Codex artifact stager", () => {
 
   test("fails closed on readback timeout and reports only the bounded private diagnostic", async () => {
     const fixtureValue = await fixture();
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "devspace-codex-artifact-readback-timeout-"));
+    roots.push(remoteRoot);
+    const remote = statefulContainerDocker(remoteRoot);
     const diagnostics: CodexArtifactStagingDiagnostic[] = [];
     const deadlines: number[] = [];
-    let scheduledDeadlines = 0;
+    remote.docker.getContainerArchive = async () => new PassThrough();
     const stager = createCodexArtifactStager({
-      docker: fakeDocker([]), readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      docker: remote.docker, readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
       onFailure: (diagnostic) => diagnostics.push(diagnostic),
       scheduleTimeout: (callback, timeoutMs) => {
         deadlines.push(timeoutMs);
-        scheduledDeadlines += 1;
-        if (scheduledDeadlines === 3) queueMicrotask(callback);
+        if (timeoutMs === codexArtifactTransferTimeoutMs(68)) queueMicrotask(callback);
         return () => {};
-      },
-      listArtifactTree: async () => null
+      }
     });
 
     await expect(stager.stageIntoRunningContainer({
@@ -674,18 +823,21 @@ describe("Codex artifact stager", () => {
 
   test("reports bounded private diagnostics for the first running-container upload failure", async () => {
     const fixtureValue = await fixture();
-    const captured: Array<Record<string, unknown>> = [];
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "devspace-codex-artifact-upload-failure-"));
+    roots.push(remoteRoot);
+    const remote = statefulContainerDocker(remoteRoot);
     const diagnostics: CodexArtifactStagingDiagnostic[] = [];
     const deadlines: number[] = [];
-    const docker = fakeDocker(captured);
-    let attachCount = 0;
-    docker.startExecAttached = async () => {
-      attachCount += 1;
-      if (attachCount === 1) throw new Error("permission denied at /private/host/secret");
-      return endStream();
+    remote.docker.putContainerArchive = async (_containerId, destination, archive) => {
+      for await (const _chunk of archive) { /* drain the transfer while simulating a partial server-side extraction */ }
+      const partialExecutable = remote.remotePath(`${destination}/artifact/bin/codex`);
+      await mkdir(path.dirname(partialExecutable), { recursive: true });
+      await writeFile(partialExecutable, "partial transfer", { mode: 0o755 });
+      await chmod(partialExecutable, 0o755);
+      throw new Error("permission denied at /private/host/secret");
     };
     const stager = createCodexArtifactStager({
-      docker, readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
+      docker: remote.docker, readbackHelperBytes: Buffer.from("helper"), createId: () => "probe-id",
       scheduleTimeout: (_callback, timeoutMs) => {
         deadlines.push(timeoutMs);
         return () => {};
@@ -702,7 +854,7 @@ describe("Codex artifact stager", () => {
     expect(diagnostics).toHaveLength(1);
     const diagnostic = diagnostics[0];
     expect(diagnostic).toMatchObject({
-      phase: "readback-helper-upload", failureCode: "unclassified", errorClass: "Error",
+      phase: "artifact-entry-upload", failureCode: "unclassified", errorClass: "Error",
       containerId: "a".repeat(64), artifactLayout: "self-contained-native"
     });
     expect(diagnostic?.elapsedMs).toBeGreaterThanOrEqual(0);
@@ -710,9 +862,49 @@ describe("Codex artifact stager", () => {
     expect(deadlines).toContain(30_000);
     expect(diagnostics[0]).not.toHaveProperty("errorMessage");
     expect(JSON.stringify(diagnostics)).not.toContain("/private/host/secret");
-    expect(captured.some((item) => {
+    expect(await lstat(remote.remotePath(destinationRoot)).catch(() => null)).toBeNull();
+    expect(await lstat(remote.remotePath(`/opt/devspace/codex-artifact/.stage-${fixtureValue.artifact.closureDigest}-probe-id`)).catch(() => null)).toBeNull();
+    expect(remote.captured.some((item) => {
+      if (item.input === undefined) return false;
       const input = item.input as DockerExecInput;
       return input.command[2]?.includes("rm -rf") === true;
     })).toBe(true);
+  });
+
+  test("does not publish a closure whose archive readback fails cryptographic verification", async () => {
+    const fixtureValue = await standaloneFixture();
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "devspace-codex-artifact-readback-mismatch-"));
+    roots.push(remoteRoot);
+    const remote = statefulContainerDocker(remoteRoot);
+    const putArchive = remote.docker.putContainerArchive.bind(remote.docker);
+    remote.docker.putContainerArchive = async (containerId, destination, archive, timeoutMs) => {
+      await putArchive(containerId, destination, archive, timeoutMs);
+      await writeFile(remote.remotePath(`${destination}/artifact/bin/codex`), "wrong bytes");
+      await chmod(remote.remotePath(`${destination}/artifact/bin/codex`), 0o755);
+    };
+    const destinationRoot = `/opt/devspace/codex-artifact/${fixtureValue.artifact.closureDigest}`;
+
+    await expect(runningStager({ remoteRoot, remote }).stageIntoRunningContainer({
+      containerId: "a".repeat(64), staged: fixtureValue.staged, destinationRoot
+    })).rejects.toThrow("codex-artifact-readback-mismatch");
+
+    expect(await lstat(remote.remotePath(destinationRoot)).catch(() => null)).toBeNull();
+    expect(await lstat(remote.remotePath(`/opt/devspace/codex-artifact/.stage-${fixtureValue.artifact.closureDigest}-fixture-id`)).catch(() => null)).toBeNull();
+  });
+
+  test("rejects archive paths that escape the staging root and leaves no executable cache", async () => {
+    const fixtureValue = await standaloneFixture();
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "devspace-codex-artifact-path-invalid-"));
+    roots.push(remoteRoot);
+    const remote = statefulContainerDocker(remoteRoot);
+    remote.docker.getContainerArchive = async () => singleEntryArchive("../escape");
+    const destinationRoot = `/opt/devspace/codex-artifact/${fixtureValue.artifact.closureDigest}`;
+
+    await expect(runningStager({ remoteRoot, remote }).stageIntoRunningContainer({
+      containerId: "a".repeat(64), staged: fixtureValue.staged, destinationRoot
+    })).rejects.toThrow("codex-artifact-tree-path-invalid");
+
+    expect(await lstat(remote.remotePath(destinationRoot)).catch(() => null)).toBeNull();
+    expect(await lstat(remote.remotePath(`/opt/devspace/codex-artifact/.stage-${fixtureValue.artifact.closureDigest}-fixture-id`)).catch(() => null)).toBeNull();
   });
 });

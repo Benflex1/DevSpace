@@ -95,13 +95,15 @@ and stages it into the workspace container at `/opt/devspace/codex-artifact/<dig
 The native PTY then executes that in-container entrypoint
 (`executableSource.kind = agent-artifact`). An Agent-host path is never passed to Docker
 exec. The digest directory is a content-addressed in-container cache. An existing closure is
-reused only after the pinned helper enumerates its exact tree and every expected file and
-symlink is read back and checked for kind, mode, length, SHA-256, or link text. Unexpected
-entries invalidate the cache. A stale or partial closure is staged into a unique temporary
-directory, verified in full, and then published by rename; entries are never overlaid into an
-existing closure. Agent staging attempts for the same container and digest are serialized.
-Harness admission replaces a stale cache before admitting the process that will use it. An
-ambiguous verification or failed publication fails closed and never authorizes execution; a
+reused only after the pinned no-follow helper confirms its exact directory tree and the Agent
+streams the exact cache directory through one Docker archive readback to check every file and
+symlink kind and mode, file length and SHA-256, link text, and closure digest. Cache presence alone
+is never proof of integrity;
+unexpected entries invalidate the cache. A stale or partial closure is staged into a unique
+temporary directory, uploaded and verified in full, and then published by rename; entries are never
+overlaid into an existing closure. Agent staging attempts for the same container and digest are
+serialized. Harness admission replaces a stale cache before admitting the process that will use it.
+An ambiguous verification or failed publication fails closed and never authorizes execution; a
 failed fresh stage cleans only its own temporary directory and leaves the prior cache intact.
 Otherwise start fails with `HARNESS_EXECUTABLE_UNAVAILABLE`. There is no Codex version pin.
 

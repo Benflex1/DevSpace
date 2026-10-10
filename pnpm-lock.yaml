@@ -71,6 +71,9 @@ importers:
       '@devspace/security':
         specifier: workspace:*
         version: link:../../packages/security
+      tar-stream:
+        specifier: 2.2.0
+        version: 2.2.0
       uuid:
         specifier: 14.0.1
         version: 14.0.1

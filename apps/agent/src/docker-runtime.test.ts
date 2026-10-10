@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, test } from "vitest";
 import { DockerEngineClient, defaultRootlessDockerSocketPath, effectiveRuntimeResources, readRuntimePolicy } from "./docker-runtime.js";
 
@@ -88,7 +89,48 @@ async function execEngineSocket(): Promise<{ socket: string; execBodies: unknown
   return { socket, execBodies, resizeUrls };
 }
 
+async function archiveEngineSocket(): Promise<{ socket: string; requests: Array<{ method: string; url: string; body: Buffer }> }> {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-archive-")); directories.push(directory);
+  const socket = path.join(directory, "engine.sock");
+  const requests: Array<{ method: string; url: string; body: Buffer }> = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      requests.push({ method: request.method ?? "", url: request.url ?? "", body: Buffer.concat(chunks) });
+      if (request.method === "PUT") response.writeHead(200).end();
+      else if (request.method === "GET") response.writeHead(200, { "content-type": "application/x-tar" }).end("archive-readback");
+      else response.writeHead(405).end();
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+  return { socket, requests };
+}
+
 describe("dedicated rootless Docker boundary", () => {
+  test("streams container archive upload and readback through the Docker socket", async () => {
+    const fixture = await archiveEngineSocket();
+    const engine = new DockerEngineClient(fixture.socket);
+    const archiveClient = engine as unknown as {
+      putContainerArchive(containerId: string, path: string, archive: Readable, timeoutMs: number): Promise<void>;
+      getContainerArchive(containerId: string, path: string, timeoutMs: number): Promise<Readable>;
+    };
+    const upload = Buffer.from("streamed archive upload");
+
+    await archiveClient.putContainerArchive("container-1", "/opt/devspace/staging root", Readable.from([upload]), 5_000);
+    const download = await archiveClient.getContainerArchive("container-1", "/opt/devspace/staging root/.", 5_000);
+    const chunks: Buffer[] = [];
+    for await (const chunk of download) chunks.push(Buffer.from(chunk as Uint8Array));
+
+    expect(fixture.requests.map(({ method, url }) => ({ method, url }))).toEqual([
+      { method: "PUT", url: "/containers/container-1/archive?path=%2Fopt%2Fdevspace%2Fstaging%20root&noOverwriteDirNonDir=1&copyUIDGID=1" },
+      { method: "GET", url: "/containers/container-1/archive?path=%2Fopt%2Fdevspace%2Fstaging%20root%2F." }
+    ]);
+    expect(fixture.requests[0]?.body).toEqual(upload);
+    expect(Buffer.concat(chunks).toString("utf8")).toBe("archive-readback");
+  });
+
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
     await expect(new DockerEngineClient(path.join(directory, "missing.sock")).assertRootlessAvailable()).rejects.toBeDefined();
