@@ -74,6 +74,26 @@ function unexpectedArchive(): Readable {
   return archive;
 }
 
+function appendFixtureArchiveEntry(pack: tar.Pack, header: tar.Header): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    pack.entry(header, (error) => error == null ? resolve() : reject(error));
+  });
+}
+
+function artifactRootBootstrapArchive(): Readable {
+  const archive = tar.pack();
+  void (async () => {
+    await appendFixtureArchiveEntry(archive, {
+      name: "devspace/", type: "directory", mode: 0o755, uid: 0, gid: 0, mtime: new Date(0)
+    });
+    await appendFixtureArchiveEntry(archive, {
+      name: "devspace/codex-artifact/", type: "directory", mode: 0o700, uid: 0, gid: 0, mtime: new Date(0)
+    });
+    archive.finalize();
+  })().catch((error: unknown) => archive.destroy(error instanceof Error ? error : new Error("rootless-artifact-bootstrap-failed")));
+  return archive;
+}
+
 class MeasuringDockerEngine extends DockerEngineClient {
   measurement: StageCounters | null = null;
   readbackFault: ReadbackFault | null = null;
@@ -194,8 +214,7 @@ async function createFixtureContainer(engine: DockerEngineClient, runId: string,
       Labels: labels,
       HostConfig: {
         Binds: [], Mounts: [], Tmpfs: {
-          "/workspace": "rw,nosuid,nodev,size=64m,mode=0700,uid=1000,gid=1000",
-          [artifactRoot]: "rw,nosuid,nodev,exec,size=64m,mode=0700,uid=1000,gid=1000"
+          "/workspace": "rw,nosuid,nodev,size=64m,mode=0700,uid=1000,gid=1000"
         },
         NetworkMode: "none", PortBindings: {}, PublishAllPorts: false,
         Privileged: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "", CgroupnsMode: "private",
@@ -410,6 +429,9 @@ test.skipIf(dockerSocketPath === undefined)("real rootless Docker accepts batche
   const peerContainerId = await createFixtureContainer(engine, runId, "peer");
   active.containerIds.add(peerContainerId);
   await engine.startContainer(peerContainerId);
+  await engine.putContainerArchive(targetContainerId, "/opt", artifactRootBootstrapArchive(), 30_000);
+  expect(await commandOkay(engine, targetContainerId, ["stat", "-c", "%a %u:%g", artifactRoot]))
+    .toBe(`700 ${testImageUser}\n`);
   const labels = (await engine.listContainers()).filter((container) => container.Labels["devspace.test-run"] === runId);
   expect(labels.map((container) => container.Id).sort()).toEqual([peerContainerId, targetContainerId].sort());
 
