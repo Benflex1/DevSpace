@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { createHarnessHomeStore, type HarnessHomeStore } from "./harness-home.js";
+import { readRegularFileNoFollow } from "./private-state.js";
 
 const workspaceId = "018f1f34-7000-7000-8000-000000000001";
 const wsA = "018f1f34-7000-7000-8000-00000000000a";
@@ -101,6 +102,51 @@ test("stale lease after writeback-before-release is recovered then acquired by a
     harnessId: "codex", workspaceId: wsB, aiSessionId: sessionB, processGeneration: 1
   });
   expect(leaseB.leaseId).toEqual(expect.any(String));
+});
+
+test("materialization and writeback preserve contents across many nested files", async () => {
+  const { home } = await store();
+  const persistent = home.persistentHomePath("codex");
+  const contents = [
+    ["config.toml", "model = 'preserved'"],
+    ["sessions/2026/10/session-a.jsonl", "session-a-history"],
+    ["sessions/2026/10/session-b.jsonl", "session-b-history"],
+    ["plugins/installed/plugin.json", "plugin-manifest"],
+    ["skills/recovery/SKILL.md", "durable-skill-state"],
+    ...Array.from({ length: 24 }, (_, index) => [`state/group-${index % 4}/record-${index}.json`, `record-${index}`])
+  ] as const;
+  for (const [relative, content] of contents) {
+    const destination = path.join(persistent, relative);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, content, { mode: 0o600 });
+  }
+
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId, aiSessionId, processGeneration: 1 });
+  const slot = await home.materialize({ workspaceId, harnessId: "codex", leaseId: lease.leaseId });
+  for (const [relative, content] of contents) {
+    await expect(readFile(path.join(slot.slotHostPath, relative), "utf8")).resolves.toBe(content);
+  }
+  await writeFile(path.join(slot.slotHostPath, "sessions/2026/10/session-a.jsonl"), "updated-session-history");
+  await home.writeBackAndClear({ workspaceId, leaseId: lease.leaseId });
+
+  await expect(readFile(path.join(persistent, "sessions/2026/10/session-a.jsonl"), "utf8"))
+    .resolves.toBe("updated-session-history");
+  for (const [relative, content] of contents.filter(([name]) => name !== "sessions/2026/10/session-a.jsonl")) {
+    await expect(readFile(path.join(persistent, relative), "utf8")).resolves.toBe(content);
+  }
+  expect(await readdir(slot.slotHostPath)).toEqual([]);
+});
+
+test("bounded home reads reject a source size change since traversal", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "hh-size-change-"));
+  roots.push(root);
+  const source = path.join(root, "source");
+  await writeFile(source, "source grew");
+
+  await expect(readRegularFileNoFollow(source, 32, 6)).rejects.toMatchObject({
+    name: "PrivateStateCorruptionError",
+    reason: "private file changed after it was sized"
+  });
 });
 
 test("writes back native homes with the entry count observed during orphan recovery", async () => {
@@ -416,6 +462,31 @@ test("unsupported file writeback leaves the previous persistent home intact and 
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: otherWorkspace, aiSessionId: otherSession, processGeneration: 1
   })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+});
+
+test("writeback traversal failure cleans incoming and preserves the dirty home lease", async () => {
+  const { home, root } = await store();
+  const homePath = home.persistentHomePath("codex");
+  await writeAuth(homePath, "persistent-before-failed-writeback");
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 1 });
+  const slot = await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: lease.leaseId });
+  await writeFile(path.join(slot.slotHostPath, "auth.json"), "slot-must-not-replace-home");
+  await mkdir(path.join(slot.slotHostPath, "state"));
+  await writeFile(path.join(slot.slotHostPath, "state", "durable.json"), "still-in-dirty-slot");
+  execFileSync("mkfifo", [path.join(slot.slotHostPath, "unsupported.pipe")]);
+
+  await expect(home.writeBackAndClear({ workspaceId: wsA, leaseId: lease.leaseId }))
+    .rejects.toMatchObject({ code: "HARNESS_HOME_UNSUPPORTED" });
+
+  await expect(readFile(path.join(homePath, "auth.json"), "utf8"))
+    .resolves.toBe("persistent-before-failed-writeback");
+  await expect(lstat(`${homePath}.incoming`)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(JSON.parse(await readFile(path.join(root, "harness-meta", `${wsA}.json`), "utf8")))
+    .toMatchObject({ harnessId: "codex", workspaceId: wsA, leaseId: lease.leaseId, dirty: true });
+  await expect(readFile(path.join(homePath, ".lease", "metadata.json"), "utf8"))
+    .resolves.toContain(lease.leaseId);
+  await expect(home.acquireLease({ harnessId: "codex", workspaceId: wsB, aiSessionId: sessionB, processGeneration: 1 }))
+    .rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
 });
 
 test("rejects a harnessId with ..", async () => {

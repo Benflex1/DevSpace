@@ -55,14 +55,37 @@ export async function lstatIdentity(target: string): Promise<{ stats: BigIntStat
  */
 export async function readRegularFileNoFollow(
   target: string,
-  maxBytes: number
+  maxBytes: number,
+  expectedSize?: number
 ): Promise<{ readonly bytes: Buffer; readonly stats: BigIntStats; readonly identity: FileIdentity }> {
+  if (expectedSize !== undefined && (!Number.isSafeInteger(expectedSize) || expectedSize < 0 || expectedSize > maxBytes)) {
+    throw new RangeError("expectedSize must be a non-negative safe integer within the read bound");
+  }
   const descriptor = await open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
     const before = await descriptor.stat({ bigint: true });
     if (!before.isFile() || before.isSymbolicLink()) throw new PrivateStateCorruptionError(target, "expected a regular file");
     if (before.size > BigInt(maxBytes)) throw new PrivateStateCorruptionError(target, "private file exceeds the read bound");
-    const bytes = await descriptor.readFile();
+    if (expectedSize !== undefined && before.size !== BigInt(expectedSize)) {
+      throw new PrivateStateCorruptionError(target, "private file changed after it was sized");
+    }
+    let bytes: Buffer;
+    if (expectedSize === undefined) {
+      bytes = await descriptor.readFile();
+    } else {
+      // Allocate only the size reserved by the caller. A file that grows while
+      // the bounded read is in progress is detected without buffering its tail.
+      bytes = Buffer.alloc(expectedSize);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesRead } = await descriptor.read(bytes, offset, bytes.length - offset, null);
+        if (bytesRead === 0) throw new PrivateStateCorruptionError(target, "private file changed during read");
+        offset += bytesRead;
+      }
+      const extra = Buffer.allocUnsafe(1);
+      const { bytesRead: extraBytes } = await descriptor.read(extra, 0, 1, null);
+      if (extraBytes !== 0) throw new PrivateStateCorruptionError(target, "private file changed during read");
+    }
     const after = await descriptor.stat({ bigint: true });
     if (!identitiesEqual(identityOf(before), identityOf(after)) || before.size !== after.size || BigInt(bytes.length) !== after.size) {
       throw new PrivateStateCorruptionError(target, "private file changed during read");
