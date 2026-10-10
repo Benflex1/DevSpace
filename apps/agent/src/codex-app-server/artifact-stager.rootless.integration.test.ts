@@ -178,12 +178,13 @@ async function createFixtureContainer(engine: DockerEngineClient, runId: string,
       Image: imageReference,
       Entrypoint: ["/bin/sh", "-c"],
       Cmd: ["trap 'exit 0' TERM INT; while :; do sleep 2147483647 & wait $!; done"],
-      WorkingDir: "/",
+      WorkingDir: "/workspace",
       User: testImageUser,
       Env: [],
       Labels: labels,
       HostConfig: {
         Binds: [], Mounts: [], Tmpfs: {
+          "/workspace": "rw,nosuid,nodev,size=64m,mode=0700,uid=1000,gid=1000",
           [artifactRoot]: "rw,nosuid,nodev,exec,size=64m,mode=0700,uid=1000,gid=1000"
         },
         NetworkMode: "none", PortBindings: {}, PublishAllPorts: false,
