@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import type { Duplex } from "node:stream";
+import { PassThrough, type Duplex, type Readable } from "node:stream";
+import * as tar from "tar-stream";
 import type { CodexProbeRuntimeIdentity } from "@devspace/contracts";
 import { readRegularFileNoFollow } from "../private-state.js";
-import type { DockerEngineClient } from "../docker-runtime.js";
+import { DockerEngineError, type DockerEngineClient } from "../docker-runtime.js";
 import {
   codexArtifactStagingDiagnostic,
   codexArtifactStagingTiming,
@@ -339,6 +340,185 @@ function exactArtifactTree(
   return actual.every((entry) => expected.get(entry.relativePath) === entry.kind);
 }
 
+function appendArchiveEntry(pack: tar.Pack, header: tar.Header, bytes?: Buffer): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const callback = (error?: Error | null) => error == null ? resolve() : reject(error);
+    try {
+      if (bytes === undefined) pack.entry(header, callback);
+      else pack.entry(header, bytes, callback);
+    } catch (error) { reject(error instanceof Error ? error : new Error("codex-artifact-archive-entry-failed", { cause: error })); }
+  });
+}
+
+function createArtifactArchive(staged: StagedCodexExecutionArtifact): Readable {
+  const pack = tar.pack();
+  const archive = new PassThrough();
+  pack.once("error", (error) => archive.destroy(error));
+  archive.once("close", () => pack.destroy());
+  pack.pipe(archive);
+  void (async () => {
+    const artifactEntries = staged.artifact.entries.map((entry) => ({
+      ...entry, relativePath: `artifact/${entry.relativePath}`
+    }));
+    const tree = expectedArtifactTree(artifactEntries);
+    const directories = [...tree.entries()].filter(([, kind]) => kind === "directory")
+      .map(([relativePath]) => relativePath)
+      .sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right));
+    for (const directory of directories) {
+      await appendArchiveEntry(pack, {
+        name: `${directory}/`, type: "directory", mode: 0o700, uid: 0, gid: 0, mtime: new Date(0)
+      });
+    }
+    for (const entry of staged.artifact.entries) {
+      const name = `artifact/${entry.relativePath}`;
+      if (entry.kind === "symlink") {
+        const target = entry.linkTarget;
+        if (target === null || target.length === 0 || target.startsWith("/")
+          || target.split("/").some((component) => component.length === 0 || component === "." || component === "..")) {
+          throw new Error("codex-artifact-link-invalid");
+        }
+        await appendArchiveEntry(pack, {
+          name, type: "symlink", linkname: target, mode: entry.mode, uid: 0, gid: 0, mtime: new Date(0)
+        });
+        continue;
+      }
+      const source = path.join(staged.stagingRoot, ...entry.relativePath.split("/"));
+      const read = await readRegularFileNoFollow(source, MAX_ENTRY_BYTES, entry.byteLength);
+      const mode = Number(read.stats.mode & 0o777n);
+      if ((read.stats.mode & 0o6000n) !== 0n || mode !== entry.mode
+        || read.bytes.length !== entry.byteLength
+        || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) {
+        throw artifactReadbackMismatch();
+      }
+      await appendArchiveEntry(pack, {
+        name, type: "file", mode: entry.mode, size: entry.byteLength, uid: 0, gid: 0, mtime: new Date(0)
+      }, read.bytes);
+    }
+    pack.finalize();
+  })().catch((error: unknown) => {
+    pack.destroy(error instanceof Error ? error : new Error("codex-artifact-upload-failed"));
+    archive.destroy(error instanceof Error ? error : new Error("codex-artifact-upload-failed"));
+  });
+  return archive;
+}
+
+async function readArtifactArchive(input: {
+  readonly archive: Readable;
+  readonly entries: readonly CodexArtifactEntry[];
+  readonly expectedTree: ReadonlyMap<string, CodexArtifactTreeEntry["kind"]>;
+  readonly timeoutMs: number;
+  readonly scheduleTimeout: ScheduleTimeout;
+}): Promise<readonly CodexArtifactEntry[] | null> {
+  const extract = tar.extract();
+  return await new Promise<readonly CodexArtifactEntry[] | null>((resolve, reject) => {
+    const actualTree: CodexArtifactTreeEntry[] = [];
+    const actualEntries: CodexArtifactEntry[] = [];
+    const expectedEntries = new Map(input.entries.map((entry) => [entry.relativePath, entry]));
+    const seenPaths = new Set<string>();
+    let settled = false;
+    let cancelTimeout = () => {};
+    const finish = (error?: Error, mismatch = false) => {
+      if (settled) return;
+      settled = true;
+      cancelTimeout();
+      if (mismatch) {
+        input.archive.destroy();
+        extract.destroy();
+        resolve(null);
+      } else if (error !== undefined) {
+        input.archive.destroy();
+        extract.destroy();
+        reject(error);
+      } else {
+        resolve(actualEntries);
+      }
+    };
+    cancelTimeout = input.scheduleTimeout(() => finish(new Error("codex-artifact-readback-timeout")), input.timeoutMs);
+
+    extract.on("entry", (header, body, next) => {
+      void (async () => {
+        const kind = header.type;
+        let relativePath = header.name;
+        if (kind === "directory" && relativePath.endsWith("/")) relativePath = relativePath.slice(0, -1);
+        if (relativePath.length === 0 || relativePath.length > 16_384 || relativePath.startsWith("/")
+          || relativePath.includes("\0")
+          || relativePath.split("/").some((component) => component.length === 0 || component === "." || component === "..")) {
+          finish(new Error("codex-artifact-tree-path-invalid"));
+          return;
+        }
+        if (seenPaths.has(relativePath)) {
+          finish(undefined, true);
+          return;
+        }
+        const expectedKind = input.expectedTree.get(relativePath);
+        const treeKind = kind === "directory" ? "directory" : kind === "file" ? "file" : kind === "symlink" ? "symlink" : "special";
+        if (expectedKind !== treeKind || expectedKind === undefined) {
+          finish(undefined, true);
+          return;
+        }
+        seenPaths.add(relativePath);
+        const size = header.size;
+        if (!Number.isSafeInteger(size) || (size ?? -1) < 0) {
+          finish(new Error("codex-artifact-readback-frame"));
+          return;
+        }
+        actualTree.push({ kind: treeKind, relativePath });
+        if (treeKind === "directory") {
+          if (size !== 0) { finish(new Error("codex-artifact-readback-frame")); return; }
+          for await (const _chunk of body) { /* a directory record has no payload */ }
+          next();
+          return;
+        }
+        const entryPath = relativePath.slice("artifact/".length);
+        const expected = expectedEntries.get(entryPath);
+        if (expected === undefined || header.mode !== expected.mode) {
+          finish(undefined, true);
+          return;
+        }
+        if (treeKind === "symlink") {
+          if (size !== 0 || header.linkname !== expected.linkTarget) {
+            finish(undefined, true);
+            return;
+          }
+          for await (const _chunk of body) { finish(undefined, true); return; }
+          actualEntries.push({ ...expected });
+          next();
+          return;
+        }
+        if (treeKind !== "file" || size !== expected.byteLength || size > MAX_ENTRY_BYTES) {
+          finish(undefined, true);
+          return;
+        }
+        const hash = createHash("sha256");
+        let byteLength = 0;
+        for await (const chunk of body) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          byteLength += bytes.length;
+          if (byteLength > expected.byteLength) { finish(undefined, true); return; }
+          hash.update(bytes);
+        }
+        const sha256 = hash.digest("hex");
+        if (byteLength !== expected.byteLength || sha256 !== expected.sha256) {
+          finish(undefined, true);
+          return;
+        }
+        actualEntries.push({
+          relativePath: expected.relativePath, kind: "file", mode: header.mode,
+          linkTarget: null, byteLength, sha256
+        });
+        next();
+      })().catch((error: unknown) => finish(error instanceof Error ? error : new Error("codex-artifact-readback-unproven")));
+    });
+    extract.once("finish", () => {
+      if (!exactArtifactTree(actualTree, input.expectedTree)) finish(undefined, true);
+      else finish();
+    });
+    extract.once("error", (error) => finish(new Error("codex-artifact-readback-frame", { cause: error })));
+    input.archive.once("error", (error) => finish(new Error("codex-artifact-readback-unproven", { cause: error })));
+    input.archive.pipe(extract);
+  });
+}
+
 export function createCodexArtifactStager(options: CodexArtifactStagerOptions): CodexArtifactStager {
   const scheduleTimeout = options.scheduleTimeout ?? scheduleRealTimeout;
 
@@ -388,6 +568,21 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
     await waitForClose(stream, EXEC_TIMEOUT_MS, scheduleTimeout);
     const inspection = await options.docker.inspectExec(execId).catch(() => null);
     if (inspection === null || inspection.Running || inspection.ExitCode !== 0) throw new Error("codex-artifact-upload-failed");
+  }
+
+  async function createStagingRoot(containerId: string, stagingRoot: string): Promise<void> {
+    const execId = await options.docker.createExec(containerId, {
+      command: ["sh", "-c", 'set -eu; mkdir -p -- "$DEVSPACE_STAGE_PARENT"; umask 077; mkdir -- "$DEVSPACE_STAGE_ROOT"'],
+      workingDirectory: "/workspace",
+      environment: { DEVSPACE_STAGE_PARENT: path.posix.dirname(stagingRoot), DEVSPACE_STAGE_ROOT: stagingRoot },
+      attachStdin: false, tty: false
+    });
+    const stream = await options.docker.startExecAttached(execId, false);
+    await waitForClose(stream, EXEC_TIMEOUT_MS, scheduleTimeout);
+    const inspection = await options.docker.inspectExec(execId).catch(() => null);
+    if (inspection === null || inspection.Running || inspection.ExitCode !== 0) {
+      throw new Error("codex-artifact-staging-root-create-failed");
+    }
   }
 
   async function readbackEntry(input: {
@@ -545,6 +740,9 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
         const expectedTree = expectedArtifactTree(input.staged.artifact.entries.map((entry) => ({
           ...entry, relativePath: `artifact/${entry.relativePath}`
         })));
+        const artifactByteLength = input.staged.artifact.entries.reduce((total, entry) =>
+          total + (entry.kind === "file" ? entry.byteLength : 0), 0);
+        const transferTimeoutMs = codexArtifactTransferTimeoutMs(artifactByteLength);
         let stagingRootOwned = false;
         let helperRootMayExist = false;
         let operationError: unknown;
@@ -554,29 +752,36 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
         let resultPath: string | undefined;
         let cleanupElapsedMs = 0;
 
+        const readClosure = async (archiveRoot: string): Promise<readonly CodexArtifactEntry[] | null> => {
+          const readbackStartedAt = performance.now();
+          try {
+            const archive = await options.docker.getContainerArchive(input.containerId, `${archiveRoot}/.`, transferTimeoutMs);
+            const actualEntries = await readArtifactArchive({
+              archive, entries: input.staged.artifact.entries, expectedTree, timeoutMs: transferTimeoutMs, scheduleTimeout
+            });
+            reportTiming({ phase: "artifact-entry-readback", containerId: input.containerId, artifactLayout,
+              startedAt: readbackStartedAt, outcome: actualEntries === null ? "failure" : "success" });
+            return actualEntries;
+          } catch (error) {
+            reportTiming({ phase: "artifact-entry-readback", containerId: input.containerId, artifactLayout,
+              startedAt: readbackStartedAt, outcome: "failure" });
+            throw error;
+          }
+        };
+
         const verifyCache = async (cacheRoot: string): Promise<"absent" | "exact" | "mismatch"> => {
           const tree = await listArtifactTree({
             containerId: input.containerId, artifactRoot: cacheRoot, readbackPath: artifactReadbackPath
           });
           if (tree === null) return "absent";
           if (!exactArtifactTree(tree, expectedTree)) return "mismatch";
-
-          const actualEntries: CodexArtifactEntry[] = [];
-          for (const entry of input.staged.artifact.entries) {
-            const readStartedAt = performance.now();
-            const actual = await readbackEntry({
-              containerId: input.containerId, artifactRoot: `${cacheRoot}/artifact`, entry,
-              readbackPath: artifactReadbackPath
-            });
-            reportTiming({ phase: "artifact-entry-readback", containerId: input.containerId, artifactLayout,
-              startedAt: readStartedAt, outcome: "success", entryRelative: entry.relativePath });
-            if (!sameEntry(entry, actual)) return "mismatch";
-            actualEntries.push({
-              relativePath: entry.relativePath, kind: actual.kind, mode: actual.mode,
-              linkTarget: actual.linkTarget, byteLength: actual.kind === "file" ? actual.bytes.length : 0,
-              sha256: actual.kind === "file" ? createHash("sha256").update(actual.bytes).digest("hex") : null
-            });
+          let actualEntries: readonly CodexArtifactEntry[] | null;
+          try { actualEntries = await readClosure(cacheRoot); }
+          catch (error) {
+            if (error instanceof DockerEngineError && error.statusCode === 404) return "absent";
+            throw error;
           }
+          if (actualEntries === null) return "mismatch";
           const finalStartedAt = performance.now();
           const observedDigest = codexExecutionArtifactClosureDigest({
             layout: input.staged.artifact.layout, target: input.staged.artifact.target,
@@ -603,53 +808,34 @@ export function createCodexArtifactStager(options: CodexArtifactStagerOptions): 
           if (cacheResult === "exact") {
             resultPath = entryPath(`${input.destinationRoot}/artifact`, input.staged.artifact.entrypoint);
           } else {
-            const actualEntries: CodexArtifactEntry[] = [];
-            const stagedArtifactRoot = `${stagingRoot}/artifact`;
+            setPhase("artifact-entry-upload");
+            const uploadStartedAt = phaseStartedAt;
             stagingRootOwned = true;
-            for (const entry of input.staged.artifact.entries) {
-              const targetPath = entryPath(stagedArtifactRoot, entry);
-              setPhase("artifact-entry-upload", entry.relativePath);
-              const uploadStartedAt = phaseStartedAt;
-              if (entry.kind === "symlink") await uploadSymlink(input.containerId, targetPath, entry.linkTarget!);
-              else {
-                const read = await readRegularFileNoFollow(path.join(input.staged.stagingRoot, ...entry.relativePath.split("/")), MAX_ENTRY_BYTES);
-                if (read.bytes.length !== entry.byteLength || createHash("sha256").update(read.bytes).digest("hex") !== entry.sha256) {
-                  throw artifactReadbackMismatch();
-                }
-                await upload(input.containerId, targetPath, read.bytes, entry.mode,
-                  codexArtifactTransferTimeoutMs(read.bytes.length));
-              }
-              reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: uploadStartedAt,
-                outcome: "success", cacheState, entryRelative: entry.relativePath });
-
-              setPhase("artifact-entry-readback", entry.relativePath);
-              const readbackStartedAt = phaseStartedAt;
-              const actual = await readbackEntry({
-                containerId: input.containerId, artifactRoot: stagedArtifactRoot, entry,
-                readbackPath: artifactReadbackPath
-              });
-              if (!sameEntry(entry, actual)) throw artifactReadbackMismatch();
-              reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: readbackStartedAt,
-                outcome: "success", cacheState, entryRelative: entry.relativePath });
-              actualEntries.push({
-                relativePath: entry.relativePath, kind: actual.kind, mode: actual.mode,
-                linkTarget: actual.linkTarget, byteLength: actual.kind === "file" ? actual.bytes.length : 0,
-                sha256: actual.kind === "file" ? createHash("sha256").update(actual.bytes).digest("hex") : null
-              });
-            }
+            await createStagingRoot(input.containerId, stagingRoot);
+            await options.docker.putContainerArchive(input.containerId, stagingRoot,
+              createArtifactArchive(input.staged), transferTimeoutMs);
+            reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: uploadStartedAt,
+              outcome: "success", cacheState });
 
             setPhase("final-closure-verification");
-            const finalStartedAt = phaseStartedAt;
+            const treeStartedAt = phaseStartedAt;
             const tree = await listArtifactTree({
               containerId: input.containerId, artifactRoot: stagingRoot, readbackPath: artifactReadbackPath
             });
+            if (tree === null || !exactArtifactTree(tree, expectedTree)) throw artifactReadbackMismatch();
+            reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: treeStartedAt,
+              outcome: "success", cacheState });
+
+            setPhase("artifact-entry-readback");
+            const actualEntries = await readClosure(stagingRoot);
+            if (actualEntries === null) throw artifactReadbackMismatch();
+            setPhase("final-closure-verification");
+            const finalStartedAt = phaseStartedAt;
             const observedDigest = codexExecutionArtifactClosureDigest({
               layout: input.staged.artifact.layout, target: input.staged.artifact.target,
               packageVersion: input.staged.artifact.packageVersion, entries: actualEntries
             });
-            if (tree === null || !exactArtifactTree(tree, expectedTree) || observedDigest !== closureDigest) {
-              throw artifactReadbackMismatch();
-            }
+            if (observedDigest !== closureDigest) throw artifactReadbackMismatch();
             reportTiming({ phase, containerId: input.containerId, artifactLayout, startedAt: finalStartedAt,
               outcome: "success", cacheState });
 

@@ -239,6 +239,45 @@ jobs:
           NODE
           test -S "$socket"
 
+      - name: Run real Codex artifact staging acceptance and benchmark
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          socket="$root/runtime/docker.sock"
+          test -S "$socket"
+          test "$DEVSPACE_TEST_DOCKER_SOCKET_PATH" = "$socket"
+          report="$root/artifact-staging-vitest.json"
+          env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+            DEVSPACE_TEST_DOCKER_SOCKET_PATH="$socket" \
+            DEVSPACE_TEST_GIT_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04 \
+            DOCKER_CONFIG="$root/docker-config" \
+            pnpm exec vitest run \
+              --project @devspace/agent \
+              apps/agent/src/codex-app-server/artifact-stager.rootless.integration.test.ts \
+              --reporter=json \
+              --outputFile="$report"
+          node --input-type=module - "$report" <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          const report = JSON.parse(await readFile(process.argv[2], 'utf8'));
+          const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+          if (report.success !== true
+            || report.numTotalTests !== 1
+            || report.numPassedTests !== 1
+            || report.numFailedTests !== 0
+            || report.numPendingTests !== 0
+            || report.numTodoTests !== 0
+            || assertions.length !== 1
+            || assertions[0]?.status !== 'passed'
+            || !String(assertions[0]?.fullName ?? assertions[0]?.title ?? '').includes('real rootless Docker accepts batched Codex artifact staging')) {
+            console.error(JSON.stringify(report, null, 2));
+            throw new Error('Rootless Codex artifact staging acceptance must run exactly once and pass; skipped tests are failures.');
+          }
+          console.log('Verified one passed real-rootless-Docker Codex artifact acceptance test with no skipped or pending tests.');
+          NODE
+          test -S "$socket"
+
       - name: Show rootless test and daemon logs on failure
         if: failure()
         shell: bash
@@ -248,6 +287,10 @@ jobs:
           if [[ -f "$root/vitest.json" ]]; then
             echo "Rootless Git integration Vitest report:"
             cat "$root/vitest.json"
+          fi
+          if [[ -f "$root/artifact-staging-vitest.json" ]]; then
+            echo "Rootless Codex artifact staging Vitest report:"
+            cat "$root/artifact-staging-vitest.json"
           fi
           if [[ -f "$root/daemon.log" ]]; then cat "$root/daemon.log"; fi
 

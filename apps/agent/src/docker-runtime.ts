@@ -1,6 +1,7 @@
 import { lstat } from "node:fs/promises";
 import http from "node:http";
-import type { Duplex } from "node:stream";
+import type { Duplex, Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import * as z from "zod";
 import { uuidV7Schema } from "@devspace/contracts";
@@ -441,6 +442,95 @@ export class DockerEngineClient {
 
   async inspectImage(id: string): Promise<DockerImageInspection> {
     return dockerImageInspectionSchema.parse(await this.json("GET", `/images/${encodeURIComponent(id)}/json`)) as DockerImageInspection;
+  }
+
+  async putContainerArchive(containerId: string, destinationPath: string, archive: Readable, timeoutMs: number): Promise<void> {
+    if (!containerId || containerId.includes("\0") || !destinationPath.startsWith("/")
+      || destinationPath.length > 16_384 || destinationPath.includes("\0")
+      || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
+      throw new Error("docker-container-archive-input-invalid");
+    }
+    const requestPath = `/containers/${encodeURIComponent(containerId)}/archive?path=${encodeURIComponent(destinationPath)}&noOverwriteDirNonDir=1&copyUIDGID=1`;
+    try {
+      const request = http.request({
+        socketPath: this.socketPath, method: "PUT", path: requestPath,
+        headers: { "content-type": "application/x-tar" }
+      });
+      const response = new Promise<void>((resolve, reject) => {
+        request.once("response", (value) => {
+          const chunks: Buffer[] = [];
+          let length = 0;
+          value.on("data", (chunk: Buffer) => {
+            length += chunk.length;
+            if (length <= 16 * 1024) chunks.push(Buffer.from(chunk));
+          });
+          value.once("end", () => {
+            const status = value.statusCode ?? 0;
+            if ([200, 201, 204].includes(status)) resolve();
+            else reject(new DockerEngineError(status, Buffer.concat(chunks).toString("utf8").slice(0, 512)));
+          });
+          value.once("error", reject);
+        });
+        request.once("error", reject);
+      });
+      const timeout = setTimeout(() => request.destroy(new Error("docker-engine-timeout")), timeoutMs);
+      const transfer = pipeline(archive, request);
+      try {
+        await Promise.all([transfer, response]);
+      } catch (error) {
+        archive.destroy();
+        request.destroy();
+        await transfer.catch(() => {});
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (error) {
+      if (error instanceof DockerEngineError) throw error;
+      throw new DockerEngineTransportError(error);
+    }
+  }
+
+  async getContainerArchive(containerId: string, sourcePath: string, timeoutMs: number): Promise<Readable> {
+    if (!containerId || containerId.includes("\0") || !sourcePath.startsWith("/")
+      || sourcePath.length > 16_384 || sourcePath.includes("\0")
+      || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
+      throw new Error("docker-container-archive-input-invalid");
+    }
+    const requestPath = `/containers/${encodeURIComponent(containerId)}/archive?path=${encodeURIComponent(sourcePath)}`;
+    return await new Promise<Readable>((resolve, reject) => {
+      const request = http.request({ socketPath: this.socketPath, method: "GET", path: requestPath });
+      const timeout = setTimeout(() => request.destroy(new Error("docker-engine-timeout")), timeoutMs);
+      let settled = false;
+      const finishError = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error instanceof DockerEngineError) reject(error);
+        else reject(new DockerEngineTransportError(error));
+      };
+      request.once("response", (response) => {
+        if (response.statusCode !== 200) {
+          const chunks: Buffer[] = [];
+          let length = 0;
+          response.on("data", (chunk: Buffer) => {
+            length += chunk.length;
+            if (length <= 16 * 1024) chunks.push(Buffer.from(chunk));
+          });
+          response.once("end", () => finishError(new DockerEngineError(
+            response.statusCode ?? 0, Buffer.concat(chunks).toString("utf8").slice(0, 512)
+          )));
+          response.once("error", finishError);
+          return;
+        }
+        settled = true;
+        response.once("end", () => clearTimeout(timeout));
+        response.once("close", () => clearTimeout(timeout));
+        resolve(response);
+      });
+      request.once("error", finishError);
+      request.end();
+    });
   }
 
   async startContainer(id: string): Promise<void> {
