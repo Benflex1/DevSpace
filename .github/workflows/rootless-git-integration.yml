@@ -276,6 +276,7 @@ jobs:
           }
           console.log('Verified one passed real-rootless-Docker Codex artifact acceptance test with no skipped or pending tests.');
           NODE
+          cat "$GITHUB_STEP_SUMMARY"
           test -S "$socket"
 
       - name: Show rootless test and daemon logs on failure
