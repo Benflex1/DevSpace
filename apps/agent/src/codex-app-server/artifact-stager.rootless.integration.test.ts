@@ -79,6 +79,16 @@ class MeasuringDockerEngine extends DockerEngineClient {
   readbackFault: ReadbackFault | null = null;
   partialUploadAfterBytes: number | null = null;
 
+  private async sendArchive(containerId: string, destinationPath: string, archive: Readable, timeoutMs: number): Promise<void> {
+    try { await super.putContainerArchive(containerId, destinationPath, archive, timeoutMs); }
+    catch (error) {
+      if (error instanceof DockerEngineError) {
+        throw new Error(`rootless-artifact-archive-put-rejected:${error.statusCode}:${destinationPath}:${error.responseBody}`, { cause: error });
+      }
+      throw error;
+    }
+  }
+
   override async createExec(containerId: string, input: Parameters<DockerEngineClient["createExec"]>[1]): Promise<string> {
     if (this.measurement !== null) this.measurement.execCreations += 1;
     return await super.createExec(containerId, input);
@@ -104,11 +114,11 @@ class MeasuringDockerEngine extends DockerEngineClient {
           yield chunk;
         }
       })());
-      return await super.putContainerArchive(containerId, destinationPath, partial, timeoutMs);
+      return await this.sendArchive(containerId, destinationPath, partial, timeoutMs);
     }
-    if (measurement === null) return await super.putContainerArchive(containerId, destinationPath, archive, timeoutMs);
+    if (measurement === null) return await this.sendArchive(containerId, destinationPath, archive, timeoutMs);
     const measured = Readable.from(countedChunks(archive, (byteLength) => { measurement.putBytes += byteLength; }));
-    return await super.putContainerArchive(containerId, destinationPath, measured, timeoutMs);
+    return await this.sendArchive(containerId, destinationPath, measured, timeoutMs);
   }
 
   override async getContainerArchive(containerId: string, sourcePath: string, timeoutMs: number): Promise<Readable> {
