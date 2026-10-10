@@ -82,15 +82,22 @@ function processBinding(projectId: string, session: { id: string; workspaceId: s
     profileRevision: session.profileRevision, processGeneration: session.processGeneration };
 }
 
-export async function inspectAiWorkbench(projectId: string, workspaceId: string, sessionId: string | undefined, dependencies: Dependencies): Promise<{
-  profile: AiProviderProfileProjection;
+export function inspectAiWorkbench(projectId: string, workspaceId: string, sessionId: string | undefined, dependencies: Dependencies): {
+  profile: AiProviderProfileProjection | null;
   sessions: ReturnType<ProjectDatabase["listAiSessions"]>;
   session: ReturnType<ProjectDatabase["getAiSession"]>;
-}> {
+} {
   const selected = sessionId === undefined ? null : exactSession(projectId, workspaceId, sessionId, dependencies.database);
-  const profile = await dependencies.agent.inspectAiProvider(projectId, workspaceId, "codex");
   const sessions = dependencies.database.listAiSessions(projectId, workspaceId);
-  return { profile, sessions, session: selected };
+  return { profile: null, sessions, session: selected };
+}
+
+export function inspectAiProviderStatus(
+  projectId: string,
+  workspaceId: string,
+  agent: Pick<FullAgentClient, "inspectAiProvider">
+): Promise<AiProviderProfileProjection> {
+  return agent.inspectAiProvider(projectId, workspaceId, "codex");
 }
 
 type AiWorkbenchProjection = Awaited<ReturnType<typeof inspectAiWorkbench>>;

@@ -15,6 +15,7 @@ import {
   boundAiWorkbenchResponse,
   createAiSession,
   inspectAiWorkbench,
+  inspectAiProviderStatus,
   interruptAiTurn,
   respondToAiApproval,
   respondToAiStructuredInput,
@@ -155,6 +156,40 @@ function fakeSessionDatabase() {
   };
   return { agent, database };
 }
+
+test("loads persisted AI session summaries without waiting for slow Codex discovery", () => {
+  const { agent, database } = fakeSessionDatabase();
+  agent.inspectAiProvider.mockImplementationOnce(() => new Promise((resolve) => {
+    setTimeout(() => resolve({
+      profileId: "codex", profileRevision, provider: "codex", displayName: "Codex",
+      capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: true,
+        structuredInput: true, stop: true, streamEvents: true },
+      availability: { state: "available" as const }
+    }), 200);
+  }));
+
+  const result = inspectAiWorkbench(projectId, workspaceId, undefined, { database, agent } as never);
+
+  expect(result.profile).toBeNull();
+  expect(result.sessions.map((item) => item.id)).toEqual([sessionBId, sessionAId]);
+  expect(result.session).toBeNull();
+  expect(agent.inspectAiProvider).not.toHaveBeenCalled();
+});
+
+test("provider status preserves an unavailable Codex inspection result", async () => {
+  const unavailableProfile = {
+    profileId: "codex", profileRevision, provider: "codex", displayName: "Codex",
+    capabilities: { inspect: true as const, start: true as const, resume: false, sendTurn: true as const,
+      interrupt: false, approvals: false, structuredInput: false, stop: true as const, streamEvents: true as const },
+    availability: { state: "unavailable" as const, code: "EXECUTABLE_MISSING" as const }
+  };
+  const agent = { inspectAiProvider: vi.fn(() => Promise.resolve(unavailableProfile)) };
+
+  const profile = await inspectAiProviderStatus(projectId, workspaceId, agent);
+
+  expect(profile.availability).toEqual({ state: "unavailable", code: "EXECUTABLE_MISSING" });
+  expect(agent.inspectAiProvider).toHaveBeenCalledWith(projectId, workspaceId, "codex");
+});
 
 test("binds a supplied older session instead of acting on the newer workspace session", async () => {
   const agent = fakeAgent();
@@ -567,7 +602,7 @@ test("bounds a maximum event collection with a logarithmic number of envelope me
 
 test("uses the exact session for history, interrupt, stop, and Agent replay", async () => {
   const { agent, database } = fakeSessionDatabase();
-  const inspected = await inspectAiWorkbench(projectId, workspaceId, sessionAId, { database, agent } as never);
+  const inspected = inspectAiWorkbench(projectId, workspaceId, sessionAId, { database, agent } as never);
   expect(inspected.session?.session.id).toBe(sessionAId);
 
   await interruptAiTurn(projectId, workspaceId, sessionAId, turnId, { database, agent } as never);
