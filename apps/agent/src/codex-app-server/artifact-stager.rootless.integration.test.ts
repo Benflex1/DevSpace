@@ -372,7 +372,9 @@ async function verifyPublishedArtifact(engine: DockerEngineClient, containerId: 
   ])).trimEnd().split("\n").map((line) => line.split("\t"));
   const expectedTree = [...expectedPaths.entries()].map(([relativePath, entry]) =>
     [relativePath, entry.kind, entry.mode, testImageUser]).sort((left, right) => left[0]!.localeCompare(right[0]!));
-  expect(observedTree).toEqual(expectedTree);
+  if (JSON.stringify(observedTree) !== JSON.stringify(expectedTree)) {
+    throw new Error(`rootless-artifact-published-tree-mismatch:${JSON.stringify({ observedTree, expectedTree })}`);
+  }
 }
 
 function createStager(engine: DockerEngineClient, readbackHelperBytes: Buffer) {
