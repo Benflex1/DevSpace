@@ -1,5 +1,12 @@
 # Current State
 
+## Test-suite audit
+
+The [2026-10-10 audit](audits/test-suite-2026-10-10.md) inventories the suite after PR #65
+and records the first conservative cleanup of duplicate assertions and fixture bookkeeping.
+Product behavior and real rootless Docker acceptance are preserved; larger UI source checks
+and timing-sensitive fixture cleanup remain follow-up investigations.
+
 ## Native harness slice
 
 The generic native AI harness is implemented on `feat/generic-native-ai-harness`. The Workbench

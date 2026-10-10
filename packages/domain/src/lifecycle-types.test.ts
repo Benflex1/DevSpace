@@ -35,8 +35,3 @@ function _assertLifecycleSpecificStateTypes(): void {
   // @ts-expect-error identically spelled service state is still not a runtime-stack state
   transitionRuntimeStackDesired(serviceState, "stopped");
 }
-
-test("lifecycle-specific functions reject states from another lifecycle at compile time", () => {
-  const stackState: RuntimeStackDesiredState = "absent";
-  expect(stackState).toBe("absent");
-});

@@ -157,16 +157,8 @@ function fakeSessionDatabase() {
   return { agent, database };
 }
 
-test("loads persisted AI session summaries without waiting for slow Codex discovery", () => {
+test("loads persisted AI session summaries without invoking Codex discovery", () => {
   const { agent, database } = fakeSessionDatabase();
-  agent.inspectAiProvider.mockImplementationOnce(() => new Promise((resolve) => {
-    setTimeout(() => resolve({
-      profileId: "codex", profileRevision, provider: "codex", displayName: "Codex",
-      capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: true, approvals: true,
-        structuredInput: true, stop: true, streamEvents: true },
-      availability: { state: "available" as const }
-    }), 200);
-  }));
 
   const result = inspectAiWorkbench(projectId, workspaceId, undefined, { database, agent } as never);
 
