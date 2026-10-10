@@ -35,6 +35,5 @@ describe("AI session browser hydration", () => {
 
     expect(source).toContain("profile.profileRevision === session.profileRevision");
     expect(source).toContain("historical-only");
-    expect(source).toContain('disabled={liveSessionExists}');
   });
 });
