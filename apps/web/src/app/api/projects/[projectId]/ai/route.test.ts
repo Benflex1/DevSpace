@@ -8,7 +8,9 @@ const ids = {
   sessionId: "018f0f00-0000-7000-8000-000000000103"
 };
 const mocks = vi.hoisted(() => ({
-  inspect: vi.fn(),
+  getDatabase: vi.fn(),
+  getAgent: vi.fn(),
+  inspectProvider: vi.fn(),
   restart: vi.fn(),
   send: vi.fn(),
   respondApproval: vi.fn(),
@@ -23,15 +25,16 @@ vi.mock("../../../../../server/auth.js", async () => {
   const actual = await vi.importActual<typeof import("../../../../../server/auth.js")>("../../../../../server/auth.js");
   return { ...actual, authenticateHeaders: mocks.authenticate };
 });
-vi.mock("../../../../../server/database.js", () => ({ getProjectDatabase: () => ({}) }));
-vi.mock("../../../../../server/agent-client.js", () => ({ createAgentClient: () => ({}) }));
+vi.mock("../../../../../server/database.js", () => ({ getProjectDatabase: mocks.getDatabase }));
+vi.mock("../../../../../server/agent-client.js", () => ({ createAgentClient: mocks.getAgent }));
 vi.mock("../../../../../server/ai-sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../../../../server/ai-sessions.js")>("../../../../../server/ai-sessions.js");
-  return { ...actual, inspectAiWorkbench: mocks.inspect, restartAiSession: mocks.restart, sendAiTurn: mocks.send,
+  return { ...actual, restartAiSession: mocks.restart, sendAiTurn: mocks.send,
     respondToAiApproval: mocks.respondApproval, respondToAiStructuredInput: mocks.respondInput };
 });
 
 import { GET, POST } from "./route.js";
+import { GET as GET_STATUS } from "./status/route.js";
 
 const profile = { profileId: "codex", profileRevision: "revision", displayName: "Codex", availability: { state: "available" }, capabilities: { interrupt: true } };
 const session = {
@@ -44,7 +47,9 @@ const context = { params: Promise.resolve({ projectId: ids.projectId }) };
 const request = new Request(`http://localhost/api/projects/${ids.projectId}/ai?workspaceId=${ids.workspaceId}&sessionId=${ids.sessionId}`);
 
 afterEach(() => {
-  mocks.inspect.mockReset();
+  mocks.getDatabase.mockReset();
+  mocks.getAgent.mockReset();
+  mocks.inspectProvider.mockReset();
   mocks.restart.mockReset();
   mocks.send.mockReset();
   mocks.respondApproval.mockReset();
@@ -55,15 +60,17 @@ afterEach(() => {
 
 describe("complete AI workbench response bound", () => {
   test("bounds the exact object passed to NextResponse.json, including the envelope", async () => {
-    mocks.inspect.mockResolvedValue({
-      profile,
-      sessions: [{ id: ids.sessionId, workspaceId: ids.workspaceId, title: "Session", state: "active", lastSequence: 1, historyStartSequence: 1, historyTruncated: false, createdAt: session.createdAt, updatedAt: session.updatedAt }],
-      session: {
+    mocks.getDatabase.mockReturnValue({
+      listAiSessions: () => [{ id: ids.sessionId, workspaceId: ids.workspaceId, title: "Session", state: "active", lastSequence: 1,
+        historyStartSequence: 1, historyTruncated: false, createdAt: session.createdAt, updatedAt: session.updatedAt }],
+      getAiSession: () => ({
         session,
         turns: Array.from({ length: 6 }, (_, index) => ({ id: `turn-${index}`, state: "completed", content: { kind: "text", text: "prompt" }, outputText: "x".repeat(2 * 1024 * 1024), outputTruncated: false, activities: [], changedFiles: { files: [], truncated: false }, failure: null, createdAt: session.createdAt, updatedAt: session.updatedAt, completedAt: session.updatedAt })),
         interactions: [], events: []
-      }
+      })
     });
+    mocks.getAgent.mockReturnValue({ inspectAiProvider: mocks.inspectProvider });
+    mocks.inspectProvider.mockResolvedValue(profile);
     const spy = vi.spyOn(NextResponse, "json");
 
     const response = await GET(request, context);
@@ -77,6 +84,61 @@ describe("complete AI workbench response bound", () => {
     const parsed = JSON.parse(responseText) as { session?: { session?: { id?: string } } };
     expect(parsed.session?.session?.id).toBe(ids.sessionId);
     spy.mockRestore();
+  });
+
+  test("measures the session-list GET with deliberately slow Codex inspection", async () => {
+    const summary = { id: ids.sessionId, workspaceId: ids.workspaceId, title: "Persisted", state: "stopped", lastSequence: 2,
+      historyStartSequence: 1, historyTruncated: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
+    mocks.getDatabase.mockReturnValue({ listAiSessions: () => [summary] });
+    mocks.getAgent.mockReturnValue({ inspectAiProvider: mocks.inspectProvider });
+    mocks.inspectProvider.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(profile), 1_500)));
+    const listRequest = new Request(`http://localhost/api/projects/${ids.projectId}/ai?workspaceId=${ids.workspaceId}`);
+    const statusRequest = new Request(`http://localhost/api/projects/${ids.projectId}/ai/status?workspaceId=${ids.workspaceId}`);
+    const statusPromise = GET_STATUS(statusRequest, context);
+    await vi.waitFor(() => expect(mocks.inspectProvider).toHaveBeenCalledTimes(1));
+    const startedAt = performance.now();
+
+    const response = await GET(listRequest, context);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(response.status).toBe(200);
+    expect(elapsedMs).toBeLessThan(1_000);
+    expect(mocks.inspectProvider).toHaveBeenCalledTimes(1);
+    expect(await response.json()).toEqual({ profile: null, sessions: [summary], session: null });
+    const statusResponse = await statusPromise;
+    expect(statusResponse.status).toBe(200);
+  });
+});
+
+describe("Legacy Codex provider status route", () => {
+  const statusRequest = new Request(`http://localhost/api/projects/${ids.projectId}/ai/status?workspaceId=${ids.workspaceId}`);
+
+  test("returns the provider's unavailable state without treating status as a session-list failure", async () => {
+    const unavailableProfile = { ...profile, provider: "codex", availability: { state: "unavailable", code: "EXECUTABLE_MISSING" },
+      capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: false, approvals: false,
+        structuredInput: false, stop: true, streamEvents: true } };
+    mocks.getAgent.mockReturnValue({ inspectAiProvider: mocks.inspectProvider });
+    mocks.inspectProvider.mockResolvedValue(unavailableProfile);
+
+    const response = await GET_STATUS(statusRequest, context);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ profile: unavailableProfile });
+    expect(mocks.inspectProvider).toHaveBeenCalledWith(ids.projectId, ids.workspaceId, "codex");
+  });
+
+  test("retains authentication and workspace validation before provider inspection", async () => {
+    const { AuthenticationError } = await import("../../../../../server/auth.js");
+    mocks.getAgent.mockReturnValue({ inspectAiProvider: mocks.inspectProvider });
+    mocks.authenticate.mockRejectedValueOnce(new AuthenticationError());
+    const denied = await GET_STATUS(statusRequest, context);
+    expect(denied.status).toBe(403);
+    expect(mocks.inspectProvider).not.toHaveBeenCalled();
+
+    const invalid = await GET_STATUS(new Request(`http://localhost/api/projects/${ids.projectId}/ai/status?workspaceId=bad`), context);
+    expect(invalid.status).toBe(422);
+    expect(mocks.inspectProvider).not.toHaveBeenCalled();
   });
 });
 

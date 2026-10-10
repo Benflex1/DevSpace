@@ -25,7 +25,14 @@ type Event = BrowserAiEvent;
 type AiPostError = Error & { turnId: string | undefined; outcome: string | undefined };
 
 export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile }: { projectId: string; workspaceId: string; active: boolean; onOpenChangedFile?: (file: Turn["changedFiles"]["files"][number]) => void | Promise<void> }) {
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const providerStatusKey = `${projectId}:${workspaceId}`;
+  const [providerStatus, setProviderStatus] = useState<{ key: string; loading: boolean; profile: Profile | null; error: string | null }>(
+    { key: "", loading: true, profile: null, error: null }
+  );
+  const activeProviderStatus = providerStatus.key === providerStatusKey
+    ? providerStatus
+    : { key: providerStatusKey, loading: true, profile: null, error: null };
+  const { profile, loading: providerStatusLoading, error: providerStatusError } = activeProviderStatus;
   const [session, setSession] = useState<SessionData | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [interactions, setInteractions] = useState<BrowserAiInteraction[]>([]);
@@ -34,6 +41,7 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
   const [composer, setComposer] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [providerStatusRetry, setProviderStatusRetry] = useState(0);
   const [reconnecting, setReconnecting] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
   const [stopPending, setStopPending] = useState(false);
@@ -42,6 +50,7 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
   const [streamRevision, setStreamRevision] = useState(0);
   const lastSequence = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
+  const providerStatusAbortRef = useRef<AbortController | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const selectedSessionId = useRef<string | null>(null);
   const terminal = useRef(false);
@@ -126,13 +135,13 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
       const response = await fetch(`/api/projects/${projectId}/ai?${query.toString()}`, { cache: "no-store", signal });
       ensureCurrent();
       const body = await response.json() as {
-        profile?: Profile;
+        profile?: Profile | null;
         sessions?: SessionSummary[];
         session?: { session: SessionData; turns: Array<Omit<Turn, "activities"> & { changedFiles: FileSummary }>; events: Event[]; interactions?: unknown[] } | null;
         message?: string;
       };
       ensureCurrent();
-      if (!response.ok || body.profile === undefined) throw new Error(body.message ?? "Codex availability could not be inspected.");
+      if (!response.ok) throw new Error(body.message ?? "AI sessions could not be loaded.");
       let selected = body.session;
       const selectedId = requestedSessionId ?? body.sessions?.[0]?.id;
       if (selected === null && selectedId !== undefined) {
@@ -147,10 +156,9 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
         selected = exactBody.session;
       }
       ensureCurrent();
-      return { profile: body.profile, sessions: body.sessions ?? [], selected };
+      return { sessions: body.sessions ?? [], selected };
     },
-    apply: ({ profile: nextProfile, sessions: nextSessions, selected }) => {
-      setProfile(nextProfile);
+    apply: ({ sessions: nextSessions, selected }) => {
       setSessions(nextSessions);
       setMessage(null);
       if (selected !== null && selected !== undefined) {
@@ -179,6 +187,38 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
     setMessage,
     setController: (controller) => { loadAbortRef.current = controller; }
   }), [projectId, workspaceId]);
+
+  useEffect(() => {
+    if (!active) {
+      setProviderStatus({ key: "", loading: true, profile: null, error: null });
+      return;
+    }
+    const controller = new AbortController();
+    providerStatusAbortRef.current?.abort();
+    providerStatusAbortRef.current = controller;
+    setProviderStatus({ key: providerStatusKey, loading: true, profile: null, error: null });
+    void (async () => {
+      try {
+        const query = new URLSearchParams({ workspaceId });
+        const response = await fetch(`/api/projects/${projectId}/ai/status?${query.toString()}`, { cache: "no-store", signal: controller.signal });
+        const body = await response.json() as { profile?: Profile | null; message?: string };
+        if (controller.signal.aborted) return;
+        if (!response.ok || body.profile === undefined || body.profile === null) {
+          throw new Error(body.message ?? "Codex availability could not be inspected.");
+        }
+        setProviderStatus({ key: providerStatusKey, loading: false, profile: body.profile, error: null });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setProviderStatus({ key: providerStatusKey, loading: false, profile: null,
+            error: error instanceof Error ? error.message : "Codex availability could not be inspected." });
+        }
+      }
+    })();
+    return () => {
+      controller.abort();
+      if (providerStatusAbortRef.current === controller) providerStatusAbortRef.current = null;
+    };
+  }, [active, projectId, providerStatusKey, providerStatusRetry, workspaceId]);
 
   useEffect(() => {
     setRespondingInteractionIds((current) => {
@@ -373,15 +413,20 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
     if (session === null) return;
     if (await restartCoordinator.restart(session.id)) setMessage(null);
   };
-  const restartWorkspace = async () => { cancelWork(); try { await fetch(`/api/projects/${projectId}/runtime`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "start" }) }); await load(); } catch { setMessage("Workspace restart could not be requested."); } };
+  const restartWorkspace = async () => { cancelWork(); try { await fetch(`/api/projects/${projectId}/runtime`, { method: "POST", headers: { "content-type": "application/json", "x-devspace-csrf": "1" }, body: JSON.stringify({ action: "start" }) }); await load(); setProviderStatusRetry((current) => current + 1); } catch { setMessage("Workspace restart could not be requested."); } };
 
-  if (loading && profile === null) return <div className="ai-tab-surface" role="status">Inspecting Codex availability…</div>;
+  if (loading) return <div className="ai-tab-surface" role="status">Loading AI sessions…</div>;
+  const profileAvailable = profile?.availability.state === "available";
   const unavailable = profile?.availability.state === "unavailable";
+  const providerLabel = profileAvailable ? "Ready" : unavailable ? "Unavailable"
+    : providerStatusLoading ? "Checking…" : "Unknown";
+  const providerStateClass = profileAvailable ? "ready" : unavailable ? "unavailable"
+    : providerStatusLoading ? "checking" : "unknown";
   const running = turns.some((turn) => turn.state === "running");
   const turnBusy = turns.some((turn) => ["running", "waiting-for-approval", "waiting-for-input"].includes(turn.state));
   const liveSessionExists = sessions.some((candidate) => ["creating", "active", "waiting_for_input", "interrupted"].includes(candidate.state));
   const restartMatchesProfile = session !== null && profile !== null
-    && profile.profileId === "codex" && profile.profileRevision === session.profileRevision;
+    && profile.availability.state === "available" && profile.profileId === "codex" && profile.profileRevision === session.profileRevision;
   const controls = session === null ? null : aiSessionMutationControls(
     session.state,
     running,
@@ -390,19 +435,22 @@ export function AiSessionTab({ projectId, workspaceId, active, onOpenChangedFile
     initialRetryPending
   );
   return <section className="ai-tab-surface" aria-label="AI session">
-    <header className="ai-tab-header"><div><strong>{session?.title ?? "AI session"}</strong><span className={`ai-status ${session?.state ?? (unavailable ? "unavailable" : "ready")}`}>{reconnecting ? "Reconnecting…" : session?.state ?? (unavailable ? "Unavailable" : "Ready")}</span></div>
-      {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && <button type="button" disabled={stopPending} onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
+    <header className="ai-tab-header"><div><strong>{session?.title ?? "AI session"}</strong><span className={`ai-status ${session?.state ?? providerStateClass}`}>{reconnecting ? "Reconnecting…" : session?.state ?? providerLabel}</span></div>
+      {session !== null && controls !== null && <div className="ai-tab-actions">{controls.showInterrupt && profile?.availability.state === "available" && profile.capabilities.interrupt && <button type="button" onClick={() => { void interrupt(); }} aria-label="Interrupt active turn">Interrupt</button>}{controls.showStop && <button type="button" disabled={stopPending} onClick={() => { void stop(); }} aria-label="Stop AI session">Stop session</button>}</div>}</header>
     {message !== null && <p className="ai-message" role="status">{message}</p>}
-    {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{unavailable ? "Codex unavailable" : "Start an AI session"}</h2><p>{unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : "Ask Codex to inspect, explain, or change files in this workspace."}</p>{!unavailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
-      <div className="ai-session-navigator" aria-label="AI sessions"><label htmlFor="ai-session-select">Session</label><select id="ai-session-select" value={session.id} onChange={(event) => { void selectSession(event.target.value); }}>{sessions.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title} · {candidate.state}</option>)}</select><button type="button" disabled={liveSessionExists} onClick={() => { void create(); }}>{liveSessionExists ? "Live session exists" : "New session"}</button></div>
+    {providerStatusLoading && <p className="ai-message" role="status">Checking Codex availability…</p>}
+    {providerStatusError !== null && <p className="ai-message" role="status">{providerStatusError} <button type="button" onClick={() => { setProviderStatusRetry((current) => current + 1); }}>Retry Codex availability</button></p>}
+    {unavailable && <p className="ai-message" role="status">Codex is unavailable for this workspace ({profile?.availability.code}). <button type="button" onClick={() => { setProviderStatusRetry((current) => current + 1); }}>Recheck availability</button></p>}
+    {session === null ? <div className="ai-empty"><div className="empty-glyph" aria-hidden="true">✦</div><h2>{unavailable ? "Codex unavailable" : profile === null ? "Codex status pending" : "Start an AI session"}</h2><p>{unavailable ? `Codex is not available for this workspace (${profile?.availability.code ?? "unknown"}).` : providerStatusError ?? (providerStatusLoading ? "Checking Codex availability before enabling session actions." : "Ask Codex to inspect, explain, or change files in this workspace.")}</p>{profileAvailable && <button type="button" onClick={() => { void create(); }}>Create session</button>}</div> : <>
+      <div className="ai-session-navigator" aria-label="AI sessions"><label htmlFor="ai-session-select">Session</label><select id="ai-session-select" value={session.id} onChange={(event) => { void selectSession(event.target.value); }}>{sessions.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title} · {candidate.state}</option>)}</select><button type="button" disabled={!profileAvailable || liveSessionExists} onClick={() => { void create(); }}>{liveSessionExists ? "Live session exists" : "New session"}</button></div>
       {session.historyTruncated && <AiHistoryTruncationNotice historyStartSequence={session.historyStartSequence} />}
       {session.interactionsTruncated && <p className="ai-interactions-truncated" role="note">Some older interaction history is omitted; only retained requests are shown.</p>}
-      {controls?.showInitialRetry && <div className="ai-degraded" role="status"><strong>Codex did not finish starting.</strong><span>Retry startup for this exact session.</span><button type="button" disabled={controls.initialRetryDisabled} onClick={() => { void retryInitialStart(); }}>Retry starting Codex</button></div>}
+      {controls?.showInitialRetry && profileAvailable && <div className="ai-degraded" role="status"><strong>Codex did not finish starting.</strong><span>Retry startup for this exact session.</span><button type="button" disabled={controls.initialRetryDisabled} onClick={() => { void retryInitialStart(); }}>Retry starting Codex</button></div>}
       <div className="ai-timeline" aria-live="polite">{turns.length === 0 && <p className="ai-empty-copy">Your conversation will appear here.</p>}{turns.map((turn) => <article className="ai-turn" key={turn.id}><div className="ai-turn-label">You <span>{turn.state}</span></div><p className="ai-user-text">{turn.content.text}</p>{turn.activities.length > 0 && <div className="ai-activities">{turn.activities.map((activity, index) => <span key={`${turn.id}-activity-${index}`}>{activity}</span>)}</div>}<div className="ai-assistant"><div className="ai-turn-label">Codex</div><p>{turn.outputText || (turn.state === "running" || turn.state.startsWith("waiting-") ? "Working…" : "")}</p>{turn.outputTruncated && <AiOutputTruncationNotice />}</div>{turn.changedFiles.files.length > 0 && <div className="ai-files"><strong>Changed files</strong><ul>{turn.changedFiles.files.map((file) => <li key={`${file.change}:${file.path}`}><span>{file.change} <code>{file.path}</code>{file.oldPath !== null && <> from <code>{file.oldPath}</code></>}</span>{onOpenChangedFile !== undefined && <button type="button" onClick={() => { void onOpenChangedFile(file); }}>Open in Workbench</button>}</li>)}</ul>{turn.changedFiles.truncated && <small>Additional files omitted.</small>}</div>}{interactions.filter((interaction) => interaction.turnId === turn.id).map((interaction) => <AiSessionInteractionCard key={interaction.id} interaction={interaction}
-        approvalsSupported={profile?.capabilities.approvals === true} structuredInputSupported={profile?.capabilities.structuredInput === true}
+        approvalsSupported={profile?.availability.state === "available" && profile.capabilities.approvals} structuredInputSupported={profile?.availability.state === "available" && profile.capabilities.structuredInput}
         responding={respondingInteractionIds.has(interaction.id)} onApproval={(decision) => { void respondApproval(interaction, decision); }} onInput={(answers) => { void respondInput(interaction, answers); }} />)}</article>)}</div>
-      {controls?.showComposer && <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Codex…" aria-label="AI prompt" rows={3} disabled={turnBusy || sendReconciliationPending} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} /><div><small>Ctrl/Cmd + Enter to send</small><button type="submit" disabled={turnBusy || sendReconciliationPending || composer.trim().length === 0}>Send</button></div></form>}
-      {controls?.showRestart && <div className="ai-degraded" role="status"><strong>Codex session stopped.</strong><span>{restartMatchesProfile ? "Committed history is preserved. Start a new provider process for this exact session." : "Committed history is preserved. This session is pinned to an older Codex profile revision and is historical-only."}</span>{restartMatchesProfile && <button type="button" disabled={controls.restartDisabled} onClick={() => { void restart(); }}>Start Codex again</button>}</div>}
+      {controls?.showComposer && profileAvailable && <form className="ai-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} placeholder="Ask Codex…" aria-label="AI prompt" rows={3} disabled={turnBusy || sendReconciliationPending} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} /><div><small>Ctrl/Cmd + Enter to send</small><button type="submit" disabled={turnBusy || sendReconciliationPending || composer.trim().length === 0}>Send</button></div></form>}
+      {controls?.showRestart && <div className="ai-degraded" role="status"><strong>Codex session stopped.</strong><span>{restartMatchesProfile ? "Committed history is preserved. Start a new provider process for this exact session." : profile === null ? "Committed history is preserved. Codex availability must be checked before this session can restart." : unavailable ? "Committed history is preserved. Codex is currently unavailable for this workspace." : "Committed history is preserved. This session is pinned to an older Codex profile revision and is historical-only."}</span>{restartMatchesProfile && <button type="button" disabled={controls.restartDisabled} onClick={() => { void restart(); }}>Start Codex again</button>}</div>}
       {session.state === "lost" && <div className="ai-degraded" role="alert"><strong>Live provider session lost.</strong><span>Committed history is preserved. Restart the workspace before creating a new live attachment.</span><button type="button" onClick={() => { void restartWorkspace(); }}>Restart workspace</button></div>}
     </>}
   </section>;

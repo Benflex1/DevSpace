@@ -65,7 +65,7 @@ export async function GET(request: Request, context: { params: Promise<{ project
     const sessionId = query.get("sessionId");
     if (workspaceId === null || !uuidV7Schema.safeParse(workspaceId).success) return json({ message: "The workspace identity is invalid." }, 422);
     if (sessionId !== null && !uuidV7Schema.safeParse(sessionId).success) return json({ message: "The session identity is invalid." }, 422);
-    const data = await inspectAiWorkbench(projectId, workspaceId, sessionId ?? undefined,
+    const data = inspectAiWorkbench(projectId, workspaceId, sessionId ?? undefined,
       { database: getProjectDatabase(config.databasePath), agent: createAgentClient(config.agentSocketPath) });
     return json(boundAiWorkbenchResponse(data));
   } catch (error) {

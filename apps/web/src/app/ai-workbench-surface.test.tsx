@@ -187,6 +187,67 @@ test("legacy structured Codex stays reachable without stacking under native", as
   expect(legacy?.getAttribute("aria-selected")).toBe("true");
 });
 
+test("Legacy keeps persisted sessions visible while provider status is pending or unavailable and blocks creation when live", async () => {
+  const persistedId = "018f1f34-7000-7000-8000-000000000030";
+  const summary = { id: persistedId, workspaceId, title: "Persisted Legacy session", state: "stopped", lastSequence: 0,
+    historyStartSequence: 1, historyTruncated: false, createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z" };
+  const selected = { session: { ...summary, profileRevision: "revision", interactionsTruncated: false }, turns: [], interactions: [], events: [] };
+  const liveSummary = { ...summary, id: "018f1f34-7000-7000-8000-000000000031", title: "Other live session", state: "active" };
+  let phase: "provider-status" | "live-session" = "provider-status";
+  let resolveStatus!: (body: unknown) => void;
+  const delayedStatus = new Promise((resolve) => {
+    resolveStatus = (body) => resolve({ ok: true, json: () => Promise.resolve(body) });
+  });
+  const requestedUrls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn((url: string) => {
+    requestedUrls.push(url);
+    const parsed = new URL(url, "http://localhost");
+    if (parsed.pathname.endsWith("/ai/status")) {
+      if (phase === "provider-status") return delayedStatus;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ profile: { profileId: "codex", profileRevision: "revision", displayName: "Codex",
+        availability: { state: "available" },
+        capabilities: { inspect: true, start: true, resume: true, sendTurn: true, interrupt: false, approvals: false,
+          structuredInput: false, stop: true, streamEvents: true } } }) });
+    }
+    if (parsed.pathname.endsWith("/ai")) {
+      const sessions = phase === "live-session" ? [summary, liveSummary] : [summary];
+      const listBody = { profile: null, sessions, session: null };
+      const detailBody = { profile: null, sessions, session: selected };
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(parsed.searchParams.has("sessionId") ? detailBody : listBody) });
+    }
+    throw new Error(`Unexpected Legacy request: ${url}`);
+  }));
+
+  const { AiSessionTab } = await import("./ai-session-tab.js");
+  let body = await mount(createElement(AiSessionTab, { projectId, workspaceId, active: true }));
+
+  expect(requestedUrls.some((url) => url.includes("/ai/status?"))).toBe(true);
+  expect(visibleText(body)).toContain("Persisted Legacy session");
+  expect(visibleText(body)).toContain("Checking Codex availability");
+  const newSession = findButtons(body).find((button) => buttonText(button) === "New session");
+  expect(newSession?.getAttribute("disabled")).not.toBeNull();
+
+  await act(async () => {
+    resolveStatus({ profile: { profileId: "codex", profileRevision: "revision", displayName: "Codex",
+      availability: { state: "unavailable", code: "EXECUTABLE_MISSING" },
+      capabilities: { inspect: true, start: true, resume: false, sendTurn: true, interrupt: false, approvals: false,
+        structuredInput: false, stop: true, streamEvents: true } } });
+    await settleReact();
+  });
+  expect(visibleText(body)).toContain("Codex is unavailable");
+  expect(newSession?.getAttribute("disabled")).not.toBeNull();
+
+  const firstRoot = roots.pop();
+  expect(firstRoot).toBeDefined();
+  act(() => { firstRoot?.unmount(); });
+  phase = "live-session";
+  body = await mount(createElement(AiSessionTab, { projectId, workspaceId, active: true }));
+
+  expect(visibleText(body)).toContain("Persisted Legacy session");
+  const liveBlockedButton = findButtons(body).find((button) => buttonText(button) === "Live session exists");
+  expect(liveBlockedButton?.getAttribute("disabled")).not.toBeNull();
+});
+
 test("an empty native session shows Start and a provider chooser, not Resume", async () => {
   installFetch([]);
   const { HarnessSessionTab } = await import("./harness-session-tab.js");

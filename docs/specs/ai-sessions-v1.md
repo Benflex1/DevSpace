@@ -303,7 +303,13 @@ The Web/SQLite projection is explicitly bounded. The current limits are:
 | retained canonical event rows per session | 2,048 rows / 16 MiB UTF-8 | one contiguous newest sequence suffix |
 | interaction rows per session | 256 rows / 4 MiB JSON bytes | newest rows first, deterministic `(createdAt,id)` order |
 | one interaction request or response JSON value | 128 KiB UTF-8 | oversized values are omitted from the bounded projection |
-| complete Web AI GET response envelope | 8 MiB UTF-8 JSON | `profile`, bounded session summaries, selected session state, retained terminal turn state, truncation metadata, then newest history |
+| complete Web AI session-history GET response envelope | 8 MiB UTF-8 JSON | `profile: null`, bounded session summaries, selected session state, retained terminal turn state, truncation metadata, then newest history |
+
+The Legacy session-history GET returns persisted summaries and selected history without Codex
+provider discovery. Its `profile` is `null`; the browser loads availability separately from the
+authenticated, no-store `GET /api/projects/{projectId}/ai/status?workspaceId=...`. Mutations that
+require a provider profile continue to inspect it and enforce availability and capability checks
+before accepting the operation.
 
 SQLite applies output, turn, interaction, and canonical-event pruning in the same transaction as
 the event insert and aggregate update. A failed compaction rolls back the event and leaves the
