@@ -61,6 +61,7 @@ export interface StagedCodexExecutionArtifact {
   readonly stagingRoot: string;
   readonly entrypointPath: string;
   readonly readbackManifestPath: string;
+  readonly cacheState: "hit" | "miss" | "repaired";
 }
 
 export class CodexArtifactIdentityError extends Error {
@@ -497,7 +498,8 @@ async function copyEntry(artifact: CodexExecutionArtifact, entry: CodexArtifactE
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
   if (entry.kind === "symlink") {
     const sourceObserved = await lstatIdentity(source);
-    if (sourceObserved === null || !sourceObserved.stats.isSymbolicLink()) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+    if (sourceObserved === null || !sourceObserved.stats.isSymbolicLink()
+      || modeOf(sourceObserved.stats) !== entry.mode) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
     const link = await readLinkStable(source, artifact.canonicalSourceRoot);
     if (link.target !== entry.linkTarget || !identitiesEqual(sourceObserved.identity, link.identity)) {
       throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
@@ -505,12 +507,113 @@ async function copyEntry(artifact: CodexExecutionArtifact, entry: CodexArtifactE
     await symlink(entry.linkTarget, destination);
     return;
   }
+  const sourceObserved = await lstatIdentity(source);
+  if (sourceObserved === null || !sourceObserved.stats.isFile() || sourceObserved.stats.nlink !== 1n
+    || modeOf(sourceObserved.stats) !== entry.mode) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   const read = await readRegularFileNoFollow(source, MAX_ENTRY_BYTES);
-  if (read.bytes.length !== entry.byteLength || sha256(read.bytes) !== entry.sha256) {
+  if (!identitiesEqual(sourceObserved.identity, read.identity)
+    || read.bytes.length !== entry.byteLength || sha256(read.bytes) !== entry.sha256) {
     throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   }
   await writeFile(destination, read.bytes, { mode: entry.mode, flag: "wx" });
   await chmod(destination, entry.mode);
+}
+
+const stageLocks = new Map<string, Promise<void>>();
+
+async function withStageLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = stageLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  stageLocks.set(key, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (stageLocks.get(key) === current) stageLocks.delete(key);
+  }
+}
+
+function stagedArtifact(artifact: CodexExecutionArtifact, stagingRoot: string,
+  cacheState: StagedCodexExecutionArtifact["cacheState"]): StagedCodexExecutionArtifact {
+  return {
+    artifact,
+    stagingRoot,
+    entrypointPath: path.join(stagingRoot, ...artifact.entrypoint.relativePath.split("/")),
+    readbackManifestPath: path.join(stagingRoot, "manifest.json"),
+    cacheState
+  };
+}
+
+async function verifySourceEntries(artifact: CodexExecutionArtifact): Promise<void> {
+  for (const entry of artifact.entries) {
+    const source = entrySourcePath(artifact, entry);
+    const observed = await lstatIdentity(source);
+    if (observed === null) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+    if (entry.kind === "symlink") {
+      if (!observed.stats.isSymbolicLink() || modeOf(observed.stats) !== entry.mode) {
+        throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+      }
+      const link = await readLinkStable(source, artifact.canonicalSourceRoot);
+      if (link.target !== entry.linkTarget || !identitiesEqual(observed.identity, link.identity)) {
+        throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+      }
+      continue;
+    }
+    if (!observed.stats.isFile() || observed.stats.nlink !== 1n) {
+      throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+    }
+    const read = await readRegularFileNoFollow(source, MAX_ENTRY_BYTES);
+    if (!identitiesEqual(observed.identity, read.identity) || read.bytes.length !== entry.byteLength
+      || sha256(read.bytes) !== entry.sha256 || modeOf(read.stats) !== entry.mode) {
+      throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+    }
+  }
+}
+
+async function quarantineStagedArtifact(candidateRoot: string, artifactDirectory: string,
+  closureDigest: string): Promise<boolean> {
+  const observed = await lstatIdentity(candidateRoot);
+  if (observed === null) return false;
+  const quarantineRoot = path.join(artifactDirectory,
+    `.quarantine-${closureDigest}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  try {
+    await rename(candidateRoot, quarantineRoot);
+    return true;
+  } catch (error) {
+    // A separate Agent process may have quarantined this same invalid candidate.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function cacheCandidateNames(names: readonly string[], closureDigest: string): string[] {
+  const stableName = `codex-${closureDigest}`;
+  const legacyPrefix = `${stableName}-`;
+  return names.filter((name) => name === stableName || name.startsWith(legacyPrefix))
+    .sort((left, right) => left === stableName ? -1 : right === stableName ? 1 : left.localeCompare(right));
+}
+
+async function findVerifiedStagedArtifact(input: {
+  readonly artifact: CodexExecutionArtifact;
+  readonly artifactDirectory: string;
+}): Promise<{ staged: StagedCodexExecutionArtifact | null; repaired: boolean }> {
+  let repaired = false;
+  const names = cacheCandidateNames(await readdir(input.artifactDirectory), input.artifact.closureDigest);
+  for (const name of names) {
+    const candidateRoot = path.join(input.artifactDirectory, name);
+    const candidate = stagedArtifact(input.artifact, candidateRoot, "hit");
+    try {
+      await verifyStagedCodexExecutionArtifact(candidate);
+    } catch {
+      repaired = await quarantineStagedArtifact(candidateRoot, input.artifactDirectory, input.artifact.closureDigest) || repaired;
+      continue;
+    }
+    await verifySourceEntries(input.artifact);
+    return { staged: candidate, repaired };
+  }
+  return { staged: null, repaired };
 }
 
 async function listStagedEntries(root: string): Promise<Set<string>> {
@@ -535,7 +638,9 @@ async function verifyEntries(artifact: CodexExecutionArtifact, root: string): Pr
     const observed = await lstatIdentity(target);
     if (observed === null) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
     if (entry.kind === "symlink") {
-      if (!observed.stats.isSymbolicLink()) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+      if (!observed.stats.isSymbolicLink() || modeOf(observed.stats) !== entry.mode) {
+        throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+      }
       const link = await readLinkStable(target, root);
       if (link.target !== entry.linkTarget) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
       continue;
@@ -563,47 +668,81 @@ export async function stageCodexExecutionArtifact(input: {
   const artifactDirectory = path.join(base, "codex-artifacts");
   await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
   await chmod(artifactDirectory, 0o700);
-  const temporaryRoot = await mkdtemp(path.join(artifactDirectory, ".stage-"));
-  await chmod(temporaryRoot, 0o700);
-  try {
-    for (const entry of input.artifact.entries) await copyEntry(input.artifact, entry, temporaryRoot);
-    const manifestPath = path.join(temporaryRoot, "manifest.json");
-    await durableJsonWriter.write(manifestPath, {
-      closureDigest: input.artifact.closureDigest,
-      entrypointSha256: input.artifact.entrypointSha256,
-      entries: input.artifact.entries
-    });
-    const finalRoot = path.join(artifactDirectory, `codex-${input.artifact.closureDigest}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    await rename(temporaryRoot, finalRoot);
-    const staged: StagedCodexExecutionArtifact = {
-      artifact: input.artifact,
-      stagingRoot: finalRoot,
-      entrypointPath: path.join(finalRoot, ...input.artifact.entrypoint.relativePath.split("/")),
-      readbackManifestPath: path.join(finalRoot, "manifest.json")
-    };
-    await verifyStagedCodexExecutionArtifact(staged);
-    return staged;
-  } catch (error) {
-    await rm(temporaryRoot, { recursive: true, force: true }).catch(() => undefined);
-    throw error;
+  const artifactEntrypoint = input.artifact.entries.find((entry) => entry.relativePath === input.artifact.entrypoint.relativePath);
+  if (!/^[a-f0-9]{64}$/u.test(input.artifact.closureDigest)
+    || codexExecutionArtifactClosureDigest({
+      layout: input.artifact.layout, target: input.artifact.target,
+      packageVersion: input.artifact.packageVersion, entries: input.artifact.entries
+    }) !== input.artifact.closureDigest
+    || artifactEntrypoint === undefined || artifactEntrypoint.kind !== "file"
+    || artifactEntrypoint.sha256 !== input.artifact.entrypointSha256
+    || canonicalJson(artifactEntrypoint) !== canonicalJson(input.artifact.entrypoint)) {
+    throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   }
+  const lockKey = `${artifactDirectory}\0${input.artifact.closureDigest}`;
+  return await withStageLock(lockKey, async () => {
+    const cached = await findVerifiedStagedArtifact({ artifact: input.artifact, artifactDirectory });
+    if (cached.staged !== null) {
+      return cached.repaired
+        ? { ...cached.staged, cacheState: "repaired" }
+        : cached.staged;
+    }
+
+    const temporaryRoot = await mkdtemp(path.join(artifactDirectory, `.stage-${input.artifact.closureDigest}-`));
+    await chmod(temporaryRoot, 0o700);
+    try {
+      for (const entry of input.artifact.entries) await copyEntry(input.artifact, entry, temporaryRoot);
+      const manifestPath = path.join(temporaryRoot, "manifest.json");
+      await durableJsonWriter.write(manifestPath, {
+        closureDigest: input.artifact.closureDigest,
+        entrypointSha256: input.artifact.entrypointSha256,
+        entries: input.artifact.entries
+      });
+      const cacheState = cached.repaired ? "repaired" : "miss";
+      const stagedTemporary = stagedArtifact(input.artifact, temporaryRoot, cacheState);
+      await verifyStagedCodexExecutionArtifact(stagedTemporary);
+
+      const finalRoot = path.join(artifactDirectory, `codex-${input.artifact.closureDigest}`);
+      try {
+        await rename(temporaryRoot, finalRoot);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+        const concurrentlyPublished = stagedArtifact(input.artifact, finalRoot, "hit");
+        await verifyStagedCodexExecutionArtifact(concurrentlyPublished);
+        await verifySourceEntries(input.artifact);
+        await rm(temporaryRoot, { recursive: true, force: true });
+        return cached.repaired
+          ? { ...concurrentlyPublished, cacheState: "repaired" }
+          : concurrentlyPublished;
+      }
+      return stagedArtifact(input.artifact, finalRoot, cacheState);
+    } catch (error) {
+      await rm(temporaryRoot, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  });
 }
 
 export async function verifyStagedCodexExecutionArtifact(staged: StagedCodexExecutionArtifact): Promise<void> {
   const root = path.resolve(staged.stagingRoot);
+  const expectedEntrypoint = path.join(root, ...staged.artifact.entrypoint.relativePath.split("/"));
+  if (path.resolve(staged.entrypointPath) !== expectedEntrypoint
+    || path.resolve(staged.readbackManifestPath) !== path.join(root, "manifest.json")) {
+    throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+  }
   const observed = await lstatIdentity(root);
   if (observed === null || !observed.stats.isDirectory() || observed.stats.isSymbolicLink()) {
     throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   }
+  const expectedManifest = {
+    closureDigest: staged.artifact.closureDigest,
+    entrypointSha256: staged.artifact.entrypointSha256,
+    entries: staged.artifact.entries
+  };
+  const expectedManifestBytes = Buffer.from(`${JSON.stringify(expectedManifest)}\n`, "utf8");
+  const manifest = await readRegularFileNoFollow(staged.readbackManifestPath, expectedManifestBytes.byteLength);
+  if (modeOf(manifest.stats) !== 0o600) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+  if (!manifest.bytes.equals(expectedManifestBytes)) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   await verifyEntries(staged.artifact, root);
-  const manifest = await readRegularFileNoFollow(staged.readbackManifestPath, MAX_PACKAGE_JSON_BYTES);
-  try {
-    const parsed = JSON.parse(manifest.bytes.toString("utf8")) as { closureDigest?: unknown; entrypointSha256?: unknown };
-    if (parsed.closureDigest !== staged.artifact.closureDigest || parsed.entrypointSha256 !== staged.artifact.entrypointSha256) {
-      throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
-    }
-  } catch (error) {
-    if (error instanceof CodexArtifactIdentityError) throw error;
-    throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
-  }
 }
