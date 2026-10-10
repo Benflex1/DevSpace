@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -39,4 +39,28 @@ test("reports bounded resolution diagnostics without exposing executable paths",
   expect(diagnostics[0]).not.toHaveProperty("errorMessage");
   expect(timings).toEqual([expect.objectContaining({ phase: "artifact-resolution", outcome: "failure" })]);
   expect(JSON.stringify(timings)).not.toContain(stateRoot);
+});
+
+test("reports Agent-side cache hits and misses through staging timing", async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-codex-stage-cache-timing-"));
+  roots.push(stateRoot);
+  const executable = path.join(stateRoot, "codex");
+  await writeFile(executable, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.alloc(64, 1)]), { mode: 0o755 });
+  await chmod(executable, 0o755);
+  const timings: CodexArtifactStagingTiming[] = [];
+  const stage = () => stageAgentCodexIntoContainer({
+    docker: {} as DockerEngineClient,
+    containerId: "b".repeat(64),
+    stateRoot,
+    createId: () => "cache-timing",
+    environment: { DEVSPACE_CODEX_EXECUTABLE_PATH: executable },
+    readbackHelperBytes: Buffer.from("fixture-helper"),
+    onStagingTiming: (timing) => timings.push(timing)
+  });
+
+  await expect(stage()).rejects.toThrow();
+  await expect(stage()).rejects.toThrow();
+
+  expect(timings.filter((timing) => timing.phase === "agent-side-stage-copy").map((timing) => timing.cacheState))
+    .toEqual(["miss", "hit"]);
 });

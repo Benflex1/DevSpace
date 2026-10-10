@@ -29,14 +29,16 @@ export async function stageAgentCodexIntoContainer(input: {
   onStagingTiming?: (timing: CodexArtifactStagingTiming) => void;
 }): Promise<{ entrypointPath: string; reportedVersion: string | null }> {
   let artifactLayout: Parameters<typeof codexArtifactStagingDiagnostic>[0]["artifactLayout"] = "unknown";
-  const runPhase = async <T>(phase: CodexArtifactStagingPhase, operation: () => Promise<T>): Promise<T> => {
+  const runPhase = async <T>(phase: CodexArtifactStagingPhase, operation: () => Promise<T>,
+    cacheState?: (result: T) => CodexArtifactStagingTiming["cacheState"]): Promise<T> => {
     const startedAt = performance.now();
     try {
       const result = await operation();
+      const reportedCacheState = cacheState?.(result);
       try {
         input.onStagingTiming?.(codexArtifactStagingTiming({
           phase, containerId: input.containerId, artifactLayout, elapsedMs: performance.now() - startedAt,
-          outcome: "success"
+          outcome: "success", ...(reportedCacheState === undefined ? {} : { cacheState: reportedCacheState })
         }));
       } catch { /* private timing must not change the staging outcome */ }
       return result;
@@ -60,7 +62,9 @@ export async function stageAgentCodexIntoContainer(input: {
     resolveCodexExecutablePath(input.environment ?? process.env)
   ));
   artifactLayout = artifact.layout;
-  const staged = await runPhase("agent-side-stage-copy", async () => await stageCodexExecutionArtifact({ artifact, stateRoot: input.stateRoot }));
+  const staged = await runPhase("agent-side-stage-copy",
+    async () => await stageCodexExecutionArtifact({ artifact, stateRoot: input.stateRoot }),
+    (result) => result.cacheState);
   const helper = await runPhase("readback-helper-load", async () => input.readbackHelperBytes ?? await readFile(READBACK_HELPER));
   if (createHash("sha256").update(helper).digest("hex") !== CODEX_ARTIFACT_READBACK_HELPER_SHA256
     && input.readbackHelperBytes === undefined) {

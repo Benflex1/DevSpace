@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -180,4 +180,98 @@ test("staging is independent from a later configured-path replacement", async ()
   await verifyStagedCodexExecutionArtifact(staged);
   await expect(readFile(staged.entrypointPath)).resolves.toEqual(nativeFixtureBytes(11));
   await expect(lstat(staged.stagingRoot)).resolves.toBeTruthy();
+});
+
+test("reuses an exact verified staged artifact by closure digest", async () => {
+  const fixture = await standaloneFixture();
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-cache-hit-");
+
+  const first = await stageCodexExecutionArtifact({ artifact, stateRoot });
+  const second = await stageCodexExecutionArtifact({ artifact, stateRoot });
+
+  expect(first.cacheState).toBe("miss");
+  expect(second.cacheState).toBe("hit");
+  expect(second.stagingRoot).toBe(first.stagingRoot);
+  const stagedNames = (await readdir(path.join(stateRoot, "codex-artifacts")))
+    .filter((name) => name.startsWith(`codex-${artifact.closureDigest}`));
+  expect(stagedNames).toHaveLength(1);
+});
+
+test("repairs a staged copy whose file integrity no longer matches the closure", async () => {
+  const fixture = await standaloneFixture();
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-cache-file-repair-");
+  const first = await stageCodexExecutionArtifact({ artifact, stateRoot });
+  await writeFile(first.entrypointPath, nativeFixtureBytes(42), { mode: 0o755 });
+
+  const repaired = await stageCodexExecutionArtifact({ artifact, stateRoot });
+
+  expect(repaired.cacheState).toBe("repaired");
+  expect(repaired.stagingRoot).toBe(first.stagingRoot);
+  await verifyStagedCodexExecutionArtifact(repaired);
+  await expect(readFile(repaired.entrypointPath)).resolves.toEqual(nativeFixtureBytes(1));
+  expect((await readdir(path.join(stateRoot, "codex-artifacts"))).some((name) => name.startsWith(".quarantine-"))).toBe(true);
+});
+
+test("repairs a staged copy with a non-exact manifest", async () => {
+  const fixture = await standaloneFixture();
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-cache-manifest-repair-");
+  const first = await stageCodexExecutionArtifact({ artifact, stateRoot });
+  const manifest = JSON.parse((await readFile(first.readbackManifestPath)).toString("utf8")) as Record<string, unknown>;
+  manifest.unexpected = true;
+  await writeFile(first.readbackManifestPath, JSON.stringify(manifest));
+
+  const repaired = await stageCodexExecutionArtifact({ artifact, stateRoot });
+
+  expect(repaired.cacheState).toBe("repaired");
+  expect(repaired.stagingRoot).toBe(first.stagingRoot);
+  await verifyStagedCodexExecutionArtifact(repaired);
+  expect((await readdir(path.join(stateRoot, "codex-artifacts"))).some((name) => name.startsWith(".quarantine-"))).toBe(true);
+});
+
+test("detects source changes before returning a cached stage", async () => {
+  const fixture = await standaloneFixture();
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-cache-source-change-");
+  await stageCodexExecutionArtifact({ artifact, stateRoot });
+  await writeFile(path.join(fixture.root, "bin", "codex"), nativeFixtureBytes(43), { mode: 0o755 });
+
+  await expect(stageCodexExecutionArtifact({ artifact, stateRoot }))
+    .rejects.toThrow("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
+});
+
+test("serializes concurrent staging of the same closure", async () => {
+  const fixture = await standaloneFixture();
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-concurrent-");
+
+  const [first, second] = await Promise.all([
+    stageCodexExecutionArtifact({ artifact, stateRoot }),
+    stageCodexExecutionArtifact({ artifact, stateRoot })
+  ]);
+
+  expect(first.stagingRoot).toBe(second.stagingRoot);
+  expect(new Set([first.cacheState, second.cacheState])).toEqual(new Set(["miss", "hit"]));
+  const stagedNames = (await readdir(path.join(stateRoot, "codex-artifacts")))
+    .filter((name) => name.startsWith(`codex-${artifact.closureDigest}`));
+  expect(stagedNames).toHaveLength(1);
+});
+
+test("ignores an incomplete temporary stage and constructs a complete cache entry", async () => {
+  const fixture = await standaloneFixture();
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-partial-recovery-");
+  const artifactDirectory = path.join(stateRoot, "codex-artifacts");
+  const partialRoot = path.join(artifactDirectory, ".stage-partial");
+  await mkdir(path.join(partialRoot, "bin"), { recursive: true });
+  await writeFile(path.join(partialRoot, "bin", "codex"), nativeFixtureBytes(99));
+
+  const staged = await stageCodexExecutionArtifact({ artifact, stateRoot });
+
+  expect(staged.cacheState).toBe("miss");
+  expect(staged.stagingRoot).not.toBe(partialRoot);
+  await verifyStagedCodexExecutionArtifact(staged);
+  await expect(lstat(partialRoot)).resolves.toBeTruthy();
 });
