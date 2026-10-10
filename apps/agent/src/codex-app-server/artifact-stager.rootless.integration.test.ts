@@ -368,7 +368,7 @@ async function verifyPublishedArtifact(engine: DockerEngineClient, containerId: 
   const entrypoint = `${destination}/${fixture.artifact.entrypoint.relativePath}`;
   expect((await containerCommand(engine, containerId, ["test", "-x", entrypoint])).exitCode).toBe(0);
   const observedTree = (await commandOkay(engine, containerId, [
-    "sh", "-c", "find \"$1\" -printf '%P\\t%y\\t%m\\t%u:%g\\n' | LC_ALL=C sort", "sh", destination
+    "sh", "-c", "find \"$1\" -printf '%P\\t%y\\t%m\\t%U:%G\\n' | LC_ALL=C sort", "sh", destination
   ])).trimEnd().split("\n").map((line) => line.split("\t"));
   const expectedTree = [...expectedPaths.entries()].map(([relativePath, entry]) =>
     [relativePath, entry.kind, entry.mode, testImageUser]).sort((left, right) => left[0]!.localeCompare(right[0]!));
