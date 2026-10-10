@@ -32,6 +32,7 @@ async function writeExecutable(filePath: string, contents = nativeFixtureBytes(1
 async function standaloneFixture(options: {
   readonly root?: string;
   readonly extraResourceFiles?: number;
+  readonly longResourceNames?: boolean;
 } = {}): Promise<{ root: string; entrypoint: string }> {
   const root = options.root ?? await temporaryRoot("devspace-codex-standalone-");
   await mkdir(path.join(root, "bin"), { recursive: true });
@@ -54,7 +55,8 @@ async function standaloneFixture(options: {
   await writeExecutable(path.join(root, "codex-path", "rg"), nativeFixtureBytes(5));
   await symlink("bin/codex", path.join(root, "codex"));
   for (let index = 0; index < (options.extraResourceFiles ?? 0); index += 1) {
-    await writeFile(path.join(root, "codex-resources", `extra-${index}.txt`), "fixture");
+    const name = options.longResourceNames ? `extra-${index}-${"x".repeat(220)}.txt` : `extra-${index}.txt`;
+    await writeFile(path.join(root, "codex-resources", name), "fixture");
   }
   return { root, entrypoint };
 }
@@ -274,4 +276,18 @@ test("ignores an incomplete temporary stage and constructs a complete cache entr
   expect(staged.stagingRoot).not.toBe(partialRoot);
   await verifyStagedCodexExecutionArtifact(staged);
   await expect(lstat(partialRoot)).resolves.toBeTruthy();
+});
+
+test("reuses a closure whose exact manifest exceeds the package metadata bound", async () => {
+  const fixture = await standaloneFixture({ extraResourceFiles: 600, longResourceNames: true });
+  const artifact = await resolveCodexExecutionArtifact(path.join(fixture.root, "codex"));
+  const stateRoot = await temporaryRoot("devspace-codex-stage-large-manifest-");
+
+  const first = await stageCodexExecutionArtifact({ artifact, stateRoot });
+  const manifest = await readFile(first.readbackManifestPath);
+  const second = await stageCodexExecutionArtifact({ artifact, stateRoot });
+
+  expect(manifest.byteLength).toBeGreaterThan(128 * 1024);
+  expect(second.cacheState).toBe("hit");
+  expect(second.stagingRoot).toBe(first.stagingRoot);
 });

@@ -578,8 +578,14 @@ async function quarantineStagedArtifact(candidateRoot: string, artifactDirectory
   if (observed === null) return false;
   const quarantineRoot = path.join(artifactDirectory,
     `.quarantine-${closureDigest}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  await rename(candidateRoot, quarantineRoot);
-  return true;
+  try {
+    await rename(candidateRoot, quarantineRoot);
+    return true;
+  } catch (error) {
+    // A separate Agent process may have quarantined this same invalid candidate.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function cacheCandidateNames(names: readonly string[], closureDigest: string): string[] {
@@ -729,21 +735,14 @@ export async function verifyStagedCodexExecutionArtifact(staged: StagedCodexExec
   if (observed === null || !observed.stats.isDirectory() || observed.stats.isSymbolicLink()) {
     throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   }
-  const manifest = await readRegularFileNoFollow(staged.readbackManifestPath, MAX_PACKAGE_JSON_BYTES);
+  const expectedManifest = {
+    closureDigest: staged.artifact.closureDigest,
+    entrypointSha256: staged.artifact.entrypointSha256,
+    entries: staged.artifact.entries
+  };
+  const expectedManifestBytes = Buffer.from(`${JSON.stringify(expectedManifest)}\n`, "utf8");
+  const manifest = await readRegularFileNoFollow(staged.readbackManifestPath, expectedManifestBytes.byteLength);
   if (modeOf(manifest.stats) !== 0o600) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
-  try {
-    const parsed = JSON.parse(manifest.bytes.toString("utf8")) as unknown;
-    const expected = {
-      closureDigest: staged.artifact.closureDigest,
-      entrypointSha256: staged.artifact.entrypointSha256,
-      entries: staged.artifact.entries
-    };
-    if (canonicalJson(parsed) !== canonicalJson(expected)) {
-      throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
-    }
-  } catch (error) {
-    if (error instanceof CodexArtifactIdentityError) throw error;
-    throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
-  }
+  if (!manifest.bytes.equals(expectedManifestBytes)) throw artifactError("CODEX_EXECUTABLE_INTEGRITY_CHANGED");
   await verifyEntries(staged.artifact, root);
 }
