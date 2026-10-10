@@ -229,7 +229,8 @@ function archiveDirectoryContents(root: string): Readable {
         } else throw new Error("fixture-archive-entry-invalid");
       }
     };
-    await visit(root, "");
+    await appendTestArchiveEntry(pack, { name: "./", type: "directory", mode: 0o700 });
+    await visit(root, ".");
     pack.finalize();
   })().catch((error: unknown) => {
     if (stream.destroyed) return;

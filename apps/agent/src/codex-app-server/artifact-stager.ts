@@ -415,6 +415,7 @@ async function readArtifactArchive(input: {
     const actualEntries: CodexArtifactEntry[] = [];
     const expectedEntries = new Map(input.entries.map((entry) => [entry.relativePath, entry]));
     const seenPaths = new Set<string>();
+    let rootDirectorySeen = false;
     let settled = false;
     let cancelTimeout = () => {};
     const finish = (error?: Error, mismatch = false) => {
@@ -438,8 +439,20 @@ async function readArtifactArchive(input: {
     extract.on("entry", (header, body, next) => {
       void (async () => {
         const kind = header.type;
+        const treeKind = kind === "directory" ? "directory" : kind === "file" ? "file" : kind === "symlink" ? "symlink" : "special";
         let relativePath = header.name;
         if (kind === "directory" && relativePath.endsWith("/")) relativePath = relativePath.slice(0, -1);
+        if (treeKind === "directory" && relativePath === ".") {
+          if (rootDirectorySeen || header.size !== 0) {
+            finish(new Error("codex-artifact-readback-frame"));
+            return;
+          }
+          rootDirectorySeen = true;
+          for await (const _chunk of body) { finish(new Error("codex-artifact-readback-frame")); return; }
+          next();
+          return;
+        }
+        if (relativePath.startsWith("./")) relativePath = relativePath.slice(2);
         if (relativePath.length === 0 || relativePath.length > 16_384 || relativePath.startsWith("/")
           || relativePath.includes("\0")
           || relativePath.split("/").some((component) => component.length === 0 || component === "." || component === "..")) {
@@ -451,7 +464,6 @@ async function readArtifactArchive(input: {
           return;
         }
         const expectedKind = input.expectedTree.get(relativePath);
-        const treeKind = kind === "directory" ? "directory" : kind === "file" ? "file" : kind === "symlink" ? "symlink" : "special";
         if (expectedKind !== treeKind || expectedKind === undefined) {
           finish(undefined, true);
           return;
