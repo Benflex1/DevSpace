@@ -28,8 +28,6 @@ interface LifecycleCase<State extends string> {
   readonly states: readonly State[];
   readonly edges: readonly Edge<State>[];
   readonly terminalStates: readonly State[];
-  readonly expectedAllowedCount: number;
-  readonly expectedRejectedCount: number;
   readonly transition: (from: State, to: State) => TransitionResult<State>;
 }
 
@@ -63,8 +61,6 @@ const projectFixture = defineLifecycle({
     registering: ["ready", "invalid"], ready: ["archived"], invalid: ["registering"], archived: ["ready"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 5,
-  expectedRejectedCount: 11,
   transition: (from, to) => transitionProject(from, to, {
     activeConfigurationRevisionExists: true,
     nonRemovedPrimaryWorkspaceExists: true
@@ -79,8 +75,6 @@ const configurationRevisionFixture = defineLifecycle({
     draft: ["active", "rejected"], active: ["superseded"], rejected: [], superseded: []
   }),
   terminalStates: ["rejected", "superseded"],
-  expectedAllowedCount: 3,
-  expectedRejectedCount: 13,
   transition: transitionConfigurationRevision
 });
 
@@ -94,8 +88,6 @@ const operationFixture = defineLifecycle({
     succeeded: [], failed: [], cancelled: []
   }),
   terminalStates: ["succeeded", "failed", "cancelled"],
-  expectedAllowedCount: 7,
-  expectedRejectedCount: 18,
   transition: (from, to) => transitionOperation(from, to, {
     cancellationCapability: { kind: "operation-type-supports-cancellation" }
   })
@@ -109,8 +101,6 @@ const workspaceDesiredFixture = defineLifecycle({
     stopped: ["running", "archived"], running: ["stopped"], archived: ["stopped", "removed"], removed: []
   }),
   terminalStates: ["removed"],
-  expectedAllowedCount: 5,
-  expectedRejectedCount: 11,
   transition: (from, to) => transitionWorkspaceDesired(from, to, { dirtyState: cleanPrimary })
 });
 
@@ -133,8 +123,6 @@ const workspaceObservedFixture = defineLifecycle({
     removed: []
   }),
   terminalStates: ["removed"],
-  expectedAllowedCount: 36,
-  expectedRejectedCount: 64,
   transition: (from, to) => transitionWorkspaceObserved(from, to, {
     recoveryEvidence,
     dirtyState: cleanPrimary
@@ -149,8 +137,6 @@ const runtimeStackDesiredFixture = defineLifecycle({
     absent: ["stopped"], stopped: ["absent", "running"], running: ["stopped"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 4,
-  expectedRejectedCount: 5,
   transition: transitionRuntimeStackDesired
 });
 
@@ -174,8 +160,6 @@ const runtimeStackObservedFixture = defineLifecycle({
   states: runtimeObservedFixtureStates,
   edges: edgesFromRows<(typeof runtimeObservedFixtureStates)[number]>(runtimeObservedFixtureRows),
   terminalStates: [],
-  expectedAllowedCount: 43,
-  expectedRejectedCount: 57,
   transition: (from, to) => transitionRuntimeStackObserved(from, to, {
     recoveryEvidence,
     absenceEvidence
@@ -190,8 +174,6 @@ const workspaceServiceDesiredFixture = defineLifecycle({
     absent: ["stopped"], stopped: ["absent", "running"], running: ["stopped"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 4,
-  expectedRejectedCount: 5,
   transition: transitionWorkspaceServiceDesired
 });
 
@@ -214,8 +196,6 @@ const workspaceServiceObservedFixture = defineLifecycle({
     lost: ["absent", "creating", "stopped", "starting", "running", "stopping", "degraded", "failed", "removing"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 43,
-  expectedRejectedCount: 57,
   transition: (from, to) => transitionWorkspaceServiceObserved(from, to, {
     recoveryEvidence,
     owningStackObservedState: "running"
@@ -233,8 +213,6 @@ const serviceHealthFixture = defineLifecycle({
     unhealthy: ["healthy", "unknown"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 10,
-  expectedRejectedCount: 6,
   transition: (from, to) => transitionWorkspaceServiceHealth(from, to, {
     serviceObservedState: "running"
   })
@@ -248,8 +226,6 @@ const processDesiredFixture = defineLifecycle({
     running: ["stopped"], stopped: ["running"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 2,
-  expectedRejectedCount: 2,
   transition: transitionProcessDesired
 });
 
@@ -268,8 +244,6 @@ const processObservedFixture = defineLifecycle({
     lost: ["exited", "killed", "failed"]
   }),
   terminalStates: ["exited", "failed", "killed"],
-  expectedAllowedCount: 19,
-  expectedRejectedCount: 45,
   transition: (from, to) => transitionProcessObserved(from, to, { recoveryEvidence })
 });
 
@@ -285,8 +259,6 @@ const terminalFixture = defineLifecycle({
     closed: [], failed: [], lost: []
   }),
   terminalStates: ["closed", "failed", "lost"],
-  expectedAllowedCount: 14,
-  expectedRejectedCount: 35,
   transition: transitionTerminal
 });
 
@@ -298,8 +270,6 @@ const previewDesiredFixture = defineLifecycle({
     inactive: ["active"], active: ["inactive"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 2,
-  expectedRejectedCount: 2,
   transition: transitionPreviewDesired
 });
 
@@ -319,8 +289,6 @@ const previewObservedFixture = defineLifecycle({
     lost: ["starting", "inactive"]
   }),
   terminalStates: [],
-  expectedAllowedCount: 19,
-  expectedRejectedCount: 30,
   transition: (from, to) => transitionPreviewObserved(from, to, {
     recoveryEvidence,
     routePresence: { routePresent: false }
@@ -341,8 +309,6 @@ const aiSessionFixture = defineLifecycle({
     stopped: [], failed: [], lost: []
   }),
   terminalStates: ["stopped", "failed", "lost"],
-  expectedAllowedCount: 18,
-  expectedRejectedCount: 31,
   transition: transitionAiSession
 });
 
@@ -359,8 +325,6 @@ const taskRunFixture = defineLifecycle({
     passed: [], failed: [], cancelled: [], timed_out: [], lost: []
   }),
   terminalStates: ["passed", "failed", "cancelled", "timed_out", "lost"],
-  expectedAllowedCount: 11,
-  expectedRejectedCount: 53,
   transition: transitionTaskRun
 });
 
@@ -392,7 +356,7 @@ function verifyLifecycle<State extends string>(definition: LifecycleCase<State>)
     );
     const rejectedPairs = orderedPairs.filter(([from, to]) => !edgeKeys.has(`${from}->${to}`));
 
-    test("fixture has the exact independent counts, terminal states, and no self-edges", () => {
+    test("fixture has unique states and edges, valid endpoints, terminal states, and no self-edges", () => {
       expect(new Set(definition.states).size).toBe(definition.states.length);
       expect(edgeKeys.size).toBe(definition.edges.length);
       for (const [from, to] of definition.edges) {
@@ -400,11 +364,6 @@ function verifyLifecycle<State extends string>(definition: LifecycleCase<State>)
         expect(definition.states).toContain(to);
         expect(from).not.toBe(to);
       }
-      expect(definition.edges).toHaveLength(definition.expectedAllowedCount);
-      expect(rejectedPairs).toHaveLength(definition.expectedRejectedCount);
-      expect(orderedPairs).toHaveLength(
-        definition.expectedAllowedCount + definition.expectedRejectedCount
-      );
       const derivedTerminalStates = definition.states.filter((state) =>
         definition.edges.every(([from]) => from !== state)
       );
@@ -434,14 +393,10 @@ for (const fixture of lifecycleFixtures) {
   verifyLifecycle(fixture as LifecycleCase<string>);
 }
 
-test("independent specification fixtures cover the exact global pair totals", () => {
-  const allowed = lifecycleFixtures.reduce((total, fixture) => total + fixture.edges.length, 0);
-  const ordered = lifecycleFixtures.reduce(
-    (total, fixture) => total + fixture.states.length ** 2,
-    0
-  );
-  expect(lifecycleFixtures).toHaveLength(17);
-  expect(allowed).toBe(245);
-  expect(ordered - allowed).toBe(445);
-  expect(ordered).toBe(690);
+test("independent specification fixtures retain the fixed aggregate coverage", () => {
+  expect({
+    lifecycles: lifecycleFixtures.length,
+    allowedEdges: lifecycleFixtures.reduce((total, fixture) => total + fixture.edges.length, 0),
+    orderedPairs: lifecycleFixtures.reduce((total, fixture) => total + fixture.states.length ** 2, 0)
+  }).toEqual({ lifecycles: 17, allowedEdges: 245, orderedPairs: 690 });
 });

@@ -37,10 +37,3 @@ test("internal transition-table construction freezes the object and every destin
     (table.first as string[]).push("first");
   }).toThrow(TypeError);
 });
-
-test("lifecycle functions return results rather than transition collections", () => {
-  const result = packageEntry.transitionProject("registering", "invalid");
-  expect(result).toEqual({ ok: true, state: "invalid" });
-  expect(Array.isArray(result)).toBe(false);
-  expect(Object.values(result).some((value) => Array.isArray(value))).toBe(false);
-});

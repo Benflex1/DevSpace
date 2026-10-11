@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
   AGENT_EVENT_NDJSON_CONTENT_TYPE,
-  agentApiV1Endpoints,
   completeAgentApiV1Endpoints,
   completeAgentApiV1ErrorCodes,
   f10AgentApiV1EndpointByOperation,
@@ -33,13 +32,6 @@ const acceptedErrors = {
 } as const;
 
 describe("F09, F10, and complete Agent API v1 inventory composition", () => {
-  test("preserves the exact F09 classification counts", () => {
-    expect(agentApiV1Endpoints).toHaveLength(38);
-    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(24);
-    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(13);
-    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
-  });
-
   test("matches the independent exact F10 route matrix", () => {
     expect(f10AgentApiV1Endpoints.map((endpoint) => [
       endpoint.operation, endpoint.method, endpoint.path, endpoint.classification, endpoint.successStatus

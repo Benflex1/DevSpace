@@ -1,5 +1,20 @@
 # Current State
 
+## Test-suite audit
+
+The [2026-10-10 audit](audits/test-suite-2026-10-10.md) inventories the suite after PR #65
+and records the first conservative cleanup of duplicate assertions and fixture bookkeeping.
+Product behavior and real rootless Docker acceptance are preserved; larger UI source checks
+and timing-sensitive fixture cleanup remain follow-up investigations.
+
+## Public-alpha acceptance gap: browser verification in CI
+
+Playwright's 11 browser cases are not currently executed in CI. Unit/tooling and real
+rootless Docker acceptance checks do not establish browser workflow acceptance. Before
+public-alpha acceptance, run the browser suite on disposable CI infrastructure and record
+its results. This delivery gap is separate from test deletion and fixture cleanup; no CI
+workflow changes are included in the audit PR.
+
 ## Native harness slice
 
 The generic native AI harness is implemented on `feat/generic-native-ai-harness`. The Workbench
