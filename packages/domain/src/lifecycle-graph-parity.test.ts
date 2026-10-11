@@ -393,6 +393,10 @@ for (const fixture of lifecycleFixtures) {
   verifyLifecycle(fixture as LifecycleCase<string>);
 }
 
-test("independent specification fixtures cover all 17 lifecycles", () => {
-  expect(lifecycleFixtures).toHaveLength(17);
+test("independent specification fixtures retain the fixed aggregate coverage", () => {
+  expect({
+    lifecycles: lifecycleFixtures.length,
+    allowedEdges: lifecycleFixtures.reduce((total, fixture) => total + fixture.edges.length, 0),
+    orderedPairs: lifecycleFixtures.reduce((total, fixture) => total + fixture.states.length ** 2, 0)
+  }).toEqual({ lifecycles: 17, allowedEdges: 245, orderedPairs: 690 });
 });

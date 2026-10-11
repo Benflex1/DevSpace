@@ -45,7 +45,7 @@ footprint relative to production. Counts and size alone are not deletion criteri
 | Keep | `agent/harness-isolation.test.ts` exercises actual private homes, cross-workspace lease refusal, and custom-harness environment isolation. `web/server/auth.test.ts` uses real signed JWT/JWKS verification and CSRF rejection. `database/{schema,migration}.test.ts` exercises real SQLite, migration history, constraints and idempotency. Size or overlap with integration tests does not justify deleting these. |
 | Keep | Both `*.rootless.integration.test.ts` files and `.github/workflows/rootless-git-integration.yml`: real Docker semantics differ from fake engine behavior. CI explicitly fails if either acceptance case skips. |
 | Keep | Agent runtime, Web persistence/orchestration, and browser AI flow tests operate at different boundaries. Agent finalization fault injection, Web event commits, and browser navigation/refresh are not interchangeable coverage. |
-| Simplify/consolidate, first batch | Lifecycle fixture numeric totals duplicate values derivable from the independent rows and state Cartesian products. Remove numeric bookkeeping, retaining the rows, all behavioral cases, terminal-state checks, duplicate detection, endpoint membership, prohibition of self edges, and the check that all 17 lifecycle fixtures are present. |
+| Simplify/consolidate, first batch | Lifecycle fixture numeric totals duplicate values derivable from the independent rows and state Cartesian products. Remove numeric bookkeeping, retaining the rows, all behavioral cases, terminal-state checks, duplicate detection, endpoint membership, prohibition of self edges, and one fixed aggregate assertion for 17 lifecycles, 245 allowed edges and 690 ordered pairs. |
 | Remove, first batch | `contracts/f10-inventory.test.ts` repeats the same four F09 classification assertions in `contracts/inventory.test.ts`. Retain the latter and every F10 route/error/schema/composition assertion. |
 | Remove, first batch | `domain/lifecycle-encapsulation.test.ts`'s single `registering -> invalid` result repeats the exhaustive graph case. Its extra array checks follow directly from exact object equality. Keep export/type boundary and freezing/mutation refusal tests. |
 | Remove, first batch | `domain/lifecycle-types.test.ts`'s last runtime case only compares a local constant to its own initializer. Keep the adjacent compile-time rejection function and all `@ts-expect-error` assertions; package typecheck includes this file. |
@@ -91,20 +91,23 @@ Real Docker acceptance runs on disposable CI infrastructure. No live DevSpace se
 
 ## First-batch measurements and verification
 
+Counts and lines include the review correction; timing and full-suite results below refer
+to the initial cleanup commit `2f5bb35`. The correction retains the same case counts.
+
 | Measure | Before | After |
 | --- | ---: | ---: |
 | Test files, all runners | 189 | 189 |
 | Inventoried cases, including 11 E2E and 2 gated rootless cases | 3,382 | 3,379 |
 | Vitest cases, including 2 gated rootless cases | 3,262 | 3,259 |
 | Tooling / E2E cases | 109 / 11 | 109 / 11 |
-| Named test-file physical lines | 42,209 | 42,132 |
+| Named test-file physical lines | 42,209 | 42,136 |
 | Focused cases, five changed files | 809 | 806 |
 | Focused elapsed time, same JSON reporter | 37.90 s | 57.79 s |
 | Full local Vitest elapsed | 327.57 s | ~319.73 s |
 | Tooling test elapsed | 4.98 s | 5.16 s |
 
-The diff removes 80 test lines and adds 3: **77 net lines removed**. Three runtime
-cases are removed; the fixture cardinality case is retained and simplified. The final
+The revised batch removes **73 net test lines**. Three runtime
+cases are removed; the fixed aggregate regression case is retained and simplified. The initial
 focused run passes all 806 cases. Comparing its JSON assertion names with baseline proves
 that all 690 transition pairs remain. The slower focused run demonstrates that these small
 maintenance changes do not establish a speed gain. SQLite aggregate-bound cases dominate
@@ -139,3 +142,23 @@ Clean-clone verification uses `.github/workflows/ci.yml`; the real rootless acce
 uses `.github/workflows/rootless-git-integration.yml`. Head-commit CI outcomes accompany the
 PR delivery. The [baseline main CI run](https://github.com/Benflex1/DevSpace/actions/runs/38072582615)
 passed and reported 253.77 seconds for Vitest on its separate hosted runner.
+
+## Review correction — 2026-10-11
+
+The aggregate fixture test now asserts the fixed object `{ lifecycles: 17, allowedEdges: 245,
+orderedPairs: 690 }`. This detects accidental fixture shrinkage while keeping the 17 sets
+of per-lifecycle numeric bookkeeping removed. The test count and all 690 behavioral pair
+checks are unchanged. All 1,191 domain cases pass, as do domain typechecking, targeted
+ESLint, repository text checks and `git diff --check`. Temporary edge and state shrink
+mutations each fail the fixed aggregate assertion; both mutations were restored before
+rerunning the domain suite (1.73 s). PR #66 verifies the corrected head through CI.
+
+The absence of Playwright execution in CI is recorded separately as a **public-alpha
+acceptance gap** in `docs/current-state.md`. Closing that delivery gap requires browser
+execution and recorded results on disposable CI infrastructure; it is outside test deletion
+and this correction.
+
+After PR #66 is merged, prioritize behavioral replacements or justified removal of the nine
+UI source-reading cases, then redundant setup in Agent AI runtime and Web AI session tests.
+Measure runtime improvements and retain unique security, recovery, persistence and real
+Docker coverage. Reuse existing fixtures; avoid new infrastructure or broad production refactors.
