@@ -8,6 +8,7 @@ import { classifyDiffResult } from "./editor-diff-state.js";
 import { EDITOR_SAVED_STATUS_DURATION_MS, editorLanguageForPath, type EditorDocument } from "./editor-state.js";
 import { editorViewVisibility } from "./editor-view-lifecycle.js";
 import { editorDocumentKey, type EditorLoadIntent, WorkbenchEditorDocuments } from "./workbench-editor-documents.js";
+import { confirmEditorReload } from "./workbench-unsaved-changes.js";
 import { monacoModelPaths } from "./monaco-model-paths.js";
 import { loadMonacoReact } from "./monaco-runtime.js";
 
@@ -171,7 +172,11 @@ export function EditorTab({ projectId, workspaceId, path, active, tabId, mode, d
       </div>
     </header>
     {document !== null && document.conflict !== null && <div className="editor-tab-conflict" role="alert">
-      <span>{document.conflict}</span><button type="button" onClick={() => { loadFile("reload").catch(() => undefined); }}>Reload from workspace</button>
+      <span>{document.conflict}</span><button type="button" onClick={() => {
+        if (confirmEditorReload(documents.get(documentKey)?.document ?? null, (message) => window.confirm(message))) {
+          loadFile("reload").catch(() => undefined);
+        }
+      }}>Reload from workspace</button>
     </div>}
     <div className="editor-tab-view" hidden={viewVisibility.changesHidden}>
       {diffLoading && diff === null && <div className="editor-tab-message">Reviewing changes for {path}…</div>}

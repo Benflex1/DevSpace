@@ -260,6 +260,116 @@ test("preserves exact unsaved text through a forced EditorTab remount and repeat
   expect(pageErrors.map((error) => error.message)).toEqual([]);
 });
 
+test("guards Projects navigation, explicit conflict reload, browser reload, and Back for dirty editors", async ({ page }) => {
+  const { projectId } = await createReadyProject(page, "Unsaved Navigation Guard");
+  let reads = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === `/api/projects/${projectId}/files` && url.searchParams.get("action") === "read") reads += 1;
+  });
+  const surface = await openReadme(page);
+  const content = "keep this buffer when navigation is canceled\n";
+  await replaceEditorText(page, content);
+
+  const canceledNavigation = page.waitForEvent("dialog");
+  const projectsClick = page.getByRole("link", { name: "Back to Projects" }).click();
+  const projectsPrompt = await canceledNavigation;
+  expect(projectsPrompt.type()).toBe("confirm");
+  await projectsPrompt.dismiss();
+  await projectsClick;
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`, "u"));
+  await expect(surface.getByText("Unsaved changes", { exact: true })).toBeVisible();
+  await expect.poll(async () => (await surface.locator(".view-lines").allTextContents()).join("\n").replaceAll("\u00a0", " ")).toContain(content.trim());
+
+  await page.route(`**/api/projects/${projectId}/files`, async (route) => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({
+        code: "WORKSPACE_FILE_CHANGED", message: "This file changed outside the editor. Reload it before trying again."
+      }) });
+      return;
+    }
+    await route.continue();
+  });
+  await surface.getByRole("button", { name: "Save", exact: true }).click();
+  const conflict = page.getByRole("alert").filter({ hasText: "This file changed outside the editor" });
+  await expect(conflict).toBeVisible();
+  const readsBeforeCanceledReload = reads;
+  const canceledReload = page.waitForEvent("dialog");
+  const reloadClick = conflict.getByRole("button", { name: "Reload from workspace" }).click();
+  const reloadPrompt = await canceledReload;
+  expect(reloadPrompt.type()).toBe("confirm");
+  expect(reloadPrompt.message()).toContain("README.md");
+  await reloadPrompt.dismiss();
+  await reloadClick;
+  expect(reads).toBe(readsBeforeCanceledReload);
+  await expect(surface.getByText("Unsaved changes", { exact: true })).toBeVisible();
+
+  const acceptedReload = page.waitForEvent("dialog");
+  const acceptedReloadClick = conflict.getByRole("button", { name: "Reload from workspace" }).click();
+  const acceptedReloadPrompt = await acceptedReload;
+  expect(acceptedReloadPrompt.type()).toBe("confirm");
+  await acceptedReloadPrompt.accept();
+  await acceptedReloadClick;
+  await expect(conflict).toHaveCount(0);
+  await expect(surface.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
+  await expect.poll(async () => (await surface.locator(".view-lines").allTextContents()).join("\n").replaceAll("\u00a0", " ")).toContain("deterministic managed workspace fixture");
+
+  await replaceEditorText(page, "keep this buffer through browser navigation cancellation\n");
+  const canceledBrowserReload = page.waitForEvent("dialog");
+  await page.evaluate(() => {
+    const browserGlobal = globalThis as typeof globalThis & {
+      readonly setTimeout: (callback: () => void, delay: number) => unknown;
+      readonly location: { reload: () => void };
+    };
+    browserGlobal.setTimeout(() => browserGlobal.location.reload(), 0);
+  });
+  const browserReloadPrompt = await canceledBrowserReload;
+  expect(browserReloadPrompt.type()).toBe("beforeunload");
+  await browserReloadPrompt.dismiss();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`, "u"));
+  await expect(surface.getByText("Unsaved changes", { exact: true })).toBeVisible();
+
+  const canceledBack = page.waitForEvent("dialog");
+  await page.evaluate(() => {
+    const browserGlobal = globalThis as typeof globalThis & {
+      readonly setTimeout: (callback: () => void, delay: number) => unknown;
+      readonly history: { back: () => void };
+    };
+    browserGlobal.setTimeout(() => browserGlobal.history.back(), 0);
+  });
+  const backPrompt = await canceledBack;
+  expect(backPrompt.type()).toBe("beforeunload");
+  await backPrompt.dismiss();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`, "u"));
+  await expect.poll(async () => (await surface.locator(".view-lines").allTextContents()).join("\n").replaceAll("\u00a0", " ")).toContain("keep this buffer through browser navigation cancellation");
+
+  const acceptedLeave = page.waitForEvent("dialog");
+  const leaveClick = page.getByRole("link", { name: "Back to Projects" }).click();
+  const leavePrompt = await acceptedLeave;
+  expect(leavePrompt.type()).toBe("confirm");
+  await leavePrompt.accept();
+  await leaveClick;
+  await expect(page).toHaveURL(/\/$/u);
+
+  await page.goBack();
+  await expect(page.locator("main.workbench")).toBeVisible();
+  const returnedSurface = await openReadme(page);
+  await replaceEditorText(page, "keep this buffer when Forward is canceled\n");
+  const canceledForward = page.waitForEvent("dialog");
+  await page.evaluate(() => {
+    const browserGlobal = globalThis as typeof globalThis & {
+      readonly setTimeout: (callback: () => void, delay: number) => unknown;
+      readonly history: { forward: () => void };
+    };
+    browserGlobal.setTimeout(() => browserGlobal.history.forward(), 0);
+  });
+  const forwardPrompt = await canceledForward;
+  expect(forwardPrompt.type()).toBe("beforeunload");
+  await forwardPrompt.dismiss();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`, "u"));
+  await expect.poll(async () => (await returnedSurface.locator(".view-lines").allTextContents()).join("\n").replaceAll("\u00a0", " ")).toContain("keep this buffer when Forward is canceled");
+});
+
 test("shows unsaved Git guidance without fabricating a worktree diff", async ({ page }) => {
   await createReadyProject(page, "Unsaved Git Guidance");
   const surface = await openReadme(page);

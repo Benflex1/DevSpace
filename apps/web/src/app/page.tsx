@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { headers } from "next/headers";
 import { AddProjectForm } from "./project-form.js";
 import { authenticateHeaders } from "../server/auth.js";
@@ -43,7 +42,8 @@ function ProjectList({ projects, runtimeAvailability }: {
       <article className="project-card" key={project.id}>
         <div className="project-card-heading">
           <div><h3>{project.name}</h3><code>{project.slug}</code></div>
-          <Link className="project-open-link" href={`/projects/${project.id}`}>Open project</Link>
+          {/* A document navigation makes browser Back/Forward run the Workbench unload guard. */}
+          <a className="project-open-link" href={`/projects/${project.id}`}>Open project</a>
         </div>
         <dl>
           <div><dt>Repository</dt><dd>{project.repositoryUrl}</dd></div>

@@ -1,7 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { GitInspectionData } from "@devspace/contracts";
 import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalOpenableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
@@ -21,6 +20,7 @@ import {
   activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 import { editorDocumentKey, WorkbenchEditorDocuments } from "./workbench-editor-documents.js";
+import { confirmWorkbenchLeave, registerBeforeUnloadGuard } from "./workbench-unsaved-changes.js";
 import type { BrowserAiTurn } from "./ai-session-projection.js";
 
 type Task = { key: string; displayName: string };
@@ -60,6 +60,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 }) {
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [editorDocuments] = useState(() => new WorkbenchEditorDocuments());
+  const confirmedWorkbenchLeave = useRef(false);
   const [editorPresentationGeneration, setEditorPresentationGeneration] = useState(0);
   const [dirtyEditorIds, setDirtyEditorIds] = useState<ReadonlySet<string>>(new Set());
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
@@ -88,6 +89,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
+  useEffect(() => registerBeforeUnloadGuard(window, () => editorDocuments.hasUnsavedChanges(), () => confirmedWorkbenchLeave.current), [editorDocuments]);
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
     const remountEditors = () => setEditorPresentationGeneration((current) => current + 1);
@@ -408,6 +410,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     }
     setTabs((current) => closeWorkbenchTab(current, tab.id));
   };
+  const handleLeaveWorkbench = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const hasUnsavedChanges = editorDocuments.hasUnsavedChanges();
+    if (!confirmWorkbenchLeave(hasUnsavedChanges, (message) => window.confirm(message))) {
+      event.preventDefault();
+      return;
+    }
+    if (hasUnsavedChanges) confirmedWorkbenchLeave.current = true;
+  };
   const runTask = async (taskKey: string) => {
     if (!actionsAvailable) return;
     showNotice("Starting task…", "pending");
@@ -515,7 +526,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       retryStart={retryStart} agentReachable={agentReachable} fetchingRepository={fetchingRepository}
       pushAvailable={pushAvailable} pushingRepository={preparingPush} lastPushStatus={lastPushStatus}
       onPushRepository={() => { preparePush().catch(() => showNotice("Push preparation failed safely.", "error")); }}
-      onFetchRepository={() => { fetchRepository().catch(() => showNotice("Repository fetch failed safely.", "error")); }} />
+      onFetchRepository={() => { fetchRepository().catch(() => showNotice("Repository fetch failed safely.", "error")); }} onLeaveWorkbench={handleLeaveWorkbench} />
     <div className="workbench-body">
       <WorkbenchSidebar projectId={projectId} workspaceId={workspaceId} agentReachable={agentReachable} gitStatus={gitStatus} gitLoading={gitLoading} gitError={gitError}
         gitBusyAction={gitBusyAction} onRefreshGit={() => { refreshGitStatus().catch(() => undefined); }} onOpenFile={(path) => openEditorTab(path)}
@@ -554,14 +565,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 }
 
 function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, runtimeState, runtimeAvailable, activeAction, canStart,
-  canStop, retryStart, agentReachable, fetchingRepository, pushAvailable, pushingRepository, lastPushStatus, onPushRepository, onFetchRepository }: {
+  canStop, retryStart, agentReachable, fetchingRepository, pushAvailable, pushingRepository, lastPushStatus, onPushRepository, onFetchRepository, onLeaveWorkbench }: {
   projectName: string; branchName: string; repositoryUrl: string; projectId: string; runtimeState: string; runtimeAvailable: boolean;
   activeAction: "start" | "stop" | null; canStart: boolean; canStop: boolean; retryStart: boolean; agentReachable: boolean;
   fetchingRepository: boolean; pushAvailable: boolean; pushingRepository: boolean; lastPushStatus: PushStatus | null;
-  onPushRepository: () => void; onFetchRepository: () => void;
+  onPushRepository: () => void; onFetchRepository: () => void; onLeaveWorkbench: (event: ReactMouseEvent<HTMLAnchorElement>) => void;
 }) {
   return <header className="workbench-topbar">
-    <div className="workbench-breadcrumb"><Link href="/" aria-label="Back to Projects">Projects</Link><span aria-hidden="true">/</span><strong>{projectName}</strong></div>
+    {/* Keep this as a document navigation so browser history traversal runs beforeunload. */}
+    <div className="workbench-breadcrumb"><a href="/" aria-label="Back to Projects" onClick={onLeaveWorkbench}>Projects</a><span aria-hidden="true">/</span><strong>{projectName}</strong></div>
     <div className="workbench-context"><span className="context-item"><span className="context-label">branch</span><code>{branchName}</code></span>
       <a className="topbar-action" href={repositoryUrl} target="_blank" rel="noreferrer">Repository</a>
       {pushAvailable && <button type="button" className="topbar-action push-action" disabled={!agentReachable || pushingRepository || fetchingRepository} onClick={onPushRepository}>
