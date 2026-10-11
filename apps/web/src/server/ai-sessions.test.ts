@@ -1722,61 +1722,19 @@ describe("SQLite AI aggregate bounds", () => {
   });
 
   test("does not let many small output deltas exceed the 2 MiB per-turn aggregate bound", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "devspace-ai-history-red-"));
-    directories.push(directory);
-    const databasePath = path.join(directory, "devspace.sqlite");
-    const database = openProjectDatabase(databasePath);
-    const project = database.createProject({
-      name: "AI history test",
-      slug: "ai-history-test",
-      repositoryUrl: "https://example.test/ai-history.git",
-      defaultBranch: "main",
-      actor: "owner"
-    });
-    const setup = await setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "owner", {
-      database,
-      agent: successfulSetupAgent(),
-      nowMonotonic: () => 0,
-      sleep: () => Promise.resolve()
-    });
-    const primaryWorkspace = setup.project.primaryWorkspace;
-    if (primaryWorkspace === null) throw new Error("Expected a primary workspace.");
-    const created = database.createAiSession({
-      projectId: project.id,
-      workspaceId: primaryWorkspace.id,
-      profileId: "codex",
-      profileRevision
-    });
-    const raw = new BetterSqlite3(databasePath);
-    raw.prepare("update ai_sessions set state = 'active' where id = ?").run(created.id);
-    raw.close();
-    const createdTurnId = "018f0f00-0000-7000-8000-000000000009";
-    database.createAiTurn({
-      projectId: project.id,
-      workspaceId: primaryWorkspace.id,
-      sessionId: created.id,
-      turnId: createdTurnId,
-      content: { kind: "text", text: "produce a bounded answer" }
-    });
-    database.commitAiEvent({
-      projectId: project.id,
-      workspaceId: primaryWorkspace.id,
-      event: turnAcceptedEvent(created.id, 1, createdTurnId, "produce a bounded answer")
-    });
+    const fixture = await historyFixture();
     for (let sequence = 2; sequence <= 34; sequence += 1) {
-      database.commitAiEvent({
-        projectId: project.id,
-        workspaceId: primaryWorkspace.id,
-        event: outputEvent(created.id, sequence, createdTurnId)
+      fixture.database.commitAiEvent({
+        projectId: fixture.projectId,
+        workspaceId: fixture.workspaceId,
+        event: outputEvent(fixture.sessionId, sequence, fixture.turnId)
       });
     }
-    const loaded = (database as unknown as { getAiSession: (projectId: string, workspaceId: string, sessionId: string) => {
-      turns: Array<{ outputText: string; outputTruncated?: boolean }>;
-    } | null }).getAiSession(project.id, primaryWorkspace.id, created.id);
+    const loaded = fixture.database.getAiSession(fixture.projectId, fixture.workspaceId, fixture.sessionId);
     expect(loaded).not.toBeNull();
     expect(Buffer.byteLength(loaded!.turns[0]!.outputText, "utf8")).toBeLessThanOrEqual(2 * 1024 * 1024);
     expect(loaded!.turns[0]!.outputTruncated).toBe(true);
-    database.close();
+    fixture.database.close();
   });
 
   test("keeps multibyte output valid at the aggregate boundary", async () => {

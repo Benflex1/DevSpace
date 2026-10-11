@@ -255,15 +255,21 @@ async function seedStoppedHistory(stateRoot: string, count: number): Promise<voi
   await writeFile(outboxPathForAiSession(stateRoot, sessionId), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, { mode: 0o600 });
 }
 
-async function startedCodexFixture(stateRoot: string, respond?: (request: { id?: number; method?: string }, emit: (message: unknown) => void) => void) {
+async function startedCodexFixture(stateRoot: string, respond?: (request: { id?: number; method?: string }, emit: (message: unknown) => void) => void,
+  onPrivateFailureObservation?: (observation: CodexPrivateFailureObservation) => void) {
   const protocol = createProtocolDocker([], respond);
   const executablePath = await createCodexTestExecutable(stateRoot);
   const runtime = createAiSessionRuntime({ mode: "codex", stateRoot,
     managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
-    docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    docker: protocol.docker, executablePath, codexPreflight: () => undefined,
+    ...(onPrivateFailureObservation === undefined ? {} : { onPrivateFailureObservation }) } as never);
   const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
   await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-  return { protocol, runtime, profile };
+  const stop = async () => {
+    protocol.close();
+    await runtime.stop({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1 });
+  };
+  return { protocol, runtime, profile, stop };
 }
 
 async function startFixtureTurn(fixture: Awaited<ReturnType<typeof startedCodexFixture>>): Promise<void> {
@@ -310,24 +316,15 @@ describe("AI session runtime", () => {
   });
   test("malformed native JSON fails the turn without escaping the stream callback", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-malformed-json-test-"));
-    const protocol = createProtocolDocker([], (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    });
-    const executablePath = await createCodexTestExecutable(stateRoot);
-    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
+    const fixture = await startedCodexFixture(stateRoot);
     try {
-      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
-      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-      await flushNativeTurnStart();
-      protocol.emitBytes(dockerBytes(Buffer.from("{malformed-json\n", "utf8")));
-      const events = await runtime.collect(sessionId, 0, 100);
+      await startFixtureTurn(fixture);
+      fixture.protocol.emitBytes(dockerBytes(Buffer.from("{malformed-json\n", "utf8")));
+      const events = await fixture.runtime.collect(sessionId, 0, 100);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("malformed-json");
     } finally {
-      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -342,7 +339,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("message");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -358,7 +355,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("method");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -377,7 +374,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 100);
       expect(events.find((event) => event.eventType === "turn.output.delta")?.payload).toEqual({ stream: "assistant", text: "é" });
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -392,7 +389,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 100);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -407,7 +404,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain('"x":"aaa');
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -423,7 +420,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain('"x":"aaa');
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -440,7 +437,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("private stderr");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -460,7 +457,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 0);
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
       expect(events.filter((event) => event.eventType === "turn.quiesced")).toHaveLength(1);
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
     } finally {
       unsubscribe();
       await rm(stateRoot, { recursive: true, force: true });
@@ -479,7 +476,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "session.stopping")).toHaveLength(1);
       expect(events.filter((event) => event.eventType === "session.stopped")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -495,7 +492,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 150);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -510,7 +507,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("private");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -525,7 +522,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.replay(sessionId, 0);
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(0);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -546,7 +543,7 @@ describe("AI session runtime", () => {
         "first", "second", "turn.activity.started"
       ]);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -621,7 +618,7 @@ describe("AI session runtime", () => {
       expect(JSON.stringify(events)).not.toContain("late-private-output");
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -639,7 +636,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.provider-completed")).toHaveLength(1);
       expect(JSON.stringify(events)).not.toContain("must-remain-private");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -653,7 +650,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 150);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(0);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -669,7 +666,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 150);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -696,7 +693,7 @@ describe("AI session runtime", () => {
       expect(JSON.stringify(events)).not.toContain("private provider error");
       expect(JSON.stringify(events)).not.toContain("unexpectedVariant");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -721,7 +718,7 @@ describe("AI session runtime", () => {
       expect(JSON.stringify(events)).not.toContain("private-item-id");
       expect(JSON.stringify(events)).not.toContain("private-plan-content");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -738,7 +735,7 @@ describe("AI session runtime", () => {
       const events = await fixture.runtime.collect(sessionId, 0, 150);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1486,7 +1483,7 @@ describe("AI session runtime", () => {
       expect(JSON.stringify(requested)).not.toContain("private diff text");
       expect(JSON.stringify(requested)).not.toContain("devspace-super-secret-token");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1511,7 +1508,7 @@ describe("AI session runtime", () => {
       expect(JSON.stringify(requested)).not.toContain("devspace-super-secret-token");
       expect(requested.payload.questions[0]?.options[0]?.label).toBe("[REDACTED]");
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1538,7 +1535,7 @@ describe("AI session runtime", () => {
       expect(events.filter((event) => event.eventType === "turn.approval.requested")).toHaveLength(0);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
     } finally {
-      await fixture.runtime.stop({ ...binding, profileRevision: fixture.profile.profileRevision, processGeneration: 1 }).catch(() => undefined);
+      await fixture.stop().catch(() => undefined);
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1851,27 +1848,15 @@ describe("AI session runtime", () => {
     validateFixture(notification, schema, schema);
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-error-notification-test-"));
     const observations: unknown[] = [];
-    const protocol = createProtocolDocker([], (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } }
-        : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    });
-    const context = managedContext(stateRoot);
-    const executablePath = await createCodexTestExecutable(stateRoot);
-    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
-      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+    const fixture = await startedCodexFixture(stateRoot, undefined, (value) => observations.push(value));
     try {
-      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
-      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-      await flushNativeTurnStart();
-      protocol.emit(notification);
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit(notification);
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(observations).toEqual([{ stage: "turn", kind: "ResponseStreamConnectionFailed", httpStatusCode: 503 }]);
-      expect(JSON.stringify(await runtime.replay(sessionId, 0))).not.toContain("private fixture");
+      expect(JSON.stringify(await fixture.runtime.replay(sessionId, 0))).not.toContain("private fixture");
     } finally {
-      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await fixture.stop();
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1882,29 +1867,17 @@ describe("AI session runtime", () => {
     validateFixture(completion, schema, schema);
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-failed-turn-test-"));
     const observations: unknown[] = [];
-    const protocol = createProtocolDocker([], (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } }
-        : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    });
-    const context = managedContext(stateRoot);
-    const executablePath = await createCodexTestExecutable(stateRoot);
-    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
-      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+    const fixture = await startedCodexFixture(stateRoot, undefined, (value) => observations.push(value));
     try {
-      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
-      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-      await flushNativeTurnStart();
-      protocol.emit(completion);
-      const events = await runtime.collect(sessionId, 0, 50);
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit(completion);
+      const events = await fixture.runtime.collect(sessionId, 0, 50);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(events.some((event) => event.eventType === "turn.provider-completed")).toBe(false);
       expect(observations).toEqual([{ stage: "turn", kind: "ResponseStreamConnectionFailed", httpStatusCode: 503 }]);
       expect(JSON.stringify(events)).not.toContain("private fixture");
     } finally {
-      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await fixture.stop();
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -1913,10 +1886,7 @@ describe("AI session runtime", () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-failed-turn-finalize-test-"));
     const captured: Array<Record<string, unknown>> = [];
     const control = { inspectCalls: [] as string[] };
-    const protocol = createProtocolDocker(captured, (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    }, control);
+    const protocol = createProtocolDocker(captured, undefined, control);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const authority = createCodexCredentialAuthority(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
@@ -1945,10 +1915,7 @@ describe("AI session runtime", () => {
   test("Unauthorized automatically finalizes, preserves durable auth, and leaves reauthentication required", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-unauthorized-finalize-test-"));
     const control = { inspectCalls: [] as string[] };
-    const protocol = createProtocolDocker([], (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    }, control);
+    const protocol = createProtocolDocker([], undefined, control);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const authority = createCodexCredentialAuthority(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
@@ -2238,10 +2205,7 @@ describe("AI session runtime", () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-finalize-race-test-"));
     const captured: Array<Record<string, unknown>> = [];
     const control = { inspectCalls: [] as string[] };
-    const protocol = createProtocolDocker(captured, (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    }, control);
+    const protocol = createProtocolDocker(captured, undefined, control);
     const executablePath = await createCodexTestExecutable(stateRoot);
     const authority = createCodexCredentialAuthority(stateRoot);
     const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
@@ -2269,28 +2233,16 @@ describe("AI session runtime", () => {
   test("prefers one deterministic private classification when error and terminal completion arrive together", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-error-pair-test-"));
     const observations: unknown[] = [];
-    const protocol = createProtocolDocker([], (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } }
-        : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    });
-    const context = managedContext(stateRoot);
-    const executablePath = await createCodexTestExecutable(stateRoot);
-    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(context) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined,
-      onPrivateFailureObservation: (value: unknown) => observations.push(value) } as never);
+    const fixture = await startedCodexFixture(stateRoot, undefined, (value) => observations.push(value));
     try {
-      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
-      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-      await flushNativeTurnStart();
-      protocol.emit(errorNotification(privateFixtureError));
-      protocol.emit(failedTurn({ ...privateFixtureError, codexErrorInfo: "internalServerError" }));
-      const events = await runtime.collect(sessionId, 0, 50);
+      await startFixtureTurn(fixture);
+      fixture.protocol.emit(errorNotification(privateFixtureError));
+      fixture.protocol.emit(failedTurn({ ...privateFixtureError, codexErrorInfo: "internalServerError" }));
+      const events = await fixture.runtime.collect(sessionId, 0, 50);
       expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
       expect(observations).toEqual([{ stage: "turn", kind: "ResponseStreamConnectionFailed", httpStatusCode: 503 }]);
     } finally {
-      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
+      await fixture.stop();
       await rm(stateRoot, { recursive: true, force: true });
     }
   });
@@ -2351,34 +2303,6 @@ describe("AI session runtime", () => {
       await expect(runtime.start({ ...binding, profileRevision: profile.profileRevision })).rejects.toThrow();
       await expect(authority.inspect()).resolves.toBeUndefined();
       expect(captured.some((entry) => String(entry.id).startsWith("cleanup-"))).toBe(true);
-    } finally {
-      await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
-      await rm(stateRoot, { recursive: true, force: true });
-    }
-  });
-
-  test("Unauthorized preserves the failed turn, marks reauthentication, and keeps durable auth", async () => {
-    const stateRoot = await mkdtemp(join(tmpdir(), "devspace-ai-codex-unauthorized-test-"));
-    const protocol = createProtocolDocker([], (request, emit) => {
-      const result = request.method === "thread/start" ? { thread: { id: "thread-1" } } : request.method === "turn/start" ? { turn: { id: "turn-1" } } : {};
-      setImmediate(() => emit({ id: request.id, result }));
-    });
-    const executablePath = await createCodexTestExecutable(stateRoot);
-    const authority = createCodexCredentialAuthority(stateRoot);
-    const runtime = createAiSessionRuntime({ mode: "codex", stateRoot, managed: { executionContext: () => Promise.resolve(managedContext(stateRoot)) } as never,
-      docker: protocol.docker, executablePath, codexPreflight: () => undefined } as never);
-    try {
-      const profile = await runtime.inspect({ projectId, workspaceId, profileId: "codex" });
-      await runtime.start({ ...binding, profileRevision: profile.profileRevision });
-      await runtime.sendTurn({ ...binding, profileRevision: profile.profileRevision, processGeneration: 1, turnId, content: { kind: "text", text: "hello" } });
-      await flushNativeTurnStart();
-      protocol.emit(errorNotification({ message: "synthetic unauthorized", codexErrorInfo: "unauthorized" }));
-      protocol.emit(failedTurn({ codexErrorInfo: "unauthorized" }));
-      const events = await runtime.collect(sessionId, 0, 50);
-      expect(events.filter((event) => event.eventType === "turn.failed")).toHaveLength(1);
-      await expect(authority.inspect()).rejects.toThrow("credential-unavailable");
-      await expect(authority.read()).resolves.toMatchObject({ document: { auth_mode: "chatgpt" } });
-      expect(JSON.stringify(events)).not.toContain("synthetic unauthorized");
     } finally {
       await runtime.stop({ ...binding, profileRevision: (await runtime.inspect({ projectId, workspaceId, profileId: "codex" })).profileRevision, processGeneration: 1 });
       await rm(stateRoot, { recursive: true, force: true });

@@ -2,10 +2,12 @@
 
 ## Test-suite audit
 
-The [2026-10-10 audit](audits/test-suite-2026-10-10.md) inventories the suite after PR #65
-and records the first conservative cleanup of duplicate assertions and fixture bookkeeping.
-Product behavior and real rootless Docker acceptance are preserved; larger UI source checks
-and timing-sensitive fixture cleanup remain follow-up investigations.
+The [2026-10-10 audit](audits/test-suite-2026-10-10.md) is closed after two planned
+cleanup batches. The final batch replaces three UI source checks with behavioral assertions,
+reuses existing Agent/Web fixtures, and removes one fully covered unauthorized-runtime case.
+Six source checks remain deliberately protected where equivalent behavior coverage is absent.
+Further cleanup does not justify delaying the public-alpha roadmap. Browser acceptance in CI
+remains a separate delivery requirement below.
 
 ## Public-alpha acceptance gap: browser verification in CI
 
