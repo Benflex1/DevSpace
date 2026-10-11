@@ -40,6 +40,13 @@ export class WorkbenchEditorDocuments {
     return this.entries.get(key);
   }
 
+  hasUnsavedChanges(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.document?.dirty === true) return true;
+    }
+    return false;
+  }
+
   ensure(key: string, path: string): WorkbenchEditorDocument {
     const existing = this.entries.get(key);
     if (existing !== undefined) {
