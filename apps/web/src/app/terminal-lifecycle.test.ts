@@ -1,9 +1,14 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, test } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, test, vi } from "vitest";
+import { RuntimeControls } from "./runtime-controls.js";
 import {
   isTerminalAttachableState, isTerminalOpenableState, isTerminalSidebarVisible, isTerminalVisibleState, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, reconcileTerminalState,
   nativeHarnessTerminalState, removeTerminalCollectionEntries, sortTerminalViewsByTitle, terminalSocketCloseAction, terminalStateMessage, terminalUiState, updateTerminalCollectionState
 } from "./terminal-lifecycle.js";
+
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 
 describe("terminal lifecycle reconciliation", () => {
   test.each(["creating", "closing", "closed", "failed", "lost"])("does not treat %s as attachable", (state) => {
@@ -98,20 +103,27 @@ describe("terminal lifecycle reconciliation", () => {
     expect(runtimeControls).toContain("restartRuntime");
     expect(runtimeControls).toContain("onRestartInitiated?.();");
     expect(runtimeControls).toContain("if (pendingRef.current) return;");
+    expect(runtimeControls).toContain("router.refresh()");
   });
 
-  test("keeps one persistent runtime control with state-aware actions", async () => {
-    const workbench = await readFile(new URL("./project-workbench.tsx", import.meta.url), "utf8");
-    const runtimeControls = await readFile(new URL("./runtime-controls.tsx", import.meta.url), "utf8");
-    expect(workbench.match(/<RuntimeControls/g)).toHaveLength(2);
-    expect(runtimeControls.match(/export function RuntimeControls/g)).toHaveLength(1);
-    expect(runtimeControls).toContain('"Start runtime"');
-    expect(runtimeControls).toContain('"Stop runtime"');
-    expect(runtimeControls).toContain("activeAction === null");
-    expect(runtimeControls).toContain("disabled={state.disabled || pending}");
-    expect(runtimeControls).toContain("{!isRestart && activeAction === null && <button");
-    expect(workbench).toContain("runtimeState={runtimeState}");
-    expect(runtimeControls).toContain("router.refresh()");
+  test("renders one runtime action with state-aware labels and authorization", () => {
+    const render = (runtimeState: string, canStart: boolean, canStop: boolean, activeAction: "stop" | null = null) =>
+      renderToStaticMarkup(createElement(RuntimeControls, {
+        projectId: "project-1", runtimeAvailable: true, runtimeState, canStart, canStop, activeAction, retryStart: false
+      }));
+    const start = render("stopped", true, false);
+    expect(start.match(/<button/g)).toHaveLength(1);
+    expect(start).toContain("Start runtime");
+    expect(start).not.toContain("disabled");
+    const stop = render("running", false, true);
+    expect(stop.match(/<button/g)).toHaveLength(1);
+    expect(stop).toContain("Stop runtime");
+    expect(stop).not.toContain("disabled");
+    expect(render("running", false, false)).toContain('disabled=""');
+    const stopping = render("running", false, true, "stop");
+    expect(stopping.match(/<button/g)).toHaveLength(1);
+    expect(stopping).toContain("Stopping…");
+    expect(stopping).toContain('disabled=""');
   });
 
   test("keeps recovery dialog styling secondary for Dismiss and primary for Restart", async () => {

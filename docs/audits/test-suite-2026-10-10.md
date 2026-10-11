@@ -162,3 +162,129 @@ After PR #66 is merged, prioritize behavioral replacements or justified removal 
 UI source-reading cases, then redundant setup in Agent AI runtime and Web AI session tests.
 Measure runtime improvements and retain unique security, recovery, persistence and real
 Docker coverage. Reuse existing fixtures; avoid new infrastructure or broad production refactors.
+
+
+## Final planned batch — 2026-10-11
+
+Baseline: merged PR #66, `a185e0e`. This review is limited to the five UI files named above
+and `agent/ai-session-runtime.test.ts` / `web/server/ai-sessions.test.ts`; it is not another
+repository-wide audit. No production code, dependencies, framework, or CI workflows change.
+
+### All nine source-reading cases
+
+| Case | Final decision and preserved protection |
+| --- | --- |
+| AI initial-start recovery | Replace source spelling with the existing React/Fake DOM harness: the recovery message and enabled retry button render, clicking sends the Create action with the workspace ID, disables retry until the response settles, and reloads the returned exact session ID. Existing coordinator tests retain duplicate-click, pending, stale-selection, wrong-returned-identity and failure/retry checks. |
+| AI historical revision | Replace source spelling with a mounted stopped session under an older profile revision: persisted output renders, the historical-only message appears, no restart button appears, and no POST occurs. Agent/Web profile fencing and exact-session restart tests remain. |
+| GitHub project form | Keep. Existing mounted form coverage handles reconnect-pending, not configured repository submission. Preserve opaque repository-ID submission and absence of browser credential/URL authority; existing field suggestion behavior stays. |
+| Preview-only polling request | Keep. Poller behavior tests cover cadence, eligibility, visibility and non-overlap, but do not prove the Workbench requests previews without refreshing tasks. |
+| Git mutation reconciliation | Keep. Browser success request-count coverage does not replace failure refresh or in-progress delayed reconciliation. Removing only the success fragment saves little and loses the fast local guard while browser CI is still pending. |
+| Lost-terminal dialog integration | Keep. Pure dialog/state tests and browser dismissal cover portions, not complete callback integration, restart admission and terminal/tab pruning. Retain narrow request action/endpoint and pending-ref checks, plus the router refresh assertion moved from the old runtime source case. |
+| Runtime action presentation | Replace function/JSX counts and spelling with static rendering of the real RuntimeControls component: exactly one action renders with enabled Start/Stop labels under authorization, unauthorized Stop is disabled, and an active Stop renders one disabled Stopping action. Existing runtime-control-state and runtime-restart tests retain authorization and fresh stop/start sequencing. |
+| Recovery button styling | Keep. No equivalent browser assertion establishes relative Dismiss/Restart styling; introducing computed-style infrastructure would make this cleanup more complex. |
+| Bounded terminal surface styling | Keep. Browser editor geometry assertions concern Monaco, not xterm bounds. Preserve the terminal flex/overflow declarations and absence of the old duplicate header until actual terminal layout acceptance covers them. |
+
+Three cases change assertions, none are deleted or added. Six source-reading cases remain
+intentionally; changing them further would require acceptance work or more test infrastructure.
+The mounted AI checks add a small local fixture and reuse the existing DOM helper; the runtime
+presentation check uses server rendering and adds no DOM setup. No browser execution is added.
+
+### Agent and Web setup review
+
+- Reuse `startedCodexFixture` / `startFixtureTurn` in four ordinary malformed/notification
+  scenarios, with one optional private-observation callback. Custom launch, discovery,
+  credential, restart, interaction and finalization fault arrangements remain separate.
+- Remove identical success responders in favor of `createProtocolDocker`'s existing default.
+  Custom response IDs, errors, delayed replies and withheld responses are unchanged.
+- Add fixture teardown that closes the fake provider transport, then awaits runtime Stop
+  before removing the temporary directory. This avoids waiting for a fake stream to close
+  by the real one-second finalization deadline in ordinary protocol tests. Assertions occur
+  before teardown. Dedicated automatic-finalization, provider-exit proof, cleanup refusal,
+  lease-release failure, persistence retry and concurrent-finalization tests retain their
+  original transports and waits. PR #53's cleanup quiescence remains.
+- Remove `Unauthorized preserves the failed turn, marks reauthentication, and keeps durable
+  auth`: the retained `Unauthorized automatically finalizes, preserves durable auth, and
+  leaves reauthentication required` sends the same two native messages and asserts every
+  removed protection (one failed turn, reauthentication refusal, durable auth readable,
+  private text absent), plus stopped history and provider/cleanup inspections.
+- Replace the duplicated real SQLite project/workspace/session/turn setup and unnecessary
+  type cast in the per-turn output aggregate case with `historyFixture()`. The event loop
+  is unchanged: canonical acceptance at sequence 1 and 33 output deltas at sequences 2–34,
+  followed by the same 2 MiB bound and truncation assertions. The earlier audit's phrase
+  "34 output events" counted acceptance; no event is removed. Multibyte, many-turn,
+  contiguous suffix, legacy read normalization and migration checks remain separate.
+- Keep fresh temporary roots and real SQLite databases per scenario. Sharing mutable runtime
+  or migrated databases would compromise isolation. Keep meaningful `vi.fn` call/order
+  assertions, bounded protocol waits, admission-race polling and long-turn liveness waits;
+  replacing all clocks or collection with new synchronization machinery has poor value here.
+
+No unique security, authorization, recovery, persistence, migration, isolation or protocol
+case is removed. All native framing, malformed messages, private projection, approval/input,
+restart generation, history bounds and outbox fault assertions remain. The only removed case
+has the exact stronger retained counterpart above.
+
+### Measurements and verification
+
+The [final-batch TSV](test-suite-2026-10-11-final.tsv) records expanded cases and physical
+lines for all seven reviewed files. First-batch inventory remains historical and unchanged.
+Counts outside these files use PR #66's inventory; this batch does not recollect browser
+or gated rootless tests. Physical lines include blanks and comments.
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| Test files, all runners | 189 | 189 |
+| Inventoried cases, including E2E and gated rootless | 3,379 | 3,378 |
+| Vitest cases, including 2 gated rootless | 3,259 | 3,258 |
+| Tooling / E2E cases | 109 / 11 | 109 / 11 |
+| Named test-file physical lines | 42,136 | 42,079 |
+| Seven reviewed files: cases | 223 | 222 |
+| Seven reviewed files: lines | 4,862 | 4,805 |
+| Agent runtime: cases / lines | 87 / 2,387 | 86 / 2,311 |
+| Web AI orchestration: cases / lines | 90 / 2,011 | 90 / 1,969 |
+| AI tab: cases / lines | 3 / 39 | 3 / 88 |
+| Terminal lifecycle: cases / lines | 28 / 176 | 28 / 188 |
+| UI source-reading cases | 9 | 6 |
+| Focused elapsed, identical JSON reporter | 99.47 s | 76.64 s |
+| Agent runtime case execution | 61.55 s | 38.67 s |
+| Web AI orchestration case execution | 33.88 s | 33.99 s |
+
+Net reduction: **57 test-code lines and one redundant case**. Agent/Web setup saves 118
+lines; behavioral UI replacements add 61 lines. Meaningful mounted recovery assertions cost
+a few tens of milliseconds rather than introducing browser startup or another framework.
+Timing runs use the same seven paths, working directory, Node/pnpm versions, existing
+Vitest configuration and `--reporter=json --outputFile=...`. JSON elapsed is
+`max(testResults.endTime) - startTime`, excluding final reporter teardown. These single
+runs are approximate, not a benchmark; the improvement comes from ordinary fake-stream
+teardown, while SQLite timing noise is reported separately. Node is v24.21.0 locally;
+hosted clean-clone CI uses the workflow's pinned v24.18.0. pnpm is 11.13.0 in both.
+
+Final focused run passes all 222 cases. Comparing collected names against baseline shows
+only the duplicate Unauthorized case removed; all 90 Web AI orchestration cases remain.
+The AI initial-retry replacement also asserts that the mounted button is disabled while
+Create is pending. Final test-file typechecking passes.
+
+Frozen-lockfile install, workspace validation, lint (including architecture/text checks),
+full typecheck, build, toolchain consistency, raw gateway deployment checks, contracts/schema
+checks, migration tests (10 cases), and migration drift checks pass locally. Full `pnpm test`
+passes **3,256 Vitest + 109 tooling cases**, with the same two rootless cases skipped locally
+(345.17 s Vitest / 5.12 s tooling). This full run overlapped other local checks and is not a
+controlled comparison with the first batch. A pre-existing untracked session transcript with
+trailing whitespace was temporarily moved outside the checkout for lint, then restored;
+it is excluded from this PR.
+
+Docker/Compose is unavailable locally: the materialization check reports that requirement;
+rendered Compose checks, Caddy/Coolify smoke tests, native helper reproducibility and real
+rootless acceptance are delegated to the unchanged GitHub workflows. Head-commit CI results
+and links accompany the draft PR delivery. Playwright is neither run nor added to CI here.
+
+Self-review confirms the diff contains four test files and audit/status documentation only.
+No production code or workflow changes, new framework, shared mega-fixture, or unique
+security/authority scenario removal warrants an independent boundary review for this batch.
+
+### Audit closure
+
+Close this audit after this second and final planned batch. Further broad cleanup does not
+have sufficient demonstrated value to delay public-alpha development. Retained source checks
+can be retired opportunistically when product work establishes equivalent component/browser
+coverage. Docker acceptance and Playwright CI acceptance remain roadmap delivery work, not
+reasons to start a third test-cleanup batch. Playwright CI execution is explicitly outside this PR.

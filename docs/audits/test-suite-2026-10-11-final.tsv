@@ -1,0 +1,8 @@
+file	cases_before	cases_after	lines_before	lines_after
+apps/agent/src/ai-session-runtime.test.ts	87	86	2387	2311
+apps/web/src/app/ai-session-tab.test.ts	3	3	39	88
+apps/web/src/app/github-app-card.test.ts	2	2	26	26
+apps/web/src/app/preview-liveness.test.ts	12	12	201	201
+apps/web/src/app/project-git-mutation.test.ts	1	1	22	22
+apps/web/src/app/terminal-lifecycle.test.ts	28	28	176	188
+apps/web/src/server/ai-sessions.test.ts	90	90	2011	1969
