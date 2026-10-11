@@ -45,3 +45,8 @@ Coolify/Traefik integration guidance is in
 
 Current production Web authentication still uses Cloudflare Access; provider-neutral production
 authentication such as OIDC remains a roadmap item.
+
+## License
+
+DevSpace is licensed under the [GNU Affero General Public License, version 3](LICENSE)
+(`AGPL-3.0-only`).
