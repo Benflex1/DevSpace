@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useRouter } from "next/navigation";
 import type { GitInspectionData } from "@devspace/contracts";
 import { RuntimeControls } from "./runtime-controls.js";
 import { isTerminalOpenableState, isTerminalSidebarVisible, LOST_TERMINAL_SIDEBAR_EXPIRY_MS, removeTerminalCollectionEntries, sortTerminalViewsByTitle, updateTerminalCollectionState } from "./terminal-lifecycle.js";
@@ -10,6 +11,7 @@ import { createPreviewLivenessPoller, type PreviewLivenessPoller } from "./previ
 import { previewPresentationLabel, previewPresentationState, previewPresentationSymbol, type PreviewLifecycleView } from "./preview-lifecycle.js";
 import { PreviewTab } from "./preview-tab.js";
 import { AiWorkbenchTab } from "./ai-workbench-tab.js";
+import { ProjectOptionsEditor } from "./project-options-editor.js";
 import { resolveAiChangedFileOpenTarget } from "./ai-changed-file-open.js";
 import { EditorTab } from "./editor-tab.js";
 import { WorkspaceChanges, type GitCommitFormInput } from "./workspace-changes.js";
@@ -17,7 +19,7 @@ import { WorkspaceFileTree } from "./workspace-file-tree.js";
 import { IncidentReference } from "./incident-reference.js";
 import { useTransientNotice } from "./transient-notice.js";
 import {
-  activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab, type WorkbenchTabState
+  activateWorkbenchTab, aiTabId, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, projectOptionsTab, terminalTabId, type WorkbenchTab, type WorkbenchTabState
 } from "./workbench-tabs.js";
 import { editorDocumentKey, WorkbenchEditorDocuments } from "./workbench-editor-documents.js";
 import { confirmWorkbenchLeave, registerBeforeUnloadGuard } from "./workbench-unsaved-changes.js";
@@ -58,11 +60,17 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   initialMessage?: string | null;
   initialGit: GitInspectionData | null;
 }) {
+  const router = useRouter();
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
   const [editorDocuments] = useState(() => new WorkbenchEditorDocuments());
   const confirmedWorkbenchLeave = useRef(false);
   const [editorPresentationGeneration, setEditorPresentationGeneration] = useState(0);
   const [dirtyEditorIds, setDirtyEditorIds] = useState<ReadonlySet<string>>(new Set());
+  const [projectOptionsDirty, setProjectOptionsDirty] = useState(false);
+  const projectOptionsDirtyRef = useRef(false);
+  const projectOptionsBusyRef = useRef(false);
+  const [projectOptionsBusy, setProjectOptionsBusy] = useState(false);
+  const [projectOptionsApplyFence, setProjectOptionsApplyFence] = useState(runtimeState === "applying");
   const [terminals, setTerminals] = useState<readonly TerminalView[]>(initialTerminals);
   const terminalTransientObservedAt = useRef(new Map<string, number>());
   const [sidebarNow, setSidebarNow] = useState(() => Date.now());
@@ -89,7 +97,9 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
-  useEffect(() => registerBeforeUnloadGuard(window, () => editorDocuments.hasUnsavedChanges(), () => confirmedWorkbenchLeave.current), [editorDocuments]);
+  useEffect(() => registerBeforeUnloadGuard(window,
+    () => editorDocuments.hasUnsavedChanges() || projectOptionsDirtyRef.current || projectOptionsBusyRef.current,
+    () => confirmedWorkbenchLeave.current), [editorDocuments]);
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
     const remountEditors = () => setEditorPresentationGeneration((current) => current + 1);
@@ -193,7 +203,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     return terminal.title;
   }, []);
 
-  const refresh = useCallback(async (): Promise<{ terminals: TerminalView[]; previews: PreviewLifecycleView[] }> => {
+  const refresh = useCallback(async (): Promise<{ terminals: TerminalView[]; previews: PreviewLifecycleView[]; authoritative: boolean }> => {
     const [executionResponse, previewResponse] = await Promise.all([
       fetch(`/api/projects/${projectId}/tasks`, { cache: "no-store" }),
       fetch(`/api/projects/${projectId}/previews`, { cache: "no-store" })
@@ -213,7 +223,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       currentPreviews.current = data.previews;
       setPreviews(data.previews);
     }
-    return { terminals, previews: nextPreviews };
+    return { terminals, previews: nextPreviews, authoritative: executionResponse.ok && previewResponse.ok };
   }, [getTerminalTitle, projectId]);
   const refreshPreviews = useCallback(async (): Promise<readonly PreviewLifecycleView[] | null> => {
     const response = await fetch(`/api/projects/${projectId}/previews`, { cache: "no-store" });
@@ -229,6 +239,23 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const handleRefresh = useCallback(() => {
     refresh().catch(() => undefined);
   }, [refresh]);
+  const refreshProjectAfterOptionsApply = useCallback(async () => {
+    const execution = await refresh();
+    const git = await refreshGitStatus();
+    router.refresh();
+    if (!execution.authoritative || git === null) throw new Error("Some project views could not be refreshed.");
+  }, [refresh, refreshGitStatus, router]);
+  const updateProjectOptionsDirty = useCallback((dirty: boolean) => {
+    projectOptionsDirtyRef.current = dirty;
+    setProjectOptionsDirty(dirty);
+  }, []);
+  const updateProjectOptionsBusy = useCallback((busy: boolean) => {
+    projectOptionsBusyRef.current = busy;
+    setProjectOptionsBusy(busy);
+  }, []);
+  const updateProjectOptionsApplyFence = useCallback((fenced: boolean) => {
+    setProjectOptionsApplyFence(fenced);
+  }, []);
 
   useEffect(() => {
     if (!runs.some((run) => ["queued", "starting", "running"].includes(run.state))) return;
@@ -304,7 +331,10 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
       return next;
     });
   }, [previews]);
-  const actionsAvailable = runtimeRunning && runtimeAvailable && agentReachable && agentStatus === "connected";
+  const effectiveRuntimeState = projectOptionsApplyFence ? "applying" : runtimeState;
+  const effectiveCanStart = canStart && !projectOptionsApplyFence;
+  const effectiveCanStop = canStop && !projectOptionsApplyFence;
+  const actionsAvailable = runtimeRunning && !projectOptionsApplyFence && runtimeAvailable && agentReachable && agentStatus === "connected";
   const openTerminalTab = useCallback((terminal: TerminalView) => {
     if (!actionsAvailable || !isTerminalOpenableState(terminal.state)) return;
     setTabs((current) => openWorkbenchTab(current, {
@@ -317,6 +347,9 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const openAiTab = useCallback(() => {
     setTabs((current) => openWorkbenchTab(current, { id: aiTabId(workspaceId), kind: "ai", sessionId: workspaceId }));
   }, [workspaceId]);
+  const openProjectOptionsTab = useCallback(() => {
+    setTabs((current) => openWorkbenchTab(current, projectOptionsTab()));
+  }, []);
   const openEditorTab = useCallback((relativePath: string, mode: "edit" | "changes" = "edit", diffKind: "staged" | "unstaged" = "unstaged", readFile = true) => {
     const tabId = editorTab(relativePath).id;
     editorDocuments.ensure(editorDocumentKey(workspaceId, relativePath), relativePath);
@@ -397,7 +430,13 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     clearNotice();
   };
   const closeTab = (tab: WorkbenchTab) => {
+    if (tab.kind === "project-options" && (projectOptionsBusy || projectOptionsBusyRef.current)) {
+      showNotice("Wait for the Project Options request to finish before closing this tab.", "pending");
+      return;
+    }
     if (tab.kind === "editor" && dirtyEditorIds.has(tab.id) && !window.confirm(`Discard unsaved changes in ${tab.title}?`)) return;
+    if (tab.kind === "project-options" && projectOptionsDirtyRef.current
+      && !window.confirm("Close Project Options and discard its unsaved edits?")) return;
     if (tab.kind === "editor") {
       editorDocuments.release(editorDocumentKey(workspaceId, tab.fileId));
       updateEditorDirty(tab.id, false);
@@ -408,11 +447,15 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         return next;
       });
     }
+    if (tab.kind === "project-options") {
+      projectOptionsDirtyRef.current = false;
+      setProjectOptionsDirty(false);
+    }
     setTabs((current) => closeWorkbenchTab(current, tab.id));
   };
   const handleLeaveWorkbench = (event: ReactMouseEvent<HTMLAnchorElement>) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const hasUnsavedChanges = editorDocuments.hasUnsavedChanges();
+    const hasUnsavedChanges = editorDocuments.hasUnsavedChanges() || projectOptionsDirtyRef.current;
     if (!confirmWorkbenchLeave(hasUnsavedChanges, (message) => window.confirm(message))) {
       event.preventDefault();
       return;
@@ -522,7 +565,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 
   return <main className="workbench" aria-label={`${projectName} project workbench`}>
     <WorkbenchTopBar projectName={projectName} branchName={gitStatus === null ? branchName : gitStatus.branchName ?? "detached HEAD"} repositoryUrl={repositoryUrl} projectId={projectId}
-      runtimeState={runtimeState} runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop}
+      runtimeState={effectiveRuntimeState} runtimeAvailable={runtimeAvailable} activeAction={projectOptionsApplyFence ? null : activeAction} canStart={effectiveCanStart} canStop={effectiveCanStop}
       retryStart={retryStart} agentReachable={agentReachable} fetchingRepository={fetchingRepository}
       pushAvailable={pushAvailable} pushingRepository={preparingPush} lastPushStatus={lastPushStatus}
       onPushRepository={() => { preparePush().catch(() => showNotice("Push preparation failed safely.", "error")); }}
@@ -533,26 +576,29 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
         onOpenChangedFile={(path, kind) => openEditorTab(path, "changes", kind)} onStage={(path) => mutateGit({ action: "stage", path }, `stage:${path}`)}
         onUnstage={(path) => mutateGit({ action: "unstage", path }, `unstage:${path}`)} onCommit={(input) => mutateGit({ action: "commit", ...input }, "commit")}
         terminals={visibleTerminals} getTerminalTitle={getTerminalTitle} tabs={tabs} actionsAvailable={actionsAvailable} tasks={tasks} runs={runs}
-        previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab} hasUnsavedEditorChanges={dirtyEditorIds.size > 0}
+        previews={previews} onOpenPreview={openPreviewTab} onOpenAi={openAiTab} onOpenProjectOptions={openProjectOptionsTab}
+        hasUnsavedEditorChanges={dirtyEditorIds.size > 0}
         onOpenTerminal={openTerminalTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
         onRunTask={(taskKey) => { runTask(taskKey).catch(() => showNotice("Task action failed.", "error")); }} />
       <section className="workbench-main" aria-label="Workbench surface">
         <WorkbenchTabStrip tabs={tabs} onActivate={(tabId) => setTabs((current) => activateWorkbenchTab(current, tabId))}
           onClose={closeTab} onCreateTerminal={() => { createTerminal().catch(() => showNotice("Terminal creation failed.", "error")); }}
-          canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} />
+          canCreateTerminal={actionsAvailable} dirtyEditorIds={dirtyEditorIds} dirtyProjectOptions={projectOptionsDirty} />
         <WorkbenchSurface tabs={tabs} terminalById={terminalById} previewById={previewById} projectId={projectId} workspaceId={workspaceId} editorViews={editorViews}
           editorDocuments={editorDocuments} editorPresentationGeneration={editorPresentationGeneration}
           onRefresh={handleRefresh} onTerminalStateChange={updateTerminalState} onReloadPreview={reloadPreview} previewGateway={previewGateway}
           onEditorDirtyChange={updateEditorDirty} onEditorModeChange={updateEditorMode} onEditorSaved={() => { refreshGitStatus().catch(() => undefined); }}
-          onDiffNoLongerPresent={handleDiffNoLongerPresent} onOpenAiChangedFile={openAiChangedFile} />
+          onDiffNoLongerPresent={handleDiffNoLongerPresent} onOpenAiChangedFile={openAiChangedFile} runtimeState={effectiveRuntimeState}
+          onProjectOptionsDirtyChange={updateProjectOptionsDirty} onProjectOptionsBusyChange={updateProjectOptionsBusy}
+          onProjectOptionsApplyFenceChange={updateProjectOptionsApplyFence} onProjectOptionsApplied={refreshProjectAfterOptionsApply} />
         {notice !== null && <p className={`workbench-message message ${notice.kind}`} role="status">
           <span>{notice.message}</span>
           <IncidentReference incidentId={notice.referenceId} />
         </p>}
       </section>
     </div>
-    {lostDialogIds.length > 0 && <LostTerminalDialog key={lostTerminalSetKey(lostDialogIds)} count={lostDialogIds.length} projectId={projectId} runtimeState={runtimeState}
-      runtimeAvailable={runtimeAvailable} activeAction={activeAction} canStart={canStart} canStop={canStop} retryStart={retryStart}
+    {lostDialogIds.length > 0 && <LostTerminalDialog key={lostTerminalSetKey(lostDialogIds)} count={lostDialogIds.length} projectId={projectId} runtimeState={effectiveRuntimeState}
+      runtimeAvailable={runtimeAvailable} activeAction={projectOptionsApplyFence ? null : activeAction} canStart={effectiveCanStart} canStop={effectiveCanStop} retryStart={retryStart}
       onDismiss={() => {
         lostTerminalRecoveryIds.current = [];
         dismissLostTerminalDialog(lostDialogIds);
@@ -560,7 +606,7 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
     {pushIntent !== null && <PushConfirmationDialog intent={pushIntent} confirming={confirmingPush}
       onCancel={() => { if (!confirmingPush) { setPushIntent(null); clearNotice(); } }} onConfirm={() => { confirmPush().catch(() => showNotice("Repository push failed safely.", "error")); }} />}
     {persistentGitFailure !== null && <GitFailureDialog failure={persistentGitFailure} onDismiss={() => setPersistentGitFailure(null)} />}
-    <WorkbenchStatusBar runtimeState={runtimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
+    <WorkbenchStatusBar runtimeState={effectiveRuntimeState} agentStatus={agentStatus} agentReachable={agentReachable} actor={actor} />
   </main>;
 }
 
@@ -591,13 +637,13 @@ function WorkbenchTopBar({ projectName, branchName, repositoryUrl, projectId, ru
   </header>;
 }
 
-function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, gitLoading, gitError, gitBusyAction, onRefreshGit, onOpenFile, onOpenChangedFile, onStage, onUnstage, onCommit, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi, hasUnsavedEditorChanges,
+function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, gitLoading, gitError, gitBusyAction, onRefreshGit, onOpenFile, onOpenChangedFile, onStage, onUnstage, onCommit, terminals, getTerminalTitle, tabs, actionsAvailable, tasks, runs, previews, onOpenPreview, onOpenAi, onOpenProjectOptions, hasUnsavedEditorChanges,
   onOpenTerminal, onCreateTerminal, onRunTask }: {
   projectId: string; workspaceId: string; agentReachable: boolean; gitStatus: GitInspectionData | null; gitLoading: boolean; gitError: string | null; gitBusyAction: string | null;
   onRefreshGit: () => void; onOpenFile: (relativePath: string) => void; onOpenChangedFile: (relativePath: string, kind: "staged" | "unstaged") => void;
   onStage: (path: string) => Promise<boolean>; onUnstage: (path: string) => Promise<boolean>; onCommit: (input: GitCommitFormInput) => Promise<boolean>;
   terminals: readonly TerminalView[]; getTerminalTitle: (terminal: TerminalView) => string; tabs: WorkbenchTabState; actionsAvailable: boolean; tasks: readonly Task[]; runs: readonly TaskRun[];
-  previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void; onOpenAi: () => void;
+  previews: readonly PreviewLifecycleView[]; onOpenPreview: (preview: PreviewLifecycleView) => void; onOpenAi: () => void; onOpenProjectOptions: () => void;
   hasUnsavedEditorChanges: boolean;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
@@ -611,6 +657,10 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
       </button>
       <button type="button" className="workbench-nav-item" onClick={() => { const first = previews[0]; if (first !== undefined) onOpenPreview(first); }}>
         <span aria-hidden="true">▾</span> Previews <span className="nav-count">{previews.length}</span>
+      </button>
+      <button type="button" className={`workbench-nav-item ${tabs.activeTabId === "project-options" ? "active" : ""}`}
+        aria-pressed={tabs.activeTabId === "project-options"} onClick={onOpenProjectOptions}>
+        <span aria-hidden="true">⚙</span> Project Options
       </button>
     </nav>
     <div className="sidebar-section files-sidebar-section">
@@ -664,14 +714,15 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
   </aside>;
 }
 
-function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCreateTerminal, dirtyEditorIds }: {
+function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCreateTerminal, dirtyEditorIds, dirtyProjectOptions }: {
   tabs: WorkbenchTabState; onActivate: (tabId: string) => void; onClose: (tab: WorkbenchTab) => void; onCreateTerminal: () => void;
-  canCreateTerminal: boolean; dirtyEditorIds: ReadonlySet<string>;
+  canCreateTerminal: boolean; dirtyEditorIds: ReadonlySet<string>; dirtyProjectOptions: boolean;
 }) {
   return <div className="workbench-tabstrip" role="tablist" aria-label="Project tabs">
     {tabs.tabs.map((tab) => <div className={`workbench-tab ${tab.id === tabs.activeTabId ? "active" : ""}`} key={tab.id}>
       <button type="button" role="tab" aria-selected={tab.id === tabs.activeTabId} onClick={() => onActivate(tab.id)}>{tab.kind === "terminal" && <span className="tab-dot" aria-hidden="true" />}
-        {tab.kind === "editor" && dirtyEditorIds.has(tab.id) && <span className="editor-tab-dirty" aria-label="Unsaved changes" />}{tabTitle(tab)}</button>
+        {tab.kind === "editor" && dirtyEditorIds.has(tab.id) && <span className="editor-tab-dirty" aria-label="Unsaved changes" />}
+        {tab.kind === "project-options" && dirtyProjectOptions && <span className="editor-tab-dirty" aria-label="Unsaved changes" />}{tabTitle(tab)}</button>
       <button type="button" className="tab-close" aria-label={`Close ${tabTitle(tab)}`} onClick={() => onClose(tab)}>×</button>
     </div>)}
     <button type="button" className="tab-create" disabled={!canCreateTerminal} onClick={onCreateTerminal} aria-label="Create terminal tab" title={canCreateTerminal ? "Create terminal" : "Start the runtime to create a terminal"}>+</button>
@@ -679,7 +730,7 @@ function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCre
   </div>;
 }
 
-function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent, onOpenAiChangedFile }: {
+function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspaceId, editorViews, editorDocuments, editorPresentationGeneration, onRefresh, onTerminalStateChange, onReloadPreview, previewGateway, onEditorDirtyChange, onEditorModeChange, onEditorSaved, onDiffNoLongerPresent, onOpenAiChangedFile, runtimeState, onProjectOptionsDirtyChange, onProjectOptionsBusyChange, onProjectOptionsApplyFenceChange, onProjectOptionsApplied }: {
   tabs: WorkbenchTabState; terminalById: ReadonlyMap<string, TerminalView>; previewById: ReadonlyMap<string, PreviewLifecycleView>;
   projectId: string; workspaceId: string; editorViews: Readonly<Record<string, { mode: "edit" | "changes"; diffKind: "staged" | "unstaged"; readFile: boolean }>>; onRefresh: () => void; onTerminalStateChange: (terminalId: string, state: string) => void;
   editorDocuments: WorkbenchEditorDocuments; editorPresentationGeneration: number;
@@ -688,6 +739,11 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
   onEditorDirtyChange: (tabId: string, dirty: boolean) => void; onEditorModeChange: (tabId: string, mode: "edit" | "changes") => void; onEditorSaved: () => void;
   onDiffNoLongerPresent: (path: string) => void;
   onOpenAiChangedFile: (file: BrowserAiTurn["changedFiles"]["files"][number]) => void | Promise<void>;
+  runtimeState: string;
+  onProjectOptionsDirtyChange: (dirty: boolean) => void;
+  onProjectOptionsBusyChange: (busy: boolean) => void;
+  onProjectOptionsApplyFenceChange: (fenced: boolean) => void;
+  onProjectOptionsApplied: () => void | Promise<void>;
 }) {
   return <div className="workbench-surface">
     {tabs.tabs.length === 0 && <div className="workbench-empty"><div className="empty-glyph" aria-hidden="true">⌘</div><h1>Project Workbench</h1><p>Open a file or terminal to start working in this project.</p></div>}
@@ -704,7 +760,10 @@ function WorkbenchSurface({ tabs, terminalById, previewById, projectId, workspac
           readFile={editorViews[tab.id]?.readFile ?? true}
           documents={editorDocuments} remountCount={editorPresentationGeneration + 1}
           active={tab.id === tabs.activeTabId} onModeChange={(mode) => onEditorModeChange(tab.id, mode)} onDirtyChange={onEditorDirtyChange}
-          onDiffNoLongerPresent={onDiffNoLongerPresent} onSaved={onEditorSaved} /> : null)}
+          onDiffNoLongerPresent={onDiffNoLongerPresent} onSaved={onEditorSaved} />
+      : tab.kind === "project-options" ? <ProjectOptionsEditor key={tab.id} projectId={projectId} runtimeState={runtimeState}
+          active={tab.id === tabs.activeTabId} onDirtyChange={onProjectOptionsDirtyChange} onBusyChange={onProjectOptionsBusyChange}
+          onApplyFenceChange={onProjectOptionsApplyFenceChange} onApplied={onProjectOptionsApplied} /> : null)}
   </div>;
 }
 
@@ -797,5 +856,5 @@ function runtimeLabel(state: string): string {
 
 function tabTitle(tab: WorkbenchTab): string {
   return tab.kind === "terminal" ? tab.title : tab.kind === "editor" ? tab.title : tab.kind === "preview" ? "Preview"
-    : tab.kind === "ai" ? "AI session" : tab.kind === "git" ? "Git" : "Task output";
+    : tab.kind === "ai" ? "AI session" : tab.kind === "project-options" ? "Project Options" : tab.kind === "git" ? "Git" : "Task output";
 }

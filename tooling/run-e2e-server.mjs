@@ -173,7 +173,7 @@ const control = http.createServer(async (request, response) => {
     const snapshot = dockerFixture.snapshot();
     const body = JSON.stringify({ networks: snapshot.networks.length, containers: snapshot.containers.length, execs: snapshot.execs,
       containerDetails: snapshot.containers.map((container) => ({ id: container.Id, name: container.Name, state: container.State,
-        portBindings: container.HostConfig.PortBindings })), appListeners: snapshot.appListeners });
+        imageReference: container.Config.Image, portBindings: container.HostConfig.PortBindings })), appListeners: snapshot.appListeners });
     response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body); return;
   }
   if (request.method === "GET" && request.url === "/gateway-snapshot") {

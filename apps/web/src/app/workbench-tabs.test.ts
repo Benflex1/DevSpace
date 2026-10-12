@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, terminalTabId, type WorkbenchTab
+  activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, projectOptionsTab, terminalTabId, type WorkbenchTab
 } from "./workbench-tabs.js";
 
 const terminal = (id: string): WorkbenchTab => ({ id: terminalTabId(id), kind: "terminal", terminalId: id, title: `Terminal ${id}` });
@@ -64,5 +64,14 @@ describe("Workbench tab state", () => {
     const second = editor("src/index.ts");
     const state = openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, first), second);
     expect(closeWorkbenchTab(state, second.id).activeTabId).toBe(first.id);
+  });
+
+  test("opens one stable Project Options tab and returns to the remaining tab when closed", () => {
+    const options = projectOptionsTab();
+    const state = openWorkbenchTab(openWorkbenchTab(emptyWorkbenchTabs, terminal("one")), options);
+    const reopened = openWorkbenchTab(state, projectOptionsTab());
+    expect(reopened.tabs.map((tab) => tab.id)).toEqual(["terminal:one", "project-options"]);
+    expect(reopened.activeTabId).toBe("project-options");
+    expect(closeWorkbenchTab(reopened, options.id).activeTabId).toBe("terminal:one");
   });
 });

@@ -51,6 +51,8 @@ async function configurePreviewWorkspace(databaseInput: ReturnType<typeof openPr
   const options = parseProjectOptionsV1({
     schemaVersion: 1,
     developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" }, ports: [{ name: "web", containerPort: 3000 }] },
+    tasks: [{ key: "check", displayName: "Check workspace", command: { executable: "/usr/bin/printf", args: ["fixture-task-ok\\n"] },
+      timeoutSeconds: 600, concurrencyPolicy: "allow", successExitCodes: [0], logRetentionDays: 3 }],
     previews: [{ key: "web", displayName: "Web", target: { kind: "workspace" }, containerPort: 3000, domainBaseId: "local",
       hostnamePattern: "{project}-{workspace}-{preview}-{shortId}", healthPath: "/health", healthStatuses: [200], startupTimeoutSeconds: 2,
       webSocketForwarding: true }]

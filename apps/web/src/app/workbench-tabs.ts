@@ -3,6 +3,7 @@ export type WorkbenchTab =
   | { readonly id: `editor:${string}`; readonly kind: "editor"; readonly fileId: string; readonly title: string }
   | { readonly id: string; readonly kind: "preview"; readonly previewId: string }
   | { readonly id: string; readonly kind: "ai"; readonly sessionId: string }
+  | { readonly id: "project-options"; readonly kind: "project-options" }
   | { readonly id: string; readonly kind: "git"; readonly viewId: string }
   | { readonly id: string; readonly kind: "task-output"; readonly taskRunId: string };
 
@@ -31,6 +32,10 @@ export function previewTabId(previewId: string): `preview:${string}` {
 
 export function aiTabId(workspaceId: string): `ai:${string}` {
   return `ai:${workspaceId}`;
+}
+
+export function projectOptionsTab(): Extract<WorkbenchTab, { kind: "project-options" }> {
+  return { id: "project-options", kind: "project-options" };
 }
 
 export function openWorkbenchTab(state: WorkbenchTabState, tab: WorkbenchTab): WorkbenchTabState {

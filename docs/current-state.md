@@ -141,9 +141,11 @@ Traefik → Cloudflare Tunnel/Access → reserved preview namespace → connecto
 loopback lease; this deployment choice is not a universal DevSpace core requirement.
 
 The current dashboard and Workbench expose project onboarding, workspace runtime controls, terminal,
-tasks, previews, AI sessions, and the Agent-backed Files + Monaco editor slice. File browsing,
-editing, and the Workbench 1B Git Changes + Commit workflow remain available when the Docker runtime
-is stopped.
+tasks, previews, AI sessions, Agent-backed Files + Monaco editing, and a Project Options revision
+editor for development images, configured tasks, and workspace previews. The editor saves immutable
+drafts separately from Apply, preserves fields outside its editing scope, and keeps Apply explicit.
+File browsing, editing, and the Workbench 1B Git Changes + Commit workflow remain available when the
+Docker runtime is stopped.
 
 Workspace Git metadata now lives inside each workspace at `.devspace-git`, so `/workspace` is a
 complete Git repository in managed containers. Each workspace owns copied objects and private refs;
