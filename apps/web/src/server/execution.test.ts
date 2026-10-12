@@ -253,6 +253,27 @@ test("retires lost terminal resources when a workspace stop intent is accepted",
   expect(database.getManagedProject(project.id)?.terminals.some((terminal) => terminal.id === lost.terminalId)).toBe(false);
 });
 
+test("retires terminals that become lost during a confirmed workspace stop", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const terminal = database.prepareTerminalCreate(project.id, "actor");
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: terminal.terminalId, state: "active" }));
+  const runtime = database.listRuntimeStacks()[0];
+  if (runtime === undefined) throw new Error("runtime stack was not created");
+
+  const stop = database.prepareRuntimeMutation({ projectId: project.id, workspaceId, actor: "actor", action: "stop",
+    runtimePlanHash: runtime.runtimePlanHash, imageReference: "node:24-bookworm" });
+  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: terminal.terminalId, state: "lost" }));
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([expect.objectContaining({ id: terminal.terminalId, state: "lost" })]);
+
+  database.finishRuntimeMutation({ operationId: stop.operationId, projectId: project.id, workspaceId,
+    outcome: { state: "succeeded", workspaceObserved: "stopped", runtimeObserved: "stopped" } });
+
+  const retired = new BetterSqlite3(databasePath);
+  expect(retired.prepare("select id from terminal_sessions where id = ?").get(terminal.terminalId)).toBeUndefined();
+  expect(retired.prepare("select id from processes where id = ?").get(terminal.terminalId)).toBeUndefined();
+  retired.close();
+});
+
 test("retains a newly lost terminal, then retires its session and process once without refreshing closed_at", async () => {
   let currentTime = new Date("2026-07-19T00:00:00.000Z");
   const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });
