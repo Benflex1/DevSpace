@@ -122,7 +122,7 @@ test("fresh installation completes project, workspace, terminal, task, and persi
   const taskRow = page.locator(".sidebar-task-list li", { hasText: "Check workspace" });
   await taskRow.getByRole("button", { name: "Run", exact: true }).click();
   const taskRuns = page.locator(".sidebar-task-runs");
-  await expect(taskRuns).toContainText("succeeded", { timeout: 120_000 });
+  await expect(taskRuns).toContainText("passed", { timeout: 120_000 });
   await expect(taskRuns).toContainText("Exit code: 0");
 
   await page.getByRole("button", { name: "Create terminal", exact: true }).click();
