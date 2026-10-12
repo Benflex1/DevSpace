@@ -102,7 +102,19 @@ test("fresh installation completes project, workspace, terminal, task, and persi
   await page.getByRole("button", { name: "Save Draft" }).click();
   await expect(page.locator(".options-draft-identity")).toContainText("Saved draft", { timeout: 60_000 });
   await page.getByRole("button", { name: "Apply", exact: true }).click();
+  const applyResponsePromise = page.waitForResponse((response) => response.url().endsWith(`/api/projects/${projectId}/options/apply`)
+    && response.request().method() === "POST");
   await page.getByRole("button", { name: "Confirm Apply" }).click();
+  const applyResponse = await applyResponsePromise;
+  const applyBody: unknown = await applyResponse.json();
+  const applySummary = applyBody !== null && typeof applyBody === "object"
+    ? { state: "state" in applyBody ? applyBody.state : undefined,
+      code: "code" in applyBody ? applyBody.code : undefined,
+      message: "message" in applyBody ? applyBody.message : undefined }
+    : null;
+  console.log(`[installation-browser] Project Options Apply HTTP ${applyResponse.status()} ${JSON.stringify(applySummary)}`);
+  expect(applyResponse.status()).toBe(200);
+  expect(applySummary?.state).toBe("applied");
   await expect(page.locator(".options-apply-status.success")).toContainText("Applied", { timeout: 180_000 });
 
   await page.getByRole("button", { name: "Start runtime" }).click();
