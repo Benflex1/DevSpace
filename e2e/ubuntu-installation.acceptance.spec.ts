@@ -17,15 +17,9 @@ test("fresh installation completes project, workspace, terminal, task, and persi
     const pathname = new URL(websocket.url()).pathname;
     if (!/\/terminals\/[^/]+\/stream$/u.test(pathname)) return;
     console.log(`[installation-browser] terminal websocket opened path=${pathname}`);
-    websocket.on("framesent", (frame) => {
-      const length = typeof frame.payload === "string" ? Buffer.byteLength(frame.payload) : frame.payload.length;
-      console.log(`[installation-browser] terminal websocket sent frame bytes=${length}`);
-    });
-    websocket.on("framereceived", (frame) => {
-      const length = typeof frame.payload === "string" ? Buffer.byteLength(frame.payload) : frame.payload.length;
-      console.log(`[installation-browser] terminal websocket received frame bytes=${length}`);
-    });
-    websocket.on("close", () => console.log("[installation-browser] terminal websocket closed"));
+    let receivedFrames = 0;
+    websocket.on("framereceived", () => { receivedFrames += 1; });
+    websocket.on("close", () => console.log(`[installation-browser] terminal websocket closed after ${receivedFrames} received frames`));
   });
   const unauthenticated = await fetch("http://127.0.0.1:3000/api/projects/00000000-0000-4000-8000-000000000000/runtime");
   expect(unauthenticated.status).toBe(403);
@@ -97,8 +91,8 @@ test("fresh installation completes project, workspace, terminal, task, and persi
   await firstTerminal.locator(".xterm-helper-textarea").focus();
   await page.keyboard.type("pwd; printf 'fresh-host-terminal-ok\\n'; printf 'fresh-host-persistence-ok\\n' > /workspace/install-acceptance.txt");
   await page.keyboard.press("Enter");
-  await expect(firstTerminal.getByText(/\/workspace/u)).toBeVisible({ timeout: 30_000 });
-  await expect(firstTerminal.getByText(/fresh-host-terminal-ok/u)).toBeVisible({ timeout: 30_000 });
+  await expect(firstTerminal.getByText("/workspace", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(firstTerminal.getByText("fresh-host-terminal-ok", { exact: true })).toBeVisible({ timeout: 30_000 });
 
   await page.getByRole("button", { name: "Stop runtime" }).click();
   await expect(page.locator(".runtime-chip.stopped")).toHaveText("Stopped", { timeout: 180_000 });
