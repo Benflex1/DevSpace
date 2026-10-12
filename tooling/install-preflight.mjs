@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const rootDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const transientSocketErrors = new Set(["ENOENT", "ECONNREFUSED", "ETIMEDOUT"]);
 
 export function validateSupportedHost(input) {
   const issues = [];
@@ -190,21 +191,46 @@ async function assertPrivateDatabaseFile(databasePath) {
   if ((entry.mode & 0o077) !== 0) throw new Error("The Web database file must not grant group or other access.");
 }
 
-async function assertUnixSocketConnectable(socketPath, label) {
-  await new Promise((resolve, reject) => {
+function connectUnixSocket(socketPath, timeoutMs) {
+  return new Promise((resolve, reject) => {
     const socket = net.createConnection({ path: socketPath });
-    const timer = setTimeout(() => socket.destroy(new Error("timeout")), 3_000);
+    const timer = setTimeout(() => {
+      const error = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
+      socket.destroy(error);
+    }, timeoutMs);
     timer.unref();
     socket.once("connect", () => {
       clearTimeout(timer);
       socket.destroy();
       resolve();
     });
-    socket.once("error", () => {
+    socket.once("error", (error) => {
       clearTimeout(timer);
-      reject(new Error(`${label} is not reachable by this service user.`));
+      reject(error);
     });
   });
+}
+
+export async function waitForUnixSocketConnectable(socketPath, label, { timeoutMs = 30_000, retryMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    try {
+      await connectUnixSocket(socketPath, Math.min(3_000, remainingMs));
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!transientSocketErrors.has(error?.code)) {
+        throw new Error(`${label} is not reachable by this service user.`, { cause: error });
+      }
+    }
+    const remainingMsAfterAttempt = deadline - Date.now();
+    if (remainingMsAfterAttempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(retryMs, remainingMsAfterAttempt)));
+    }
+  }
+  throw new Error(`${label} did not become reachable within ${timeoutMs} ms.`, { cause: lastError });
 }
 
 async function readDockerInfo(socketPath) {
@@ -276,7 +302,7 @@ async function validateWebRuntime(environment) {
   const databasePath = environment.DEVSPACE_DATABASE_PATH.trim();
   await assertPrivateDirectory(path.dirname(databasePath), "Web state directory");
   await assertPrivateDatabaseFile(databasePath);
-  await assertUnixSocketConnectable(environment.DEVSPACE_AGENT_SOCKET_PATH.trim(), "Agent socket");
+  await waitForUnixSocketConnectable(environment.DEVSPACE_AGENT_SOCKET_PATH.trim(), "Agent socket");
 }
 
 async function main(role) {

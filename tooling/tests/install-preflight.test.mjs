@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 const preflight = await import("../install-preflight.mjs").catch(() => null);
@@ -146,4 +150,23 @@ test("rootless Docker detection requires the daemon's explicit rootless security
   const isRootlessDockerInfo = requirePreflightFunction("isRootlessDockerInfo");
   assert.equal(isRootlessDockerInfo({ SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"] }), true);
   assert.equal(isRootlessDockerInfo({ SecurityOptions: ["name=seccomp,profile=builtin"] }), false);
+});
+
+test("Web preflight waits briefly for the Agent socket to appear during service restart", async () => {
+  const waitForUnixSocketConnectable = requirePreflightFunction("waitForUnixSocketConnectable");
+  const root = await mkdtemp(path.join(os.tmpdir(), "devspace-agent-socket-test-"));
+  const socketPath = path.join(root, "agent.sock");
+  const server = net.createServer((socket) => socket.destroy());
+  try {
+    const connection = waitForUnixSocketConnectable(socketPath, "Agent socket", { timeoutMs: 1_000, retryMs: 20 });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => { server.off("error", reject); resolve(); });
+    });
+    await connection;
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
 });
