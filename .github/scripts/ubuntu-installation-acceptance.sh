@@ -183,12 +183,23 @@ PY
   sudo -u "$agent_user" env XDG_RUNTIME_DIR="$agent_runtime" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" systemctl --user show-environment \
     | grep '^XDG_RUNTIME_DIR=' || printf 'User manager does not export XDG_RUNTIME_DIR; Docker unit drop-in will pin it.\n'
+  printf 'User manager sandbox: '
+  sudo systemctl show "user@${agent_uid}.service" \
+    --property=ProtectHome,ProtectSystem,PrivateUsers,ReadOnlyPaths,ReadWritePaths --value
+  sudo -u "$agent_user" env XDG_RUNTIME_DIR="$agent_runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" \
+    systemd-run --user --wait --pipe --collect \
+      --unit="devspace-runtime-write-check-${run_id}-${run_attempt}" \
+      --property="Environment=XDG_RUNTIME_DIR=${agent_runtime}" \
+      /bin/sh -ec 'id; printf "XDG_RUNTIME_DIR=%s\\n" "$XDG_RUNTIME_DIR"; stat -c "runtime owner=%u mode=%a" "$XDG_RUNTIME_DIR"; test -w "$XDG_RUNTIME_DIR"; probe="$XDG_RUNTIME_DIR/.devspace-runtime-write-check"; : >"$probe"; rm -f "$probe"'
   local docker_dropin_dir="$agent_home/.config/systemd/user/docker.service.d"
   local docker_dropin="$docker_dropin_dir/devspace-runtime.conf"
   [[ ! -e "$docker_dropin" && ! -L "$docker_dropin" ]] || fail "Docker runtime drop-in already exists"
-  sudo install -d -o "$agent_user" -g devspace-agent -m 0700 "$docker_dropin_dir"
+  sudo -u "$agent_user" install -d -m 0700 "$docker_dropin_dir"
+  test "$(stat -c '%U' "$docker_dropin_dir")" = "$agent_user"
+  test "$(stat -c '%a' "$docker_dropin_dir")" = 700
   printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=%s\n' "$agent_runtime" >"$root/docker-runtime.conf"
-  sudo install -o "$agent_user" -g devspace-agent -m 0600 "$root/docker-runtime.conf" "$docker_dropin"
+  sudo -u "$agent_user" install -m 0600 "$root/docker-runtime.conf" "$docker_dropin"
   sudo -u "$agent_user" env -i HOME="$agent_home" PATH=/usr/local/bin:/usr/bin:/bin \
     XDG_RUNTIME_DIR="$agent_runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" \
     /usr/bin/dockerd-rootless-setuptool.sh check
