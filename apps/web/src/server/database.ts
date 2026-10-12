@@ -2435,6 +2435,11 @@ export function openProjectDatabase(path: string, options: {
           if (operation?.operationName === "workspace.stop" && operation.projectId === input.projectId
             && operation.workspaceId === input.workspaceId && input.outcome.workspaceObserved === "stopped"
             && input.outcome.runtimeObserved === "stopped") {
+            db.update(terminalSessions).set({ state: "lost", closedAt: timestamp }).where(and(
+              eq(terminalSessions.workspaceId, input.workspaceId),
+              or(eq(terminalSessions.state, "creating"), eq(terminalSessions.state, "active"),
+                eq(terminalSessions.state, "disconnected"), eq(terminalSessions.state, "closing"))
+            )).run();
             retireLostTerminalResources(input.workspaceId);
           }
         } else {

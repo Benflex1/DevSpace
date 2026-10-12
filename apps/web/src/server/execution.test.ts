@@ -253,7 +253,7 @@ test("retires lost terminal resources when a workspace stop intent is accepted",
   expect(database.getManagedProject(project.id)?.terminals.some((terminal) => terminal.id === lost.terminalId)).toBe(false);
 });
 
-test("retires terminals that become lost during a confirmed workspace stop", async () => {
+test("retires active terminals after a confirmed workspace stop", async () => {
   const { database, project, databasePath, workspaceId } = await createReadyProject();
   const terminal = database.prepareTerminalCreate(project.id, "actor");
   database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: terminal.terminalId, state: "active" }));
@@ -262,8 +262,7 @@ test("retires terminals that become lost during a confirmed workspace stop", asy
 
   const stop = database.prepareRuntimeMutation({ projectId: project.id, workspaceId, actor: "actor", action: "stop",
     runtimePlanHash: runtime.runtimePlanHash, imageReference: "node:24-bookworm" });
-  database.applyExecutionSnapshot(terminalSnapshot({ projectId: project.id, workspaceId, terminalId: terminal.terminalId, state: "lost" }));
-  expect(database.getManagedProject(project.id)?.terminals).toEqual([expect.objectContaining({ id: terminal.terminalId, state: "lost" })]);
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([expect.objectContaining({ id: terminal.terminalId, state: "active" })]);
 
   database.finishRuntimeMutation({ operationId: stop.operationId, projectId: project.id, workspaceId,
     outcome: { state: "succeeded", workspaceObserved: "stopped", runtimeObserved: "stopped" } });
