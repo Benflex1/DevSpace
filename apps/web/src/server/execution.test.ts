@@ -124,7 +124,7 @@ test("failed preview operation snapshots preserve the last proven route", async 
   })]);
 });
 
-test("stale preview snapshot data cannot cross the active revision fence", async () => {
+test("stale preview snapshots cannot mutate or expose historical revision rows", async () => {
   const { database, project, databasePath, workspaceId } = await createReadyProject();
   const oldRevisionId = "018f0f00-0000-7000-8000-000000000002";
   const newRevisionId = "018f0f00-0000-7000-8000-000000000011";
@@ -148,9 +148,13 @@ test("stale preview snapshot data cannot cross the active revision fence", async
     projectId: project.id, workspaceId, hostname, observedState: "healthy", routePresent: true
   }));
 
-  expect(database.listPreviews(project.id, workspaceId)).toEqual([expect.objectContaining({
-    id: previewId, configRevisionId: oldRevisionId, observedState: "lost", routePresent: false, lastErrorCode: null
-  })]);
+  expect(database.listPreviews(project.id, workspaceId)).toEqual([]);
+  const historical = new BetterSqlite3(databasePath);
+  expect(historical.prepare(`select observed_state as observedState, route_present as routePresent,
+    last_error_code as lastErrorCode from previews where id = ?`).get(previewId)).toEqual({
+    observedState: "lost", routePresent: 0, lastErrorCode: null
+  });
+  historical.close();
 });
 
 test("allows multiple live terminals per workspace while keeping distinct server identities", async () => {

@@ -12,9 +12,9 @@ import {
   hashProjectOptionsV1, hashRuntimePlanV1, parseProjectOptionsV1
 } from "@devspace/project-options";
 import { DockerEngineClient, type DockerContainerInspection, type DockerNetworkInspection } from "./docker-runtime.js";
-import { ManagedWorkspaces, runGit, type GitRunner } from "./managed-workspaces.js";
+import { ManagedWorkspaces, RevisionAdoptionRecoveryRequiredError, runGit, type GitRunner } from "./managed-workspaces.js";
 import { PreviewRuntimeManager } from "./preview-runtime.js";
-import { durableJsonWriter } from "./private-state.js";
+import { durableJsonWriter, type AtomicJsonWriter } from "./private-state.js";
 import { WorkspaceRuntimeManager } from "./workspace-runtime.js";
 
 const execFileAsync = promisify(execFile);
@@ -228,10 +228,11 @@ test.skipIf(dockerSocketPath === undefined)("real managed containers provide iso
   const workspaceId = uuidv7();
   const peerWorkspaceId = uuidv7();
   const revisionId = uuidv7();
-  const operationIds = [uuidv7(), uuidv7(), uuidv7(), uuidv7(), uuidv7()];
-  const [storeOperation, workspaceOperation, startOperation, peerWorkspaceOperation, restartOperation] = operationIds;
+  const operationIds = [uuidv7(), uuidv7(), uuidv7(), uuidv7(), uuidv7(), uuidv7(), uuidv7()];
+  const [storeOperation, workspaceOperation, startOperation, peerWorkspaceOperation, restartOperation, adoptionOperation, candidateStartOperation] = operationIds;
   if (storeOperation === undefined || workspaceOperation === undefined || startOperation === undefined
-    || peerWorkspaceOperation === undefined || restartOperation === undefined) {
+    || peerWorkspaceOperation === undefined || restartOperation === undefined || adoptionOperation === undefined
+    || candidateStartOperation === undefined) {
     throw new Error("rootless-git-test-operation-id-generation-failed");
   }
   activeFixture = { root, engine, projectId, workspaceIds: [workspaceId, peerWorkspaceId], operationIds };
@@ -391,4 +392,72 @@ test.skipIf(dockerSocketPath === undefined)("real managed containers provide iso
   await expect(managed.inspectGit(projectId, workspaceId)).resolves.toMatchObject({
     branchName: "container-feature", headCommit: containerCommit, dirty: false
   });
+
+  const adoptionImage = process.env.DEVSPACE_TEST_ADOPTION_IMAGE
+    ?? (gitImage === "node:24-bookworm" ? "ubuntu:24.04" : "node:24-bookworm");
+  const candidateRevisionId = uuidv7();
+  const candidateOptions = parseProjectOptionsV1({
+    ...options,
+    developmentEnvironment: { ...options.developmentEnvironment,
+      source: { kind: "image", imageReference: adoptionImage },
+      ports: [{ name: "web", containerPort: 5180, protocol: "tcp" }] },
+    previews: [{ key: "web", displayName: "Web", target: { kind: "workspace" }, containerPort: 5180,
+      domainBaseId: "preview-main", hostnamePattern: "{project}-{shortId}" }]
+  });
+  const candidatePlan = compileRuntimePlanV1(candidateOptions);
+  const candidateRevisionHash = hashProjectOptionsV1(candidateOptions);
+  const candidateRuntimePlanHash = hashRuntimePlanV1(candidatePlan);
+  await managed.registerRevision({ projectId, revisionId: candidateRevisionId, configuration: {
+    format: "devspace.project-options/v1", hash: candidateRevisionHash, canonicalJson: canonicalizeProjectOptionsV1(candidateOptions)
+  } });
+  await managed.registerRuntimePlan({ projectId, revisionId: candidateRevisionId, revisionHash: candidateRevisionHash,
+    runtimePlan: { format: candidatePlan.format, hash: candidateRuntimePlanHash, canonicalJson: canonicalizeRuntimePlanV1(candidatePlan) } });
+
+  const dirtyFile = "options-dirty.txt";
+  await containerCommandOkay(engine, recreatedContainerId, ["sh", "-c", `printf '%s\\n' 'dirty and retained' > ${dirtyFile}`]);
+  const gitBeforeAdoption = {
+    head: await hostGit(worktreePath, ["rev-parse", "HEAD"]),
+    status: await hostGit(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]),
+    file: await readFile(path.join(worktreePath, dirtyFile), "utf8")
+  };
+  const harnessSentinel = path.join(runtime.harnessSlotHostPath(workspaceId), "adoption-state.txt");
+  await writeFile(harnessSentinel, "Agent-owned harness state survives adoption.\n", "utf8");
+  await managed.stopWorkspace(projectId, workspaceId);
+
+  const adoptionRequest = {
+    projectId, workspaceId,
+    expectedRevision: { revisionId, revisionHash },
+    candidateRevision: { revisionId: candidateRevisionId, revisionHash: candidateRevisionHash },
+    previousPreviews: []
+  };
+  const workspaceOwnerPath = path.join(roots.state, "ownership/workspaces", `${workspaceId}.json`);
+  let failAfterOwnerCommit = true;
+  const interruptedWriter: AtomicJsonWriter = { async write(file, value) {
+    await durableJsonWriter.write(file, value);
+    if (failAfterOwnerCommit && path.resolve(file) === path.resolve(workspaceOwnerPath)) {
+      failAfterOwnerCommit = false;
+      throw new Error("simulated-interruption-after-agent-owner-commit");
+    }
+  } };
+  const interruptedManaged = new ManagedWorkspaces(roots, git, interruptedWriter, runtime, preview);
+  await interruptedManaged.initialize();
+  await expect(interruptedManaged.adoptConfigurationRevision(adoptionRequest, adoptionOperation))
+    .rejects.toBeInstanceOf(RevisionAdoptionRecoveryRequiredError);
+  await expect(readFile(workspaceOwnerPath, "utf8")).resolves.toContain(candidateRevisionId);
+  await expect(runtime.inspect({ projectId, workspaceId, revisionId, revisionHash, runtimePlanHash, generation: 1 }))
+    .resolves.toMatchObject({ observedState: "absent" });
+  await expect(interruptedManaged.adoptConfigurationRevision(adoptionRequest, adoptionOperation)).resolves.toBeUndefined();
+  await expect(managed.inspectWorkspace(projectId, workspaceId)).resolves.toMatchObject({ revisionId: candidateRevisionId,
+    revisionHash: candidateRevisionHash, observedState: "stopped", runtimeStack: { observedState: "absent" } });
+
+  await managed.startWorkspace(projectId, workspaceId, candidateStartOperation);
+  const candidateExecution = await managed.executionContext(projectId, workspaceId);
+  const candidateContainer = await engine.inspectContainer(candidateExecution.ownership.developmentContainer.id);
+  expect(candidateContainer.Config.Image).toBe(adoptionImage);
+  expect(candidateContainer.HostConfig.PortBindings).toHaveProperty("5180/tcp");
+  expect(candidateContainer.HostConfig.PortBindings).not.toHaveProperty("4173/tcp");
+  expect(await hostGit(worktreePath, ["rev-parse", "HEAD"])).toBe(gitBeforeAdoption.head);
+  expect(await hostGit(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(gitBeforeAdoption.status);
+  expect(await readFile(path.join(worktreePath, dirtyFile), "utf8")).toBe(gitBeforeAdoption.file);
+  expect(await readFile(harnessSentinel, "utf8")).toBe("Agent-owned harness state survives adoption.\n");
 }, 300_000);

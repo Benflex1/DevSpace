@@ -80,6 +80,7 @@ export interface HarnessHomeStore {
   releaseLease(input: { harnessId: string; leaseId: string }): Promise<void>;
   recoverDirtySlots(): Promise<readonly RecoveredSlot[]>;
   reapStaleLeases(): Promise<void>;
+  hasActiveWorkspaceLease?(workspaceId: string): Promise<boolean>;
   persistentHomePath(harnessId: string): string;
 }
 
@@ -484,6 +485,22 @@ export function createHarnessHomeStore(stateRoot: string, options: HarnessHomeSt
         if (meta !== null && meta.dirty) continue;
         await rm(leaseDir(homePath), { recursive: true, force: true });
       }
+    },
+    async hasActiveWorkspaceLease(workspaceIdInput) {
+      const workspaceId = requireUuid(workspaceIdInput, "workspaceId");
+      if ((await readMeta(workspaceId))?.dirty === true) return true;
+      let homes: Dirent[];
+      try { homes = await readdir(homesRoot, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+      for (const entry of homes) {
+        if (!entry.isDirectory()) continue;
+        const metadata = await readLease(path.join(homesRoot, entry.name));
+        if (metadata?.workspaceId === workspaceId) return true;
+      }
+      return false;
     }
   };
 }

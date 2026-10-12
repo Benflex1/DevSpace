@@ -92,6 +92,23 @@ class FailingRuntimeInspection extends WorkspaceRuntimeManager {
   }
 }
 
+class LostRuntimeAdoptionFixture extends WorkspaceRuntimeManager {
+  retireCalls = 0;
+  override inspect(..._args: Parameters<WorkspaceRuntimeManager["inspect"]>): Promise<{
+    observedState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
+    serviceState: "absent" | "starting" | "running" | "stopping" | "stopped" | "failed" | "lost";
+    errorCode: string | null;
+    containerIdentity: string | null;
+  }> {
+    return Promise.resolve({ observedState: "lost", serviceState: "lost", errorCode: "WORKSPACE_STATE_CONFLICT", containerIdentity: null });
+  }
+  override assertRootlessRuntimeAvailable(): Promise<void> { return Promise.resolve(); }
+  override retireForRevisionAdoption(..._args: Parameters<WorkspaceRuntimeManager["retireForRevisionAdoption"]>): Promise<void> {
+    this.retireCalls += 1;
+    return Promise.resolve();
+  }
+}
+
 async function commit(source: string, content: string): Promise<string> {
   await writeFile(path.join(source, "README.md"), content, "utf8");
   await exec("/usr/bin/git", ["-C", source, "add", "README.md"]);
@@ -951,6 +968,49 @@ test("workspace ownership removal, replacement, revision mismatch, and missing r
   const worktree = h.managed.worktreePath(workspaceId);
   await rename(worktree, `${worktree}.owned-old`); await mkdir(worktree);
   await expect(h.managed.inspectWorkspace(projectId, workspaceId)).rejects.toMatchObject({ failure: { code: "WORKSPACE_STATE_CONFLICT" } });
+});
+
+test("resumed adoption reconciles a lost retained runtime before committing Agent revision ownership", async () => {
+  const h = await harness();
+  await h.register(); await h.createStore(); await h.managed.fetch(projectId); await h.managed.createWorkspace(h.workspace, workspaceOperation);
+  const oldOptions = parseProjectOptionsV1({ schemaVersion: 1,
+    developmentEnvironment: { source: { kind: "image", imageReference: "node:24-bookworm" } } });
+  const oldPlan = compileRuntimePlanV1(oldOptions);
+  await h.managed.registerRuntimePlan({ projectId, revisionId, revisionHash: hashProjectOptionsV1(oldOptions),
+    runtimePlan: { format: oldPlan.format, hash: hashRuntimePlanV1(oldPlan), canonicalJson: canonicalizeRuntimePlanV1(oldPlan) } });
+
+  const candidateRevisionId = "018f0f00-0000-7000-8000-000000000041";
+  const candidateOptions = parseProjectOptionsV1({ ...oldOptions, developmentEnvironment: {
+    ...oldOptions.developmentEnvironment, source: { kind: "image", imageReference: "ubuntu:24.04" }
+  } });
+  const candidateHash = hashProjectOptionsV1(candidateOptions);
+  const candidatePlan = compileRuntimePlanV1(candidateOptions);
+  const candidatePlanHash = hashRuntimePlanV1(candidatePlan);
+  const engine = new DockerEngineClient(path.join(h.root, "fixture-docker.sock"));
+  const policy = { cpuMillicores: 2_000, memoryBytes: 1024 * 1024 * 1024, pidLimit: 256,
+    stabilizationDurationMs: 20, stabilizationIntervalMs: 10, stabilizationTimeoutMs: 50 };
+  const runtime = new LostRuntimeAdoptionFixture(h.roots.state, engine, policy);
+  const preview = new NoopPreviewRuntime(h.roots.state, engine, runtime);
+  const managed = new ManagedWorkspaces(h.roots, h.git, durableJsonWriter, runtime, preview);
+  await managed.initialize();
+  await managed.registerRevision({ projectId, revisionId: candidateRevisionId, configuration: {
+    format: "devspace.project-options/v1", hash: candidateHash, canonicalJson: canonicalizeProjectOptionsV1(candidateOptions)
+  } });
+  await managed.registerRuntimePlan({ projectId, revisionId: candidateRevisionId, revisionHash: candidateHash,
+    runtimePlan: { format: candidatePlan.format, hash: candidatePlanHash, canonicalJson: canonicalizeRuntimePlanV1(candidatePlan) } });
+  const request = { projectId, workspaceId,
+    expectedRevision: { revisionId, revisionHash: hashProjectOptionsV1(oldOptions) },
+    candidateRevision: { revisionId: candidateRevisionId, revisionHash: candidateHash }, previousPreviews: [] };
+  const operationId = "018f0f00-0000-7000-8000-000000000042";
+
+  await expect(managed.adoptConfigurationRevision(request, operationId)).rejects.toMatchObject({
+    failure: { code: "WORKSPACE_STATE_CONFLICT" }
+  });
+  await expect(managed.adoptConfigurationRevision(request, operationId, true)).resolves.toBeUndefined();
+  expect(runtime.retireCalls).toBe(1);
+  const owner = await readJson<WorkspaceOwnershipTestRecord>(path.join(h.roots.state, "ownership/workspaces", `${workspaceId}.json`));
+  expect(owner.revision).toEqual({ revisionId: candidateRevisionId, revisionHash: candidateHash });
+  expect(owner.worktreePath).toBe(h.managed.worktreePath(workspaceId));
 });
 
 test("every managed Git command carries hook and submodule protections", async () => {

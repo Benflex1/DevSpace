@@ -12,9 +12,9 @@ type ObsoleteErrorBuilderIsPublic = "agentErrorEnvelopeSchema" extends keyof typ
 test("@devspace/contracts is consumable from its package root without prior build output", () => {
   const internalErrorBuilderIsNotPublic: AssertFalse<InternalErrorBuilderIsPublic> = false;
   const obsoleteErrorBuilderIsNotPublic: AssertFalse<ObsoleteErrorBuilderIsPublic> = false;
-  expect(packageEntry.agentApiV1Endpoints).toHaveLength(38);
+  expect(packageEntry.agentApiV1Endpoints).toHaveLength(39);
   expect(packageEntry.f10AgentApiV1Endpoints).toHaveLength(2);
-  expect(packageEntry.completeAgentApiV1Endpoints).toHaveLength(54);
+  expect(packageEntry.completeAgentApiV1Endpoints).toHaveLength(55);
   expect(packageEntry.githubAgentApiV1Endpoints).toHaveLength(8);
   expect(packageEntry.f11AiAgentApiV1Endpoints).toHaveLength(10);
   expect(packageEntry.executableAgentErrorCodes).toHaveLength(51);

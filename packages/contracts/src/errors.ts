@@ -84,11 +84,11 @@ export const executableAgentErrorRegistry = Object.freeze({
     desiredState: workspaceDesiredStateSchema,
     observedState: workspaceObservedStateSchema,
     action: z.enum(["create", "start", "stop", "rebuild", "archive", "remove", "run-task",
-      "create-terminal", "activate-preview", "start-ai-session"])
+      "create-terminal", "activate-preview", "start-ai-session", "revision-adopt"])
   }) },
   RESOURCE_STATE_CONFLICT: { statuses: [409], retryable: false, detailsSchema: z.strictObject({
     resource: resourceReferenceSchema,
-    action: z.enum(["create", "start", "stop", "close", "attach", "activate", "deactivate", "interrupt", "resume"])
+    action: z.enum(["create", "start", "stop", "close", "attach", "activate", "deactivate", "interrupt", "resume", "adopt-revision"])
   }) },
   DIRTY_WORKSPACE_REQUIRES_ACTION: { statuses: [409], retryable: false, detailsSchema: z.strictObject({
     workspaceId: uuidV7Schema, requestedAction: z.enum(["archive", "remove"])

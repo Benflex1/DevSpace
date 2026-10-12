@@ -58,8 +58,9 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
   const database = getProjectDatabase(config.databasePath);
   let project = database.getManagedProject(projectId);
   if (project === undefined) return null;
+  const initialPendingApply = database.getPendingProjectOptionsApply(projectId);
   let previewMaterializationError: string | null = null;
-  if (project.state === "ready" && project.primaryWorkspace !== null && project.activeRevision !== null) {
+  if (initialPendingApply === null && project.state === "ready" && project.primaryWorkspace !== null && project.activeRevision !== null) {
     try {
       database.materializePreviews({ projectId: project.id, workspaceId: project.primaryWorkspace.id,
         revisionId: project.activeRevision.id, previewBaseRegistry: config.previewBaseRegistry });
@@ -90,7 +91,7 @@ export async function loadProjectWorkspaceData(projectId: string): Promise<Proje
       runtimeAvailable: agentState.runtimeStatus?.rootlessRuntime === "available"
         && agentState.runtimeStatus.operationJournal === "available"
     });
-    if (live !== null) {
+    if (live !== null && database.getPendingProjectOptionsApply(projectId) === null) {
       const runtimeState = live.workspace.runtimeStack.observedState;
       const mode = runtimeState === "running" && live.workspace.observedState === "running" ? "running"
         : live.workspace.observedState === "lost" || runtimeState === "lost" ? "lost" : "observe";

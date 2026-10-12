@@ -599,6 +599,106 @@ export class WorkspaceRuntimeManager {
     catch { return "unavailable"; }
   }
 
+  validatePlanPolicy(planInput: unknown): void {
+    const plan = parseRuntimePlanV1(planInput);
+    try { effectiveRuntimeResources(plan, this.policy); }
+    catch { throw new WorkspaceRuntimeError("RUNTIME_POLICY_VIOLATION", "Requested resources exceed administrator runtime policy."); }
+  }
+
+  async assertRootlessRuntimeAvailable(): Promise<void> {
+    try { await this.engine.assertRootlessAvailable(); }
+    catch { throw new WorkspaceRuntimeError("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless Docker runtime is unavailable."); }
+  }
+
+  /**
+   * Removes only resources represented by exact Agent ownership evidence. Both
+   * ownership records are retained until Docker confirms the recorded IDs and
+   * their canonical names are absent. The callback releases dependent leases
+   * after container absence is established and before ownership is cleared.
+   */
+  async retireForRevisionAdoption(association: RuntimeAssociation,
+    afterContainerAbsent: (ownership: RuntimeOwnership) => Promise<void>,
+    onIrreversibleEffect: () => void): Promise<void> {
+    await this.assertRootlessRuntimeAvailable();
+
+    let ownership = await this.load(association.workspaceId);
+    const hadCommittedOwnership = ownership !== null;
+    const creation = await this.loadCreation(association.workspaceId);
+    if (ownership === null && creation === null) {
+      const names = resourceNames(association.workspaceId, association.generation);
+      if (await this.inspectOptionalContainer(names.container) !== null || await this.inspectOptionalNetwork(names.network) !== null) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "A runtime resource exists without exact Agent ownership evidence.");
+      }
+      return;
+    }
+    if (ownership !== null && !associationMatches(ownership, association)) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime belongs to another configuration revision.");
+    }
+    if (creation !== null) {
+      if (creation.projectId !== association.projectId || creation.workspaceId !== association.workspaceId
+        || creation.revisionId !== association.revisionId || creation.revisionHash !== association.revisionHash
+        || creation.runtimePlanHash !== association.runtimePlanHash || creation.generation !== association.generation
+        || creation.containerId === null || creation.networkId === null) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The retained runtime creation evidence is incomplete or belongs to another revision.");
+      }
+      const fromCreation = this.ownershipFromCreation(creation);
+      if (ownership !== null && (ownership.network.id !== fromCreation.network.id
+        || ownership.developmentContainer.id !== fromCreation.developmentContainer.id)) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "Runtime ownership records disagree about exact Docker resource IDs.");
+      }
+      ownership ??= fromCreation;
+    }
+    if (ownership === null) throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact Agent-owned runtime could not be established.");
+
+    const [container, network] = await Promise.all([
+      this.inspectOptionalContainer(ownership.developmentContainer.id),
+      this.inspectOptionalNetwork(ownership.network.id)
+    ]);
+    if (container !== null) {
+      this.validateContainer(container, ownership, hadCommittedOwnership ? "materialized" : "operation-owned-pre-activation");
+      if (container.State.Running) {
+        throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The development container is still running.");
+      }
+    } else if (await this.inspectOptionalContainer(ownership.developmentContainer.name) !== null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The development container name is occupied by a resource with a different ID.");
+    }
+    if (network !== null) this.validateNetwork(network, ownership.network);
+    else if (await this.inspectOptionalNetwork(ownership.network.name) !== null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The workspace network name is occupied by a resource with a different ID.");
+    }
+
+    if (container !== null) {
+      onIrreversibleEffect();
+      await this.engine.removeContainer(ownership.developmentContainer.id);
+    }
+    if (await this.inspectOptionalContainer(ownership.developmentContainer.id) !== null
+      || await this.inspectOptionalContainer(ownership.developmentContainer.name) !== null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact development container has not been confirmed absent.");
+    }
+    onIrreversibleEffect();
+    await afterContainerAbsent(ownership);
+
+    if (network !== null) {
+      onIrreversibleEffect();
+      await this.engine.removeNetwork(ownership.network.id);
+    }
+    if (await this.inspectOptionalNetwork(ownership.network.id) !== null
+      || await this.inspectOptionalNetwork(ownership.network.name) !== null) {
+      throw new WorkspaceRuntimeError("WORKSPACE_STATE_CONFLICT", "The exact workspace network has not been confirmed absent.");
+    }
+
+    // Keep the primary ownership record until the creation journal is gone so
+    // a restart can always derive and recheck the exact resource IDs.
+    onIrreversibleEffect();
+    await this.unlinkIfPresent(this.creationPath(association.workspaceId));
+    await this.unlinkIfPresent(this.ownershipPath(association.workspaceId));
+  }
+
+  private async unlinkIfPresent(file: string): Promise<void> {
+    try { await unlink(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+
   async exactRunningOwnership(expected: RuntimeAssociation): Promise<RuntimeOwnership> {
     const record = await this.load(expected.workspaceId);
     if (record === null || !associationMatches(record, expected)) {

@@ -14,6 +14,7 @@ import {
 } from "./docker-runtime.js";
 import { PreviewRuntimeManager, type PreviewGatewayAdapter, type PreviewGatewayProbe, type PreviewGatewayProbeRequest,
   type PreviewGatewayProbeResult, type PreviewGatewayRoute } from "./preview-runtime.js";
+import type { PreviewGatewayRouteIdentity } from "@devspace/gateway-caddy";
 import { WorkspaceRuntimeManager, type RuntimeAssociation } from "./workspace-runtime.js";
 
 const ids = {
@@ -127,7 +128,10 @@ class Probe implements PreviewGatewayProbe {
 
 class Gateway implements PreviewGatewayAdapter {
   readonly routes: PreviewGatewayRoute[] = [];
+  readonly foreignHostnames = new Set<string>();
   failEnsure = false;
+  failRemoveAfterEffect = false;
+  removeCalls = 0;
   constructor(private readonly results: PreviewGatewayProbeResult[] = [{ kind: "response", statusCode: 200 }]) {}
   probe(_input: PreviewGatewayProbeRequest): Promise<PreviewGatewayProbeResult> {
     return Promise.resolve(this.results.shift() ?? { kind: "response", statusCode: 200 });
@@ -138,13 +142,23 @@ class Gateway implements PreviewGatewayAdapter {
     return Promise.resolve();
   }
   replaceRoute(route: PreviewGatewayRoute): Promise<void> { return this.ensureRoute(route); }
-  removeRoute(route: PreviewGatewayRoute): Promise<void> {
-    const retained = this.routes.filter((candidate) => candidate.hostname !== route.hostname);
+  removeRoute(route: PreviewGatewayRoute | PreviewGatewayRouteIdentity): Promise<void> {
+    this.removeCalls += 1;
+    const retained = this.routes.filter((candidate) => candidate.hostname !== route.hostname
+      && !("previewId" in route && candidate.previewId === route.previewId && candidate.revisionId === route.revisionId
+        && candidate.projectId === route.projectId && candidate.workspaceId === route.workspaceId));
     this.routes.splice(0, this.routes.length, ...retained);
+    if (this.failRemoveAfterEffect) {
+      this.failRemoveAfterEffect = false;
+      return Promise.reject(new Error("simulated-interruption-after-route-removal"));
+    }
     return Promise.resolve();
   }
-  inspectRoute(route: PreviewGatewayRoute): Promise<{ present: boolean; status: "present" | "absent"; route?: PreviewGatewayRoute }> {
-    const current = this.routes.find((candidate) => candidate.hostname === route.hostname);
+  inspectRoute(route: PreviewGatewayRoute | PreviewGatewayRouteIdentity): Promise<{ present: boolean; status: "present" | "absent" | "stale" | "foreign"; route?: PreviewGatewayRoute }> {
+    if (this.foreignHostnames.has(route.hostname)) return Promise.resolve({ present: false, status: "foreign" });
+    const current = this.routes.find((candidate) => candidate.hostname === route.hostname
+      || ("previewId" in route && candidate.previewId === route.previewId && candidate.revisionId === route.revisionId
+        && candidate.projectId === route.projectId && candidate.workspaceId === route.workspaceId));
     return Promise.resolve(current === undefined ? { present: false, status: "absent" } : { present: true, status: "present", route: current });
   }
   reconcileRoutes(routes: readonly PreviewGatewayRoute[]): Promise<void> {
@@ -476,5 +490,82 @@ describe("Agent preview runtime policy", () => {
     const fixtureValue = await fixture(); cleanup.push(fixtureValue.root);
     await expect(fixtureValue.manager.activate({ ...activation, revisionId: "018f1f34-7000-7000-8000-000000000006" }, association, options, ids.operationId))
       .rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+  });
+
+  test("adoption retries identity-scoped preview removal after an uncertain gateway interruption", async () => {
+    const gateway = new Gateway();
+    const fixtureValue = await fixture(undefined, gateway); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    expect(gateway.routes).toHaveLength(1);
+    gateway.failRemoveAfterEffect = true;
+    const adoptionOperationId = "018f1f34-7000-7000-8000-000000000011";
+    const identity = { projectId: ids.projectId, workspaceId: ids.workspaceId, revisionId: ids.revisionId,
+      previewId: ids.previewId, previewKey: "web", hostname: activation.hostname };
+    const effects: string[] = [];
+    await expect(fixtureValue.manager.deactivateForAdoption(identity, adoptionOperationId, () => effects.push("route-removal")))
+      .rejects.toMatchObject({ code: "GATEWAY_UPDATE_FAILED" });
+    expect(gateway.routes).toEqual([]);
+    await expect(readFile(path.join(fixtureValue.state, "previews", `${ids.previewId}.json`), "utf8"))
+      .resolves.toContain('"desiredState":"active"');
+
+    const restarted = new PreviewRuntimeManager(fixtureValue.state, fixtureValue.engine, fixtureValue.runtime, approvedRegistry,
+      undefined, undefined, uuidv7, fixtureValue.clock, { firstPort: 40_000, lastPort: 40_001 }, gateway,
+      () => Promise.resolve({ projectSlug: "project", workspaceSlug: "workspace" }));
+    await restarted.initialize();
+    await restarted.deactivateForAdoption(identity, adoptionOperationId, () => effects.push("route-removal"));
+    expect(gateway.routes).toEqual([]);
+    expect(gateway.removeCalls).toBe(1);
+    expect(effects).toEqual(["route-removal", "route-removal"]);
+    const state = JSON.parse(await readFile(path.join(fixtureValue.state, "previews", `${ids.previewId}.json`), "utf8")) as {
+      desiredState: string; routePresent: boolean; operationId: string;
+    };
+    expect(state).toMatchObject({ desiredState: "inactive", routePresent: false, operationId: adoptionOperationId });
+  });
+
+  test("adoption removes an orphan route by revision identity when Agent preview state is missing", async () => {
+    const gateway = new Gateway();
+    const fixtureValue = await fixture(undefined, gateway); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    const statePath = path.join(fixtureValue.state, "previews", `${ids.previewId}.json`);
+    await rm(statePath);
+    const identity = { previewId: ids.previewId, previewKey: "web", hostname: activation.hostname };
+    const expected = { projectId: ids.projectId, workspaceId: ids.workspaceId, revisionId: ids.revisionId,
+      projectSlug: "project", workspaceSlug: "workspace", options, previews: [identity] };
+    await fixtureValue.manager.validateAdoptionPreviews(expected);
+    const effects: string[] = [];
+    await fixtureValue.manager.deactivateForAdoption({ projectId: ids.projectId, workspaceId: ids.workspaceId,
+      revisionId: ids.revisionId, ...identity }, ids.operationId, () => effects.push("route-removal"));
+    expect(gateway.routes).toEqual([]);
+    expect(gateway.removeCalls).toBe(1);
+    expect(effects).toEqual(["route-removal"]);
+    await expect(gateway.inspectRoute({ projectId: ids.projectId, workspaceId: ids.workspaceId,
+      previewId: ids.previewId, revisionId: ids.revisionId, generation: 1, hostname: activation.hostname }))
+      .resolves.toMatchObject({ status: "absent", present: false });
+  });
+
+  test("adoption rejects preview rows that do not belong to the expected revision before cleanup", async () => {
+    const gateway = new Gateway();
+    const fixtureValue = await fixture(undefined, gateway); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    const effects: string[] = [];
+    await expect(fixtureValue.manager.validateAdoptionPreviews({ projectId: ids.projectId, workspaceId: ids.workspaceId,
+      revisionId: ids.revisionId, projectSlug: "project", workspaceSlug: "workspace", options,
+      previews: [{ previewId: ids.previewId, previewKey: "web", hostname: "other.preview.example.com" }] }))
+      .rejects.toMatchObject({ code: "PREVIEW_DOMAIN_NOT_APPROVED" });
+    expect(gateway.routes).toHaveLength(1);
+    expect(effects).toEqual([]);
+  });
+
+  test("adoption refuses a foreign route before changing preview or runtime ownership", async () => {
+    const gateway = new Gateway();
+    const fixtureValue = await fixture(undefined, gateway); cleanup.push(fixtureValue.root);
+    await fixtureValue.manager.activate(activation, association, options, ids.operationId);
+    gateway.foreignHostnames.add(activation.hostname);
+    await expect(fixtureValue.manager.validateAdoptionPreviews({ projectId: ids.projectId, workspaceId: ids.workspaceId,
+      revisionId: ids.revisionId, projectSlug: "project", workspaceSlug: "workspace", options,
+      previews: [{ previewId: ids.previewId, previewKey: "web", hostname: activation.hostname }] }))
+      .rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+    expect(gateway.removeCalls).toBe(0);
+    expect(gateway.routes).toHaveLength(1);
   });
 });

@@ -3,7 +3,7 @@ import { agentApiV1EndpointByOperation, type AgentExecutionFailure, type AgentRe
 import { performance } from "node:perf_hooks";
 import { v7 as uuidv7 } from "uuid";
 import { AgentEventLog } from "./event-log.js";
-import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
+import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces, RevisionAdoptionRecoveryRequiredError } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
 import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -11,7 +11,7 @@ import { classifyFailureCode, createLogger, type StructuredLogger } from "@devsp
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
   const request = record.request as { projectId?: string; workspaceId?: string; revisionId?: string; previewId?: string };
   if (typeof request.projectId !== "string") return null;
-  if (["workspace.create", "workspace.start", "workspace.stop", "task.start", "process.stop", "terminal.create", "terminal.close", "project.push",
+  if (["workspace.create", "workspace.start", "workspace.stop", "workspace.revision.adopt", "task.start", "process.stop", "terminal.create", "terminal.close", "project.push",
     "project.git.stage", "project.git.unstage", "project.git.commit",
     "preview.activate", "preview.deactivate"].includes(record.operationName)
     && typeof request.workspaceId === "string") {
@@ -49,7 +49,8 @@ export class OperationExecutor {
       closeTerminal: () => Promise.reject(new Error("execution-manager-unavailable")),
       stopWorkspace: () => Promise.resolve()
     },
-    private readonly logger: StructuredLogger = createLogger({ component: "agent", subsystem: "operations" })
+    private readonly logger: StructuredLogger = createLogger({ component: "agent", subsystem: "operations" }),
+    private readonly assertHarnessWorkspaceQuiescent: (workspaceId: string) => Promise<void> = () => Promise.resolve()
   ) {}
 
   get isHealthy(): boolean { return this.observationHealthy; }
@@ -137,6 +138,7 @@ export class OperationExecutor {
   private async execute(operationId: string): Promise<void> {
     let record = this.journal.get(operationId);
     if (record === undefined || record.state === "succeeded" || record.state === "failed") return;
+    const recoveringAdoption = record.operationName === "workspace.revision.adopt" && record.state === "running";
     const projectId = (record.request as { projectId: string }).projectId;
     const resource = resourceFor(record);
     const request = record.request as { projectId?: unknown; workspaceId?: unknown; previewId?: unknown };
@@ -150,6 +152,7 @@ export class OperationExecutor {
     let taskStartCompleted = false;
     let fetchMutationCompleted = false;
     let gitMutationCompleted = false;
+    let revisionAdoptionCompleted = false;
     let phase = "operation-setup";
     const operationStartedAt = performance.now();
     try {
@@ -222,6 +225,28 @@ export class OperationExecutor {
           await this.execution.stopWorkspace(request.projectId, request.workspaceId);
           await this.managed.stopWorkspace(request.projectId, request.workspaceId);
           this.events.workspaceRuntimeConverged(operationId, request.projectId, request.workspaceId, previousRuntime, "stopped");
+          break;
+        }
+        case "workspace.revision.adopt": {
+          const request = record.request as Parameters<ManagedWorkspaces["adoptConfigurationRevision"]>[0];
+          const activeProcess = this.execution.snapshotResources().find((item) => item.type === "process"
+            && item.observation.workspaceId === request.workspaceId
+            && !["exited", "failed", "killed"].includes(item.observation.observedState));
+          if (activeProcess?.type === "process") {
+            throw new AgentExecutionError({ code: "RESOURCE_STATE_CONFLICT",
+              message: "A workspace process must be stopped before applying configuration.", retryable: false,
+              details: { resource: { type: "process", id: activeProcess.observation.processId }, action: "adopt-revision" }
+            });
+          }
+          try { await this.assertHarnessWorkspaceQuiescent(request.workspaceId); }
+          catch {
+            throw new AgentExecutionError({ code: "WORKSPACE_STATE_CONFLICT",
+              message: "An AI execution or private-home lease is still active for this workspace.", retryable: false,
+              details: { workspaceId: request.workspaceId, desiredState: "stopped", observedState: "running", action: "revision-adopt" }
+            });
+          }
+          await this.managed.adoptConfigurationRevision(request, operationId, recoveringAdoption);
+          revisionAdoptionCompleted = true;
           break;
         }
         case "preview.activate":
@@ -300,6 +325,13 @@ export class OperationExecutor {
       }
       if (record.operationName === "project.fetch" && (fetchMutationCompleted || error instanceof FetchMutationRecoveryRequiredError)) {
         this.logger.warn("agent.operation.fetch_recovery_required", "Git Fetch completed; operation remains recoverable after post-success failure.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
+        return;
+      }
+      if (record.operationName === "workspace.revision.adopt"
+        && (recoveringAdoption || revisionAdoptionCompleted || error instanceof RevisionAdoptionRecoveryRequiredError)) {
+        this.logger.warn("agent.operation.revision_adoption_recovery_required", "Configuration adoption remains resumable after an external side effect or completed adoption.", {
           operationId, operationName: record.operationName, ...resourceFields
         });
         return;

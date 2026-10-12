@@ -6,7 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { gitInspectionDataSchema } from "@devspace/contracts";
 import { createLogger } from "@devspace/diagnostics";
 import { AgentEventLog } from "./event-log.js";
-import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces } from "./managed-workspaces.js";
+import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces, RevisionAdoptionRecoveryRequiredError } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationJournal } from "./operation-journal.js";
 import { TaskStartRecoveryRequiredError } from "./execution-manager.js";
@@ -61,6 +61,52 @@ test("accepted incomplete work resumes after restart and duplicate scheduling ex
   for (let index = 0; index < 10; index += 1) executor.schedule(record);
   await waitFor(restarted, [operation1]);
   expect(calls).toBe(1);
+});
+
+test("revision adoption remains resumable after partial effects and succeeds when replayed after Agent restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-revision-adoption-restart-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const operationId = "018f0f00-0000-7000-8000-000000000012";
+  const request = {
+    projectId: project, workspaceId: targetWorkspace,
+    expectedRevision: { revisionId: "018f0f00-0000-7000-8000-000000000013", revisionHash: `sha256-jcs-v1:${"a".repeat(64)}` },
+    candidateRevision: { revisionId: "018f0f00-0000-7000-8000-000000000014", revisionHash: `sha256-jcs-v1:${"b".repeat(64)}` },
+    previousPreviews: []
+  };
+  const firstJournal = new OperationJournal(journalRoot, () => new Date(timestamp)); await firstJournal.initialize();
+  const accepted = await firstJournal.accept(operationId, "workspace.revision.adopt", request);
+  let attempts = 0;
+  const recoveryFlags: boolean[] = [];
+  const partialManaged = {
+    awaitProjectExecutionFence: async () => undefined,
+    adoptConfigurationRevision: async (_data: unknown, _replayOperationId: string, recovering: boolean) => {
+      attempts += 1;
+      recoveryFlags.push(recovering);
+      throw new RevisionAdoptionRecoveryRequiredError("A stopped container was removed; adoption will resume from exact ownership records.");
+    },
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const firstExecutor = new OperationExecutor(firstJournal, partialManaged, new AgentEventLog(boot, () => new Date(timestamp)));
+  firstExecutor.schedule(accepted); await firstExecutor.drain();
+  expect(firstJournal.get(operationId)).toMatchObject({ state: "running", failure: null });
+
+  const restartedJournal = new OperationJournal(journalRoot, () => new Date(timestamp)); await restartedJournal.initialize();
+  const completedRequest: unknown[] = [];
+  const resumedManaged = {
+    awaitProjectExecutionFence: async () => undefined,
+    adoptConfigurationRevision: async (data: unknown, replayOperationId: string, recovering: boolean) => {
+      recoveryFlags.push(recovering);
+      completedRequest.push({ data, replayOperationId });
+    },
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const restartedExecutor = new OperationExecutor(restartedJournal, resumedManaged, new AgentEventLog(boot, () => new Date(timestamp)));
+  restartedExecutor.resumeAccepted(); await restartedExecutor.drain();
+
+  expect(attempts).toBe(1);
+  expect(completedRequest).toEqual([{ data: request, replayOperationId: operationId }]);
+  expect(recoveryFlags).toEqual([false, true]);
+  expect(restartedJournal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
 });
 
 test("dispatches project.push through ManagedWorkspaces exactly once", async () => {

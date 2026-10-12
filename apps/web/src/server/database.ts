@@ -30,7 +30,9 @@ import {
   type AgentSnapshotData,
   type NativeHarnessLifecycleState,
   type CanonicalAiEvent,
-  type WorkspaceInspectionData
+  type WorkspaceInspectionData,
+  revisionIdentitySchema,
+  type RevisionIdentity
 } from "@devspace/contracts";
 import { mkdirSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
@@ -40,7 +42,7 @@ import {
   previews, workspaceServices, workspaces, aiSessions, aiTurns, aiEvents,
   githubConnectionAttempts, githubConnections, githubConnectionSetupAttempts, projectGithubSources,
   harnessDefinitions,
-  type Operation, type Preview, type Project, type ProjectConfigRevision, type ProjectGithubSource
+  type NewPreview, type Operation, type Preview, type Project, type ProjectConfigRevision, type ProjectGithubSource
 } from "@devspace/database";
 import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -244,6 +246,31 @@ export function openProjectDatabase(path: string, options: {
   const db = drizzle({ client });
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? uuidv7;
+  const pendingConfigurationApply = (projectId: string, workspaceId?: string) => {
+    const clauses = [eq(operations.projectId, projectId), eq(operations.operationName, "configuration.apply"),
+      or(eq(operations.state, "accepted"), eq(operations.state, "running"))];
+    if (workspaceId !== undefined) clauses.push(eq(operations.workspaceId, workspaceId));
+    return db.select().from(operations).where(and(...clauses))
+      .orderBy(desc(operations.createdAt), desc(operations.operationId)).get();
+  };
+  const assertNoPendingConfigurationApply = (projectId: string, workspaceId?: string): void => {
+    if (pendingConfigurationApply(projectId, workspaceId) !== undefined) {
+      throw new ProjectSetupConflictError("Project Options Apply is in progress for this workspace.");
+    }
+  };
+  const projectOptionsDraftBaseRevision = (revisionId: string): string | null => {
+    const audit = db.select({ metadataJson: auditEvents.metadataJson }).from(auditEvents).where(and(
+      eq(auditEvents.eventType, "project.options.draft_saved"), eq(auditEvents.resourceType, "configuration-revision"),
+      eq(auditEvents.resourceId, revisionId)
+    )).orderBy(desc(auditEvents.sequence)).get();
+    if (audit === undefined) return null;
+    try {
+      const metadata: unknown = JSON.parse(audit.metadataJson);
+      if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+      const expectedRevisionId = (metadata as Record<string, unknown>)["expectedRevisionId"];
+      return typeof expectedRevisionId === "string" ? expectedRevisionId : null;
+    } catch { return null; }
+  };
   const terminalizeInterruptedProjectPushes = (): void => {
     const timestamp = now().toISOString();
     const active = db.select().from(operations).where(and(
@@ -318,8 +345,9 @@ export function openProjectDatabase(path: string, options: {
         db.update(terminalSessions).set({ title }).where(eq(terminalSessions.id, terminal.id)).run();
       }
     }
-    const previewRows = workspace === undefined ? [] : db.select().from(previews)
-      .where(eq(previews.workspaceId, workspace.id)).orderBy(previews.previewKey, previews.id).all();
+    const previewRows = workspace === undefined || revision === undefined ? [] : db.select().from(previews)
+      .where(and(eq(previews.workspaceId, workspace.id), eq(previews.configRevisionId, revision.id)))
+      .orderBy(previews.previewKey, previews.id).all();
     return {
       ...toView(project),
       activeRevision: revision === undefined ? null : { id: revision.id, number: revision.revisionNumber, hash: revision.configurationHash },
@@ -342,6 +370,7 @@ export function openProjectDatabase(path: string, options: {
     };
   };
   const assertAiWorkspace = (projectId: string, workspaceId: string) => {
+    assertNoPendingConfigurationApply(projectId, workspaceId);
     const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
     if (project === undefined || project.state !== "ready" || project.primaryWorkspaceId === null || project.activeConfigRevisionId === null) {
       throw new ProjectSetupConflictError("The AI session is no longer available.");
@@ -925,6 +954,54 @@ export function openProjectDatabase(path: string, options: {
       const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
       return project === undefined ? undefined : readManagedProject(project);
     },
+    getProjectOptionsState(projectId: string) {
+      const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
+      if (project === undefined || project.state !== "ready" || project.primaryWorkspaceId === null
+        || project.activeConfigRevisionId === null) throw new ProjectSetupConflictError("A ready primary workspace is required.");
+      const workspace = db.select().from(workspaces).where(and(eq(workspaces.id, project.primaryWorkspaceId),
+        eq(workspaces.projectId, project.id))).get();
+      const activeRevision = db.select().from(projectConfigRevisions).where(and(
+        eq(projectConfigRevisions.id, project.activeConfigRevisionId), eq(projectConfigRevisions.projectId, project.id)
+      )).get();
+      if (workspace === undefined || workspace.kind !== "primary" || activeRevision === undefined) {
+        throw new ProjectSetupConflictError("The primary workspace configuration is inconsistent.");
+      }
+      const drafts = db.select().from(projectConfigRevisions).where(and(
+        eq(projectConfigRevisions.projectId, projectId), eq(projectConfigRevisions.state, "draft")
+      )).orderBy(desc(projectConfigRevisions.revisionNumber)).all()
+        .filter((draft) => projectOptionsDraftBaseRevision(draft.id) === activeRevision.id);
+      return { project, workspace, activeRevision, drafts, pendingApply: pendingConfigurationApply(projectId, workspace.id) ?? null };
+    },
+    getPendingProjectOptionsApply(projectId: string) {
+      const operation = pendingConfigurationApply(projectId);
+      if (operation === undefined) return null;
+      let progress: unknown;
+      try { progress = JSON.parse(operation.progressJson ?? "null"); }
+      catch { throw new ProjectSetupConflictError("The pending Project Options Apply record is malformed."); }
+      if (progress === null || typeof progress !== "object" || Array.isArray(progress)) {
+        throw new ProjectSetupConflictError("The pending Project Options Apply record is incomplete.");
+      }
+      const fields = progress as Record<string, unknown>;
+      const expectedRevision = revisionIdentitySchema.safeParse(fields["expectedRevision"]);
+      const candidateRevision = revisionIdentitySchema.safeParse(fields["candidateRevision"]);
+      const rawPreviewIds = fields["previewIds"];
+      if (!expectedRevision.success || !candidateRevision.success || rawPreviewIds === null
+        || typeof rawPreviewIds !== "object" || Array.isArray(rawPreviewIds)) {
+        throw new ProjectSetupConflictError("The pending Project Options Apply record is incomplete.");
+      }
+      const previewIds: Record<string, string> = {};
+      for (const [key, value] of Object.entries(rawPreviewIds)) {
+        if (typeof value !== "string") throw new ProjectSetupConflictError("The pending Project Options Apply preview identity is invalid.");
+        previewIds[key] = value;
+      }
+      const phase = fields["phase"] === "adoption-submitted" ? "adoption-submitted" as const : "reserved" as const;
+      return { operation, expectedRevision: expectedRevision.data, candidateRevision: candidateRevision.data, previewIds, phase };
+    },
+    getCompletedProjectOptionsApply(projectId: string, candidateRevisionId: string): Operation | null {
+      return db.select().from(operations).where(and(eq(operations.projectId, projectId),
+        eq(operations.operationName, "configuration.apply"), eq(operations.resourceId, candidateRevisionId),
+        eq(operations.state, "succeeded"))).orderBy(desc(operations.finishedAt), desc(operations.operationId)).get() ?? null;
+    },
     getProjectGithubSource(projectId: string): ProjectGithubSourceView | null {
       const source = db.select().from(projectGithubSources).where(eq(projectGithubSources.projectId, projectId)).get();
       return source === undefined ? null : toGithubSourceView(source);
@@ -984,11 +1061,15 @@ export function openProjectDatabase(path: string, options: {
       if (owned === undefined || owned.connection.status === "failed") throw new ProjectSetupConflictError("The GitHub connection is not owned by this actor.");
     },
     listPreviews(projectId: string, workspaceId: string): PreviewView[] {
-      const workspace = db.select({ id: workspaces.id }).from(workspaces).where(and(
+      const workspace = db.select({ id: workspaces.id, configRevisionId: workspaces.configRevisionId }).from(workspaces).where(and(
         eq(workspaces.id, workspaceId), eq(workspaces.projectId, projectId)
       )).get();
       if (workspace === undefined) return [];
-      return db.select().from(previews).where(eq(previews.workspaceId, workspace.id))
+      const project = db.select({ activeConfigRevisionId: projects.activeConfigRevisionId }).from(projects)
+        .where(and(eq(projects.id, projectId), eq(projects.primaryWorkspaceId, workspaceId))).get();
+      const revisionId = project?.activeConfigRevisionId;
+      if (revisionId === null || revisionId === undefined || revisionId !== workspace.configRevisionId) return [];
+      return db.select().from(previews).where(and(eq(previews.workspaceId, workspace.id), eq(previews.configRevisionId, revisionId)))
         .orderBy(previews.previewKey, previews.id).all().map(toPreviewView);
     },
     preparePreviewMutation(input: {
@@ -1050,7 +1131,8 @@ export function openProjectDatabase(path: string, options: {
           throw new ProjectSetupConflictError("Preview materialization has a stale workspace or configuration revision.");
         }
         const options = parseProjectOptionsV1(JSON.parse(context.revision.configurationJson));
-        const existing = db.select().from(previews).where(eq(previews.workspaceId, input.workspaceId)).all();
+        const existing = db.select().from(previews).where(and(eq(previews.workspaceId, input.workspaceId),
+          eq(previews.configRevisionId, input.revisionId))).all();
         const existingByKey = new Map(existing.map((preview) => [preview.previewKey, preview]));
         const ids: Record<string, string> = {};
         for (const preview of options.previews) ids[preview.key] = existingByKey.get(preview.key)?.id ?? createId();
@@ -1082,7 +1164,8 @@ export function openProjectDatabase(path: string, options: {
           }
           db.insert(previews).values(row).run();
         }
-        return db.select().from(previews).where(eq(previews.workspaceId, input.workspaceId))
+        return db.select().from(previews).where(and(eq(previews.workspaceId, input.workspaceId),
+          eq(previews.configRevisionId, input.revisionId)))
           .orderBy(previews.previewKey, previews.id).all().map(toPreviewView);
       }).immediate();
     },
@@ -1286,6 +1369,260 @@ export function openProjectDatabase(path: string, options: {
         return operation;
       }).immediate();
     },
+    getOrCreateRevisionOperation(input: {
+      projectId: string; actor: string;
+      operationName: "configuration-revision.register" | "configuration-runtime-plan.register";
+      revisionId: string;
+    }): Operation {
+      return client.transaction(() => {
+        const existing = db.select().from(operations).where(and(
+          eq(operations.projectId, input.projectId), eq(operations.operationName, input.operationName),
+          eq(operations.resourceType, "configuration-revision"), eq(operations.resourceId, input.revisionId)
+        )).orderBy(desc(operations.createdAt), desc(operations.operationId)).get();
+        if (existing !== undefined && existing.state !== "failed") return existing;
+        const timestamp = now().toISOString();
+        const operation: Operation = {
+          operationId: createId(), projectId: input.projectId, workspaceId: null, actor: input.actor,
+          operationName: input.operationName, resourceType: "configuration-revision", resourceId: input.revisionId,
+          state: "accepted", progressJson: null, errorCode: null, errorMessage: null,
+          createdAt: timestamp, startedAt: null, finishedAt: null
+        };
+        db.insert(operations).values(operation).run();
+        return operation;
+      }).immediate();
+    },
+    createProjectOptionsDraft(input: {
+      projectId: string; workspaceId: string; expectedRevision: RevisionIdentity;
+      revisionId: string; configurationJson: string; configurationHash: string;
+      compiledRuntimePlanJson: string; runtimePlanHash: string; actor: string;
+    }): ProjectConfigRevision {
+      return client.transaction(() => {
+        const project = db.select().from(projects).where(eq(projects.id, input.projectId)).get();
+        const workspace = db.select().from(workspaces).where(and(eq(workspaces.id, input.workspaceId),
+          eq(workspaces.projectId, input.projectId))).get();
+        const active = project?.activeConfigRevisionId === null || project?.activeConfigRevisionId === undefined ? undefined
+          : db.select().from(projectConfigRevisions).where(and(eq(projectConfigRevisions.id, project.activeConfigRevisionId),
+            eq(projectConfigRevisions.projectId, input.projectId))).get();
+        if (project?.state !== "ready" || project.primaryWorkspaceId !== input.workspaceId || workspace?.kind !== "primary"
+          || active === undefined || workspace.configRevisionId !== active.id
+          || active.id !== input.expectedRevision.revisionId || active.configurationHash !== input.expectedRevision.revisionHash) {
+          throw new ProjectSetupConflictError("The active Project Options revision changed. Reload the current settings before saving.");
+        }
+        assertNoPendingConfigurationApply(input.projectId, input.workspaceId);
+        const sameDrafts = db.select().from(projectConfigRevisions).where(and(eq(projectConfigRevisions.projectId, input.projectId),
+          eq(projectConfigRevisions.state, "draft"), eq(projectConfigRevisions.configurationHash, input.configurationHash),
+          eq(projectConfigRevisions.configurationJson, input.configurationJson))).orderBy(desc(projectConfigRevisions.revisionNumber)).all();
+        const sameDraft = sameDrafts.find((draft) => projectOptionsDraftBaseRevision(draft.id) === active.id);
+        if (sameDraft !== undefined) return sameDraft;
+        const latest = db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.projectId, input.projectId))
+          .orderBy(desc(projectConfigRevisions.revisionNumber)).get();
+        const createdAt = now().toISOString();
+        const revision: ProjectConfigRevision = {
+          id: input.revisionId, projectId: input.projectId, revisionNumber: (latest?.revisionNumber ?? 0) + 1,
+          schemaVersion: 1, configurationJson: input.configurationJson, configurationHash: input.configurationHash,
+          compiledRuntimePlanJson: input.compiledRuntimePlanJson, runtimePlanHash: input.runtimePlanHash,
+          source: "user", state: "draft", createdBy: input.actor, createdAt, activatedAt: null, supersededAt: null
+        };
+        db.insert(projectConfigRevisions).values(revision).run();
+        const last = db.select({ sequence: auditEvents.sequence }).from(auditEvents).orderBy(desc(auditEvents.sequence)).limit(1).get();
+        options.beforeAuditInsert?.();
+        db.insert(auditEvents).values({ id: createId(), sequence: (last?.sequence ?? -1) + 1, actor: input.actor,
+          eventType: "project.options.draft_saved", resourceType: "configuration-revision", resourceId: revision.id,
+          operationId: null, metadataJson: JSON.stringify({ expectedRevisionId: active.id, revisionNumber: revision.revisionNumber }),
+          createdAt }).run();
+        return revision;
+      }).immediate();
+    },
+    reserveProjectOptionsApply(input: {
+      projectId: string; workspaceId: string; actor: string; expectedRevision: RevisionIdentity;
+      candidateRevision: RevisionIdentity; previewIds: Readonly<Record<string, string>>;
+    }): { operation: Operation; expectedRevision: RevisionIdentity; candidateRevision: RevisionIdentity; previewIds: Record<string, string> } {
+      return client.transaction(() => {
+        const existing = pendingConfigurationApply(input.projectId, input.workspaceId);
+        if (existing !== undefined) {
+          const pending = this.getPendingProjectOptionsApply(input.projectId);
+          if (pending === null || pending.operation.operationId !== existing.operationId
+            || pending.expectedRevision.revisionId !== input.expectedRevision.revisionId
+            || pending.expectedRevision.revisionHash !== input.expectedRevision.revisionHash
+            || pending.candidateRevision.revisionId !== input.candidateRevision.revisionId
+            || pending.candidateRevision.revisionHash !== input.candidateRevision.revisionHash) {
+            throw new ProjectSetupConflictError("Another Project Options Apply is already in progress.");
+          }
+          return pending;
+        }
+        const project = db.select().from(projects).where(eq(projects.id, input.projectId)).get();
+        const workspace = db.select().from(workspaces).where(and(eq(workspaces.id, input.workspaceId),
+          eq(workspaces.projectId, input.projectId))).get();
+        const active = project?.activeConfigRevisionId === null || project?.activeConfigRevisionId === undefined ? undefined
+          : db.select().from(projectConfigRevisions).where(and(eq(projectConfigRevisions.id, project.activeConfigRevisionId),
+            eq(projectConfigRevisions.projectId, input.projectId))).get();
+        const candidate = db.select().from(projectConfigRevisions).where(and(eq(projectConfigRevisions.id, input.candidateRevision.revisionId),
+          eq(projectConfigRevisions.projectId, input.projectId))).get();
+        if (project?.state !== "ready" || project.primaryWorkspaceId !== input.workspaceId || workspace?.kind !== "primary"
+          || active === undefined || active.id !== input.expectedRevision.revisionId
+          || active.configurationHash !== input.expectedRevision.revisionHash || workspace.configRevisionId !== active.id) {
+          throw new ProjectSetupConflictError("The active Project Options revision changed. Reload settings before applying.");
+        }
+        if (candidate === undefined || candidate.state !== "draft" || candidate.configurationHash !== input.candidateRevision.revisionHash
+          || candidate.compiledRuntimePlanJson === null || candidate.runtimePlanHash === null) {
+          throw new ProjectSetupConflictError("The candidate Project Options revision is not a complete saved draft.");
+        }
+        if (projectOptionsDraftBaseRevision(candidate.id) !== active.id) {
+          throw new ProjectSetupConflictError("This draft was saved against an older active revision. Save it again against the current settings before applying.");
+        }
+        const activeWorkspaceOperation = db.select().from(operations).where(and(eq(operations.projectId, input.projectId),
+          eq(operations.workspaceId, input.workspaceId), or(eq(operations.state, "accepted"), eq(operations.state, "running"))))
+          .orderBy(desc(operations.createdAt), desc(operations.operationId)).all().find((operation) => operation.operationName !== "configuration.apply");
+        if (activeWorkspaceOperation !== undefined) throw new ProjectSetupConflictError("A workspace operation is still in progress.");
+        const busyProcess = db.select().from(processes).where(eq(processes.workspaceId, input.workspaceId)).all().find((process) =>
+          ["queued", "starting", "running", "stopping"].includes(process.observedState)
+          || (process.observedState === "lost" && process.kind !== "ai"));
+        if (busyProcess !== undefined) throw new ProjectSetupConflictError("A task, terminal, or unproven process is still active in this workspace.");
+        const busyTask = db.select().from(taskRuns).where(eq(taskRuns.workspaceId, input.workspaceId)).all()
+          .find((task) => ["queued", "starting", "running"].includes(task.state));
+        if (busyTask !== undefined) throw new ProjectSetupConflictError("A configured task is still active in this workspace.");
+        const busyTerminal = db.select().from(terminalSessions).where(eq(terminalSessions.workspaceId, input.workspaceId)).all()
+          .find((terminal) => ["creating", "active", "disconnected", "closing"].includes(terminal.state));
+        if (busyTerminal !== undefined) throw new ProjectSetupConflictError("A terminal session is still active in this workspace.");
+        const activeAi = db.select().from(aiSessions).where(eq(aiSessions.workspaceId, input.workspaceId)).all()
+          .find((session) => ["creating", "active", "waiting_for_input"].includes(session.state));
+        if (activeAi !== undefined) throw new ProjectSetupConflictError("An AI session is still active in this workspace.");
+        const activeTurn = db.select().from(aiTurns).innerJoin(aiSessions, eq(aiTurns.sessionId, aiSessions.id))
+          .where(and(eq(aiSessions.workspaceId, input.workspaceId), or(eq(aiTurns.state, "accepted"), eq(aiTurns.state, "starting"),
+            eq(aiTurns.state, "running"), eq(aiTurns.state, "waiting-for-approval"), eq(aiTurns.state, "waiting-for-input"),
+            eq(aiTurns.state, "interrupting")))).get();
+        if (activeTurn !== undefined) throw new ProjectSetupConflictError("An AI turn is still in progress in this workspace.");
+
+        const previewIds = { ...input.previewIds };
+        const timestamp = now().toISOString();
+        const operation: Operation = { operationId: createId(), projectId: input.projectId, workspaceId: input.workspaceId,
+          actor: input.actor, operationName: "configuration.apply", resourceType: "configuration-revision",
+          resourceId: candidate.id, state: "accepted", progressJson: JSON.stringify({ expectedRevision: input.expectedRevision,
+            candidateRevision: input.candidateRevision, previewIds, phase: "reserved" }), errorCode: null, errorMessage: null,
+          createdAt: timestamp, startedAt: null, finishedAt: null };
+        db.insert(operations).values(operation).run();
+        return { operation, expectedRevision: input.expectedRevision, candidateRevision: input.candidateRevision, previewIds };
+      }).immediate();
+    },
+    markProjectOptionsApplyRunning(operationId: string): void {
+      const timestamp = now().toISOString();
+      db.update(operations).set({ state: "running", startedAt: timestamp }).where(and(
+        eq(operations.operationId, operationId), eq(operations.operationName, "configuration.apply"), eq(operations.state, "accepted")
+      )).run();
+    },
+    markProjectOptionsAdoptionSubmitted(operationId: string): void {
+      client.transaction(() => {
+        const operation = db.select().from(operations).where(and(eq(operations.operationId, operationId),
+          eq(operations.operationName, "configuration.apply"))).get();
+        if (operation === undefined || (operation.state !== "accepted" && operation.state !== "running")) {
+          throw new ProjectSetupConflictError("The Project Options Apply reservation is no longer active.");
+        }
+        let progress: Record<string, unknown>;
+        try {
+          const parsed: unknown = JSON.parse(operation.progressJson ?? "{}");
+          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid-progress");
+          progress = parsed as Record<string, unknown>;
+        } catch { throw new ProjectSetupConflictError("The Project Options Apply reservation is malformed."); }
+        db.update(operations).set({ progressJson: JSON.stringify({ ...progress, phase: "adoption-submitted" }) })
+          .where(eq(operations.operationId, operationId)).run();
+      }).immediate();
+    },
+    failProjectOptionsApply(operationId: string, outcome: { code: string; message: string }): void {
+      client.transaction(() => {
+        const operation = db.select().from(operations).where(and(eq(operations.operationId, operationId),
+          eq(operations.operationName, "configuration.apply"))).get();
+        if (operation === undefined || (operation.state !== "accepted" && operation.state !== "running")) return;
+        const timestamp = now().toISOString();
+        db.update(operations).set({ state: "failed", finishedAt: timestamp, errorCode: outcome.code,
+          errorMessage: outcome.message.slice(0, 512) }).where(eq(operations.operationId, operationId)).run();
+        const last = db.select({ sequence: auditEvents.sequence }).from(auditEvents).orderBy(desc(auditEvents.sequence)).limit(1).get();
+        db.insert(auditEvents).values({ id: createId(), sequence: (last?.sequence ?? -1) + 1, actor: operation.actor,
+          eventType: "project.options.apply_failed", resourceType: "configuration-revision", resourceId: operation.resourceId,
+          operationId, metadataJson: JSON.stringify({ code: outcome.code }), createdAt: timestamp }).run();
+      }).immediate();
+    },
+    activateProjectOptionsRevision(input: {
+      operationId: string; projectId: string; workspaceId: string; expectedRevision: RevisionIdentity;
+      candidateRevision: RevisionIdentity; imageReference: string; previewRows: readonly NewPreview[];
+    }): ProjectConfigRevision {
+      return client.transaction(() => {
+        const operation = db.select().from(operations).where(and(eq(operations.operationId, input.operationId),
+          eq(operations.operationName, "configuration.apply"), eq(operations.projectId, input.projectId),
+          eq(operations.workspaceId, input.workspaceId))).get();
+        if (operation?.state === "succeeded") {
+          const activated = db.select().from(projectConfigRevisions).where(eq(projectConfigRevisions.id, input.candidateRevision.revisionId)).get();
+          if (activated?.state === "active") return activated;
+        }
+        if (operation === undefined || (operation.state !== "accepted" && operation.state !== "running")
+          || operation.resourceId !== input.candidateRevision.revisionId) {
+          throw new ProjectSetupConflictError("The Project Options Apply operation is no longer active.");
+        }
+        const project = db.select().from(projects).where(eq(projects.id, input.projectId)).get();
+        const workspace = db.select().from(workspaces).where(and(eq(workspaces.id, input.workspaceId),
+          eq(workspaces.projectId, input.projectId))).get();
+        const oldRevision = db.select().from(projectConfigRevisions).where(and(eq(projectConfigRevisions.id, input.expectedRevision.revisionId),
+          eq(projectConfigRevisions.projectId, input.projectId))).get();
+        const candidate = db.select().from(projectConfigRevisions).where(and(eq(projectConfigRevisions.id, input.candidateRevision.revisionId),
+          eq(projectConfigRevisions.projectId, input.projectId))).get();
+        if (project?.activeConfigRevisionId !== input.expectedRevision.revisionId || project.state !== "ready"
+          || workspace?.configRevisionId !== input.expectedRevision.revisionId || workspace.id !== input.workspaceId
+          || oldRevision?.configurationHash !== input.expectedRevision.revisionHash || candidate?.state !== "draft"
+          || candidate.configurationHash !== input.candidateRevision.revisionHash || candidate.runtimePlanHash === null
+          || candidate.compiledRuntimePlanJson === null) {
+          throw new ProjectSetupConflictError("The active Project Options revision changed before activation.");
+        }
+        const pending = this.getPendingProjectOptionsApply(input.projectId);
+        if (pending?.operation.operationId !== input.operationId) throw new ProjectSetupConflictError("The Project Options Apply reservation changed before activation.");
+        const timestamp = now().toISOString();
+        db.update(previews).set({ desiredState: "inactive", observedState: "inactive", routePresent: false,
+          deactivatedAt: timestamp, updatedAt: timestamp }).where(and(eq(previews.workspaceId, input.workspaceId),
+          eq(previews.configRevisionId, input.expectedRevision.revisionId))).run();
+        for (const row of input.previewRows) {
+          if (row.workspaceId !== input.workspaceId || row.configRevisionId !== candidate.id) {
+            throw new ProjectSetupConflictError("A candidate preview row does not match the revision being activated.");
+          }
+          const existing = db.select().from(previews).where(eq(previews.id, row.id)).get();
+          if (existing === undefined) db.insert(previews).values(row).run();
+          else if (existing.workspaceId !== row.workspaceId || existing.configRevisionId !== row.configRevisionId
+            || existing.previewKey !== row.previewKey || existing.hostname !== row.hostname) {
+            throw new ProjectSetupConflictError("A candidate preview identity conflicts with retained history.");
+          }
+        }
+        db.update(projectConfigRevisions).set({ state: "superseded", supersededAt: timestamp })
+          .where(and(eq(projectConfigRevisions.id, oldRevision.id), eq(projectConfigRevisions.state, "active"))).run();
+        db.update(projectConfigRevisions).set({ state: "active", activatedAt: timestamp, supersededAt: null })
+          .where(and(eq(projectConfigRevisions.id, candidate.id), eq(projectConfigRevisions.state, "draft"))).run();
+        const projectUpdate = db.update(projects).set({ activeConfigRevisionId: candidate.id, updatedAt: timestamp,
+          rowVersion: project.rowVersion + 1 }).where(and(eq(projects.id, input.projectId),
+          eq(projects.activeConfigRevisionId, input.expectedRevision.revisionId))).run();
+        const workspaceUpdate = db.update(workspaces).set({ configRevisionId: candidate.id, desiredState: "stopped",
+          observedState: "stopped", updatedAt: timestamp, rowVersion: workspace.rowVersion + 1 }).where(and(
+          eq(workspaces.id, input.workspaceId), eq(workspaces.configRevisionId, input.expectedRevision.revisionId))).run();
+        if (projectUpdate.changes !== 1 || workspaceUpdate.changes !== 1) {
+          throw new ProjectSetupConflictError("The active Project Options revision changed concurrently.");
+        }
+        const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
+        if (stack !== undefined) {
+          db.update(runtimeStacks).set({ runtimePlanHash: candidate.runtimePlanHash, desiredState: "absent", observedState: "absent",
+            updatedAt: timestamp, lastObservedAt: timestamp, lastErrorCode: null, lastErrorMessage: null }).where(eq(runtimeStacks.id, stack.id)).run();
+          const development = db.select().from(workspaceServices).where(and(eq(workspaceServices.runtimeStackId, stack.id),
+            eq(workspaceServices.kind, "development"))).get();
+          if (development === undefined) throw new ProjectSetupConflictError("The development runtime service record is missing.");
+          db.update(workspaceServices).set({ containerId: null, imageReference: input.imageReference, imageDigest: null,
+            desiredState: "absent", observedState: "absent", healthState: "unknown", startedAt: null,
+            stoppedAt: timestamp, lastObservedAt: timestamp }).where(eq(workspaceServices.id, development.id)).run();
+        }
+        const last = db.select({ sequence: auditEvents.sequence }).from(auditEvents).orderBy(desc(auditEvents.sequence)).limit(1).get();
+        options.beforeAuditInsert?.();
+        db.insert(auditEvents).values({ id: createId(), sequence: (last?.sequence ?? -1) + 1, actor: operation.actor,
+          eventType: "project.options.activated", resourceType: "configuration-revision", resourceId: candidate.id,
+          operationId: input.operationId, metadataJson: JSON.stringify({ previousRevisionId: oldRevision.id,
+            previousRevisionHash: oldRevision.configurationHash, revisionHash: candidate.configurationHash }), createdAt: timestamp }).run();
+        db.update(operations).set({ state: "succeeded", finishedAt: timestamp, errorCode: null, errorMessage: null })
+          .where(and(eq(operations.operationId, input.operationId), or(eq(operations.state, "accepted"), eq(operations.state, "running")))).run();
+        return { ...candidate, state: "active" as const, activatedAt: timestamp, supersededAt: null };
+      }).immediate();
+    },
     getOrCreateProjectFetchOperation(input: { projectId: string; actor: string }): Operation {
       return client.transaction(() => {
         const project = db.select({ id: projects.id, state: projects.state }).from(projects)
@@ -1398,6 +1735,7 @@ export function openProjectDatabase(path: string, options: {
       if (project === undefined || project.state !== "ready" || project.primaryWorkspaceId === null || project.activeConfigRevisionId === null) {
         throw new ProjectSetupConflictError("A ready primary workspace is required.");
       }
+      assertNoPendingConfigurationApply(projectId, project.primaryWorkspaceId);
       const workspace = db.select().from(workspaces).where(and(eq(workspaces.id, project.primaryWorkspaceId), eq(workspaces.projectId, project.id))).get();
       const revision = db.select().from(projectConfigRevisions).where(and(
         eq(projectConfigRevisions.id, project.activeConfigRevisionId), eq(projectConfigRevisions.projectId, project.id)
@@ -1630,6 +1968,10 @@ export function openProjectDatabase(path: string, options: {
         if (session === undefined || session.runtimeKind !== "native-pty") {
           throw new ProjectSetupConflictError("The native harness session is not available.");
         }
+        const workspace = db.select({ projectId: workspaces.projectId }).from(workspaces)
+          .where(eq(workspaces.id, session.workspaceId)).get();
+        if (workspace === undefined) throw new ProjectSetupConflictError("The native harness workspace is not available.");
+        assertNoPendingConfigurationApply(workspace.projectId, session.workspaceId);
         if (session.processGeneration !== expectedGeneration) {
           throw new ProjectSetupConflictError("The harness resume generation is stale.");
         }

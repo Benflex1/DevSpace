@@ -35,6 +35,7 @@ export const supportedMutationNames = [
   "workspace.create",
   "workspace.start",
   "workspace.stop",
+  "workspace.revision.adopt",
   "task.start",
   "process.stop",
   "terminal.create",

@@ -545,6 +545,10 @@ export class DockerEngineClient {
     await this.request("DELETE", `/containers/${encodeURIComponent(id)}?force=1`, undefined, [204]);
   }
 
+  async removeNetwork(id: string): Promise<void> {
+    await this.request("DELETE", `/networks/${encodeURIComponent(id)}`, undefined, [204]);
+  }
+
   async createProbeContainer(name: string, input: DockerProbeContainerInput): Promise<string> {
     const imageReference = input.imageReference ?? input.imageId;
     if (input.imageId.length === 0 || imageReference.length === 0 || imageReference.includes("\0") || input.user.includes("\0")) {

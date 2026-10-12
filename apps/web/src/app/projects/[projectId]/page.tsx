@@ -22,7 +22,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
   const workspaceState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping"
     : inspectedWorkspace?.observedState ?? `${project.primaryWorkspace?.observedState ?? "unknown"} (persisted)`;
   const inspectedRuntimeState = inspectedWorkspace?.runtimeStack.observedState ?? project.runtime?.observedState ?? "absent";
-  const runtimeState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping" : inspectedRuntimeState;
+  const runtimeState = runtimeOperation?.configurationApply !== null && runtimeOperation?.configurationApply !== undefined
+    ? "applying" : activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping" : inspectedRuntimeState;
 
   if (project.state === "ready" && project.primaryWorkspace !== null) {
     return <ProjectWorkbench projectId={project.id} workspaceId={project.primaryWorkspace.id} projectName={project.name}

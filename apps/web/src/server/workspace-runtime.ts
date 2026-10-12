@@ -111,8 +111,8 @@ export async function mutatePrimaryWorkspaceRuntime(action: "start" | "stop", pr
   const now = dependencies.nowMonotonic ?? (() => Date.now());
   const sleep = dependencies.sleep ?? (async (milliseconds: number) => await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   const deadline = now() + (dependencies.orchestrationTimeoutMs ?? 120_000);
-  const registration = dependencies.database.getOrCreateOperation({ projectId, actor,
-    operationName: "configuration-runtime-plan.register", resourceType: "configuration-revision", resourceId: context.revision.id });
+  const registration = dependencies.database.getOrCreateRevisionOperation({ projectId, actor,
+    operationName: "configuration-runtime-plan.register", revisionId: context.revision.id });
   if (registration.state !== "succeeded") {
     try {
       await pollMutation({ database: dependencies.database, agent: dependencies.agent, operationId: registration.operationId,
