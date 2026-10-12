@@ -88,6 +88,23 @@ test("rootless Docker socket permits owner-only or owner-group access inside its
       serviceGid: gid
     }), []);
   }
+  assert.deepEqual(validateRootlessDockerSocket({
+    socketPath: `/run/user/${uid}/docker.sock`,
+    socket: { isSocket: true, uid, gid: 231189, mode: 0o1660 },
+    runtimeDirectory: { isDirectory: true, isSymbolicLink: false, realPath: `/run/user/${uid}`, uid, mode: 0o700 },
+    serviceUid: uid,
+    serviceGid: gid,
+    serviceSubGidRanges: [{ start: 231072, count: 65536 }]
+  }), []);
+});
+
+test("rootless Docker subordinate GID ranges are read only for the service account", () => {
+  const parseSubordinateGidRanges = requirePreflightFunction("parseSubordinateGidRanges");
+  assert.deepEqual(parseSubordinateGidRanges(
+    "other:100000:65536\ndevspace-agent:231072:65536\n1234:400000:65536\nmalformed:bad:range",
+    "devspace-agent",
+    1234
+  ), [{ start: 231072, count: 65536 }, { start: 400000, count: 65536 }]);
 });
 
 test("rootless Docker socket rejects unauthorized modes, wrong owner/group, and a non-private runtime directory", () => {
@@ -102,7 +119,7 @@ test("rootless Docker socket rejects unauthorized modes, wrong owner/group, and 
     serviceGid: gid
   };
   assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, uid: uid + 1 } }).some((issue) => issue.includes("owned by the Agent")));
-  assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, gid: gid + 1 } }).some((issue) => issue.includes("Agent primary group")));
+  assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, gid: gid + 1 } }).some((issue) => issue.includes("mapped subordinate GIDs")));
   assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, mode: 0o666 } }).some((issue) => issue.includes("0600 or 0660")));
   assert.ok(validateRootlessDockerSocket({ ...input, runtimeDirectory: { ...input.runtimeDirectory, mode: 0o750 } }).some((issue) => issue.includes("private mode 0700")));
   assert.ok(validateRootlessDockerSocket({ ...input, runtimeDirectory: { ...input.runtimeDirectory, uid: uid + 1 } }).some((issue) => issue.includes("owned by the Agent")));

@@ -71,7 +71,22 @@ export function validateAgentEnvironment(environment) {
   return issues;
 }
 
-export function validateRootlessDockerSocket({ socketPath, socket, runtimeDirectory, serviceUid, serviceGid }) {
+export function parseSubordinateGidRanges(contents, username, uid) {
+  const owners = new Set([username, String(uid)]);
+  return contents.split(/\r?\n/u).flatMap((line) => {
+    const [owner, startText, countText] = line.split(":");
+    if (!owners.has(owner)) return [];
+    const start = Number(startText);
+    const count = Number(countText);
+    if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(count) || count < 1
+      || !Number.isSafeInteger(start + count)) return [];
+    return [{ start, count }];
+  });
+}
+
+export function validateRootlessDockerSocket({
+  socketPath, socket, runtimeDirectory, serviceUid, serviceGid, serviceSubGidRanges = []
+}) {
   const issues = [];
   const expectedSocketPath = `/run/user/${serviceUid}/docker.sock`;
   const expectedRuntimeDirectory = `/run/user/${serviceUid}`;
@@ -91,7 +106,10 @@ export function validateRootlessDockerSocket({ socketPath, socket, runtimeDirect
     issues.push("The dedicated rootless Docker endpoint must be a Unix socket.");
   } else {
     if (socket.uid !== serviceUid) issues.push("The Docker socket must be owned by the Agent service user.");
-    if (socket.gid !== serviceGid) issues.push("The Docker socket must use the Agent primary group.");
+    const mappedAgentGroup = socket.gid === serviceGid || serviceSubGidRanges.some(({ start, count }) =>
+      Number.isSafeInteger(start) && Number.isSafeInteger(count) && count > 0
+      && socket.gid >= start && socket.gid < start + count);
+    if (!mappedAgentGroup) issues.push("The Docker socket group must be the Agent primary group or one of its mapped subordinate GIDs.");
     const mode = socket.mode & 0o777;
     if (mode !== 0o600 && mode !== 0o660) {
       issues.push("The Docker socket must use mode 0600 or 0660 with no world access.");
@@ -227,6 +245,11 @@ async function validateAgentRuntime(environment) {
     throw new Error("The Agent must use the rootless Docker socket owned by its own service account.");
   }
   const runtimeDirectoryPath = path.dirname(socketPath);
+  const serviceUid = process.getuid?.() ?? -1;
+  const serviceGid = process.getgid?.() ?? -1;
+  const passwdEntry = await execFileAsync("getent", ["passwd", String(serviceUid)], { timeout: 5_000 }).catch(() => ({ stdout: "" }));
+  const username = passwdEntry.stdout.trim().split(":")[0] ?? "";
+  const subGidContents = await readFile("/etc/subgid", "utf8").catch(() => "");
   const [socket, runtimeDirectoryEntry, runtimeDirectoryRealPath] = await Promise.all([
     lstat(socketPath).catch(() => null),
     lstat(runtimeDirectoryPath).catch(() => null),
@@ -239,8 +262,9 @@ async function validateAgentRuntime(environment) {
       isDirectory: runtimeDirectoryEntry.isDirectory(), isSymbolicLink: runtimeDirectoryEntry.isSymbolicLink(),
       realPath: runtimeDirectoryRealPath, uid: runtimeDirectoryEntry.uid, mode: runtimeDirectoryEntry.mode
     },
-    serviceUid: process.getuid?.() ?? -1,
-    serviceGid: process.getgid?.() ?? -1
+    serviceUid,
+    serviceGid,
+    serviceSubGidRanges: parseSubordinateGidRanges(subGidContents, username, serviceUid)
   });
   if (issues.length > 0) throw new Error(issues[0]);
   const dockerInfo = await readDockerInfo(socketPath);

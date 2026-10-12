@@ -28,6 +28,20 @@ assert_owned_directory() {
   test "$(sudo stat -c '%a' "$directory")" = "$expected_mode"
 }
 
+is_agent_socket_gid() {
+  local socket_gid="$1"
+  [[ "$socket_gid" = "$agent_gid" ]] && return 0
+  awk -F: -v user="$agent_user" -v uid="$agent_uid" -v gid="$socket_gid" \
+    '($1 == user || $1 == uid) && gid >= $2 && gid < $2 + $3 { found = 1 } END { exit !found }' /etc/subgid
+}
+
+is_private_socket_mode() {
+  local mode="$1" permissions
+  [[ "$mode" =~ ^[0-7]+$ ]] || return 1
+  permissions=$((8#$mode & 0777))
+  (( permissions == 8#600 || permissions == 8#660 ))
+}
+
 prepare_host() {
   local ref="${2:?full source commit is required}" node_version=24.18.0 pnpm_version=11.13.0
   [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || fail "the source ref must be a full commit SHA"
@@ -230,8 +244,9 @@ PY
   runtime_mode="$(sudo stat -c '%a' "$agent_runtime")"
   printf 'Rootless Docker socket: %s owner=%s group=%s mode=%s\n' "$docker_socket" "$socket_uid" "$socket_gid" "$socket_mode"
   printf 'Rootless Docker socket parent: %s owner=%s mode=%s\n' "$agent_runtime" "$runtime_uid" "$runtime_mode"
-  [[ "$socket_uid" = "$agent_uid" && "$socket_gid" = "$agent_gid" ]] || fail "rootless socket has unexpected ownership"
-  [[ "$socket_mode" = 600 || "$socket_mode" = 660 ]] || fail "rootless socket mode is not 0600 or 0660"
+  [[ "$socket_uid" = "$agent_uid" ]] && is_agent_socket_gid "$socket_gid" \
+    || fail "rootless socket has unexpected ownership"
+  is_private_socket_mode "$socket_mode" || fail "rootless socket mode is not 0600 or 0660"
   [[ "$runtime_uid" = "$agent_uid" && "$runtime_mode" = 700 ]] || fail "rootless socket parent is not private to the Agent"
   security_options="$(sudo -u "$agent_user" env DOCKER_HOST="unix://${docker_socket}" docker info --format '{{json .SecurityOptions}}')"
   grep -q 'name=rootless' <<<"$security_options" || fail "Docker did not report rootless mode"
@@ -356,8 +371,9 @@ verify_workspace() {
   socket_gid="$(sudo stat -c '%g' "$docker_socket")"
   runtime_mode="$(sudo stat -c '%a' "$agent_runtime")"
   runtime_uid="$(sudo stat -c '%u' "$agent_runtime")"
-  [[ "$socket_uid" = "$agent_uid" && "$socket_gid" = "$agent_gid" ]] || fail "rootless socket ownership changed"
-  [[ "$socket_mode" = 600 || "$socket_mode" = 660 ]] || fail "rootless socket permissions are not owner-only or owner-group"
+  [[ "$socket_uid" = "$agent_uid" ]] && is_agent_socket_gid "$socket_gid" \
+    || fail "rootless socket ownership changed"
+  is_private_socket_mode "$socket_mode" || fail "rootless socket permissions are not owner-only or owner-group"
   [[ "$runtime_uid" = "$agent_uid" && "$runtime_mode" = 700 ]] || fail "rootless runtime directory is not private to Agent"
   web_db="$web_home/devspace.sqlite"
   sudo test -f "$web_db" && [[ "$(sudo stat -c '%U' "$web_db")" = "$web_user" ]] \
