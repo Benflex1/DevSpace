@@ -998,7 +998,7 @@ export function openProjectDatabase(path: string, options: {
       if (rawPhase !== "reserved" && rawPhase !== "adoption-submitted") {
         throw new ProjectSetupConflictError("The pending Project Options Apply phase is invalid.");
       }
-      const phase = rawPhase;
+      const phase: "reserved" | "adoption-submitted" = rawPhase;
       return { operation, expectedRevision: expectedRevision.data, candidateRevision: candidateRevision.data, previewIds, phase };
     },
     getCompletedProjectOptionsApply(projectId: string, candidateRevisionId: string): Operation | null {
