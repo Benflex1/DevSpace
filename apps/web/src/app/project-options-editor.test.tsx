@@ -364,7 +364,13 @@ test("adds and removes multiple tasks and previews while marking the form unsave
   vi.stubGlobal("fetch", vi.fn((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith("/options") && init?.method === "PUT") {
-      savedOptions.value = JSON.parse(String(init.body)).options as ReturnType<typeof initialOptions>;
+      if (typeof init.body !== "string") throw new Error("Expected JSON Project Options draft payload");
+      const payload: unknown = JSON.parse(init.body);
+      if (payload === null || typeof payload !== "object" || !("options" in payload)
+        || payload.options === null || typeof payload.options !== "object") {
+        throw new Error("Project Options draft payload is invalid");
+      }
+      savedOptions.value = payload.options as ReturnType<typeof initialOptions>;
       return Promise.resolve(response({ draft: { id: candidateRevisionId, number: 4, hash: candidateRevisionHash,
         options: savedOptions.value } }, 201));
     }
