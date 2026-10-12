@@ -318,11 +318,20 @@ PY
   printf 'PASS: production Web rejected unauthenticated access with HTTP %s\n' "$http_status"
 
   sudo systemctl restart devspace-agent.service
+  local agent_health_sent_at
+  agent_health_sent_at="$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')"
+  local -a agent_health_headers=(
+    --header 'X-DevSpace-Protocol-Version: 1'
+    --header 'X-DevSpace-Request-Id: 018f0f00-0000-7000-8000-000000000001'
+    --header "X-DevSpace-Sent-At: ${agent_health_sent_at}"
+  )
   for attempt in $(seq 1 30); do
-    if sudo -u "$web_user" curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health >/dev/null; then break; fi
+    if sudo -u "$web_user" curl --silent --fail --unix-socket "$agent_socket" \
+      "${agent_health_headers[@]}" http://localhost/v1/health >/dev/null; then break; fi
     sleep 1
   done
-  sudo -u "$web_user" curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health
+  sudo -u "$web_user" curl --silent --fail --unix-socket "$agent_socket" \
+    "${agent_health_headers[@]}" http://localhost/v1/health
   sudo systemctl restart devspace-web.service
   for attempt in $(seq 1 90); do
     http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:3000${unauthenticated_probe_path}" || true)"
