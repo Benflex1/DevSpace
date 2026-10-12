@@ -142,12 +142,22 @@ const webProxy = https.createServer(tlsOptions, (request, response) => {
   request.pipe(upstream);
 });
 webProxy.on("upgrade", (request, clientSocket, clientHead) => {
+  const pathname = new URL(request.url ?? "/", "https://127.0.0.1:3444").pathname;
+  if (/\/terminals\/[^/]+\/stream$/u.test(pathname)) {
+    console.log(`[installation-fixture] terminal websocket request origin=${request.headers.origin ?? "missing"} accessHeader=${request.headers["cf-access-jwt-assertion"] ? "present" : "missing"}`);
+  }
   const upstream = http.request({ hostname: "127.0.0.1", port: 3000, method: request.method,
     path: request.url, headers: request.headers });
   upstream.on("upgrade", (response, upstreamSocket, upstreamHead) => {
+    if (/\/terminals\/[^/]+\/stream$/u.test(pathname)) {
+      console.log(`[installation-fixture] terminal websocket upstream status=${response.statusCode}`);
+    }
     writeUpgradedResponse(response, upstreamHead, clientSocket, upstreamSocket, clientHead);
   });
   upstream.on("response", (response) => {
+    if (/\/terminals\/[^/]+\/stream$/u.test(pathname)) {
+      console.log(`[installation-fixture] terminal websocket rejected status=${response.statusCode}`);
+    }
     const headerLines = Object.entries(response.headers).flatMap(([name, value]) => {
       if (value === undefined) return [];
       return (Array.isArray(value) ? value : [value]).map((item) => `${name}: ${item}`);

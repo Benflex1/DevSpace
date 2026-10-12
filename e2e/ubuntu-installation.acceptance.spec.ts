@@ -14,6 +14,20 @@ async function authenticatedStatus(pathname: string, accessToken: string): Promi
 
 test("fresh installation completes project, workspace, terminal, task, and persistence workflow", async ({ page }) => {
   test.setTimeout(900_000);
+  page.on("websocket", (websocket) => {
+    const pathname = new URL(websocket.url()).pathname;
+    if (!/\/terminals\/[^/]+\/stream$/u.test(pathname)) return;
+    console.log(`[installation-browser] terminal websocket opened path=${pathname}`);
+    websocket.on("framesent", (frame) => {
+      const length = typeof frame.payload === "string" ? Buffer.byteLength(frame.payload) : frame.payload.length;
+      console.log(`[installation-browser] terminal websocket sent frame bytes=${length}`);
+    });
+    websocket.on("framereceived", (frame) => {
+      const length = typeof frame.payload === "string" ? Buffer.byteLength(frame.payload) : frame.payload.length;
+      console.log(`[installation-browser] terminal websocket received frame bytes=${length}`);
+    });
+    websocket.on("close", () => console.log("[installation-browser] terminal websocket closed"));
+  });
   const unauthenticated = await page.request.get("/api/projects/00000000-0000-4000-8000-000000000000/runtime");
   expect(unauthenticated.status()).toBe(403);
 
