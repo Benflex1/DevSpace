@@ -198,8 +198,9 @@ PY
   sudo -u "$agent_user" install -d -m 0700 "$docker_dropin_dir"
   test "$(sudo -u "$agent_user" stat -c '%U' "$docker_dropin_dir")" = "$agent_user"
   test "$(sudo -u "$agent_user" stat -c '%a' "$docker_dropin_dir")" = 700
-  printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=%s\n' "$agent_runtime" >"$root/docker-runtime.conf"
-  sudo -u "$agent_user" install -m 0600 "$root/docker-runtime.conf" "$docker_dropin"
+  printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=%s\n' "$agent_runtime" \
+    | sudo -u "$agent_user" tee "$docker_dropin" >/dev/null
+  sudo chmod 0600 "$docker_dropin"
   sudo -u "$agent_user" env -i HOME="$agent_home" PATH=/usr/local/bin:/usr/bin:/bin \
     XDG_RUNTIME_DIR="$agent_runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" \
     /usr/bin/dockerd-rootless-setuptool.sh check
