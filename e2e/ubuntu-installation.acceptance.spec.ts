@@ -13,9 +13,12 @@ async function authenticatedStatus(pathname: string): Promise<number> {
 
 test("fresh installation completes project, workspace, terminal, task, and persistence workflow", async ({ page }) => {
   test.setTimeout(900_000);
+  const terminalStreamIds = new Set<string>();
   page.on("websocket", (websocket) => {
     const pathname = new URL(websocket.url()).pathname;
-    if (!/\/terminals\/[^/]+\/stream$/u.test(pathname)) return;
+    const terminalId = pathname.match(/\/terminals\/([^/]+)\/stream$/u)?.[1];
+    if (terminalId === undefined) return;
+    terminalStreamIds.add(terminalId);
     console.log(`[installation-browser] terminal websocket opened path=${pathname}`);
     let receivedFrames = 0;
     websocket.on("framereceived", () => { receivedFrames += 1; });
@@ -125,13 +128,39 @@ test("fresh installation completes project, workspace, terminal, task, and persi
   await expect(taskRuns).toContainText("passed", { timeout: 120_000 });
   await expect(taskRuns).toContainText("Exit code: 0");
 
+  const terminalCreateResponsePromise = page.waitForResponse((response) => response.url().endsWith(`/api/projects/${projectId}/terminals`)
+    && response.request().method() === "POST");
   await page.getByRole("button", { name: "Create terminal", exact: true }).click();
-  await expect(page.locator(".terminal-list li").filter({ hasText: "Terminal 2" })).toContainText("active", { timeout: 60_000 });
-  const secondTerminal = page.locator(".terminal-tab-surface.is-active");
-  await secondTerminal.locator(".xterm-helper-textarea").focus();
+  const terminalCreateResponse = await terminalCreateResponsePromise;
+  expect(terminalCreateResponse.status()).toBe(200);
+  const terminalCreateBody: unknown = await terminalCreateResponse.json();
+  if (terminalCreateBody === null || typeof terminalCreateBody !== "object" || !("terminalId" in terminalCreateBody)
+    || typeof terminalCreateBody.terminalId !== "string" || !("workspaceId" in terminalCreateBody)
+    || terminalCreateBody.workspaceId !== workspaceId) {
+    throw new Error("Terminal creation did not return the expected terminal and workspace IDs.");
+  }
+  const terminalId = terminalCreateBody.terminalId;
+  const readCreatedTerminalState = async (): Promise<string | null> => await page.evaluate<
+    string | null, { projectId: string; terminalId: string }
+  >(async ({ projectId, terminalId }) => {
+    const response = await fetch(`/api/projects/${projectId}/tasks`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const body: unknown = await response.json();
+    if (body === null || typeof body !== "object" || !("terminals" in body) || !Array.isArray(body.terminals)) return null;
+    const terminals = body.terminals as unknown[];
+    const terminal = terminals.find((candidate) => candidate !== null && typeof candidate === "object"
+      && "id" in candidate && candidate.id === terminalId);
+    return terminal !== undefined && terminal !== null && typeof terminal === "object"
+      && "state" in terminal && typeof terminal.state === "string" ? terminal.state : null;
+  }, { projectId, terminalId });
+  await expect.poll(readCreatedTerminalState, { timeout: 60_000 }).toBe("active");
+  await expect.poll(() => terminalStreamIds.has(terminalId), { timeout: 60_000 }).toBe(true);
+  const createdTerminal = page.locator(".terminal-tab-surface.is-active");
+  await expect(createdTerminal).toBeVisible();
+  await createdTerminal.locator(".xterm-helper-textarea").focus();
   await page.keyboard.type("cat /workspace/install-acceptance.txt");
   await page.keyboard.press("Enter");
-  await expect(secondTerminal.getByText(/fresh-host-persistence-ok/u)).toBeVisible({ timeout: 30_000 });
+  await expect(createdTerminal.getByText(/fresh-host-persistence-ok/u)).toBeVisible({ timeout: 30_000 });
 
   await page.getByRole("button", { name: "Stop runtime" }).click();
   await expect(page.locator(".runtime-chip.stopped")).toHaveText("Stopped", { timeout: 180_000 });
