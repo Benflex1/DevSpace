@@ -319,10 +319,10 @@ PY
 
   sudo systemctl restart devspace-agent.service
   for attempt in $(seq 1 30); do
-    if curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health >/dev/null; then break; fi
+    if sudo -u "$web_user" curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health >/dev/null; then break; fi
     sleep 1
   done
-  curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health
+  sudo -u "$web_user" curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health
   sudo systemctl restart devspace-web.service
   for attempt in $(seq 1 90); do
     http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:3000${unauthenticated_probe_path}" || true)"
