@@ -5,10 +5,9 @@ import { expect, test } from "@playwright/test";
 
 const exec = promisify(execFile);
 const appOrigin = "https://127.0.0.1:3444";
-const accessIssuer = "https://127.0.0.1:3443";
 
-async function authenticatedStatus(pathname: string, accessToken: string): Promise<number> {
-  const response = await fetch(`${appOrigin}${pathname}`, { headers: { "cf-access-jwt-assertion": accessToken } });
+async function authenticatedStatus(pathname: string): Promise<number> {
+  const response = await fetch(`${appOrigin}${pathname}`);
   return response.status;
 }
 
@@ -28,16 +27,8 @@ test("fresh installation completes project, workspace, terminal, task, and persi
     });
     websocket.on("close", () => console.log("[installation-browser] terminal websocket closed"));
   });
-  const unauthenticated = await page.request.get("/api/projects/00000000-0000-4000-8000-000000000000/runtime");
-  expect(unauthenticated.status()).toBe(403);
-
-  const tokenResponse = await fetch(`${accessIssuer}/access-token`);
-  expect(tokenResponse.status).toBe(200);
-  const tokenPayload: unknown = await tokenResponse.json();
-  if (tokenPayload === null || typeof tokenPayload !== "object" || !("token" in tokenPayload)
-    || typeof tokenPayload.token !== "string") throw new Error("The local Access fixture did not return a JWT.");
-  const accessToken = tokenPayload.token;
-  await page.setExtraHTTPHeaders({ "cf-access-jwt-assertion": accessToken });
+  const unauthenticated = await fetch("http://127.0.0.1:3000/api/projects/00000000-0000-4000-8000-000000000000/runtime");
+  expect(unauthenticated.status).toBe(403);
 
   const pageResponse = await page.goto("/");
   expect(pageResponse?.status()).toBe(200);
@@ -92,7 +83,7 @@ test("fresh installation completes project, workspace, terminal, task, and persi
 
   await exec("/usr/bin/sudo", ["systemctl", "restart", "devspace-agent.service"], { timeout: 90_000 });
   await exec("/usr/bin/sudo", ["systemctl", "restart", "devspace-web.service"], { timeout: 90_000 });
-  await expect.poll(async () => await authenticatedStatus(`/api/projects/${projectId}/runtime`, accessToken), { timeout: 90_000 }).toBe(200);
+  await expect.poll(async () => await authenticatedStatus(`/api/projects/${projectId}/runtime`), { timeout: 90_000 }).toBe(200);
   await page.goto(`/projects/${projectId}`);
   await expect(page.locator("main.workbench")).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible();

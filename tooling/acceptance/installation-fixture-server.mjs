@@ -98,6 +98,7 @@ function sendFile(request, response, pathname) {
 }
 
 const tlsOptions = { key: await readFile(privateKeyPath), cert: await readFile(certificatePath) };
+// This loopback-only proxy models Cloudflare Access injecting its signed assertion at the edge.
 const fixtures = https.createServer(tlsOptions, (request, response) => {
   const pathname = new URL(request.url ?? "/", issuer).pathname;
   if (request.socket.remoteAddress !== "127.0.0.1") {
@@ -106,9 +107,6 @@ const fixtures = https.createServer(tlsOptions, (request, response) => {
     response.writeHead(200, { "content-type": "text/plain" }).end("ready\n");
   } else if (request.method === "GET" && pathname === "/cdn-cgi/access/certs") {
     response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(jwks);
-  } else if (request.method === "GET" && pathname === "/access-token") {
-    response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
-      .end(JSON.stringify({ token: createAccessToken() }));
   } else {
     sendFile(request, response, pathname);
   }
@@ -131,7 +129,7 @@ function writeUpgradedResponse(response, upstreamHead, clientSocket, upstreamSoc
 
 const webProxy = https.createServer(tlsOptions, (request, response) => {
   const upstream = http.request({ hostname: "127.0.0.1", port: 3000, method: request.method,
-    path: request.url, headers: request.headers }, (upstreamResponse) => {
+    path: request.url, headers: { ...request.headers, "cf-access-jwt-assertion": createAccessToken() } }, (upstreamResponse) => {
     response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
     upstreamResponse.pipe(response);
   });
@@ -144,10 +142,10 @@ const webProxy = https.createServer(tlsOptions, (request, response) => {
 webProxy.on("upgrade", (request, clientSocket, clientHead) => {
   const pathname = new URL(request.url ?? "/", "https://127.0.0.1:3444").pathname;
   if (/\/terminals\/[^/]+\/stream$/u.test(pathname)) {
-    console.log(`[installation-fixture] terminal websocket request origin=${request.headers.origin ?? "missing"} accessHeader=${request.headers["cf-access-jwt-assertion"] ? "present" : "missing"}`);
+    console.log(`[installation-fixture] terminal websocket request origin=${request.headers.origin ?? "missing"} accessHeader=fixture-injected`);
   }
   const upstream = http.request({ hostname: "127.0.0.1", port: 3000, method: request.method,
-    path: request.url, headers: request.headers });
+    path: request.url, headers: { ...request.headers, "cf-access-jwt-assertion": createAccessToken() } });
   upstream.on("upgrade", (response, upstreamSocket, upstreamHead) => {
     if (/\/terminals\/[^/]+\/stream$/u.test(pathname)) {
       console.log(`[installation-fixture] terminal websocket upstream status=${response.statusCode}`);
