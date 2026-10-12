@@ -180,6 +180,15 @@ PY
   sudo systemctl start "user@${agent_uid}.service"
   local agent_runtime="/run/user/${agent_uid}"
   assert_owned_directory "$agent_runtime" "$agent_user" 700
+  sudo -u "$agent_user" env XDG_RUNTIME_DIR="$agent_runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" systemctl --user show-environment \
+    | grep '^XDG_RUNTIME_DIR=' || printf 'User manager does not export XDG_RUNTIME_DIR; Docker unit drop-in will pin it.\n'
+  local docker_dropin_dir="$agent_home/.config/systemd/user/docker.service.d"
+  local docker_dropin="$docker_dropin_dir/devspace-runtime.conf"
+  [[ ! -e "$docker_dropin" && ! -L "$docker_dropin" ]] || fail "Docker runtime drop-in already exists"
+  sudo install -d -o "$agent_user" -g devspace-agent -m 0700 "$docker_dropin_dir"
+  printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=%s\n' "$agent_runtime" >"$root/docker-runtime.conf"
+  sudo install -o "$agent_user" -g devspace-agent -m 0600 "$root/docker-runtime.conf" "$docker_dropin"
   sudo -u "$agent_user" env -i HOME="$agent_home" PATH=/usr/local/bin:/usr/bin:/bin \
     XDG_RUNTIME_DIR="$agent_runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" \
     /usr/bin/dockerd-rootless-setuptool.sh check
@@ -189,6 +198,9 @@ PY
   sudo -u "$agent_user" env -i HOME="$agent_home" PATH=/usr/local/bin:/usr/bin:/bin \
     XDG_RUNTIME_DIR="$agent_runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" \
     systemctl --user enable --now docker.service
+  sudo -u "$agent_user" env XDG_RUNTIME_DIR="$agent_runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" systemctl --user show docker.service \
+    --property=Environment --value
 
   local docker_socket="${agent_runtime}/docker.sock"
   for attempt in $(seq 1 60); do
