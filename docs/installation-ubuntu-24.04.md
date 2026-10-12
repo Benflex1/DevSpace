@@ -108,31 +108,74 @@ sudo install -d -o devspace-agent -g devspace-agent -m 0700 \
 sudo install -d -o devspace-web -g devspace-web -m 0700 /var/lib/devspace-web
 ```
 
-The Agent requires subordinate UID/GID mappings for rootless containers. Check that `devspace-agent`
-has at least 65,536 non-overlapping IDs in both files, then run Docker's prerequisite checker:
+The Agent requires subordinate UID/GID mappings for rootless containers. Allocate a free range of
+65,536 IDs in both files if the account does not already have enough. This chooses a range that
+does not overlap entries in either file:
 
 ```bash
+SUBUID_START="$(python3 - <<'PY'
+import pathlib, pwd
+user = 'devspace-agent'
+uid = str(pwd.getpwnam(user).pw_uid)
+needed = 65536
+all_ranges = []
+complete = True
+for path in (pathlib.Path('/etc/subuid'), pathlib.Path('/etc/subgid')):
+    assigned = 0
+    for line in path.read_text().splitlines() if path.exists() else []:
+        fields = line.split(':')
+        if len(fields) != 3:
+            continue
+        try:
+            start, count = int(fields[1]), int(fields[2])
+        except ValueError:
+            continue
+        all_ranges.append((start, start + count))
+        if fields[0] in (user, uid):
+            assigned += count
+    complete = complete and assigned >= needed
+if complete:
+    print('existing')
+else:
+    candidate = 1_000_000
+    while any(candidate < end and start < candidate + needed for start, end in all_ranges):
+        candidate += needed
+    print(candidate)
+PY
+)"
+if [[ "$SUBUID_START" != existing ]]; then
+  SUBUID_END=$((SUBUID_START + 65535))
+  sudo usermod --add-subuids "$SUBUID_START-$SUBUID_END" \
+    --add-subgids "$SUBUID_START-$SUBUID_END" devspace-agent
+fi
 grep '^devspace-agent:' /etc/subuid /etc/subgid
+```
+
+On this dedicated host, stop the package-installed rootful daemon before installing the dedicated
+rootless one. This keeps DevSpace from selecting a rootful Docker endpoint:
+
+```bash
+sudo systemctl disable --now docker.service docker.socket containerd.service
+if sudo test -S /var/run/docker.sock; then sudo rm /var/run/docker.sock; fi
+```
+
+Delegate resource controllers only to the Agent user's systemd manager. This is needed by the
+rootless Engine on Ubuntu's cgroup v2 host. Start that manager and run Docker's prerequisite check:
+
+```bash
 AGENT_UID="$(id -u devspace-agent)"
+sudo install -d -m 0755 "/etc/systemd/system/user@${AGENT_UID}.service.d"
+printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+  | sudo tee "/etc/systemd/system/user@${AGENT_UID}.service.d/devspace-rootless.conf" >/dev/null
+sudo systemctl daemon-reload
 sudo loginctl enable-linger devspace-agent
+sudo systemctl start "user@${AGENT_UID}.service"
 sudo -u devspace-agent env -i \
   HOME=/var/lib/devspace-agent \
   PATH=/usr/local/bin:/usr/bin:/bin \
   XDG_RUNTIME_DIR="/run/user/${AGENT_UID}" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${AGENT_UID}/bus" \
   /usr/bin/dockerd-rootless-setuptool.sh check
-```
-
-If either subordinate-ID entry is missing, allocate a free range of at least 65,536 IDs to this
-account in both files before continuing. Do not reuse a range assigned to another account.
-
-This dedicated host must not run DevSpace through a rootful or system containerd daemon. Stop and
-disable the rootful units installed by the package setup, then remove the inactive Docker socket so
-the rootless setup cannot accidentally select it:
-
-```bash
-sudo systemctl disable --now docker.service docker.socket containerd.service
-if sudo test -S /var/run/docker.sock; then sudo rm /var/run/docker.sock; fi
 ```
 
 Install and enable the Agent user's Docker service. `loginctl enable-linger` keeps the user service
@@ -332,10 +375,14 @@ Then:
    that repository.
 3. Start the workspace and wait for the runtime to become ready.
 4. Open Terminal and confirm `pwd` is `/workspace`.
-5. In Project Options, add the default **Check workspace** task, apply the revision, and run it
-   from the Workbench. It prints `configured-task-ok` and exits successfully.
-6. Create a small file under `/workspace`, stop the workspace from the Workbench, start it again,
-   and confirm the file is still present.
+5. In Terminal, create a small file under `/workspace` so you can check that workspace data
+   survives the next steps.
+6. Stop the workspace from the Workbench.
+7. Open Project Options, add the default **Check workspace** task, then Save Draft and Apply the
+   saved revision. Project Options Apply requires the workspace to be stopped.
+8. Start the workspace again and run **Check workspace** from the Workbench. It prints
+   `configured-task-ok` and exits successfully.
+9. Open Terminal and confirm the file created before Stop is still present.
 
 The first step may use a public HTTPS repository without GitHub credentials. Private source
 inspection, private fetch, and Push require the existing Agent-owned GitHub App configuration and

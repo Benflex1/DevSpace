@@ -71,6 +71,35 @@ export function validateAgentEnvironment(environment) {
   return issues;
 }
 
+export function validateRootlessDockerSocket({ socketPath, socket, runtimeDirectory, serviceUid, serviceGid }) {
+  const issues = [];
+  const expectedSocketPath = `/run/user/${serviceUid}/docker.sock`;
+  const expectedRuntimeDirectory = `/run/user/${serviceUid}`;
+  if (socketPath !== expectedSocketPath) {
+    issues.push("DEVSPACE_DOCKER_SOCKET_PATH must be the Agent user's /run/user directory socket.");
+  }
+  if (runtimeDirectory === null || !runtimeDirectory.isDirectory || runtimeDirectory.isSymbolicLink
+    || runtimeDirectory.realPath !== expectedRuntimeDirectory) {
+    issues.push("The Docker socket parent must be a real, private mode 0700 Agent runtime directory.");
+  } else {
+    if (runtimeDirectory.uid !== serviceUid) issues.push("The Docker socket parent must be owned by the Agent service user.");
+    if ((runtimeDirectory.mode & 0o777) !== 0o700) {
+      issues.push("The Docker socket parent must be a real, private mode 0700 Agent runtime directory.");
+    }
+  }
+  if (socket === null || !socket.isSocket) {
+    issues.push("The dedicated rootless Docker endpoint must be a Unix socket.");
+  } else {
+    if (socket.uid !== serviceUid) issues.push("The Docker socket must be owned by the Agent service user.");
+    if (socket.gid !== serviceGid) issues.push("The Docker socket must use the Agent primary group.");
+    const mode = socket.mode & 0o777;
+    if (mode !== 0o600 && mode !== 0o660) {
+      issues.push("The Docker socket must use mode 0600 or 0660 with no world access.");
+    }
+  }
+  return issues;
+}
+
 export function isRootlessDockerInfo(info) {
   return Array.isArray(info?.SecurityOptions) && info.SecurityOptions.includes("name=rootless");
 }
@@ -197,12 +226,23 @@ async function validateAgentRuntime(environment) {
   if (socketPath !== `/run/user/${process.getuid?.() ?? ""}/docker.sock`) {
     throw new Error("The Agent must use the rootless Docker socket owned by its own service account.");
   }
-  const socket = await lstat(socketPath).catch(() => null);
-  if (socket === null || !socket.isSocket()) throw new Error("The dedicated rootless Docker socket is missing.");
-  if (process.getuid !== undefined && socket.uid !== process.getuid()) {
-    throw new Error("The dedicated rootless Docker socket must be owned by the Agent service account.");
-  }
-  if ((socket.mode & 0o077) !== 0) throw new Error("The Docker socket must remain private to the Agent service account.");
+  const runtimeDirectoryPath = path.dirname(socketPath);
+  const [socket, runtimeDirectoryEntry, runtimeDirectoryRealPath] = await Promise.all([
+    lstat(socketPath).catch(() => null),
+    lstat(runtimeDirectoryPath).catch(() => null),
+    realpath(runtimeDirectoryPath).catch(() => "")
+  ]);
+  const issues = validateRootlessDockerSocket({
+    socketPath,
+    socket: socket === null ? null : { isSocket: socket.isSocket(), uid: socket.uid, gid: socket.gid, mode: socket.mode },
+    runtimeDirectory: runtimeDirectoryEntry === null ? null : {
+      isDirectory: runtimeDirectoryEntry.isDirectory(), isSymbolicLink: runtimeDirectoryEntry.isSymbolicLink(),
+      realPath: runtimeDirectoryRealPath, uid: runtimeDirectoryEntry.uid, mode: runtimeDirectoryEntry.mode
+    },
+    serviceUid: process.getuid?.() ?? -1,
+    serviceGid: process.getgid?.() ?? -1
+  });
+  if (issues.length > 0) throw new Error(issues[0]);
   const dockerInfo = await readDockerInfo(socketPath);
   if (!isRootlessDockerInfo(dockerInfo)) throw new Error("The configured Docker daemon does not report rootless mode.");
 }

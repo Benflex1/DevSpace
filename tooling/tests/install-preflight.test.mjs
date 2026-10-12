@@ -75,6 +75,56 @@ test("Agent preflight requires explicit host paths for its state and rootless Do
   assert.ok(issues.some((issue) => issue.includes("rootless Docker socket")));
 });
 
+test("rootless Docker socket permits owner-only or owner-group access inside its private runtime directory", () => {
+  const validateRootlessDockerSocket = requirePreflightFunction("validateRootlessDockerSocket");
+  const uid = 1234;
+  const gid = 1235;
+  for (const mode of [0o600, 0o660]) {
+    assert.deepEqual(validateRootlessDockerSocket({
+      socketPath: `/run/user/${uid}/docker.sock`,
+      socket: { isSocket: true, uid, gid, mode },
+      runtimeDirectory: { isDirectory: true, isSymbolicLink: false, realPath: `/run/user/${uid}`, uid, mode: 0o700 },
+      serviceUid: uid,
+      serviceGid: gid
+    }), []);
+  }
+});
+
+test("rootless Docker socket rejects unauthorized modes, wrong owner/group, and a non-private runtime directory", () => {
+  const validateRootlessDockerSocket = requirePreflightFunction("validateRootlessDockerSocket");
+  const uid = 1234;
+  const gid = 1235;
+  const input = {
+    socketPath: `/run/user/${uid}/docker.sock`,
+    socket: { isSocket: true, uid, gid, mode: 0o660 },
+    runtimeDirectory: { isDirectory: true, isSymbolicLink: false, realPath: `/run/user/${uid}`, uid, mode: 0o700 },
+    serviceUid: uid,
+    serviceGid: gid
+  };
+  assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, uid: uid + 1 } }).some((issue) => issue.includes("owned by the Agent")));
+  assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, gid: gid + 1 } }).some((issue) => issue.includes("Agent primary group")));
+  assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, mode: 0o666 } }).some((issue) => issue.includes("0600 or 0660")));
+  assert.ok(validateRootlessDockerSocket({ ...input, runtimeDirectory: { ...input.runtimeDirectory, mode: 0o750 } }).some((issue) => issue.includes("private mode 0700")));
+  assert.ok(validateRootlessDockerSocket({ ...input, runtimeDirectory: { ...input.runtimeDirectory, uid: uid + 1 } }).some((issue) => issue.includes("owned by the Agent")));
+  assert.ok(validateRootlessDockerSocket({ ...input, runtimeDirectory: { ...input.runtimeDirectory, isSymbolicLink: true } }).some((issue) => issue.includes("real, private")));
+});
+
+test("rootless Docker socket rejects unexpected paths and non-socket entries", () => {
+  const validateRootlessDockerSocket = requirePreflightFunction("validateRootlessDockerSocket");
+  const uid = 1234;
+  const gid = 1235;
+  const input = {
+    socketPath: `/run/user/${uid}/docker.sock`,
+    socket: { isSocket: true, uid, gid, mode: 0o600 },
+    runtimeDirectory: { isDirectory: true, isSymbolicLink: false, realPath: `/run/user/${uid}`, uid, mode: 0o700 },
+    serviceUid: uid,
+    serviceGid: gid
+  };
+  assert.ok(validateRootlessDockerSocket({ ...input, socketPath: "/var/run/docker.sock" }).some((issue) => issue.includes("Agent user's /run/user directory")));
+  assert.ok(validateRootlessDockerSocket({ ...input, socket: { ...input.socket, isSocket: false } }).some((issue) => issue.includes("Unix socket")));
+  assert.ok(validateRootlessDockerSocket({ ...input, runtimeDirectory: { ...input.runtimeDirectory, realPath: "/run/user/other" } }).some((issue) => issue.includes("real, private")));
+});
+
 test("rootless Docker detection requires the daemon's explicit rootless security option", () => {
   const isRootlessDockerInfo = requirePreflightFunction("isRootlessDockerInfo");
   assert.equal(isRootlessDockerInfo({ SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"] }), true);
