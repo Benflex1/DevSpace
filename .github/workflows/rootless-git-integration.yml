@@ -54,6 +54,11 @@ jobs:
       - name: Run workspace-stop terminal-retirement regression tests
         run: pnpm exec vitest run --project @devspace/web apps/web/src/server/execution.test.ts
 
+      - name: Run Agent workspace-stop execution regression tests
+        run: >-
+          pnpm exec vitest run --project @devspace/agent
+          apps/agent/src/execution-manager.test.ts apps/agent/src/operation-executor.test.ts
+
       - name: Prepare official rootless Docker components
         shell: bash
         run: |

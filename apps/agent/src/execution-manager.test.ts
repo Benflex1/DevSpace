@@ -84,6 +84,54 @@ test("individual task and terminal stop fail closed without a signal attempt", a
   expect(creates).toBe(2);
 });
 
+test("settles terminal execution ownership after the exact workspace runtime has stopped", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-workspace-stop-execution-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const otherWorkspaceId = "018f0f00-0000-7000-8000-000000000005";
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const engine = {
+    createExec: async () => "exec-owned",
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: null, ContainerID: "container-owned" })
+  } as never;
+  const managed = { executionContext: async () => context } as never;
+  const manager = new ExecutionManager(root, managed, engine);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(manager.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "process", observation: expect.objectContaining({
+      processId: terminalId, desiredState: "running", observedState: "running"
+    }) }),
+    expect.objectContaining({ type: "terminal", identity: expect.objectContaining({ terminalId }), state: "disconnected" })
+  ]));
+
+  await manager.stopWorkspace(id, otherWorkspaceId);
+  expect(manager.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "process", observation: expect.objectContaining({ processId: terminalId, observedState: "running" }) })
+  ]));
+
+  await manager.stopWorkspace(id, workspaceId);
+  expect(manager.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "process", observation: expect.objectContaining({
+      processId: terminalId, desiredState: "stopped", observedState: "killed"
+    }) }),
+    expect.objectContaining({ type: "terminal", identity: expect.objectContaining({ terminalId }), state: "lost" })
+  ]));
+  expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")))
+    .toMatchObject({ desiredState: "stopped", observedState: "killed", terminalState: "lost" });
+
+  const restarted = new ExecutionManager(root, managed, engine);
+  await restarted.initialize();
+  expect(restarted.snapshotResources()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "process", observation: expect.objectContaining({ processId: terminalId, observedState: "killed" }) }),
+    expect.objectContaining({ type: "terminal", identity: expect.objectContaining({ terminalId }), state: "lost" })
+  ]));
+});
+
 test("an exact task.start replay reuses a recovered execution instead of hitting concurrency checks", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-task-replay-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
