@@ -43,6 +43,14 @@ export interface ProjectOptionsAdoptionDependencies {
   readonly timeoutMs?: number;
 }
 
+type ProjectOptionsApplyResult = {
+  readonly state: "applied" | "pending";
+  readonly operationId: string;
+  readonly activeRevisionId: string;
+  readonly runtimeState: "absent" | "unknown";
+  readonly message: string;
+};
+
 type ProjectOptionsStateDatabase = Pick<ReturnType<typeof import("./database.js").openProjectDatabase>,
   "getProjectOptionsState" | "getPendingProjectOptionsApply" | "getCompletedProjectOptionsApply" | "createProjectOptionsDraft"
   | "reserveProjectOptionsApply" | "markProjectOptionsApplyRunning" | "markProjectOptionsAdoptionSubmitted"
@@ -212,13 +220,7 @@ function runtimePlanData(input: { projectId: string; revisionId: string; revisio
 
 export async function applyProjectOptions(input: {
   readonly projectId: string; readonly actor: string; readonly expectedRevision: RevisionIdentity; readonly candidateRevisionId: string;
-}, dependencies: ProjectOptionsAdoptionDependencies): Promise<{
-  readonly state: "applied" | "pending";
-  readonly operationId: string;
-  readonly activeRevisionId: string;
-  readonly runtimeState: "absent" | "unknown";
-  readonly message: string;
-}> {
+}, dependencies: ProjectOptionsAdoptionDependencies): Promise<ProjectOptionsApplyResult> {
   const expectedRevision = revisionIdentitySchema.parse(input.expectedRevision);
   const state = dependencies.database.getProjectOptionsState(input.projectId);
   if (state.activeRevision.id === input.candidateRevisionId) {
@@ -249,7 +251,6 @@ export async function applyProjectOptions(input: {
     throw new ProjectOptionsAdoptionError("CONFIGURATION_INVALID", "The saved Project Options draft failed integrity validation.", 409);
   }
 
-  const existingPending = dependencies.database.getPendingProjectOptionsApply(input.projectId);
   const createId = dependencies.createId ?? uuidv7;
   const generatedPreviewIds = Object.fromEntries(options.previews.map((preview) => [preview.key, createId()]));
   const reservation = dependencies.database.reserveProjectOptionsApply({
@@ -261,17 +262,39 @@ export async function applyProjectOptions(input: {
   const pendingResult = () => ({ state: "pending" as const, operationId: operation.operationId,
     activeRevisionId: expectedRevision.revisionId, runtimeState: "unknown" as const,
     message: "Apply is still running. The prior configuration remains active until the Web application confirms Agent adoption and activates the revision." });
-  const failBeforeAgentAdoption = (code: string, message: string, status = 409): never => {
-    dependencies.database.failProjectOptionsApply(operation.operationId, { code, message });
+  const concurrentResult = (code: string, message: string, status: number): ProjectOptionsApplyResult => {
+    const pending = dependencies.database.getPendingProjectOptionsApply(input.projectId);
+    if (pending?.operation.operationId === operation.operationId) return pendingResult();
+    const current = dependencies.database.getProjectOptionsState(input.projectId);
+    const completed = dependencies.database.getCompletedProjectOptionsApply(input.projectId, candidate.id);
+    if (current.activeRevision.id === candidate.id && completed?.operationId === operation.operationId) {
+      return { state: "applied", operationId: operation.operationId, activeRevisionId: candidate.id,
+        runtimeState: "absent", message: "Project Options are active. The next Start will create the development container from the new image and runtime plan." };
+    }
     throw new ProjectOptionsAdoptionError(code, message, status);
+  };
+  const failApplyAtPhase = (code: string, message: string, expectedPhase: "reserved" | "adoption-submitted",
+    status = 409): ProjectOptionsApplyResult => {
+    const failed = dependencies.database.failProjectOptionsApply(operation.operationId, expectedPhase, { code, message });
+    if (!failed) return concurrentResult(code, message, status);
+    throw new ProjectOptionsAdoptionError(code, message, status);
+  };
+  const failBeforeAgentAdoption = (code: string, message: string, status = 409): ProjectOptionsApplyResult =>
+    failApplyAtPhase(code, message, "reserved", status);
+  const failFromAgentObservation = (snapshot: AgentSnapshotData | null): ProjectOptionsApplyResult | null => {
+    const observation = snapshot?.operationObservations.find((item) => item.operationId === operation.operationId);
+    if (observation?.state !== "failed") return null;
+    const failure = observation.failure;
+    const phase = dependencies.database.getPendingProjectOptionsApply(input.projectId)?.phase ?? "adoption-submitted";
+    return failApplyAtPhase(failure?.code ?? "AGENT_INTERNAL_ERROR",
+      failure?.message ?? "The Agent rejected the Project Options adoption before changing ownership.", phase, 409);
   };
 
   const timeoutMs = dependencies.timeoutMs ?? 120_000;
   const applyObservation = await dependencies.agent.snapshot().catch(() => null);
   const priorAdoption = applyObservation?.operationObservations.find((item) => item.operationId === operation.operationId);
   if (priorAdoption?.state === "failed") {
-    const failure = operationFailure(applyObservation!, operation.operationId)!;
-    failBeforeAgentAdoption(failure.code, failure.message, 409);
+    return failFromAgentObservation(applyObservation) ?? pendingResult();
   }
 
   const revisionRegistration = dependencies.database.getOrCreateRevisionOperation({ projectId: input.projectId,
@@ -284,7 +307,7 @@ export async function applyProjectOptions(input: {
     } catch (error) {
       if (error instanceof AgentResponseError) {
         dependencies.database.finishOperation(revisionRegistration.operationId, { state: "failed", code: error.code, message: error.message });
-        failBeforeAgentAdoption(error.code, error.message, 422);
+        return failBeforeAgentAdoption(error.code, error.message, 422);
       }
       return pendingResult();
     }
@@ -295,7 +318,7 @@ export async function applyProjectOptions(input: {
       const code = failure?.code ?? "AGENT_INTERNAL_ERROR";
       const message = failure?.message ?? "Candidate configuration registration failed.";
       dependencies.database.finishOperation(revisionRegistration.operationId, { state: "failed", code, message });
-      failBeforeAgentAdoption(code, message, 422);
+      return failBeforeAgentAdoption(code, message, 422);
     }
     if (outcome === "pending") return pendingResult();
     dependencies.database.finishOperation(revisionRegistration.operationId, { state: "succeeded" });
@@ -311,7 +334,7 @@ export async function applyProjectOptions(input: {
     } catch (error) {
       if (error instanceof AgentResponseError) {
         dependencies.database.finishOperation(planRegistration.operationId, { state: "failed", code: error.code, message: error.message });
-        failBeforeAgentAdoption(error.code, error.message, 422);
+        return failBeforeAgentAdoption(error.code, error.message, 422);
       }
       return pendingResult();
     }
@@ -322,35 +345,36 @@ export async function applyProjectOptions(input: {
       const code = failure?.code ?? "RUNTIME_POLICY_VIOLATION";
       const message = failure?.message ?? "Candidate runtime plan registration failed.";
       dependencies.database.finishOperation(planRegistration.operationId, { state: "failed", code, message });
-      failBeforeAgentAdoption(code, message, 422);
+      return failBeforeAgentAdoption(code, message, 422);
     }
     if (outcome === "pending") return pendingResult();
     dependencies.database.finishOperation(planRegistration.operationId, { state: "succeeded" });
   }
 
   let adoptionSucceeded = priorAdoption?.state === "succeeded";
-  const adoptionWasSubmitted = existingPending?.phase === "adoption-submitted" || priorAdoption !== undefined;
+  const currentReservation = dependencies.database.getPendingProjectOptionsApply(input.projectId);
+  const adoptionWasSubmitted = currentReservation?.operation.operationId === operation.operationId
+    && currentReservation.phase === "adoption-submitted" || priorAdoption !== undefined;
   if (!adoptionWasSubmitted) {
     const runtime = await dependencies.agent.runtimeStatus().catch(() => null);
     if (runtime?.rootlessRuntime !== "available" || runtime.operationJournal !== "available") {
-      failBeforeAgentAdoption("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless runtime or Agent operation journal is unavailable.", 503);
+      return failBeforeAgentAdoption("ROOTLESS_RUNTIME_UNAVAILABLE", "The dedicated rootless runtime or Agent operation journal is unavailable.", 503);
     }
     const inspection = await dependencies.agent.inspectWorkspace(input.projectId, state.workspace.id).catch(() => null);
     if (inspection === null) {
-      dependencies.database.failProjectOptionsApply(operation.operationId, { code: "AGENT_UNAVAILABLE", message: "The Agent workspace inspection is unavailable." });
-      throw new ProjectOptionsAdoptionError("AGENT_UNAVAILABLE", "The Agent workspace inspection is unavailable.", 503);
+      return failBeforeAgentAdoption("AGENT_UNAVAILABLE", "The Agent workspace inspection is unavailable.", 503);
     }
     const oldRevision = inspection.revisionId === expectedRevision.revisionId && inspection.revisionHash === expectedRevision.revisionHash;
     if (!oldRevision || inspection.observedState !== "stopped"
       || (inspection.runtimeStack.observedState !== "absent" && inspection.runtimeStack.observedState !== "stopped")) {
-      failBeforeAgentAdoption("WORKSPACE_STATE_CONFLICT", "The existing workspace must be stopped under the expected configuration before Apply.", 409);
+      return failBeforeAgentAdoption("WORKSPACE_STATE_CONFLICT", "The existing workspace must be stopped under the expected configuration before Apply.", 409);
     }
     const activeAgentResource = (applyObservation?.resources ?? []).some((resource) =>
       (resource.type === "process" && resource.observation.workspaceId === state.workspace.id
         && !["exited", "failed", "killed"].includes(resource.observation.observedState))
       || (resource.type === "terminal" && resource.identity.workspaceId === state.workspace.id
         && ["creating", "active", "disconnected", "closing"].includes(resource.state)));
-    if (activeAgentResource) failBeforeAgentAdoption("WORKSPACE_STATE_CONFLICT", "An Agent process or terminal is still active in this workspace.", 409);
+    if (activeAgentResource) return failBeforeAgentAdoption("WORKSPACE_STATE_CONFLICT", "An Agent process or terminal is still active in this workspace.", 409);
   }
 
   if (!adoptionSucceeded) {
@@ -364,19 +388,17 @@ export async function applyProjectOptions(input: {
     try { await dependencies.agent.adoptConfigurationRevision(operation.operationId, adoptionRequest); }
     catch (error) {
       if (error instanceof AgentResponseError) {
-        dependencies.database.failProjectOptionsApply(operation.operationId, { code: error.code, message: error.message });
-        throw new ProjectOptionsAdoptionError(error.code, error.message, 409);
+        const terminalFailure = failFromAgentObservation(await dependencies.agent.snapshot().catch(() => null));
+        if (terminalFailure !== null) return terminalFailure;
       }
       return pendingResult();
     }
     const outcome = await waitForOperation(dependencies.agent, operation.operationId, timeoutMs, dependencies);
     if (outcome === "failed") {
       const snapshot = await dependencies.agent.snapshot().catch(() => null);
-      const failure = snapshot === null ? null : operationFailure(snapshot, operation.operationId);
-      const code = failure?.code ?? "AGENT_INTERNAL_ERROR";
-      const message = failure?.message ?? "The Agent could not safely adopt the candidate revision.";
-      dependencies.database.failProjectOptionsApply(operation.operationId, { code, message });
-      throw new ProjectOptionsAdoptionError(code, message, 409);
+      const terminalFailure = failFromAgentObservation(snapshot);
+      if (terminalFailure !== null) return terminalFailure;
+      return pendingResult();
     }
     if (outcome === "pending") return pendingResult();
     adoptionSucceeded = true;

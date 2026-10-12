@@ -994,7 +994,11 @@ export function openProjectDatabase(path: string, options: {
         if (typeof value !== "string") throw new ProjectSetupConflictError("The pending Project Options Apply preview identity is invalid.");
         previewIds[key] = value;
       }
-      const phase = fields["phase"] === "adoption-submitted" ? "adoption-submitted" as const : "reserved" as const;
+      const rawPhase = fields["phase"];
+      if (rawPhase !== "reserved" && rawPhase !== "adoption-submitted") {
+        throw new ProjectSetupConflictError("The pending Project Options Apply phase is invalid.");
+      }
+      const phase = rawPhase;
       return { operation, expectedRevision: expectedRevision.data, candidateRevision: candidateRevision.data, previewIds, phase };
     },
     getCompletedProjectOptionsApply(projectId: string, candidateRevisionId: string): Operation | null {
@@ -1523,15 +1527,20 @@ export function openProjectDatabase(path: string, options: {
           if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid-progress");
           progress = parsed as Record<string, unknown>;
         } catch { throw new ProjectSetupConflictError("The Project Options Apply reservation is malformed."); }
+        if (progress["phase"] === "adoption-submitted") return;
+        if (progress["phase"] !== "reserved") throw new ProjectSetupConflictError("The Project Options Apply phase is invalid.");
         db.update(operations).set({ progressJson: JSON.stringify({ ...progress, phase: "adoption-submitted" }) })
           .where(eq(operations.operationId, operationId)).run();
       }).immediate();
     },
-    failProjectOptionsApply(operationId: string, outcome: { code: string; message: string }): void {
-      client.transaction(() => {
+    failProjectOptionsApply(operationId: string, expectedPhase: "reserved" | "adoption-submitted",
+      outcome: { code: string; message: string }): boolean {
+      return client.transaction(() => {
         const operation = db.select().from(operations).where(and(eq(operations.operationId, operationId),
           eq(operations.operationName, "configuration.apply"))).get();
-        if (operation === undefined || (operation.state !== "accepted" && operation.state !== "running")) return;
+        if (operation === undefined || (operation.state !== "accepted" && operation.state !== "running")) return false;
+        const pending = this.getPendingProjectOptionsApply(operation.projectId);
+        if (pending?.operation.operationId !== operationId || pending.phase !== expectedPhase) return false;
         const timestamp = now().toISOString();
         db.update(operations).set({ state: "failed", finishedAt: timestamp, errorCode: outcome.code,
           errorMessage: outcome.message.slice(0, 512) }).where(eq(operations.operationId, operationId)).run();
@@ -1539,6 +1548,7 @@ export function openProjectDatabase(path: string, options: {
         db.insert(auditEvents).values({ id: createId(), sequence: (last?.sequence ?? -1) + 1, actor: operation.actor,
           eventType: "project.options.apply_failed", resourceType: "configuration-revision", resourceId: operation.resourceId,
           operationId, metadataJson: JSON.stringify({ code: outcome.code }), createdAt: timestamp }).run();
+        return true;
       }).immediate();
     },
     activateProjectOptionsRevision(input: {

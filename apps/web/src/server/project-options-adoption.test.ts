@@ -32,6 +32,8 @@ async function fixture() {
   let running = false;
   let holdAdoption = false;
   let adoptionCalls = 0;
+  let workspaceInspectionCalls = 0;
+  let workspaceInspectionGate: { readonly callNumber: number; readonly entered: () => void; readonly wait: Promise<void> } | null = null;
   const succeed = (operationId: string) => observations.set(operationId, {
     operationId, state: "succeeded", updatedAt: "2026-10-12T12:00:00.000Z", failure: null
   });
@@ -55,11 +57,20 @@ async function fixture() {
     inspectGit: (projectId: string, workspaceId: string | null) => Promise.resolve(gitInspectionDataSchema.parse({
       projectId, workspaceId, branchName: "main", headCommit: "a".repeat(40), dirty: false, aheadCount: 0, behindCount: 0
     })),
-    inspectWorkspace: (projectId: string, workspaceId: string) => Promise.resolve(workspaceInspectionDataSchema.parse({
-      projectId, workspaceId, kind: "primary", revisionId: agentRevisionId, revisionHash: agentRevisionHash,
-      desiredState: running ? "running" : "stopped", observedState: running ? "running" : "stopped", dirty: true,
-      runtimeStack: { desiredState: running ? "running" : "absent", observedState: running ? "running" : "absent" }
-    })),
+    inspectWorkspace: async (projectId: string, workspaceId: string) => {
+      workspaceInspectionCalls += 1;
+      const gate = workspaceInspectionGate;
+      if (gate !== null && workspaceInspectionCalls === gate.callNumber) {
+        workspaceInspectionGate = null;
+        gate.entered();
+        await gate.wait;
+      }
+      return workspaceInspectionDataSchema.parse({
+        projectId, workspaceId, kind: "primary", revisionId: agentRevisionId, revisionHash: agentRevisionHash,
+        desiredState: running ? "running" : "stopped", observedState: running ? "running" : "stopped", dirty: true,
+        runtimeStack: { desiredState: running ? "running" : "absent", observedState: running ? "running" : "absent" }
+      });
+    },
     adoptConfigurationRevision: (operationId: string, data: { candidateRevision: { revisionId: string; revisionHash: string } }) => {
       adoptionCalls += 1;
       agentRevisionId = data.candidateRevision.revisionId; agentRevisionHash = data.candidateRevision.revisionHash;
@@ -92,6 +103,14 @@ async function fixture() {
   return { database, project, agent, registry, current, nextOptions, saved, dependencies, observations,
     setRunning: (value: boolean) => { running = value; },
     setHoldAdoption: (value: boolean) => { holdAdoption = value; },
+    holdNextWorkspaceInspection: () => {
+      let entered!: () => void;
+      let release!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+      const wait = new Promise<void>((resolve) => { release = resolve; });
+      workspaceInspectionGate = { callNumber: workspaceInspectionCalls + 1, entered, wait };
+      return { entered: enteredPromise, release };
+    },
     finishAdoption: (operationId: string) => succeed(operationId), adoptionCalls: () => adoptionCalls };
 }
 
@@ -170,6 +189,32 @@ test("recovers after Agent ownership changes and after Web activation commits", 
   const replayed = await applyProjectOptions(request, value.dependencies);
   expect(replayed).toMatchObject({ state: "applied", operationId: recovered.operationId });
   expect(value.adoptionCalls()).toBe(1);
+  value.database.close();
+});
+
+test("a delayed duplicate Apply cannot fail the shared reservation after Agent ownership changes", async () => {
+  const value = await fixture(); value.setHoldAdoption(true);
+  const request = { projectId: value.project.id, actor: "owner@example.com",
+    expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash },
+    candidateRevisionId: value.saved.id };
+  const gate = value.holdNextWorkspaceInspection();
+  const delayedApply = applyProjectOptions(request, { ...value.dependencies, timeoutMs: 0 });
+  await gate.entered;
+  const operationId = value.database.getPendingProjectOptionsApply(value.project.id)?.operation.operationId;
+
+  const adoptingApply = await applyProjectOptions(request, { ...value.dependencies, timeoutMs: 0 });
+  expect(adoptingApply).toMatchObject({ state: "pending", operationId });
+  expect(value.database.getProjectOptionsState(value.project.id).activeRevision.id).toBe(value.current.activeRevision.id);
+  expect(value.database.getPendingProjectOptionsApply(value.project.id)?.phase).toBe("adoption-submitted");
+  const agentAfterAdoption = await value.agent.inspectWorkspace(value.project.id, value.current.workspaceId);
+  expect(agentAfterAdoption.revisionId).toBe(value.saved.id);
+
+  gate.release();
+  const delayedResult = await delayedApply;
+  expect(delayedResult).toMatchObject({ state: "pending", activeRevisionId: value.current.activeRevision.id });
+  expect(value.database.getPendingProjectOptionsApply(value.project.id)?.phase).toBe("adoption-submitted");
+  expect(value.database.getProjectOptionsState(value.project.id).activeRevision.id).toBe(value.current.activeRevision.id);
+  expect(value.database.getCompletedProjectOptionsApply(value.project.id, value.saved.id)).toBeNull();
   value.database.close();
 });
 
