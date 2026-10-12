@@ -232,7 +232,7 @@ export function ProjectOptionsEditor({ projectId, runtimeState, active, onDirtyC
       target: { kind: "workspace" },
       containerPort: port,
       domainBaseId: snapshot.approvedPreviewBases[0]?.id ?? "",
-      hostnamePattern: "{project}-{shortId}",
+      hostnamePattern: "{project}-{preview}-{shortId}",
       protocol: "http",
       healthPath: "/",
       healthStatuses: [200],

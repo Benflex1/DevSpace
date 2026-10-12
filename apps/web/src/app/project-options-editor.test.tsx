@@ -204,7 +204,8 @@ test("loads, saves, and applies a full options document without changing unrelat
   });
   expect(submitted.previews[0]).toMatchObject({
     key: "web", displayName: "Web", containerPort: 4173, healthPath: "/healthz",
-    healthStatuses: [200, 204], startupTimeoutSeconds: 90, webSocketForwarding: false
+    healthStatuses: [200, 204], startupTimeoutSeconds: 90, webSocketForwarding: false,
+    hostnamePattern: "{project}-{shortId}"
   });
   expect(submitted.developmentEnvironment.ports).toEqual([{ name: "web", containerPort: 4173, protocol: "tcp" }]);
   expect(submitted.resources.memoryBytes).toBe(536870912);
@@ -359,7 +360,16 @@ test("keeps field-specific Apply validation errors visible after refreshing save
 
 test("adds and removes multiple tasks and previews while marking the form unsaved", async () => {
   const options = initialOptions();
-  vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(optionsSnapshot(options)))));
+  const savedOptions: { value: ReturnType<typeof initialOptions> | null } = { value: null };
+  vi.stubGlobal("fetch", vi.fn((input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.endsWith("/options") && init?.method === "PUT") {
+      savedOptions.value = JSON.parse(String(init.body)).options as ReturnType<typeof initialOptions>;
+      return Promise.resolve(response({ draft: { id: candidateRevisionId, number: 4, hash: candidateRevisionHash,
+        options: savedOptions.value } }, 201));
+    }
+    return Promise.resolve(response(optionsSnapshot(options)));
+  }));
   const onDirtyChange = vi.fn();
   const { ProjectOptionsEditor } = await import("./project-options-editor.js");
   const body = await mount(createElement(ProjectOptionsEditor, {
@@ -369,10 +379,13 @@ test("adds and removes multiple tasks and previews while marking the form unsave
 
   await press(body, "Add task");
   await press(body, "Add preview");
+  expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  await press(body, "Save Draft");
 
   expect(findByLabel(body, "Task check-2 executable").value).toBe("/usr/bin/printf");
   expect(findByLabel(body, "Preview Web 2 container port").value).toBe("3000");
-  expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  expect(savedOptions.value?.previews[1]?.hostnamePattern).toBe("{project}-{preview}-{shortId}");
+  expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   const previewRemovals = findButtons(body).filter((button) => buttonText(button).trim() === "Remove preview");
   expect(previewRemovals).toHaveLength(2);
   const removePreview = reactProps(previewRemovals[1]!).onClick;

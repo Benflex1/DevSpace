@@ -24,6 +24,10 @@ export class ProjectOptionsValidationError extends Error {
   constructor(readonly field: string, message: string) { super(message); this.name = "ProjectOptionsValidationError"; }
 }
 
+class ProjectOptionsPreviewHostnameConflictError extends ProjectOptionsValidationError {
+  constructor() { super("previews", "Each workspace preview must use a unique hostname in this configuration revision."); }
+}
+
 export class ProjectOptionsAdoptionError extends Error {
   constructor(readonly code: string, message: string, readonly status: number, readonly retryable = false) {
     super(message); this.name = "ProjectOptionsAdoptionError";
@@ -121,9 +125,10 @@ function materializeCandidatePreviews(input: {
   readonly previewIds: Readonly<Record<string, string>>;
   readonly previewBaseRegistry: ApprovedPreviewBaseRegistry;
   readonly now: string;
+  readonly requireUniqueHostnames?: boolean;
 }) {
   try {
-    return materializePreviews({
+    const rows = materializePreviews({
       projectId: input.state.project.id,
       projectSlug: input.state.project.slug,
       workspaceId: input.state.workspace.id,
@@ -134,7 +139,12 @@ function materializeCandidatePreviews(input: {
       previewBaseRegistry: input.previewBaseRegistry,
       now: input.now
     });
+    if (input.requireUniqueHostnames === true && new Set(rows.map((row) => row.hostname)).size !== rows.length) {
+      throw new ProjectOptionsPreviewHostnameConflictError();
+    }
+    return rows;
   } catch (error) {
+    if (error instanceof ProjectOptionsValidationError) throw error;
     throw new ProjectOptionsValidationError("previews", error instanceof Error ? error.message : "Preview configuration is not approved.");
   }
 }
@@ -260,7 +270,6 @@ export async function applyProjectOptions(input: {
     expectedRevision, candidateRevision, previewIds: generatedPreviewIds
   });
   const { operation, previewIds } = reservation;
-  dependencies.database.markProjectOptionsApplyRunning(operation.operationId);
   const pendingResult = () => ({ state: "pending" as const, operationId: operation.operationId,
     activeRevisionId: expectedRevision.revisionId, runtimeState: "unknown" as const,
     message: "Apply is still running. The prior configuration remains active until the Web application confirms Agent adoption and activates the revision." });
@@ -291,6 +300,35 @@ export async function applyProjectOptions(input: {
     return failApplyAtPhase(failure?.code ?? "AGENT_INTERNAL_ERROR",
       failure?.message ?? "The Agent rejected the Project Options adoption before changing ownership.", phase, 409);
   };
+
+  // The reservation owns the durable preview IDs. Validate those exact IDs before
+  // submitting or resuming any Agent operation that may retire the stopped runtime.
+  try {
+    materializeCandidatePreviews({ state, configurationRevisionId: candidate.id, options, previewIds,
+      previewBaseRegistry: dependencies.previewBaseRegistry, now: new Date().toISOString(), requireUniqueHostnames: true });
+  } catch (error) {
+    if (!(error instanceof ProjectOptionsValidationError)) throw error;
+    const code = error instanceof ProjectOptionsPreviewHostnameConflictError
+      ? "PROJECT_OPTIONS_PREVIEW_HOSTNAME_CONFLICT" : "PROJECT_OPTIONS_PREVIEW_INVALID";
+    const pending = dependencies.database.getPendingProjectOptionsApply(input.projectId);
+    let safeToFail = pending?.operation.operationId === operation.operationId && pending.phase === "reserved";
+    if (pending?.operation.operationId === operation.operationId && pending.phase === "adoption-submitted") {
+      const snapshot = await dependencies.agent.snapshot().catch(() => null);
+      const observation = snapshot?.operationObservations.find((item) => item.operationId === operation.operationId);
+      if (snapshot !== null && (observation === undefined || observation.state === "failed")) {
+        const inspection = await dependencies.agent.inspectWorkspace(input.projectId, state.workspace.id).catch(() => null);
+        safeToFail = inspection?.revisionId === expectedRevision.revisionId
+          && inspection.revisionHash === expectedRevision.revisionHash && inspection.observedState === "stopped"
+          && (inspection.runtimeStack.observedState === "stopped" || inspection.runtimeStack.observedState === "absent");
+      }
+    }
+    if (safeToFail && pending !== null) {
+      const failed = dependencies.database.failProjectOptionsApply(operation.operationId, pending.phase, { code, message: error.message });
+      if (failed) throw error;
+    }
+    return concurrentResult(code, error.message, 422);
+  }
+  dependencies.database.markProjectOptionsApplyRunning(operation.operationId);
 
   const timeoutMs = dependencies.timeoutMs ?? 120_000;
   const applyObservation = await dependencies.agent.snapshot().catch(() => null);
@@ -416,7 +454,7 @@ export async function applyProjectOptions(input: {
   const activationState = dependencies.database.getProjectOptionsState(input.projectId);
   const previewRows = materializeCandidatePreviews({ state: activationState, configurationRevisionId: candidate.id,
     options, previewIds: pending?.previewIds ?? previewIds,
-    previewBaseRegistry: dependencies.previewBaseRegistry, now: new Date().toISOString() });
+    previewBaseRegistry: dependencies.previewBaseRegistry, now: new Date().toISOString(), requireUniqueHostnames: true });
   try {
     const active = dependencies.database.activateProjectOptionsRevision({ operationId: operation.operationId,
       projectId: input.projectId, workspaceId: state.workspace.id, expectedRevision, candidateRevision,

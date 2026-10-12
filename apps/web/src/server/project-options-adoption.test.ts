@@ -168,6 +168,66 @@ test("a stopped-state rejection keeps the old revision authoritative", async () 
   value.database.close();
 });
 
+test("rejects colliding durable preview hostnames on retry and accepts the preview-aware pattern", async () => {
+  const value = await fixture();
+  const previews = [
+    { ...value.current.activeRevision.options.previews[0]!, key: "web", displayName: "Web", containerPort: 5180,
+      hostnamePattern: "{project}-{shortId}" },
+    { ...value.current.activeRevision.options.previews[0]!, key: "docs", displayName: "Docs", containerPort: 5181,
+      hostnamePattern: "{project}-{shortId}" }
+  ];
+  const options = parseProjectOptionsV1({ ...value.current.activeRevision.options,
+    developmentEnvironment: { ...value.current.activeRevision.options.developmentEnvironment,
+      source: { kind: "image", imageReference: "node:26-bookworm" },
+      ports: previews.map((preview) => ({ name: preview.key, containerPort: preview.containerPort, protocol: "tcp" })) },
+    previews });
+  const saved = saveProjectOptionsDraft({ projectId: value.project.id, actor: "owner@example.com",
+    expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash }, options }, {
+    database: value.database, previewBaseRegistry: value.registry
+  });
+  const collidingIds = { web: "0190aaaa-0000-7000-8000-000000000001", docs: "0190aaaa-0000-7000-8000-000000000002" };
+  const pending = value.database.reserveProjectOptionsApply({ projectId: value.project.id, workspaceId: value.current.workspaceId,
+    actor: "owner@example.com", expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash },
+    candidateRevision: { revisionId: saved.id, revisionHash: saved.hash }, previewIds: collidingIds });
+  value.database.markProjectOptionsApplyRunning(pending.operation.operationId);
+  value.database.markProjectOptionsAdoptionSubmitted(pending.operation.operationId);
+
+  await expect(applyProjectOptions({ projectId: value.project.id, actor: "owner@example.com",
+    expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash },
+    candidateRevisionId: saved.id }, { ...value.dependencies,
+    createId: (() => { let index = 0; return () => `0190bbbb-0000-7000-8000-${String(++index).padStart(12, "0")}`; })()
+  })).rejects.toMatchObject({ name: "ProjectOptionsValidationError", field: "previews" });
+
+  expect(value.adoptionCalls()).toBe(0);
+  expect(value.database.getProjectOptionsState(value.project.id).activeRevision.id).toBe(value.current.activeRevision.id);
+  await expect(value.agent.inspectWorkspace(value.project.id, value.current.workspaceId)).resolves.toMatchObject({
+    revisionId: value.current.activeRevision.id, observedState: "stopped", runtimeStack: { observedState: "absent" }
+  });
+  expect(value.database.getPendingProjectOptionsApply(value.project.id)).toBeNull();
+  expect(value.database.listOperations().filter((operation) => operation.operationName === "configuration.apply").at(-1))
+    .toMatchObject({ state: "failed", errorCode: "PROJECT_OPTIONS_PREVIEW_HOSTNAME_CONFLICT" });
+
+  const collisionSafeOptions = parseProjectOptionsV1({ ...options,
+    previews: previews.map((preview) => ({ ...preview, hostnamePattern: "{project}-{preview}-{shortId}" })) });
+  const collisionSafeDraft = saveProjectOptionsDraft({ projectId: value.project.id, actor: "owner@example.com",
+    expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash },
+    options: collisionSafeOptions }, { database: value.database, previewBaseRegistry: value.registry });
+  value.database.reserveProjectOptionsApply({ projectId: value.project.id, workspaceId: value.current.workspaceId,
+    actor: "owner@example.com", expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash },
+    candidateRevision: { revisionId: collisionSafeDraft.id, revisionHash: collisionSafeDraft.hash }, previewIds: collidingIds });
+  const applied = await applyProjectOptions({ projectId: value.project.id, actor: "owner@example.com",
+    expectedRevision: { revisionId: value.current.activeRevision.id, revisionHash: value.current.activeRevision.hash },
+    candidateRevisionId: collisionSafeDraft.id }, { ...value.dependencies,
+    createId: (() => { let index = 0; return () => `0190bbbb-0000-7000-8000-${String(++index).padStart(12, "0")}`; })()
+  });
+  expect(applied).toMatchObject({ state: "applied", activeRevisionId: collisionSafeDraft.id });
+  const materialized = value.database.listPreviews(value.project.id, value.current.workspaceId)
+    .filter((preview) => preview.configRevisionId === collisionSafeDraft.id);
+  expect(new Set(materialized.map((preview) => preview.hostname)).size).toBe(2);
+  expect(materialized.map((preview) => preview.previewKey).sort()).toEqual(["docs", "web"]);
+  value.database.close();
+});
+
 test("recovers after Agent ownership changes and after Web activation commits", async () => {
   const value = await fixture(); value.setHoldAdoption(true);
   const request = { projectId: value.project.id, actor: "owner@example.com",

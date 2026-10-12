@@ -35,7 +35,7 @@ async function createPreviewFixture() {
     Labels: { "devspace.managed": "true", "devspace.resource-role": "network" }
   });
   assert.equal(network.status, 201);
-  return { root, socket, fixture, workspaceRoot, networkName: "devspace-preview-test-network" };
+  return { root, socket, fixture, workspaceRoot, networkName: "devspace-preview-test-network", networkId: network.body.Id };
 }
 
 async function createContainer(harness, name, hostPort, containerPort = 3000) {
@@ -121,6 +121,7 @@ test("Docker fixture persists effective create state and supports policy/lifecyc
   assert.equal(created.status, 201);
   const containerId = created.body.Id;
   const inspected = (await request(socket, "GET", `/containers/${containerId}/json`)).body;
+  assert.equal(inspected.Config.Image, "node:24");
   assert.deepEqual(inspected.HostConfig, {
     Privileged: false, PublishAllPorts: false, PidMode: "", IpcMode: "private", UTSMode: "", UsernsMode: "",
     CgroupnsMode: "private", NetworkMode: "devspace-test-network",
@@ -236,5 +237,23 @@ test("removing a container prevents its old application target from answering", 
     assert.match(response.body, new RegExp(replacement, "u"));
     assert.doesNotMatch(response.body, new RegExp(oldContainer, "u"));
     oldTerminal.socket.destroy(); replacementTerminal.socket.destroy();
+  } finally { await closePreviewFixture(harness); }
+});
+
+test("Docker DELETE routes retire stopped containers and unused networks", async () => {
+  const harness = await createPreviewFixture();
+  try {
+    const containerId = await createContainer(harness, "container-delete-route", 43107);
+    const terminal = await createTerminalExec(harness, containerId);
+    await harness.fixture.startApplicationForExec(terminal.execId, 3000);
+    await request(harness.socket, "POST", `/containers/${containerId}/stop`);
+
+    assert.equal((await request(harness.socket, "DELETE", `/containers/${containerId}?force=1`)).status, 204);
+    assert.equal((await request(harness.socket, "GET", `/containers/${containerId}/json`)).status, 404);
+    assert.deepEqual(harness.fixture.snapshot().appListeners, []);
+    await assert.rejects(httpRequest(43107));
+    assert.equal((await request(harness.socket, "DELETE", `/networks/${harness.networkId}`)).status, 204);
+    assert.equal((await request(harness.socket, "GET", `/networks/${harness.networkId}`)).status, 404);
+    terminal.socket.destroy();
   } finally { await closePreviewFixture(harness); }
 });

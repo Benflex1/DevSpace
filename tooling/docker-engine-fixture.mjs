@@ -117,6 +117,14 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
         networks.set(networkId, network); names.set(body.Name, networkId); send(response, 201, { Id: networkId }); return;
       }
       const networkMatch = /^\/networks\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === "DELETE" && networkMatch !== null) {
+        const network = networks.get(decodeURIComponent(networkMatch[1]));
+        if (network === undefined) { send(response, 404, { message: "not found" }); return; }
+        if ([...containers.values()].some((container) => container.HostConfig.NetworkMode === network.Name)) {
+          send(response, 409, { message: "network is still in use" }); return;
+        }
+        networks.delete(network.Id); names.delete(network.Name); response.writeHead(204).end(); return;
+      }
       if (request.method === "GET" && networkMatch !== null) {
         const network = networks.get(decodeURIComponent(networkMatch[1]));
         if (network === undefined) send(response, 404, { message: "not found" }); else send(response, 200, network); return;
@@ -167,7 +175,8 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
           containerCreateFailures -= 1; send(response, 500, { message: "fixture container creation failure" }); return;
         }
         const containerId = id("c");
-        const container = { Id: containerId, Name: `/${name}`, Config: { Labels: body.Labels, WorkingDir: body.WorkingDir, ExposedPorts: exposedPorts },
+        const container = { Id: containerId, Name: `/${name}`, Config: { Labels: body.Labels, Image: body.Image,
+          WorkingDir: body.WorkingDir, ExposedPorts: exposedPorts },
           HostConfig: { Privileged: body.HostConfig.Privileged, PublishAllPorts: body.HostConfig.PublishAllPorts,
             PidMode: body.HostConfig.PidMode, IpcMode: body.HostConfig.IpcMode, UTSMode: body.HostConfig.UTSMode,
             UsernsMode: body.HostConfig.UsernsMode, CgroupnsMode: body.HostConfig.CgroupnsMode,
@@ -217,6 +226,15 @@ export async function createDockerEngineFixture(socketPath, managedWorkspaceRoot
       if (containerMatch !== null) {
         const container = containers.get(decodeURIComponent(containerMatch[1]));
         if (container === undefined) { send(response, 404, { message: "not found" }); return; }
+        if (request.method === "DELETE" && containerMatch[2] === undefined) {
+          await stopApplication(container.Id);
+          containers.delete(container.Id); names.delete(container.Name.replace(/^\//u, ""));
+          for (const execution of execs.values()) {
+            if (execution.ContainerID !== container.Id) continue;
+            execSockets.get(execution.ID)?.destroy(); execSockets.delete(execution.ID); execs.delete(execution.ID);
+          }
+          response.writeHead(204).end(); return;
+        }
         if (request.method === "GET" && containerMatch[2] === "json") {
           if (container.State.Running) {
             const lifecycle = lifecycles.get(container.Id);
