@@ -977,10 +977,27 @@ export class ExecutionManager {
   }
 
   stopWorkspace(projectId: string, workspaceId: string): Promise<void> {
-    // The exact container lifecycle reclaims every exec when the workspace runtime stops.
-    // M1 deliberately does not attempt to signal individual task or terminal descendants.
-    void projectId; void workspaceId;
-    return Promise.resolve();
+    return this.settleWorkspaceExecutions(projectId, workspaceId);
+  }
+
+  private async settleWorkspaceExecutions(projectId: string, workspaceId: string): Promise<void> {
+    for (const live of this.executions.values()) {
+      const previous = live.record;
+      if (previous.projectId !== projectId || previous.workspaceId !== workspaceId || previous.executionRole === "harness"
+        || !["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
+      // The managed runtime has confirmed the exact container is stopped, so
+      // none of its ordinary task or terminal execs can still be running.
+      live.record = { ...previous, desiredState: "stopped", observedState: "killed",
+        terminalState: previous.kind === "terminal" ? "lost" : null,
+        exitCode: null, finishedAt: this.now().toISOString() };
+      try { await this.persist(live); }
+      catch (error) { live.record = previous; throw error; }
+      if (live.stream !== null) {
+        live.stream.destroy();
+        live.stream = null;
+      }
+      if (live.attachment !== null) this.requestAttachmentClose(live.attachment);
+    }
   }
 
   shutdownTransports(): void {

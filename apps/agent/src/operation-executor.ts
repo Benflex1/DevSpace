@@ -222,8 +222,8 @@ export class OperationExecutor {
         }
         case "workspace.stop": {
           const request = record.request as { projectId: string; workspaceId: string };
-          await this.execution.stopWorkspace(request.projectId, request.workspaceId);
           await this.managed.stopWorkspace(request.projectId, request.workspaceId);
+          await this.execution.stopWorkspace(request.projectId, request.workspaceId);
           this.events.workspaceRuntimeConverged(operationId, request.projectId, request.workspaceId, previousRuntime, "stopped");
           break;
         }
