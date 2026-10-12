@@ -16,6 +16,7 @@ agent_socket=/run/devspace-agent/agent.sock
 agent_env=/etc/devspace/agent.env
 web_env=/etc/devspace/web.env
 test_ca=/etc/devspace/installation-test-ca.pem
+unauthenticated_probe_path=/api/projects/00000000-0000-4000-8000-000000000000/runtime
 agent_uid=""
 agent_gid=""
 
@@ -309,7 +310,7 @@ PY
 
   local http_status=
   for attempt in $(seq 1 90); do
-    http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/projects || true)"
+    http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:3000${unauthenticated_probe_path}" || true)"
     [[ "$http_status" = 403 ]] && break
     sleep 1
   done
@@ -324,7 +325,7 @@ PY
   curl --silent --fail --unix-socket "$agent_socket" http://localhost/v1/health
   sudo systemctl restart devspace-web.service
   for attempt in $(seq 1 90); do
-    http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/projects || true)"
+    http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:3000${unauthenticated_probe_path}" || true)"
     [[ "$http_status" = 403 ]] && break
     sleep 1
   done

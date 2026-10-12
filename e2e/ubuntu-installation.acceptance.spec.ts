@@ -14,7 +14,7 @@ async function authenticatedStatus(pathname: string, accessToken: string): Promi
 
 test("fresh installation completes project, workspace, terminal, task, and persistence workflow", async ({ page }) => {
   test.setTimeout(900_000);
-  const unauthenticated = await page.request.get("/api/projects");
+  const unauthenticated = await page.request.get("/api/projects/00000000-0000-4000-8000-000000000000/runtime");
   expect(unauthenticated.status()).toBe(403);
 
   const tokenResponse = await fetch(`${accessIssuer}/access-token`);
@@ -78,7 +78,7 @@ test("fresh installation completes project, workspace, terminal, task, and persi
 
   await exec("/usr/bin/sudo", ["systemctl", "restart", "devspace-agent.service"], { timeout: 90_000 });
   await exec("/usr/bin/sudo", ["systemctl", "restart", "devspace-web.service"], { timeout: 90_000 });
-  await expect.poll(async () => await authenticatedStatus("/api/projects", accessToken), { timeout: 90_000 }).toBe(200);
+  await expect.poll(async () => await authenticatedStatus(`/api/projects/${projectId}/runtime`, accessToken), { timeout: 90_000 }).toBe(200);
   await page.goto(`/projects/${projectId}`);
   await expect(page.locator("main.workbench")).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible();
