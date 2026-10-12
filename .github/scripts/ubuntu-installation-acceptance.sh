@@ -182,7 +182,8 @@ PY
   assert_owned_directory "$agent_runtime" "$agent_user" 700
   sudo -u "$agent_user" env XDG_RUNTIME_DIR="$agent_runtime" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=${agent_runtime}/bus" systemctl --user show-environment \
-    | grep '^XDG_RUNTIME_DIR=' || printf 'User manager does not export XDG_RUNTIME_DIR; Docker unit drop-in will pin it.\n'
+    | grep -E '^(XDG_RUNTIME_DIR|XDG_CONFIG_HOME|DOCKER_CONFIG)=' \
+    || printf 'User manager has no Docker path variables; the Docker unit drop-in will pin its paths.\n'
   printf 'User manager sandbox: '
   sudo systemctl show "user@${agent_uid}.service" \
     --property=ProtectHome,ProtectSystem,PrivateUsers,ReadOnlyPaths,ReadWritePaths --value
@@ -195,10 +196,11 @@ PY
   local docker_dropin_dir="$agent_home/.config/systemd/user/docker.service.d"
   local docker_dropin="$docker_dropin_dir/devspace-runtime.conf"
   [[ ! -e "$docker_dropin" && ! -L "$docker_dropin" ]] || fail "Docker runtime drop-in already exists"
-  sudo -u "$agent_user" install -d -m 0700 "$docker_dropin_dir"
+  sudo -u "$agent_user" install -d -m 0700 "$agent_home/.config/docker" "$docker_dropin_dir"
   test "$(sudo -u "$agent_user" stat -c '%U' "$docker_dropin_dir")" = "$agent_user"
   test "$(sudo -u "$agent_user" stat -c '%a' "$docker_dropin_dir")" = 700
-  printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=%s\n' "$agent_runtime" \
+  printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=%s\nEnvironment=XDG_CONFIG_HOME=%s/.config\n' \
+    "$agent_runtime" "$agent_home" \
     | sudo -u "$agent_user" tee "$docker_dropin" >/dev/null
   sudo chmod 0600 "$docker_dropin"
   sudo -u "$agent_user" env -i HOME="$agent_home" PATH=/usr/local/bin:/usr/bin:/bin \

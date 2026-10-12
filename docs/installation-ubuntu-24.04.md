@@ -180,14 +180,17 @@ sudo -u devspace-agent env -i \
 
 Install and enable the Agent user's Docker service. `loginctl enable-linger` keeps the user service
 available after logout and at boot. Pin `XDG_RUNTIME_DIR` in the user service because Docker's
-generated unit otherwise inherits it from the systemd user manager; the explicit setting also keeps
-the daemon on the exact private runtime directory checked above:
+generated unit otherwise inherits runtime and configuration paths from the systemd user manager.
+The Agent-specific config directory contains rootless daemon settings and stays inside persistent
+Agent state:
 
 ```bash
 AGENT_UID="$(id -u devspace-agent)"
+AGENT_CONFIG=/var/lib/devspace-agent/.config
 DOCKER_UNIT_DIR=/var/lib/devspace-agent/.config/systemd/user/docker.service.d
-sudo -u devspace-agent install -d -m 0700 "$DOCKER_UNIT_DIR"
-printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\n' "$AGENT_UID" \
+sudo -u devspace-agent install -d -m 0700 "$AGENT_CONFIG/docker" "$DOCKER_UNIT_DIR"
+printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\nEnvironment=XDG_CONFIG_HOME=%s\n' \
+  "$AGENT_UID" "$AGENT_CONFIG" \
   | sudo -u devspace-agent tee "$DOCKER_UNIT_DIR/devspace-runtime.conf" >/dev/null
 sudo chmod 0600 "$DOCKER_UNIT_DIR/devspace-runtime.conf"
 sudo -u devspace-agent env -i \
