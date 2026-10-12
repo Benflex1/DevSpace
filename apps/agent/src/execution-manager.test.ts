@@ -102,34 +102,38 @@ test("settles terminal execution ownership after the exact workspace runtime has
   const manager = new ExecutionManager(root, managed, engine);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
-  expect(manager.snapshotResources()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "process", observation: expect.objectContaining({
-      processId: terminalId, desiredState: "running", observedState: "running"
-    }) }),
-    expect.objectContaining({ type: "terminal", identity: expect.objectContaining({ terminalId }), state: "disconnected" })
-  ]));
+  expect(manager.snapshotResources().some((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId
+    && resource.observation.desiredState === "running"
+    && resource.observation.observedState === "running")).toBe(true);
+  expect(manager.snapshotResources().some((resource) => resource.type === "terminal"
+    && resource.identity.terminalId === terminalId
+    && resource.state === "disconnected")).toBe(true);
 
   await manager.stopWorkspace(id, otherWorkspaceId);
-  expect(manager.snapshotResources()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "process", observation: expect.objectContaining({ processId: terminalId, observedState: "running" }) })
-  ]));
+  expect(manager.snapshotResources().some((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId
+    && resource.observation.observedState === "running")).toBe(true);
 
   await manager.stopWorkspace(id, workspaceId);
-  expect(manager.snapshotResources()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "process", observation: expect.objectContaining({
-      processId: terminalId, desiredState: "stopped", observedState: "killed"
-    }) }),
-    expect.objectContaining({ type: "terminal", identity: expect.objectContaining({ terminalId }), state: "lost" })
-  ]));
+  expect(manager.snapshotResources().some((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId
+    && resource.observation.desiredState === "stopped"
+    && resource.observation.observedState === "killed")).toBe(true);
+  expect(manager.snapshotResources().some((resource) => resource.type === "terminal"
+    && resource.identity.terminalId === terminalId
+    && resource.state === "lost")).toBe(true);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")))
     .toMatchObject({ desiredState: "stopped", observedState: "killed", terminalState: "lost" });
 
   const restarted = new ExecutionManager(root, managed, engine);
   await restarted.initialize();
-  expect(restarted.snapshotResources()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "process", observation: expect.objectContaining({ processId: terminalId, observedState: "killed" }) }),
-    expect.objectContaining({ type: "terminal", identity: expect.objectContaining({ terminalId }), state: "lost" })
-  ]));
+  expect(restarted.snapshotResources().some((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId
+    && resource.observation.observedState === "killed")).toBe(true);
+  expect(restarted.snapshotResources().some((resource) => resource.type === "terminal"
+    && resource.identity.terminalId === terminalId
+    && resource.state === "lost")).toBe(true);
 });
 
 test("an exact task.start replay reuses a recovered execution instead of hitting concurrency checks", async () => {

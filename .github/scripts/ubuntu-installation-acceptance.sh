@@ -39,8 +39,9 @@ is_agent_socket_gid() {
 is_private_socket_mode() {
   local mode="$1" permissions
   [[ "$mode" =~ ^[0-7]+$ ]] || return 1
-  permissions=$((8#$mode & 0777))
-  (( permissions == 8#600 || permissions == 8#660 ))
+  ((${#mode} >= 3)) || return 1
+  permissions="${mode: -3}"
+  [[ "$permissions" = 600 || "$permissions" = 660 ]]
 }
 
 prepare_host() {
