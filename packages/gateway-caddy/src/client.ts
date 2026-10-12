@@ -137,7 +137,7 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
     const identity = isFullRoute(input) ? this.validate(input) : validateIdentity(input);
     await withManagedRouteMutation(async () => {
       const current = this.currentManaged(await this.readRoutes());
-      const desired = current.filter((candidate) => candidate.hostname !== identity.hostname && routeResourceKey(candidate) !== routeResourceKey(identity));
+      const desired = current.filter((candidate) => routeResourceKey(candidate) !== routeResourceKey(identity));
       if (isFullRoute(identity)) this.leases.delete(identity.leaseId);
       await this.replaceRoutes(desired);
     });
@@ -154,9 +154,11 @@ export class CaddyGatewayClient implements PreviewGatewayAdapterContract {
         && exact.webSocketForwarding === expected.webSocketForwarding : true;
       return exactMatch ? { present: true, status: "present", route: exact } : { present: false, status: "stale", route: exact, reason: "route-does-not-match-exact-lease" };
     }
-    const stale = managed.find((candidate) => routeResourceKey(candidate) === routeResourceKey(expected)
-      && candidate.hostname === expected.hostname);
+    const stale = managed.find((candidate) => routeResourceKey(candidate) === routeResourceKey(expected));
     if (stale !== undefined) return { present: false, status: "stale", route: stale, reason: "route-does-not-match-exact-lease" };
+    if (managed.some((candidate) => candidate.hostname === expected.hostname)) {
+      return { present: false, status: "foreign", reason: "a different managed resource owns the approved hostname" };
+    }
     if (current.some((candidate) => candidate.kind === "foreign" && candidate.hostnames.includes(expected.hostname))) {
       return { present: false, status: "foreign", reason: "a foreign route owns the approved hostname" };
     }

@@ -47,6 +47,8 @@ const requestData: Record<string, unknown> = {
   "workspace.files.save": { ...workspace, path: "src/index.ts", content: "export {}\n", expectedRevision: "a".repeat(64) },
   "workspace.start": workspace,
   "workspace.stop": workspace,
+  "workspace.revision.adopt": { ...workspace, expectedRevision: { revisionId: id, revisionHash: hash },
+    candidateRevision: { revisionId: id2, revisionHash: hash }, previousPreviews: [] },
   "workspace.rebuild": { ...workspace, revision: { revisionId: id, revisionHash: hash } },
   "workspace.archive": { ...workspace, dirtyHandling: "preserve" },
   "workspace.remove": { ...workspace, dirtyHandling: "discard" },
@@ -89,8 +91,8 @@ const responseData: Record<string, unknown> = {
 
 describe("Agent API v1 executable endpoint inventory", () => {
   test("has the exact accepted classification counts", () => {
-    expect(agentApiV1Endpoints).toHaveLength(38);
-    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(24);
+    expect(agentApiV1Endpoints).toHaveLength(39);
+    expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "mutation")).toHaveLength(25);
     expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "non-mutating")).toHaveLength(13);
     expect(agentApiV1Endpoints.filter((endpoint) => endpoint.classification === "websocket-upgrade")).toHaveLength(1);
   });
@@ -98,8 +100,8 @@ describe("Agent API v1 executable endpoint inventory", () => {
   test("has unique stable identities and only executable F09 routes", () => {
     const operations = agentApiV1Endpoints.map((endpoint) => endpoint.operation);
     const routes = agentApiV1Endpoints.map((endpoint) => `${endpoint.method} ${endpoint.path}`);
-    expect(new Set(operations).size).toBe(38);
-    expect(new Set(routes).size).toBe(38);
+    expect(new Set(operations).size).toBe(39);
+    expect(new Set(routes).size).toBe(39);
     expect(agentApiV1Endpoints.every((endpoint) => endpoint.path.startsWith("/v1"))).toBe(true);
     expect(operations.join(" ")).not.toMatch(/reconciliation|snapshot|event/u);
     expect(Object.keys(agentApiV1EndpointByOperation)).toEqual(operations);
@@ -164,7 +166,7 @@ describe("Agent API v1 executable endpoint inventory", () => {
     expect(generated.description).toContain("Structural JSON Schema projection");
     expect(generated.$comment).toContain("Authoritative runtime Zod validation");
     expect(generated.$comment).toContain("semantic refinements");
-    expect(generated["x-devspace-endpoint-count"]).toBe(54);
+    expect(generated["x-devspace-endpoint-count"]).toBe(55);
     const definitions = generated.$defs as Record<string, unknown>;
     expect(definitions["operation.workspace.create.requestBody"]).toBeDefined();
     expect(definitions["operation.workspace.create.successBody"]).toBeDefined();

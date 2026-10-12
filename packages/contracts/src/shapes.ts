@@ -34,6 +34,12 @@ import {
 } from "./primitives.js";
 import { githubConnectionIdSchema, githubDecimalIdSchema, githubRepositorySchema } from "./github-app.js";
 
+const hostnameSchema = z.string().min(1).max(253).refine((hostname) => hostname.split(".").every(
+  (label) => label.length >= 1 && label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
+));
+export const previewHostnameSchema = hostnameSchema;
+
 export const configurationDocumentSchema = z.strictObject({
   format: z.literal("devspace.project-options/v1"),
   hash: projectOptionsRevisionHashSchema,
@@ -208,6 +214,30 @@ export const rebuildWorkspaceDataSchema = z.strictObject({
   workspaceId: uuidV7Schema,
   revision: revisionIdentitySchema
 });
+export const adoptConfigurationRevisionDataSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  expectedRevision: revisionIdentitySchema,
+  candidateRevision: revisionIdentitySchema,
+  previousPreviews: z.array(z.strictObject({
+    previewId: uuidV7Schema,
+    previewKey: configurationKeySchema,
+    hostname: previewHostnameSchema
+  })).max(32)
+}).superRefine((value, context) => {
+  if (value.expectedRevision.revisionId === value.candidateRevision.revisionId) {
+    context.addIssue({ code: "custom", path: ["candidateRevision", "revisionId"], message: "Candidate revision must differ from current revision" });
+  }
+  if (new Set(value.previousPreviews.map((preview) => preview.previewId)).size !== value.previousPreviews.length) {
+    context.addIssue({ code: "custom", path: ["previousPreviews"], message: "Previous preview IDs must be unique" });
+  }
+  if (new Set(value.previousPreviews.map((preview) => preview.previewKey)).size !== value.previousPreviews.length) {
+    context.addIssue({ code: "custom", path: ["previousPreviews"], message: "Previous preview keys must be unique" });
+  }
+  if (new Set(value.previousPreviews.map((preview) => preview.hostname)).size !== value.previousPreviews.length) {
+    context.addIssue({ code: "custom", path: ["previousPreviews"], message: "Previous preview hostnames must be unique" });
+  }
+});
 export const archiveWorkspaceDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
@@ -380,11 +410,6 @@ export const processInspectionDataSchema = z.strictObject({
   }
 });
 
-const hostnameSchema = z.string().min(1).max(253).refine((hostname) => hostname.split(".").every(
-  (label) => label.length >= 1 && label.length <= 63
-    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
-));
-export const previewHostnameSchema = hostnameSchema;
 export const previewInspectionDataSchema = z.strictObject({
   projectId: uuidV7Schema,
   workspaceId: uuidV7Schema,
@@ -421,6 +446,7 @@ export type WorkspaceFileReadResult = z.infer<typeof workspaceFileReadResultSche
 export type WorkspaceFileSaveResult = z.infer<typeof workspaceFileSaveResultSchema>;
 export type CreateWorkspaceData = z.infer<typeof createWorkspaceDataSchema>;
 export type RebuildWorkspaceData = z.infer<typeof rebuildWorkspaceDataSchema>;
+export type AdoptConfigurationRevisionData = z.infer<typeof adoptConfigurationRevisionDataSchema>;
 export type ArchiveWorkspaceData = z.infer<typeof archiveWorkspaceDataSchema>;
 export type RemoveWorkspaceData = z.infer<typeof removeWorkspaceDataSchema>;
 export type StartTaskData = z.infer<typeof startTaskDataSchema>;

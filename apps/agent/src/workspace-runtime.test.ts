@@ -33,6 +33,8 @@ class FakeEngine extends DockerEngineClient {
   containerCreates = 0;
   imageFailures = 0;
   containerCreateFailures = 0;
+  containerRemovalFailuresAfterRemove = 0;
+  networkRemovalFailuresAfterRemove = 0;
   runningInspections = 0;
   readonly networkIdsBeforeStart: string[] = [];
   onRunningInspect: ((inspection: number, container: DockerContainerInspection) => void) | null = null;
@@ -51,6 +53,16 @@ class FakeEngine extends DockerEngineClient {
   override inspectNetwork(id: string): Promise<DockerNetworkInspection> {
     const value = this.networks.get(id) ?? [...this.networks.values()].find((network) => network.Name === id);
     return value === undefined ? Promise.reject(new DockerEngineError(404, "missing")) : Promise.resolve(value);
+  }
+  override removeNetwork(id: string): Promise<void> {
+    const network = this.networks.get(id);
+    if (network === undefined) throw new DockerEngineError(404, "missing");
+    this.networks.delete(id); this.names.delete(network.Name); this.removedNetworkIds.push(id);
+    if (this.networkRemovalFailuresAfterRemove > 0) {
+      this.networkRemovalFailuresAfterRemove -= 1;
+      throw new Error("simulated-crash-after-network-removal");
+    }
+    return Promise.resolve();
   }
   override createContainer(name: string, input: Parameters<DockerEngineClient["createContainer"]>[1]): Promise<string> {
     if (this.names.has(name)) throw new DockerEngineError(409, "collision");
@@ -117,9 +129,14 @@ class FakeEngine extends DockerEngineClient {
     this.containers.delete(id);
     this.names.delete(value.Name.replace(/^\//u, ""));
     this.removedContainerIds.push(id);
+    if (this.containerRemovalFailuresAfterRemove > 0) {
+      this.containerRemovalFailuresAfterRemove -= 1;
+      throw new Error("simulated-crash-after-container-removal");
+    }
     return Promise.resolve();
   }
   readonly removedContainerIds: string[] = [];
+  readonly removedNetworkIds: string[] = [];
 }
 
 const association = { projectId: "018f1f34-7000-7000-8000-000000000001", workspaceId: "018f1f34-7000-7000-8000-000000000002",
@@ -218,6 +235,50 @@ describe("exact Docker runtime ownership", () => {
     await expect(fixture.manager.stop(fixture.association)).resolves.toMatchObject({ observedState: "stopped" });
     await expect(start(fixture, "018f1f34-7000-7000-8000-000000000011")).resolves.toMatchObject({ observedState: "running" });
     expect(fixture.engine.networks).toHaveLength(1); expect(fixture.engine.containers).toHaveLength(1);
+  });
+
+  test.each(["container", "network"] as const)("retirement retry reconciles interruption after %s removal", async (boundary) => {
+    const fixture = await runtimeFixture();
+    await start(fixture);
+    await fixture.manager.stop(fixture.association);
+    if (boundary === "container") fixture.engine.containerRemovalFailuresAfterRemove = 1;
+    else fixture.engine.networkRemovalFailuresAfterRemove = 1;
+    const ownershipPath = path.join(fixture.root, "state/ownership/runtimes", `${fixture.association.workspaceId}.json`);
+    const creationPath = path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`);
+    const afterContainerAbsent = boundary === "container"
+      ? () => Promise.reject(new Error("simulated-interruption-after-container-absence"))
+      : () => Promise.resolve();
+    await expect(fixture.manager.retireForRevisionAdoption(fixture.association, afterContainerAbsent, () => undefined)).rejects.toThrow();
+    await expect(readFile(ownershipPath, "utf8")).resolves.toContain(fixture.association.revisionId);
+    await expect(readFile(creationPath, "utf8")).resolves.toContain(fixture.association.revisionId);
+    expect(fixture.engine.containers).toHaveLength(0);
+    if (boundary === "container") expect(fixture.engine.networks).toHaveLength(1);
+    else expect(fixture.engine.networks).toHaveLength(0);
+
+    restart(fixture);
+    await fixture.manager.retireForRevisionAdoption(fixture.association, () => Promise.resolve(), () => undefined);
+    await expect(readFile(ownershipPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(creationPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(fixture.engine.containers).toHaveLength(0);
+    expect(fixture.engine.networks).toHaveLength(0);
+    expect(fixture.engine.removedContainerIds).toHaveLength(1);
+    expect(fixture.engine.removedNetworkIds).toHaveLength(1);
+  });
+
+  test("refuses unowned runtime resources at canonical names without deleting them", async () => {
+    const fixture = await runtimeFixture();
+    await start(fixture);
+    const ownershipPath = path.join(fixture.root, "state/ownership/runtimes", `${fixture.association.workspaceId}.json`);
+    const creationPath = path.join(fixture.root, "state/runtime-creations", `${fixture.association.workspaceId}.json`);
+    await rm(ownershipPath, { force: true });
+    await rm(creationPath, { force: true });
+
+    await expect(fixture.manager.retireForRevisionAdoption(fixture.association, () => Promise.resolve(), () => undefined))
+      .rejects.toMatchObject({ code: "WORKSPACE_STATE_CONFLICT" });
+    expect(fixture.engine.containers).toHaveLength(1);
+    expect(fixture.engine.networks).toHaveLength(1);
+    expect(fixture.engine.removedContainerIds).toEqual([]);
+    expect(fixture.engine.removedNetworkIds).toEqual([]);
   });
 
   test("accepts image labels while rejecting unrecorded DevSpace ownership labels", async () => {

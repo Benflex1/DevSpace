@@ -415,7 +415,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
   harnessHooks.onHarnessRecovered = async (event) => {
     await harnessRuntime.finalizeRecoveredLoss(event);
   };
-  const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}));
+  const executor = new OperationExecutor(journal, managed, events, createId, execution, logger.child({}),
+    async (workspaceId) => await harnessRuntime.assertWorkspaceQuiescent(workspaceId));
   const configuredCodexPath = process.env.DEVSPACE_CODEX_EXECUTABLE_PATH;
   const aiRuntime = options.aiRuntime ?? createAiSessionRuntime({ managed, stateRoot: managedRoots.state, now, createId,
     mode: process.env.DEVSPACE_AI_PROVIDER_MODE === "fake" ? "fake" : "codex",
@@ -482,6 +483,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.files.save"].path ? agentApiV1EndpointByOperation["workspace.files.save"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.start"].path ? agentApiV1EndpointByOperation["workspace.start"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.stop"].path ? agentApiV1EndpointByOperation["workspace.stop"]
+      : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["workspace.revision.adopt"].path ? agentApiV1EndpointByOperation["workspace.revision.adopt"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["task.start"].path ? agentApiV1EndpointByOperation["task.start"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["process.stop"].path ? agentApiV1EndpointByOperation["process.stop"]
       : request.method === "POST" && url.pathname === agentApiV1EndpointByOperation["process.inspect"].path ? agentApiV1EndpointByOperation["process.inspect"]
@@ -910,7 +912,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
     }
 
-    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "project.git.stage", "project.git.unstage", "project.git.commit", "workspace.create", "workspace.start", "workspace.stop",
+    const mutationRoutes = ["configuration-revision.register", "configuration-runtime-plan.register", "project.managed-store.create", "project.fetch", "project.push", "project.git.stage", "project.git.unstage", "project.git.commit", "workspace.create", "workspace.start", "workspace.stop", "workspace.revision.adopt",
       "task.start", "process.stop", "terminal.create", "terminal.close", "preview.activate", "preview.deactivate"] as const;
     for (const operation of mutationRoutes) {
       const endpoint = agentApiV1EndpointByOperation[operation];

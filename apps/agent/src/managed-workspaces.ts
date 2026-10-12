@@ -40,6 +40,7 @@ import {
   workspaceInspectionDataSchema,
   type AgentExecutionFailure,
   type AgentSnapshotResource,
+  type AdoptConfigurationRevisionData,
   type ConfigurationRevisionData,
   type ConfigurationRuntimePlanData,
   type CreateManagedStoreData,
@@ -199,6 +200,11 @@ export class FetchMutationRecoveryRequiredError extends Error {
   constructor() {
     super("The Git Fetch completed; post-fetch recovery is required before the operation can complete.");
     this.name = "FetchMutationRecoveryRequiredError";
+  }
+}
+export class RevisionAdoptionRecoveryRequiredError extends Error {
+  constructor(message = "Configuration adoption crossed an external side-effect boundary and must be resumed.") {
+    super(message); this.name = "RevisionAdoptionRecoveryRequiredError";
   }
 }
 
@@ -1117,6 +1123,105 @@ export class ManagedWorkspaces {
       throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "A different runtime plan is already registered.", { policy: "runtime-plan-mismatch" }));
     }
     if (record.runtimePlan === null) await this.writer.write(file, revisionRecordSchema.parse({ ...record, runtimePlan: data.runtimePlan }));
+  }
+
+  async adoptConfigurationRevision(input: AdoptConfigurationRevisionData, operationId: string, recovering = false): Promise<void> {
+    let sideEffectsStarted = recovering;
+    try {
+      const workspace = await this.loadWorkspaceOwnership(input.projectId, input.workspaceId);
+      const isExpectedOwner = workspace.revision.revisionId === input.expectedRevision.revisionId
+        && workspace.revision.revisionHash === input.expectedRevision.revisionHash;
+      const isCandidateOwner = workspace.revision.revisionId === input.candidateRevision.revisionId
+        && workspace.revision.revisionHash === input.candidateRevision.revisionHash;
+      if ((!isExpectedOwner && !isCandidateOwner)
+        || input.expectedRevision.revisionId === input.candidateRevision.revisionId) {
+        throw new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", "The Agent workspace revision does not match this adoption.", {
+          workspaceId: input.workspaceId, desiredState: "stopped", observedState: "lost", action: "revision-adopt"
+        }));
+      }
+
+      const previous = await this.loadRevisionRecord(input.projectId, input.expectedRevision.revisionId);
+      const candidate = await this.loadRevisionRecord(input.projectId, input.candidateRevision.revisionId);
+      if (previous.data.configuration.hash !== input.expectedRevision.revisionHash
+        || candidate.data.configuration.hash !== input.candidateRevision.revisionHash
+        || candidate.runtimePlan === null || previous.runtimePlan === null) {
+        throw new AgentExecutionError(executionFailure("CONFIGURATION_NOT_REGISTERED", "The expected and candidate configuration plans must be registered.", {
+          revisionId: input.candidateRevision.revisionId, revisionHash: input.candidateRevision.revisionHash
+        }));
+      }
+      const oldAssociation = {
+        projectId: input.projectId, workspaceId: input.workspaceId,
+        revisionId: previous.data.revisionId, revisionHash: previous.data.configuration.hash,
+        runtimePlanHash: previous.runtimePlan.hash, generation: 1
+      };
+      const previousOptions = parseProjectOptionsV1(JSON.parse(previous.data.configuration.canonicalJson));
+      try { this.runtime.validatePlanPolicy(JSON.parse(candidate.runtimePlan.canonicalJson)); }
+      catch {
+        throw new AgentExecutionError(executionFailure("RUNTIME_POLICY_VIOLATION", "The candidate runtime plan is not permitted by Agent policy.", {
+          policy: "runtime-plan-mismatch"
+        }));
+      }
+
+      const observed = await this.runtime.inspect(oldAssociation);
+      const safelyStopped = observed.observedState === "absent" || observed.observedState === "stopped";
+      const recoverableRetirement = recovering && (observed.observedState === "lost" || observed.observedState === "failed")
+        && (observed.serviceState === "lost" || observed.serviceState === "failed");
+      if (!safelyStopped && !recoverableRetirement) {
+        throw new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", "The workspace runtime must be stopped and fully inspectable before Apply.", {
+          workspaceId: input.workspaceId, desiredState: "stopped", observedState: observed.observedState, action: "revision-adopt"
+        }));
+      }
+      await this.runtime.assertRootlessRuntimeAvailable();
+
+      try {
+        await this.preview.validateAdoptionPreviews({ projectId: input.projectId, workspaceId: input.workspaceId,
+          revisionId: input.expectedRevision.revisionId, projectSlug: workspace.projectSlug, workspaceSlug: workspace.workspaceSlug,
+          options: previousOptions, previews: input.previousPreviews });
+      } catch (error) {
+        if (error instanceof PreviewRuntimeError) {
+          if (error.code === "GATEWAY_UPDATE_FAILED") {
+            throw new AgentExecutionError(executionFailure("GATEWAY_UPDATE_FAILED", error.message, {
+              previewId: error.details.previewId ?? input.workspaceId
+            }));
+          }
+          throw new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", error.message, {
+            workspaceId: input.workspaceId, desiredState: "stopped", observedState: "lost", action: "revision-adopt"
+          }));
+        }
+        throw error;
+      }
+
+      for (const preview of input.previousPreviews) {
+        await this.preview.deactivateForAdoption({ projectId: input.projectId, workspaceId: input.workspaceId,
+          revisionId: input.expectedRevision.revisionId, ...preview }, operationId, () => { sideEffectsStarted = true; });
+      }
+
+      await this.runtime.retireForRevisionAdoption(oldAssociation, async (ownership) => {
+        await this.preview.releaseRetiredRuntimeLeases(ownership);
+      }, () => { sideEffectsStarted = true; });
+
+      if (!isCandidateOwner) {
+        const adopted = workspaceOwnershipSchema.parse({ ...workspace,
+          revision: { revisionId: input.candidateRevision.revisionId, revisionHash: input.candidateRevision.revisionHash }
+        });
+        sideEffectsStarted = true;
+        await this.writer.write(this.workspaceOwnershipPath(input.workspaceId), adopted);
+      }
+    } catch (error) {
+      if (sideEffectsStarted) {
+        throw new RevisionAdoptionRecoveryRequiredError(error instanceof Error ? error.message : undefined);
+      }
+      if (error instanceof AgentExecutionError) throw error;
+      if (error instanceof WorkspaceRuntimeError && error.code === "ROOTLESS_RUNTIME_UNAVAILABLE") {
+        throw new AgentExecutionError(executionFailure("ROOTLESS_RUNTIME_UNAVAILABLE", error.message, {}));
+      }
+      if (error instanceof WorkspaceRuntimeError) {
+        throw new AgentExecutionError(executionFailure("WORKSPACE_STATE_CONFLICT", error.message, {
+          workspaceId: input.workspaceId, desiredState: "stopped", observedState: "lost", action: "revision-adopt"
+        }));
+      }
+      throw error;
+    }
   }
 
   private async loadStoreOwnership(projectId: string): Promise<StoreOwnership> {

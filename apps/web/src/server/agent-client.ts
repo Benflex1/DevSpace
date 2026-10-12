@@ -12,6 +12,7 @@ import {
   type AiEventStreamFrame,
   type AiProviderProfileProjection,
   type AgentSnapshotData,
+  type AdoptConfigurationRevisionData,
   type ActivatePreviewData,
   type AcknowledgeAiEventsData,
   type ConfigurationRevisionData,
@@ -191,7 +192,7 @@ export function createAgentClient(socketPath: string, options: {
   const logger = options.logger ?? createLogger({ component: "web", subsystem: "agent-client", now });
   const aiStreamAdmission = options.aiStreamAdmission ?? processAiStreamAdmission;
 
-  type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register"
+  type SupportedOperation = "agent.health.get" | "agent.runtime-status.get" | "project.source.inspect" | "configuration-revision.register" | "configuration-runtime-plan.register" | "workspace.revision.adopt"
     | "github.app.inspect" | "github.installation.verify" | "github.installation.inspect" | "github.installation.refresh"
     | "github.installation.disconnect" | "github.installation.reconnect.prepare"
     | "github.repositories.list" | "github.repositories.resolve"
@@ -414,6 +415,9 @@ export function createAgentClient(socketPath: string, options: {
     stopWorkspace: async (operationId: string, projectId: string, workspaceId: string): Promise<void> => {
       await call("workspace.stop", { projectId, workspaceId }, operationId);
     },
+    adoptConfigurationRevision: async (operationId: string, data: AdoptConfigurationRevisionData): Promise<void> => {
+      await call("workspace.revision.adopt", data, operationId);
+    },
     startTask: async (operationId: string, data: { projectId: string; workspaceId: string; taskRunId: string; processId: string; taskKey: string }): Promise<void> => {
       await call("task.start", data, operationId);
     },
@@ -632,7 +636,7 @@ export function createAgentClient(socketPath: string, options: {
 
 export type FullAgentClient = ReturnType<typeof createAgentClient>;
 export type WorkspaceAgentClient = Pick<FullAgentClient,
-  "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "createManagedStore" |
+  "health" | "runtimeStatus" | "inspectSource" | "registerRevision" | "registerRuntimePlan" | "adoptConfigurationRevision" | "createManagedStore" |
   "fetchProject" | "createWorkspace" | "inspectGit" | "inspectWorkspace" | "listWorkspaceDirectory" | "readWorkspaceFile" |
   "saveWorkspaceFile" | "startWorkspace" | "stopWorkspace" | "snapshot">;
 export type AgentClient = Pick<FullAgentClient, "health" | "inspectSource">

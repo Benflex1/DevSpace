@@ -235,6 +235,23 @@ describe("typed private Caddy gateway adapter", () => {
     expect(await adapter.inspectRoute(route())).toMatchObject({ present: false, status: "stale" });
   });
 
+  test("reports a same-resource route with a changed hostname as stale", async () => {
+    const transport = new MemoryTransport();
+    transport.documents = [toCaddyRoute(route({ hostname: "moved-preview.localhost" }), approved)];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    expect(await adapter.inspectRoute(route())).toMatchObject({ present: false, status: "stale" });
+  });
+
+  test("does not remove a different managed route by hostname alone", async () => {
+    const transport = new MemoryTransport();
+    const other = route({ previewId: "018f1f34-7000-7000-8000-000000000099" });
+    transport.documents = [...toCaddyRouteSet([other], approved)];
+    const adapter = new CaddyGatewayClient(transport, { isApprovedHostname: approved });
+    expect(await adapter.inspectRoute(route())).toMatchObject({ present: false, status: "foreign" });
+    await adapter.removeRoute(route());
+    expect((await adapter.inspectRoute(other)).present).toBe(true);
+  });
+
   test("bounds unexpected private admin failures", async () => {
     const transport = new MemoryTransport();
     transport.failReads = true;

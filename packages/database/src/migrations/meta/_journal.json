@@ -71,6 +71,13 @@
       "when": 1789861856607,
       "tag": "0009_native_harness_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1791763200000,
+      "tag": "0010_revision_scoped_previews",
+      "breakpoints": true
     }
   ]
 }

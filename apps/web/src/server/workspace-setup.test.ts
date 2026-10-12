@@ -102,6 +102,30 @@ test("persists a ready primary workspace and recovers it without repeating Agent
   database.close();
 });
 
+test("configuration registration operations are independently idempotent for each revision", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "devspace-revision-operation-test-")); directories.push(directory);
+  const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));
+  const project = database.createProject({ name: "Repository", slug: "repository",
+    repositoryUrl: "https://example.com/repository.git", defaultBranch: "main", actor: "developer@example.com" });
+  await setupPrimaryWorkspace({ imageReference: "node:24-bookworm" }, project.id, "developer@example.com", {
+    database, agent: successfulSetupAgent()
+  });
+  const activeRevisionId = database.getManagedProject(project.id)?.activeRevision?.id;
+  if (activeRevisionId === undefined) throw new Error("initial-revision-not-activated");
+  const nextRevisionId = "018f0f00-0000-7000-8000-000000000111";
+  const oldRegistration = database.getOrCreateRevisionOperation({ projectId: project.id,
+    actor: "developer@example.com", operationName: "configuration-revision.register", revisionId: activeRevisionId });
+  const nextRegistration = database.getOrCreateRevisionOperation({ projectId: project.id,
+    actor: "developer@example.com", operationName: "configuration-revision.register", revisionId: nextRevisionId });
+  const retryNextRegistration = database.getOrCreateRevisionOperation({ projectId: project.id,
+    actor: "developer@example.com", operationName: "configuration-revision.register", revisionId: nextRevisionId });
+
+  expect(nextRegistration.operationId).not.toBe(oldRegistration.operationId);
+  expect(nextRegistration.resourceId).toBe(nextRevisionId);
+  expect(retryNextRegistration.operationId).toBe(nextRegistration.operationId);
+  database.close();
+});
+
 test("initial setup stores a workspace preview and matching development port, then materializes it", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "devspace-setup-preview-")); directories.push(directory);
   const database = openProjectDatabase(path.join(directory, "devspace.sqlite"));

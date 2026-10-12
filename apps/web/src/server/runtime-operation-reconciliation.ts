@@ -6,6 +6,7 @@ import { persistedFailureMessage } from "./failure-policy.js";
 export type RuntimeAction = "start" | "stop";
 export type RuntimeActionBlockingReason =
   | "active-runtime-operation"
+  | "configuration-apply"
   | "agent-snapshot-unavailable"
   | "runtime-unavailable"
   | "inspection-unavailable"
@@ -22,19 +23,27 @@ export interface RuntimeOperationReconciliation {
   readonly blockingReason: RuntimeActionBlockingReason | null;
   readonly inspection: WorkspaceInspectionData | null;
   readonly reconciledTerminal: null | { readonly action: RuntimeAction; readonly state: "succeeded" | "failed" };
+  readonly configurationApply: null | {
+    readonly operationId: string;
+    readonly phase: "reserved" | "adoption-submitted";
+    readonly expectedRevisionId: string;
+    readonly candidateRevisionId: string;
+  };
 }
 
 function actionOf(operationName: string): RuntimeAction | null {
   return operationName === "workspace.start" ? "start" : operationName === "workspace.stop" ? "stop" : null;
 }
 
-function inactive(input: Omit<RuntimeOperationReconciliation, "activeAction" | "activeOperationId">): RuntimeOperationReconciliation {
-  return { activeAction: null, activeOperationId: null, ...input };
+function inactive(input: Omit<RuntimeOperationReconciliation, "activeAction" | "activeOperationId" | "configurationApply">
+  & Partial<Pick<RuntimeOperationReconciliation, "configurationApply">>): RuntimeOperationReconciliation {
+  return { activeAction: null, activeOperationId: null, configurationApply: null, ...input };
 }
 
 function active(action: RuntimeAction, operationId: string, inspection: WorkspaceInspectionData | null): RuntimeOperationReconciliation {
   return { activeAction: action, activeOperationId: operationId, canStart: false, canStop: false, canRetryStart: false,
-    retryOperationId: null, blockingReason: "active-runtime-operation", inspection, reconciledTerminal: null };
+    retryOperationId: null, blockingReason: "active-runtime-operation", inspection, reconciledTerminal: null,
+    configurationApply: null };
 }
 
 function exactObservation(snapshot: AgentSnapshotData | null, operationId: string): AgentOperationObservation | undefined {
@@ -49,6 +58,31 @@ export async function reconcilePrimaryWorkspaceRuntimeOperation(projectId: strin
   /** True only when both the rootless runtime and Agent operation journal are available. */
   readonly runtimeAvailable?: boolean;
 }): Promise<RuntimeOperationReconciliation> {
+  // Apply deliberately makes getRuntimeContext unavailable while the Agent and
+  // SQLite may be at different adoption boundaries. Status reads use the
+  // durable operation reservation and workspace identity directly instead.
+  const pendingApply = dependencies.database.getPendingProjectOptionsApply(projectId);
+  if (pendingApply !== null) {
+    const inspection = dependencies.inspection ?? (pendingApply.operation.workspaceId === null ? null
+      : await dependencies.agent.inspectWorkspace(projectId, pendingApply.operation.workspaceId).catch(() => null));
+    return {
+      activeAction: null,
+      activeOperationId: null,
+      canStart: false,
+      canStop: false,
+      canRetryStart: false,
+      retryOperationId: null,
+      blockingReason: "configuration-apply",
+      inspection,
+      reconciledTerminal: null,
+      configurationApply: {
+        operationId: pendingApply.operation.operationId,
+        phase: pendingApply.phase,
+        expectedRevisionId: pendingApply.expectedRevision.revisionId,
+        candidateRevisionId: pendingApply.candidateRevision.revisionId
+      }
+    };
+  }
   const context = dependencies.database.getRuntimeContext(projectId);
   const snapshot = dependencies.snapshot === undefined
     ? await dependencies.agent.snapshot().catch(() => null)
@@ -111,5 +145,5 @@ export async function reconcilePrimaryWorkspaceRuntimeOperation(projectId: strin
   const blockingReason = canStart || canStop ? null
     : latestIsFailedStart ? "failed-start-unproven" : "runtime-state-not-actionable";
   return inactive({ ...base, canStart, canStop, canRetryStart,
-    retryOperationId: canRetryStart ? latest.operationId : null, blockingReason });
+    retryOperationId: canRetryStart ? latest.operationId : null, blockingReason, configurationApply: null });
 }

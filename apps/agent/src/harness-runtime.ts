@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import path from "node:path";
 import {
@@ -762,6 +762,28 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     },
     async finalizeRecoveredLoss(identity: HarnessRecoveryIdentity) {
       return exclusive(async () => await finalizeRecoveredLoss(identity));
+    },
+    async assertWorkspaceQuiescent(workspaceId: string) {
+      if (liveByWorkspace.has(workspaceId)) {
+        throw new HarnessRuntimeError("HARNESS_ADMISSION_UNCERTAIN", "A live AI execution still owns this workspace.");
+      }
+      let entries: string[];
+      try { entries = await readdir(sessionsRoot); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") entries = [];
+        else throw error;
+      }
+      for (const name of entries) {
+        if (!name.endsWith(".json")) throw new HarnessRuntimeError("HARNESS_ADMISSION_UNCERTAIN", "AI session ownership state is not exact.");
+        const record = await loadSession(name.slice(0, -".json".length));
+        if (record.workspaceId === workspaceId
+          && (record.state === "live" || record.leaseId !== null || record.recoveryPending === true)) {
+          throw new HarnessRuntimeError("HARNESS_ADMISSION_UNCERTAIN", "An AI session or private-home lease is still active for this workspace.");
+        }
+      }
+      if (await dependencies.home.hasActiveWorkspaceLease?.(workspaceId) === true) {
+        throw new HarnessRuntimeError("HARNESS_ADMISSION_UNCERTAIN", "A private-home lease or dirty persistent slot is still active for this workspace.");
+      }
     },
     async recoverAfterAgentRestart() {
       return exclusive(async () => {

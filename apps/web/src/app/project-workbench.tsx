@@ -792,7 +792,7 @@ function WorkbenchStatusBar({ runtimeState, agentStatus, agentReachable, actor }
 }
 
 function runtimeLabel(state: string): string {
-  return { starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped", absent: "Offline" }[state] ?? state;
+  return { applying: "Applying Project Options…", starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped", absent: "Offline" }[state] ?? state;
 }
 
 function tabTitle(tab: WorkbenchTab): string {

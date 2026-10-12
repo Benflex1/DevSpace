@@ -378,6 +378,7 @@ export class PreviewLeaseAllocator {
         await unlink(file).catch((unlinkError: NodeJS.ErrnoException) => { if (unlinkError.code !== "ENOENT") throw unlinkError; });
         return true;
       }
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
       throw error;
     }
   }
@@ -640,16 +641,136 @@ export class PreviewRuntimeManager {
       || state.revisionId !== input.revisionId) {
       throw new PreviewRuntimeError("RESOURCE_NOT_FOUND", "The preview is not owned by this workspace.");
     }
-    if (state.operationId === operationId && state.desiredState === "inactive") return;
-    if (state.routePresent) {
-      try { await this.removeRoute(state); }
-      catch (error) {
-        throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message : "The preview route could not be removed.", {
-          previewId: state.previewId
-        });
-      }
+    if (state.operationId === operationId && state.desiredState === "inactive" && !state.routePresent) return;
+    try { await this.removeRoute(state); }
+    catch (error) {
+      throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message : "The preview route could not be removed.", {
+        previewId: state.previewId
+      });
     }
     await this.save({ ...state, desiredState: "inactive", observedState: "inactive", routePresent: false, operationId, nextAttemptAt: 0 });
+  }
+
+  async validateAdoptionPreviews(input: {
+    projectId: string;
+    workspaceId: string;
+    revisionId: string;
+    projectSlug: string;
+    workspaceSlug: string;
+    options: ProjectOptionsV1;
+    previews: readonly { readonly previewId: string; readonly previewKey: string; readonly hostname: string }[];
+  }): Promise<void> {
+    const expected = input.options.previews.filter((preview) => preview.target.kind === "workspace");
+    if (expected.length !== input.previews.length) {
+      throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The persisted preview rows do not match the expected revision.");
+    }
+    if (expected.length > 0 && this.gateway === null) {
+      throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", "The preview gateway is unavailable for safe revision adoption.", {
+        ...(input.previews[0] === undefined ? {} : { previewId: input.previews[0].previewId })
+      });
+    }
+    const optionsByKey = new Map(expected.map((preview) => [preview.key, preview]));
+    for (const preview of input.previews) {
+      const previewId = uuidV7Schema.parse(preview.previewId);
+      const configured = optionsByKey.get(preview.previewKey);
+      if (configured === undefined) {
+        throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "A persisted preview is not part of the expected workspace revision.", {
+          revisionId: input.revisionId, previewKey: preview.previewKey, previewId
+        });
+      }
+      this.validatePersistedHostname({ hostname: preview.hostname, projectSlug: input.projectSlug,
+        workspaceSlug: input.workspaceSlug }, previewId, configured);
+
+      const state = await this.load(previewId);
+      if (state !== null && (state.projectId !== input.projectId || state.workspaceId !== input.workspaceId
+        || state.revisionId !== input.revisionId || state.previewKey !== preview.previewKey
+        || state.hostname !== preview.hostname || state.domainBaseId !== configured.domainBaseId)) {
+        throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "A preview identity is bound to another workspace revision.", {
+          revisionId: input.revisionId, previewKey: preview.previewKey, previewId
+        });
+      }
+
+      if (this.gateway !== null) {
+        let inspection;
+        try {
+          inspection = await this.gateway.inspectRoute({ projectId: input.projectId, workspaceId: input.workspaceId,
+            previewId, revisionId: input.revisionId, generation: state?.generation ?? 1, hostname: preview.hostname });
+        } catch (error) {
+          throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message
+            : "The preview route could not be inspected.", { previewId });
+        }
+        if (inspection.status === "foreign") {
+          throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "A foreign route owns the approved preview hostname.", {
+            revisionId: input.revisionId, previewKey: preview.previewKey, previewId
+          });
+        }
+      }
+    }
+  }
+
+  async deactivateForAdoption(input: {
+    projectId: string;
+    workspaceId: string;
+    revisionId: string;
+    previewId: string;
+    previewKey: string;
+    hostname: string;
+  }, operationId: string, onIrreversibleEffect: () => void): Promise<void> {
+    const state = await this.load(input.previewId);
+    if (state !== null && (state.projectId !== input.projectId || state.workspaceId !== input.workspaceId
+      || state.revisionId !== input.revisionId || state.previewKey !== input.previewKey || state.hostname !== input.hostname)) {
+      throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "The preview identity is bound to another workspace revision.", {
+        revisionId: input.revisionId, previewKey: input.previewKey, previewId: input.previewId
+      });
+    }
+    if (this.gateway === null) {
+      throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", "The preview gateway is unavailable for safe revision adoption.", {
+        previewId: input.previewId
+      });
+    }
+    const identity = { projectId: input.projectId, workspaceId: input.workspaceId, previewId: input.previewId,
+      revisionId: input.revisionId, generation: state?.generation ?? 1, hostname: input.hostname };
+    let inspection;
+    try { inspection = await this.gateway.inspectRoute(identity); }
+    catch (error) {
+      throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message
+        : "The preview route could not be inspected.", { previewId: input.previewId });
+    }
+    if (inspection.status === "foreign") {
+      throw new PreviewRuntimeError("WORKSPACE_STATE_CONFLICT", "A foreign route owns the approved preview hostname.", {
+        revisionId: input.revisionId, previewKey: input.previewKey, previewId: input.previewId
+      });
+    }
+    if (state?.operationId === operationId && state.desiredState === "inactive" && !state.routePresent
+      && inspection.status === "absent") return;
+
+    if (inspection.status === "present" || inspection.status === "stale") {
+      onIrreversibleEffect();
+      try { await this.gateway.removeRoute(identity); }
+      catch (error) {
+        throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message
+          : "The preview route could not be removed.", { previewId: input.previewId });
+      }
+      try { inspection = await this.gateway.inspectRoute(identity); }
+      catch (error) {
+        throw new PreviewRuntimeError("GATEWAY_UPDATE_FAILED", error instanceof Error ? error.message
+          : "The preview route removal could not be verified.", { previewId: input.previewId });
+      }
+      if (inspection.status !== "absent") {
+        throw new PreviewRuntimeError(inspection.status === "foreign" ? "WORKSPACE_STATE_CONFLICT" : "GATEWAY_UPDATE_FAILED",
+          "The old preview route is not confirmed absent after removal.", { previewId: input.previewId });
+      }
+    }
+
+    if (state !== null) {
+      onIrreversibleEffect();
+      await this.save({ ...state, desiredState: "inactive", observedState: "inactive", routePresent: false,
+        operationId, nextAttemptAt: 0 });
+    }
+  }
+
+  async releaseRetiredRuntimeLeases(ownership: RuntimeOwnership): Promise<void> {
+    for (const binding of ownership.previewBindings) await this.leases.releaseIfContainerRemoved(binding.leaseId);
   }
   async inspect(input: { projectId: string; workspaceId: string; revisionId: string; previewId: string }): Promise<PreviewInspectionData> {
     uuidV7Schema.parse(input.projectId); uuidV7Schema.parse(input.workspaceId); uuidV7Schema.parse(input.revisionId);

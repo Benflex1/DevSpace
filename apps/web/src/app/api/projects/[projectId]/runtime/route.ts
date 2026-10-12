@@ -20,10 +20,12 @@ export async function GET(request: Request, context: { params: Promise<{ project
     if (data === null) return json({ message: "Project workspace was not found." }, 404);
     const activeAction = data.runtimeOperation?.activeAction ?? null;
     const inspection = data.runtimeOperation?.inspection ?? data.live?.workspace ?? null;
-    const runtimeState = activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping"
+    const configurationApply = data.runtimeOperation?.configurationApply ?? null;
+    const runtimeState = configurationApply !== null ? "applying" : activeAction === "start" ? "starting" : activeAction === "stop" ? "stopping"
       : inspection?.runtimeStack.observedState ?? data.project.runtime?.observedState ?? "absent";
     return json({ runtimeState, runtimeAvailable: data.runtimeAvailability === "available", activeAction,
-      canStart: data.runtimeOperation?.canStart === true, canStop: data.runtimeOperation?.canStop === true }, 200);
+      canStart: data.runtimeOperation?.canStart === true, canStop: data.runtimeOperation?.canStop === true,
+      configurationApply }, 200);
   } catch (error) {
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     return json({ message: "Fresh runtime authorization could not be obtained." }, 503);

@@ -358,7 +358,7 @@ export const previews = sqliteTable("previews", {
   targetKey: text("target_key").notNull(),
   domainBaseId: text("domain_base_id").notNull(),
   hostnamePattern: text("hostname_pattern").notNull(),
-  hostname: text("hostname").notNull().unique("previews_hostname_unique"),
+  hostname: text("hostname").notNull(),
   containerPort: integer("container_port").notNull(),
   protocol: text("protocol", { enum: previewProtocols }).notNull(),
   healthPath: text("health_path").notNull(),
@@ -382,7 +382,8 @@ export const previews = sqliteTable("previews", {
   activatedAt: text("activated_at"),
   deactivatedAt: text("deactivated_at")
 }, (table) => [
-  unique("previews_workspace_preview_key_unique").on(table.workspaceId, table.previewKey),
+  unique("previews_workspace_revision_preview_key_unique").on(table.workspaceId, table.configRevisionId, table.previewKey),
+  unique("previews_revision_hostname_unique").on(table.configRevisionId, table.hostname),
   index("previews_config_revision_id_idx").on(table.configRevisionId),
   index("previews_service_id_idx").on(table.serviceId),
   index("previews_operation_id_idx").on(table.operationId),

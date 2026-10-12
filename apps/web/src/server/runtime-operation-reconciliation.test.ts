@@ -55,6 +55,7 @@ async function runtimeFixture() {
   let stopConverges = false;
   const runtimeAgent = {
     ...setupAgent,
+    adoptConfigurationRevision: () => Promise.resolve(),
     runtimeStatus: () => Promise.resolve({ rootlessRuntime: "available" as const, operationJournal: "available" as const,
       checkedAt: "2026-07-18T12:00:00.000Z" }),
     startWorkspace: (operationId) => {
