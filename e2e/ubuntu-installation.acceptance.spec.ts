@@ -40,7 +40,7 @@ test("fresh installation completes project, workspace, terminal, task, and persi
     && response.request().method() === "POST");
   await page.getByRole("button", { name: "Inspect and register" }).click();
   const registered = await registerResponse;
-  expect(registered.status()).toBe(200);
+  expect(registered.status()).toBe(201);
 
   const dashboardProject = page.locator("article", { has: page.getByRole("heading", { name: projectName }) });
   await expect(dashboardProject.getByText("Registered — workspace setup pending")).toBeVisible({ timeout: 120_000 });
