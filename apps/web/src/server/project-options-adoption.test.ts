@@ -119,6 +119,7 @@ test("loads the saved active revision and validates a complete immutable draft",
   expect(value.current.activeRevision.options.developmentEnvironment.source).toEqual({ kind: "image", imageReference: "node:24-bookworm" });
   expect(value.current.activeRevision.options.tasks[0]?.displayName).toBe("Check");
   expect(value.current.activeRevision.options.previews[0]?.containerPort).toBe(4173);
+  expect(value.current.approvedPreviewBases).toEqual([{ id: "preview-main", domain: "preview.example.com" }]);
   expect(value.saved.options.developmentEnvironment.source).toEqual({ kind: "image", imageReference: "node:26-bookworm" });
   expect(value.saved.options.tasks[0]?.displayName).toBe("Check updated");
   expect(value.saved.options.previews[0]?.containerPort).toBe(5180);

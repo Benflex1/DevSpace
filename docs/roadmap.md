@@ -643,10 +643,9 @@ Deferred until later:
 ## Project Options
 
 - 🟡 Project setup already exposes the preview configuration needed for M1
-- ❌ Full Project Options editor
-- ❌ Better validation UX
+- ✅ Workbench editor for development image, configured tasks, and workspace previews with immutable drafts, explicit Apply, and field validation
 - ❌ Runtime/service configuration UX
-- ❌ Preview configuration management after project creation
+- ✅ Preview configuration management after project creation
 
 ## Workbench lifecycle and visual design
 

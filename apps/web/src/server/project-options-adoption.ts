@@ -165,6 +165,7 @@ export function readProjectOptions(projectId: string, dependencies: Pick<Project
   const state = dependencies.database.getProjectOptionsState(projectId);
   const options = activeOptions(state);
   const draft = state.drafts[0];
+  const approvedPreviewBases = getApprovedPreviewBases(dependencies.previewBaseRegistry);
   return {
     projectId,
     workspaceId: state.workspace.id,
@@ -183,7 +184,8 @@ export function readProjectOptions(projectId: string, dependencies: Pick<Project
       };
     })(),
     previews: dependencies.database.listPreviews(projectId, state.workspace.id),
-    approvedPreviewBaseIds: getApprovedPreviewBases(dependencies.previewBaseRegistry).map((base) => base.id)
+    approvedPreviewBaseIds: approvedPreviewBases.map((base) => base.id),
+    approvedPreviewBases: approvedPreviewBases.map((base) => ({ id: base.id, domain: base.domain }))
   };
 }
 

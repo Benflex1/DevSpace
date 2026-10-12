@@ -1,6 +1,6 @@
 import type { EditorDocument } from "./editor-state.js";
 
-export const WORKBENCH_LEAVE_CONFIRMATION = "Leave this Workbench and discard its unsaved editor changes?";
+export const WORKBENCH_LEAVE_CONFIRMATION = "Leave this Workbench and discard its unsaved changes?";
 
 export function confirmWorkbenchLeave(hasUnsavedChanges: boolean, confirm: (message: string) => boolean): boolean {
   return !hasUnsavedChanges || confirm(WORKBENCH_LEAVE_CONFIRMATION);
