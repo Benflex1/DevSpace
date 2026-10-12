@@ -23,9 +23,9 @@ fail() { printf 'installation acceptance: %s\n' "$1" >&2; exit 1; }
 
 assert_owned_directory() {
   local directory="$1" user="$2" expected_mode="$3"
-  test -d "$directory" && test ! -L "$directory"
-  test "$(stat -c '%U' "$directory")" = "$user"
-  test "$(stat -c '%a' "$directory")" = "$expected_mode"
+  sudo test -d "$directory" && sudo test ! -L "$directory"
+  test "$(sudo stat -c '%U' "$directory")" = "$user"
+  test "$(sudo stat -c '%a' "$directory")" = "$expected_mode"
 }
 
 prepare_host() {
@@ -221,13 +221,13 @@ PY
     if sudo -u "$agent_user" env DOCKER_HOST="unix://${docker_socket}" docker info >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  [[ -S "$docker_socket" ]] || fail "rootless Docker did not create its socket"
+  sudo -u "$agent_user" test -S "$docker_socket" || fail "Agent cannot access its rootless Docker socket"
   local socket_uid socket_gid socket_mode runtime_uid runtime_mode security_options
-  socket_uid="$(stat -c '%u' "$docker_socket")"
-  socket_gid="$(stat -c '%g' "$docker_socket")"
-  socket_mode="$(stat -c '%a' "$docker_socket")"
-  runtime_uid="$(stat -c '%u' "$agent_runtime")"
-  runtime_mode="$(stat -c '%a' "$agent_runtime")"
+  socket_uid="$(sudo stat -c '%u' "$docker_socket")"
+  socket_gid="$(sudo stat -c '%g' "$docker_socket")"
+  socket_mode="$(sudo stat -c '%a' "$docker_socket")"
+  runtime_uid="$(sudo stat -c '%u' "$agent_runtime")"
+  runtime_mode="$(sudo stat -c '%a' "$agent_runtime")"
   printf 'Rootless Docker socket: %s owner=%s group=%s mode=%s\n' "$docker_socket" "$socket_uid" "$socket_gid" "$socket_mode"
   printf 'Rootless Docker socket parent: %s owner=%s mode=%s\n' "$agent_runtime" "$runtime_uid" "$runtime_mode"
   [[ "$socket_uid" = "$agent_uid" && "$socket_gid" = "$agent_gid" ]] || fail "rootless socket has unexpected ownership"
@@ -350,17 +350,19 @@ verify_workspace() {
   printf 'PASS: container %s binds host workspace path %s at /workspace\n' "$container_id" "$expected_workspace_path"
 
   local socket_mode socket_uid socket_gid runtime_mode runtime_uid web_db
-  socket_mode="$(stat -c '%a' "$docker_socket")"
-  socket_uid="$(stat -c '%u' "$docker_socket")"
-  socket_gid="$(stat -c '%g' "$docker_socket")"
-  runtime_mode="$(stat -c '%a' "$agent_runtime")"
-  runtime_uid="$(stat -c '%u' "$agent_runtime")"
+  sudo -u "$agent_user" test -S "$docker_socket" || fail "Agent lost access to its rootless Docker socket after service restarts"
+  socket_mode="$(sudo stat -c '%a' "$docker_socket")"
+  socket_uid="$(sudo stat -c '%u' "$docker_socket")"
+  socket_gid="$(sudo stat -c '%g' "$docker_socket")"
+  runtime_mode="$(sudo stat -c '%a' "$agent_runtime")"
+  runtime_uid="$(sudo stat -c '%u' "$agent_runtime")"
   [[ "$socket_uid" = "$agent_uid" && "$socket_gid" = "$agent_gid" ]] || fail "rootless socket ownership changed"
   [[ "$socket_mode" = 600 || "$socket_mode" = 660 ]] || fail "rootless socket permissions are not owner-only or owner-group"
   [[ "$runtime_uid" = "$agent_uid" && "$runtime_mode" = 700 ]] || fail "rootless runtime directory is not private to Agent"
   web_db="$web_home/devspace.sqlite"
-  [[ -f "$web_db" && "$(stat -c '%U' "$web_db")" = "$web_user" ]] || fail "Web database did not persist with Web ownership"
-  [[ "$(stat -c '%a' "$web_db")" = 600 ]] || fail "Web database permissions changed across restarts"
+  sudo test -f "$web_db" && [[ "$(sudo stat -c '%U' "$web_db")" = "$web_user" ]] \
+    || fail "Web database did not persist with Web ownership"
+  [[ "$(sudo stat -c '%a' "$web_db")" = 600 ]] || fail "Web database permissions changed across restarts"
   assert_owned_directory "$agent_home" "$agent_user" 700
   assert_owned_directory "$managed_root" "$agent_user" 700
   assert_owned_directory "$managed_root/projects" "$agent_user" 700
