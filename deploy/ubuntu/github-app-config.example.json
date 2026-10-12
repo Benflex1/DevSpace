@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "appId": "12345678",
+  "expectedAccountId": "87654321",
+  "expectedAccountType": "Organization",
+  "installationUrl": "https://github.com/apps/example-devspace/installations/new"
+}

@@ -9,6 +9,15 @@ Six source checks remain deliberately protected where equivalent behavior covera
 Further cleanup does not justify delaying the public-alpha roadmap. Browser acceptance in CI
 remains a separate delivery requirement below.
 
+## Fresh-host installation
+
+[`installation-ubuntu-24.04.md`](installation-ubuntu-24.04.md) documents the Ubuntu 24.04 amd64
+host setup, pinned Node/pnpm build, rootless Agent runtime, Cloudflare Access, separate systemd
+services, and first project workflow. The implementation executor has no sudo, systemd, Docker
+daemon, or disposable-host facility; its offline frozen dependency install stopped with `ENOSPC`.
+Clean-host workspace Start, terminal, task, and Stop/Start preservation acceptance therefore remain
+unverified. Do not describe the installation path as host-accepted until that run is performed.
+
 ## Public-alpha acceptance gap: browser verification in CI
 
 Playwright's 11 browser cases are not currently executed in CI. Unit/tooling and real

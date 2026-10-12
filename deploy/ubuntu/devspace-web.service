@@ -1,0 +1,24 @@
+[Unit]
+Description=DevSpace Web application
+After=network-online.target devspace-agent.service
+Wants=network-online.target devspace-agent.service
+
+[Service]
+Type=simple
+User=devspace-web
+Group=devspace-web
+SupplementaryGroups=devspace-agent devspace-code
+WorkingDirectory=/opt/devspace
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/devspace/web.env
+StateDirectory=devspace-web
+StateDirectoryMode=0700
+UMask=0077
+ExecStartPre=/usr/local/bin/node /opt/devspace/tooling/install-preflight.mjs web
+ExecStart=/usr/local/bin/pnpm --filter @devspace/web run start
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=multi-user.target

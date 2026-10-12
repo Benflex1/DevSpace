@@ -1,0 +1,26 @@
+[Unit]
+Description=DevSpace workspace Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devspace-agent
+Group=devspace-agent
+SupplementaryGroups=devspace-code
+WorkingDirectory=/opt/devspace
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/devspace/agent.env
+StateDirectory=devspace-agent
+StateDirectoryMode=0700
+RuntimeDirectory=devspace-agent
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStartPre=/usr/local/bin/node /opt/devspace/tooling/install-preflight.mjs agent
+ExecStart=/usr/local/bin/pnpm --filter @devspace/agent run start
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=multi-user.target
