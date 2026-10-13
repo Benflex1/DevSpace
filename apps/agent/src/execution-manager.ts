@@ -282,6 +282,7 @@ export class ExecutionManager {
   private readonly persistentTmux: PersistentTmuxRuntime;
   private readonly harnessProcessIds = new Set<string>();
   private readonly settledHarnessProcessIds = new Set<string>();
+  private readonly terminalAdmissionMode: "persistent" | "legacy-direct-exec";
 
   constructor(
     stateRoot: string,
@@ -294,11 +295,13 @@ export class ExecutionManager {
       readonly onHarnessRecovered?: (event: HarnessRecoveryIdentity) => void | Promise<void>;
       readonly onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
     } = {},
-    persistentTmux?: PersistentTmuxRuntime
+    persistentTmux?: PersistentTmuxRuntime,
+    terminalAdmissionMode: "persistent" | "legacy-direct-exec" = "persistent"
   ) {
     this.recordsRoot = path.join(path.resolve(stateRoot), "ownership", "executions");
     this.stateRoot = path.resolve(stateRoot);
     this.persistentTmux = persistentTmux ?? new PersistentTmuxRuntime(engine);
+    this.terminalAdmissionMode = terminalAdmissionMode;
   }
 
   harnessRecoveryReports(): readonly HarnessRecoveryReport[] {
@@ -1045,8 +1048,11 @@ export class ExecutionManager {
     const terminalId = uuidV7Schema.parse(input.terminalId);
     const pending = this.terminalAdmissions.get(terminalId);
     if (pending !== undefined) return await pending;
+    const identity = { ...input, terminalId };
     const admission = this.serializeWorkspaceAdmission(input.workspaceId,
-      async () => await this.admitPersistentTerminal({ ...input, terminalId }));
+      async () => this.terminalAdmissionMode === "legacy-direct-exec"
+        ? await this.admitLegacyDirectTerminal(identity)
+        : await this.admitPersistentTerminal(identity));
     this.terminalAdmissions.set(terminalId, admission);
     try { await admission; }
     finally { if (this.terminalAdmissions.get(terminalId) === admission) this.terminalAdmissions.delete(terminalId); }
@@ -1063,6 +1069,24 @@ export class ExecutionManager {
       release();
       if (this.workspaceAdmissions.get(workspaceId) === current) this.workspaceAdmissions.delete(workspaceId);
     }
+  }
+
+  private async admitLegacyDirectTerminal(input: TerminalIdentityData): Promise<void> {
+    const existing = [...this.executions.values()].find((candidate) => candidate.record.terminalId === input.terminalId);
+    if (existing !== undefined) {
+      if (existing.record.executionRole === "terminal" && existing.record.terminalBackend !== "tmux"
+        && existing.record.projectId === input.projectId && existing.record.workspaceId === input.workspaceId) return;
+      throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
+        resource: { type: "terminal", id: input.terminalId }, action: "create"
+      });
+    }
+    const context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    await this.createExec(context, {
+      kind: "terminal", executionRole: "terminal", harnessSessionId: null, harnessGeneration: null, harnessLeaseId: null,
+      processId: input.terminalId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
+      successExitCodes: [0], command: ["/bin/sh"], workingDirectory: "/workspace",
+      environment: { TERM: "xterm-256color" }, attachStdin: true, tty: true, operationId: null
+    });
   }
 
   private async admitPersistentTerminal(input: TerminalIdentityData): Promise<void> {

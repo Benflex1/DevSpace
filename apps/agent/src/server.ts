@@ -84,6 +84,8 @@ export interface AgentServerOptions {
   readonly previewGatewayFactory?: (resolveLease: OpaqueLeaseResolver) => PreviewGatewayAdapterContract;
   readonly previewLeaseResolverSocketPath?: string;
   readonly operationJournal?: OperationJournal;
+  /** Internal E2E seam for the legacy direct-exec terminal fixture. */
+  readonly terminalAdmissionModeForTests?: "legacy-direct-exec";
   readonly eventRetention?: number;
   readonly now?: () => Date;
   readonly createId?: () => string;
@@ -349,7 +351,8 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
   } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
-    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks);
+    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks,
+    undefined, options.terminalAdmissionModeForTests);
   harnessHooks.onTerminalResizeFailure = (event) => logger.error(
     "agent.terminal.resize_failed",
     "Terminal resize failed at the Docker boundary.",

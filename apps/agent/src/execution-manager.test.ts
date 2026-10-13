@@ -1261,6 +1261,33 @@ test("ordinary task execs stay non-TTY while interactive terminals receive initi
   expect(created).toHaveLength(1);
 });
 
+test("the explicit E2E legacy-terminal seam still creates a direct interactive shell", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-legacy-terminal-test-")); roots.push(root);
+  const context = {
+    projectId: id, workspaceId, revisionId: id,
+    revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`,
+    generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } },
+    options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const execRequests: Array<{ readonly command: readonly string[]; readonly workingDirectory: string; readonly attachStdin: boolean; readonly tty: boolean }> = [];
+  const engine = {
+    createExec: async (_containerId: string, input: typeof execRequests[number]) => {
+      execRequests.push(input);
+      return "direct-terminal-exec";
+    },
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, ContainerID: "container-owned", Running: true, ExitCode: null })
+  };
+  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine as never,
+    undefined, undefined, undefined, undefined, "legacy-direct-exec");
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+
+  expect(execRequests).toMatchObject([{ command: ["/bin/sh"], workingDirectory: "/workspace", attachStdin: true, tty: true }]);
+});
+
 test("terminal resize failures produce one bounded private diagnostic without Docker response details", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-resize-diagnostic-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });

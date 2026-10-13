@@ -942,6 +942,8 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     progress.record("docker.image.verified", "info", { imageReference, imageId: image.Id, architecture: image.Architecture });
 
     const role = imageReference.endsWith("-slim") ? "slim" : "bookworm";
+    const executionUser = role === "slim" ? "0:0" : testUser;
+    const executionUid = role === "slim" ? 0 : 1000;
     const containerName = `devspace-tmux-${runId.slice(0, 8)}-${role}`;
     const labels = {
       "devspace.test": "persistent-tmux-feasibility",
@@ -950,14 +952,14 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     };
     const containerId = await progress.run("docker.container.create", dockerOperationTimeoutMs, () => createWritableRootlessTmuxContainer(engine, containerName, {
       imageReference,
-      user: "",
+      user: executionUser,
       labels,
       cpuMillicores: 500,
       memoryBytes: 512 * 1024 * 1024,
       pidLimit: 64
     }));
     fixture.containerIds.add(containerId);
-    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser: "image-default" });
+    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser });
     await progress.run("docker.container.start", dockerOperationTimeoutMs, () => engine.startContainer(containerId));
     progress.record("docker.container.started", "info", { containerId });
     const container = await progress.run("docker.container.inspect-after-start", dockerOperationTimeoutMs,
@@ -966,8 +968,8 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       containerId, image: container.Config.Image, user: container.Config.User,
       running: container.State.Running, status: container.State.Status
     });
-    expect(container.Config.User).toBe("");
-    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.default-user.verify")).toBe("0\n");
+    expect(container.Config.User).toBe(executionUser);
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.execution-user.verify")).toBe(`${executionUid}\n`);
     expect(await commandOkay(engine, containerId, ["test", "-d", "/workspace"], "container.workspace-directory.verify")).toBe("");
     expect(container.HostConfig).toMatchObject({
       Privileged: false, NetworkMode: "none", ReadonlyRootfs: false,

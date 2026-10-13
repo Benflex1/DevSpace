@@ -16,6 +16,7 @@ const server = createAgentServer({
   socketPath,
   managedRoots: { projects: `${managedRoot}/projects`, workspaces: `${managedRoot}/workspaces`, state: `${managedRoot}/state` },
   operationJournalPath: `${managedRoot}/state/operations`,
+  terminalAdmissionModeForTests: "legacy-direct-exec",
   previewBaseRegistry: readPreviewBaseRegistry(),
   ...(caddyAdminSocket !== undefined && gatewayPolicy !== null ? {
     previewGatewayFactory: (resolveLease: (leaseId: string) => Promise<{ readonly leaseId: string; readonly hostIp: "127.0.0.1"; readonly hostPort: number } | null>) =>
