@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   persistentTerminalOwnershipMarker,
+  persistentTmuxBinding,
   persistentTmuxSessionName,
   parseTmuxPaneObservation,
   type PersistentTerminalOwnership
@@ -27,6 +28,15 @@ describe("persistent tmux identity", () => {
       .not.toBe(persistentTerminalOwnershipMarker(ownership));
     expect(persistentTerminalOwnershipMarker({ ...ownership, generation: 2 }))
       .not.toBe(persistentTerminalOwnershipMarker(ownership));
+  });
+
+  test("uses the existing root execution identity for an isolated tmux socket", () => {
+    expect(persistentTmuxBinding("a".repeat(64), 0, 0)).toMatchObject({
+      uid: 0,
+      gid: 0,
+      socketDirectory: "/tmp/devspace-persistent-tmux-0",
+      socketPath: "/tmp/devspace-persistent-tmux-0/server.sock"
+    });
   });
 
   test("parses one exact pane and retains pane-death evidence", () => {

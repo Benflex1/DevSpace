@@ -197,7 +197,7 @@ export function parseTmuxPaneObservations(output: string): TmuxPaneObservation[]
 }
 
 export function persistentTmuxBinding(containerId: string, uid: number, gid: number): PersistentTmuxBinding {
-  if (!containerId || containerId.includes("\0") || !Number.isSafeInteger(uid) || uid < 1
+  if (!containerId || containerId.includes("\0") || !Number.isSafeInteger(uid) || uid < 0
     || !Number.isSafeInteger(gid) || gid < 0) throw new Error("persistent-tmux-execution-identity-invalid");
   const artifactRoot = `/opt/${TMUX_ARCHIVE_ROOT}`;
   const socketDirectory = `/tmp/devspace-persistent-tmux-${uid}`;
@@ -338,7 +338,7 @@ export class PersistentTmuxRuntime {
     assertRunningContainer(container, containerId);
     const uidResult = await this.commandResult(persistentTmuxBinding(containerId, 1, 0), ["id", "-u"]);
     if (uidResult.exitCode !== 0) throw new Error("persistent-tmux-execution-uid-unavailable");
-    const uid = parseNumericOutput(uidResult.stdout, "execution-uid", false);
+    const uid = parseNumericOutput(uidResult.stdout, "execution-uid", true);
     const gidResult = await this.commandResult(persistentTmuxBinding(containerId, uid, 0), ["id", "-g"]);
     if (gidResult.exitCode !== 0) throw new Error("persistent-tmux-execution-gid-unavailable");
     const gid = parseNumericOutput(gidResult.stdout, "execution-gid", true);

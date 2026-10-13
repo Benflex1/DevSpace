@@ -950,14 +950,14 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     };
     const containerId = await progress.run("docker.container.create", dockerOperationTimeoutMs, () => createWritableRootlessTmuxContainer(engine, containerName, {
       imageReference,
-      user: testUser,
+      user: "",
       labels,
       cpuMillicores: 500,
       memoryBytes: 512 * 1024 * 1024,
       pidLimit: 64
     }));
     fixture.containerIds.add(containerId);
-    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser: testUser });
+    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser: "image-default" });
     await progress.run("docker.container.start", dockerOperationTimeoutMs, () => engine.startContainer(containerId));
     progress.record("docker.container.started", "info", { containerId });
     const container = await progress.run("docker.container.inspect-after-start", dockerOperationTimeoutMs,
@@ -966,7 +966,8 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       containerId, image: container.Config.Image, user: container.Config.User,
       running: container.State.Running, status: container.State.Status
     });
-    expect(container.Config.User).toBe(testUser);
+    expect(container.Config.User).toBe("");
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.default-user.verify")).toBe("0\n");
     expect(await commandOkay(engine, containerId, ["test", "-d", "/workspace"], "container.workspace-directory.verify")).toBe("");
     expect(container.HostConfig).toMatchObject({
       Privileged: false, NetworkMode: "none", ReadonlyRootfs: false,
