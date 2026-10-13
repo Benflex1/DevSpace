@@ -6,6 +6,7 @@ export const TERMINAL_POST_EXIT_REPLAY_RETENTION_MS = 30_000 as const;
 export const TERMINAL_PROTOCOL_ERROR_CLOSE_CODE = 1002 as const;
 export const TERMINAL_NORMAL_CLOSE_CODE = 1000 as const;
 export const TERMINAL_FAILURE_CLOSE_CODE = 1011 as const;
+export const TERMINAL_ATTACHMENT_READY_VERSION = 2 as const;
 
 export const terminalProtocolMetadata = Object.freeze({
   subprotocol: TERMINAL_SUBPROTOCOL,
@@ -14,17 +15,24 @@ export const terminalProtocolMetadata = Object.freeze({
   activeAttachmentsPerTerminal: 1,
   attachmentSlotReservedBeforeUpgrade: true,
   readyRequiredBeforeClientFrames: true,
+  attachmentReadyVersion: TERMINAL_ATTACHMENT_READY_VERSION,
+  supportsTmuxHistoryControls: true,
+  supportsTmuxSelectionCopy: true,
   detachClosesTerminalResource: false
 });
 
 export type TerminalClientFrame =
   | { readonly type: "input"; readonly data: Uint8Array }
   | { readonly type: "resize"; readonly columns: number; readonly rows: number }
+  | { readonly type: "history" }
+  | { readonly type: "live" }
   | { readonly type: "detach" };
 
 export type TerminalAgentFrame =
   | { readonly type: "ready" }
+  | { readonly type: "ready"; readonly version: typeof TERMINAL_ATTACHMENT_READY_VERSION; readonly attachmentId: string }
   | { readonly type: "output"; readonly data: Uint8Array }
+  | { readonly type: "attachment-conflict" }
   | { readonly type: "exit"; readonly exitCode: number | null };
 
 export type TerminalFrameDecodeErrorCode =
@@ -32,7 +40,9 @@ export type TerminalFrameDecodeErrorCode =
   | "MALFORMED_LENGTH"
   | "PAYLOAD_TOO_LARGE"
   | "INVALID_RESIZE_DIMENSIONS"
-  | "INVALID_EXIT_CODE";
+  | "INVALID_EXIT_CODE"
+  | "UNSUPPORTED_ATTACHMENT_VERSION"
+  | "INVALID_ATTACHMENT_ID";
 
 export type TerminalFrameDecodeResult<Frame> =
   | { readonly ok: true; readonly frame: Frame }
@@ -65,6 +75,14 @@ export function decodeTerminalClientFrame(message: Uint8Array): TerminalFrameDec
       return message.byteLength === 1
         ? { ok: true, frame: { type: "detach" } }
         : decodeFailure("MALFORMED_LENGTH");
+    case 0x04:
+      return message.byteLength === 1
+        ? { ok: true, frame: { type: "history" } }
+        : decodeFailure("MALFORMED_LENGTH");
+    case 0x05:
+      return message.byteLength === 1
+        ? { ok: true, frame: { type: "live" } }
+        : decodeFailure("MALFORMED_LENGTH");
     default:
       return decodeFailure("UNKNOWN_DISCRIMINATOR");
   }
@@ -75,9 +93,16 @@ export function decodeTerminalAgentFrame(message: Uint8Array): TerminalFrameDeco
   if (message.byteLength === 0) return decodeFailure("MALFORMED_LENGTH");
   switch (message[0]) {
     case 0x11:
-      return message.byteLength === 1
-        ? { ok: true, frame: { type: "ready" } }
-        : decodeFailure("MALFORMED_LENGTH");
+      if (message.byteLength === 1) return { ok: true, frame: { type: "ready" } };
+      if (message.byteLength !== 38) return decodeFailure("MALFORMED_LENGTH");
+      if (message[1] !== TERMINAL_ATTACHMENT_READY_VERSION) return decodeFailure("UNSUPPORTED_ATTACHMENT_VERSION");
+      {
+        const attachmentId = new TextDecoder().decode(message.subarray(2));
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(attachmentId)) {
+          return decodeFailure("INVALID_ATTACHMENT_ID");
+        }
+        return { ok: true, frame: { type: "ready", version: TERMINAL_ATTACHMENT_READY_VERSION, attachmentId } };
+      }
     case 0x12:
       if (message.byteLength < 2) return decodeFailure("MALFORMED_LENGTH");
       return { ok: true, frame: { type: "output", data: copyPayload(message) } };
@@ -93,6 +118,10 @@ export function decodeTerminalAgentFrame(message: Uint8Array): TerminalFrameDeco
       return message[1] === 0x00 || message[1] === 0x01
         ? decodeFailure("MALFORMED_LENGTH")
         : decodeFailure("INVALID_EXIT_CODE");
+    case 0x14:
+      return message.byteLength === 1
+        ? { ok: true, frame: { type: "attachment-conflict" } }
+        : decodeFailure("MALFORMED_LENGTH");
     default:
       return decodeFailure("UNKNOWN_DISCRIMINATOR");
   }
@@ -106,6 +135,8 @@ function assertPayload(data: Uint8Array, label: string): void {
 
 export function encodeTerminalClientFrame(frame: TerminalClientFrame): Uint8Array {
   if (frame.type === "detach") return Uint8Array.of(0x03);
+  if (frame.type === "history") return Uint8Array.of(0x04);
+  if (frame.type === "live") return Uint8Array.of(0x05);
   if (frame.type === "resize") {
     if (!Number.isInteger(frame.columns) || !Number.isInteger(frame.rows)
       || frame.columns < 1 || frame.columns > 65_535 || frame.rows < 1 || frame.rows > 65_535) {
@@ -126,7 +157,21 @@ export function encodeTerminalClientFrame(frame: TerminalClientFrame): Uint8Arra
 }
 
 export function encodeTerminalAgentFrame(frame: TerminalAgentFrame): Uint8Array {
-  if (frame.type === "ready") return Uint8Array.of(0x11);
+  if (frame.type === "ready") {
+    if ("attachmentId" in frame) {
+      if (frame.version !== TERMINAL_ATTACHMENT_READY_VERSION
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(frame.attachmentId)) {
+        throw new RangeError("Persistent terminal readiness requires a version 2 UUIDv7 attachment ID");
+      }
+      const encoded = new Uint8Array(38);
+      encoded[0] = 0x11;
+      encoded[1] = frame.version;
+      encoded.set(new TextEncoder().encode(frame.attachmentId), 2);
+      return encoded;
+    }
+    return Uint8Array.of(0x11);
+  }
+  if (frame.type === "attachment-conflict") return Uint8Array.of(0x14);
   if (frame.type === "output") {
     assertPayload(frame.data, "Output");
     const encoded = new Uint8Array(frame.data.byteLength + 1);

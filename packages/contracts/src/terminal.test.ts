@@ -59,6 +59,24 @@ describe("terminal binary frames", () => {
     });
   });
 
+  test("versions persistent attachment readiness and fixed history controls", () => {
+    const ready = { type: "ready", version: 2, attachmentId: "018f0f00-0000-7000-8000-000000000099" } as const;
+    expect([...encodeTerminalAgentFrame(ready)]).toEqual([
+      0x11, 0x02, ...new TextEncoder().encode(ready.attachmentId)
+    ]);
+    expect(decodeTerminalAgentFrame(encodeTerminalAgentFrame(ready))).toEqual({ ok: true, frame: ready });
+    expect([...encodeTerminalClientFrame({ type: "history" })]).toEqual([0x04]);
+    expect([...encodeTerminalClientFrame({ type: "live" })]).toEqual([0x05]);
+    expect(decodeTerminalClientFrame(Uint8Array.of(0x04))).toEqual({ ok: true, frame: { type: "history" } });
+    expect(decodeTerminalClientFrame(Uint8Array.of(0x05))).toEqual({ ok: true, frame: { type: "live" } });
+  });
+
+  test("decodes a duplicate attachment response without accepting input", () => {
+    expect(decodeTerminalAgentFrame(Uint8Array.of(0x14))).toEqual({
+      ok: true, frame: { type: "attachment-conflict" }
+    });
+  });
+
   test("encoded and decoded payloads own copies instead of aliasing caller buffers", () => {
     const input = Uint8Array.of(0x41, 0x42);
     const encoded = encodeTerminalClientFrame({ type: "input", data: input });

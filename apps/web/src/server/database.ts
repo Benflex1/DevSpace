@@ -141,6 +141,7 @@ export class ProjectSetupConflictError extends Error {
 }
 
 const terminalNamespaceStates = new Set(["creating", "active", "disconnected"]);
+const terminalProcessFinalStates = new Set(["exited", "failed", "killed", "lost"]);
 const terminalDisplayNumberPattern = /^Terminal ([1-9][0-9]*)$/u;
 const terminalRetirementGracePeriodMs = 30_000;
 
@@ -2603,9 +2604,18 @@ export function openProjectDatabase(path: string, options: {
                   operationId: local.operationId, updatedAt: timestamp
                 }).where(eq(previews.id, preview.id)).run();
             } else if (local.operationName === "terminal.create") {
-              db.update(terminalSessions).set({ state: "failed", closedAt: timestamp }).where(eq(terminalSessions.id, local.resourceId)).run();
-              db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
-                .where(eq(processes.id, local.resourceId)).run();
+              const terminal = db.select({ state: terminalSessions.state }).from(terminalSessions)
+                .where(eq(terminalSessions.id, local.resourceId)).get();
+              if (terminal?.state === "creating") {
+                db.update(terminalSessions).set({ state: "failed", closedAt: timestamp })
+                  .where(and(eq(terminalSessions.id, local.resourceId), eq(terminalSessions.state, "creating"))).run();
+                const process = db.select({ observedState: processes.observedState }).from(processes)
+                  .where(eq(processes.id, local.resourceId)).get();
+                if (process !== undefined && !terminalProcessFinalStates.has(process.observedState)) {
+                  db.update(processes).set({ observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp })
+                    .where(and(eq(processes.id, local.resourceId), eq(processes.observedState, process.observedState))).run();
+                }
+              }
             } else if (local.operationName === "task.start") {
               const run = db.select().from(taskRuns).where(eq(taskRuns.id, local.resourceId)).get();
               db.update(taskRuns).set({ state: "failed", finishedAt: timestamp }).where(eq(taskRuns.id, local.resourceId)).run();
@@ -2635,6 +2645,11 @@ export function openProjectDatabase(path: string, options: {
         for (const resource of snapshot.resources) {
           if (resource.type === "process") {
             const observed = resource.observation;
+            const current = db.select({ observedState: processes.observedState }).from(processes).where(and(
+              eq(processes.id, observed.processId), eq(processes.workspaceId, observed.workspaceId)
+            )).get();
+            if (current === undefined) continue;
+            if (terminalProcessFinalStates.has(current.observedState) && current.observedState !== observed.observedState) continue;
             db.update(processes).set({ desiredState: observed.desiredState, observedState: observed.observedState,
               exitCode: observed.exitCode, startedAt: observed.startedAt, finishedAt: observed.finishedAt, lastObservedAt: timestamp })
               .where(and(eq(processes.id, observed.processId), eq(processes.workspaceId, observed.workspaceId))).run();

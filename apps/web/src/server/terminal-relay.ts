@@ -2,11 +2,12 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { v7 as uuidv7 } from "uuid";
 import WebSocket, { WebSocketServer } from "ws";
-import { AGENT_API_VERSION, TERMINAL_MAX_MESSAGE_BYTES, TERMINAL_SUBPROTOCOL } from "@devspace/contracts";
+import { AGENT_API_VERSION, TERMINAL_MAX_MESSAGE_BYTES, TERMINAL_SUBPROTOCOL, encodeTerminalAgentFrame } from "@devspace/contracts";
 import type { AuthConfig } from "./config.js";
 import { authenticateHeaders } from "./auth.js";
 
 const MAX_RELAY_BUFFER_BYTES = 256 * 1024;
+const HEARTBEAT_INTERVAL_MS = 15_000;
 const terminalPathPattern = new RegExp(
   "^/api/projects/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})"
   + "/workspaces/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})"
@@ -41,6 +42,27 @@ export function installTerminalWebSocketRelay(server: Server, options: TerminalR
     perMessageDeflate: false, handleProtocols: (protocols) => protocols.size === 1 && protocols.has(TERMINAL_SUBPROTOCOL)
       ? TERMINAL_SUBPROTOCOL : false });
 
+  const heartbeat = (socket: WebSocket, peer: WebSocket): void => {
+    let alive = true;
+    const interval = setInterval(() => {
+      if (!alive) {
+        socket.terminate();
+        if (peer.readyState < WebSocket.CLOSING) peer.terminate();
+        return;
+      }
+      alive = false;
+      try { socket.ping(); }
+      catch {
+        socket.terminate();
+        if (peer.readyState < WebSocket.CLOSING) peer.terminate();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    interval.unref();
+    socket.on("pong", () => { alive = true; });
+    socket.once("close", () => clearInterval(interval));
+    socket.once("error", () => clearInterval(interval));
+  };
+
   const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     let match: RegExpExecArray | null;
     try { match = terminalPathPattern.exec(new URL(request.url ?? "/", options.appOrigin).pathname); }
@@ -73,7 +95,21 @@ export function installTerminalWebSocketRelay(server: Server, options: TerminalR
       const fail = (status: 400 | 403 | 404 | 409) => {
         if (settled) return; settled = true; agent.terminate(); reject(socket, status);
       };
-      agent.once("unexpected-response", (_request, response) => fail(response.statusCode === 409 ? 409 : response.statusCode === 404 ? 404 : 403));
+      agent.once("unexpected-response", (_request, response) => {
+        if (response.statusCode !== 409 || settled) {
+          fail(response.statusCode === 404 ? 404 : response.statusCode === 409 ? 409 : 403);
+          return;
+        }
+        settled = true;
+        response.resume();
+        try {
+          terminalServer.handleUpgrade(request, socket, head, (websocket) => {
+            browser = websocket;
+            websocket.send(encodeTerminalAgentFrame({ type: "attachment-conflict" }), { binary: true });
+            websocket.close(1008, "Terminal already has an active attachment.");
+          });
+        } catch { socket.destroy(); }
+      });
       agent.once("error", () => { if (browser === null) fail(409); else browser.close(1011, "Terminal relay unavailable."); });
       agent.once("open", () => {
         if (settled) return;
@@ -95,6 +131,8 @@ export function installTerminalWebSocketRelay(server: Server, options: TerminalR
             websocket.once("close", () => agent.close());
             websocket.once("error", () => agent.close());
             agent.once("close", (code) => { if (websocket.readyState < WebSocket.CLOSING) websocket.close(code === 1000 ? 1000 : 1011); });
+            heartbeat(websocket, agent);
+            heartbeat(agent, websocket);
           });
         } catch { agent.terminate(); socket.destroy(); }
       });

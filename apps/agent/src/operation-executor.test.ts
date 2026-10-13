@@ -9,7 +9,7 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces, RevisionAdoptionRecoveryRequiredError } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationJournal } from "./operation-journal.js";
-import { TaskStartRecoveryRequiredError } from "./execution-manager.js";
+import { PersistentTerminalAdmissionUncertainError, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 
 const boot = "018f0f00-0000-7000-8000-000000000001";
 const project = "018f0f00-0000-7000-8000-000000000002";
@@ -61,6 +61,80 @@ test("accepted incomplete work resumes after restart and duplicate scheduling ex
   for (let index = 0; index < 10; index += 1) executor.schedule(record);
   await waitFor(restarted, [operation1]);
   expect(calls).toBe(1);
+});
+
+test("uncertain persistent terminal admission stays running and retries the same operation identity", async () => {
+  vi.useFakeTimers();
+  try {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-admission-retry-")); roots.push(root);
+    const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+    const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+    const operationId = "018f0f00-0000-7000-8000-000000000015";
+    const request = { projectId: project, workspaceId: targetWorkspace, terminalId: "018f0f00-0000-7000-8000-000000000016" };
+    const accepted = await journal.accept(operationId, "terminal.create", request);
+    let calls = 0;
+    const execution = {
+      snapshotResources: () => [],
+      createTerminal: async (input: typeof request) => {
+        calls += 1;
+        expect(input).toEqual(request);
+        if (calls === 1) throw new PersistentTerminalAdmissionUncertainError();
+      }
+    };
+    const managed = {
+      awaitProjectExecutionFence: async () => undefined,
+      snapshotResources: () => projectResources()
+    } as unknown as ManagedWorkspaces;
+    const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)), undefined,
+      execution as never);
+
+    executor.schedule(accepted);
+    await executor.drain();
+    expect(journal.get(operationId)).toMatchObject({ state: "running", failure: null });
+    expect(calls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await executor.drain();
+
+    expect(calls).toBe(2);
+    expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("Agent shutdown clears uncertain terminal admission retry timers", async () => {
+  vi.useFakeTimers();
+  try {
+    const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-admission-shutdown-")); roots.push(root);
+    const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+    const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+    const operationId = "018f0f00-0000-7000-8000-000000000017";
+    const request = { projectId: project, workspaceId: targetWorkspace, terminalId: "018f0f00-0000-7000-8000-000000000018" };
+    const accepted = await journal.accept(operationId, "terminal.create", request);
+    let calls = 0;
+    const execution = {
+      snapshotResources: () => [],
+      createTerminal: async () => { calls += 1; throw new PersistentTerminalAdmissionUncertainError(); }
+    };
+    const managed = {
+      awaitProjectExecutionFence: async () => undefined,
+      snapshotResources: () => projectResources()
+    } as unknown as ManagedWorkspaces;
+    const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)), undefined,
+      execution as never);
+
+    executor.schedule(accepted);
+    await executor.drain();
+    executor.shutdown();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await executor.drain();
+
+    expect(calls).toBe(1);
+    expect(journal.get(operationId)).toMatchObject({ state: "running", failure: null });
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("revision adoption remains resumable after partial effects and succeeds when replayed after Agent restart", async () => {

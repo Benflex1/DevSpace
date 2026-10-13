@@ -1,13 +1,19 @@
 # Current State
 
-## Persistent terminals: design proposed
+## Persistent terminals: Slice 1 in review
 
-[ADR 017](decisions/017-persistent-workspace-terminals.md) proposes in-container tmux ownership
-of shell and Native harness PTYs, with fresh Docker exec clients after attachment loss.
-[Feasibility evidence](feasibility/persistent-terminals-2026-10-13.md) covers local shell/TUI
-continuity and a static tmux artifact; Docker restart/Stop and browser acceptance remain unverified.
-No persistent-terminal implementation is included. Current Agent restart still loses terminal
-attachment; Native orphans retain their private-home lease until exact exit or workspace Stop.
+[ADR 017](decisions/017-persistent-workspace-terminals.md) is Accepted. The Slice 1 branch adds
+container-local tmux 3.7c shells, durable terminal/session/pane identity, fresh attachment execs,
+Agent recovery, a versioned browser handshake, terminal reset/redraw, resize, tmux History controls,
+and Web reconciliation that retains disconnected terminals. New shells are capped at eight per
+workspace; legacy direct-exec terminals and Native harness execution keep their existing behavior.
+
+The existing rootless Docker acceptance workflow now exercises the production Agent manager and
+tmux runtime on `node:24-bookworm` and `node:24-bookworm-slim`, including a manager reinitialization
+against the same running container. That CI run is pending for this branch. The executor has no
+Docker daemon, so a full Agent/Web process restart and browser reload acceptance has not been run;
+the PR remains draft until that required proof is available. Native Codex continuity is deferred
+to Slice 2. Full persistent-process exit/close and Native settlement work is deferred to Slice 3.
 
 ## Test-suite audit
 

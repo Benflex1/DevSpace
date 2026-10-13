@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { ExecutionManager, TaskStartRecoveryRequiredError, isSuccessfulTaskExitCode } from "./execution-manager.js";
 import { DockerEngineError } from "./docker-runtime.js";
+import type { PersistentTmuxRuntime, PersistentTmuxBinding, PersistentTerminalOwnership } from "./persistent-terminal-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter } from "./private-state.js";
 
@@ -16,6 +17,65 @@ const workspaceId = "018f0f00-0000-7000-8000-000000000002";
 const terminalId = "018f0f00-0000-7000-8000-000000000003";
 const operationId = "018f0f00-0000-7000-8000-000000000004";
 const roots: string[] = [];
+
+type FakePersistentRuntime = Pick<PersistentTmuxRuntime,
+  "prepare" | "createSessionExec" | "startCreatedExec" | "inspectExec" | "lookupSession" | "createAttachment"
+  | "resizeAttachment" | "history" | "live">;
+
+function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> = {}) {
+  const sessions = new Map<string, { readonly identity: PersistentTerminalOwnership; readonly sessionName: string }>();
+  const deadSessions = new Set<string>();
+  const counts = { sessionsCreated: 0, attachmentsCreated: 0, resizes: 0, history: 0, live: 0 };
+  const runtime = {
+    prepare: async (containerId: string): Promise<PersistentTmuxBinding> => ({
+      containerId, uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test", binaryPath: "/opt/devspace-test/tmux",
+      configPath: "/opt/devspace-test/tmux.conf", terminfoPath: "/opt/devspace-test/terminfo",
+      socketDirectory: "/tmp/devspace-persistent-tmux-1000", socketPath: "/tmp/devspace-persistent-tmux-1000/server.sock",
+      environment: { TMUX: "", TMUX_PANE: "" }
+    }),
+    createSessionExec: async (_binding: PersistentTmuxBinding, identity: PersistentTerminalOwnership, sessionName: string) => {
+      counts.sessionsCreated += 1;
+      sessions.set(sessionName, { identity, sessionName });
+      return `tmux-create-${counts.sessionsCreated}`;
+    },
+    startCreatedExec: async (execId: string) => ({ execId, exitCode: 0, stdout: "", stderr: "" }),
+    inspectExec: async (_binding: PersistentTmuxBinding, _execId: string) => ({ running: false, exitCode: null }),
+    lookupSession: async (_binding: PersistentTmuxBinding, identity: PersistentTerminalOwnership,
+      sessionName: string, knownSessionId: string | null, knownPaneId: string | null) => {
+      const session = sessions.get(sessionName);
+      if (session === undefined || session.identity.containerId !== identity.containerId
+        || session.identity.terminalId !== identity.terminalId) return null;
+      if (knownSessionId !== null && knownSessionId !== "$7" || knownPaneId !== null && knownPaneId !== "%0") return null;
+      const paneDead = deadSessions.has(sessionName);
+      return { sessionName, sessionId: "$7", paneId: "%0", panePid: 4321, paneDead, paneDeadStatus: paneDead ? 7 : null };
+    },
+    createAttachment: async () => {
+      counts.attachmentsCreated += 1;
+      return { execId: `tmux-attach-${counts.attachmentsCreated}`, stream: new PassThrough() };
+    },
+    resizeAttachment: async () => { counts.resizes += 1; },
+    history: async () => { counts.history += 1; },
+    live: async () => { counts.live += 1; },
+    ...overrides
+  };
+  return { runtime: runtime as unknown as PersistentTmuxRuntime, sessions, counts,
+    markPaneDead: (sessionName: string) => deadSessions.add(sessionName) };
+}
+
+function createExecutionManager(
+  root: string,
+  managed: never,
+  engine: never,
+  writer = durableJsonWriter,
+  now?: () => Date,
+  hooks?: ConstructorParameters<typeof ExecutionManager>[5],
+  persistentTmux = createFakePersistentRuntime().runtime
+): ExecutionManager {
+  const engineWithContainer = Object.assign({
+    inspectContainer: async (containerId: string) => ({ Id: containerId, State: { Running: true } })
+  }, engine);
+  return new ExecutionManager(root, managed, engineWithContainer, writer, now, hooks, persistentTmux);
+}
 afterEach(async () => {
   vi.useRealTimers();
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
@@ -45,7 +105,7 @@ test.each([
         executable: "/usr/bin/printf", args: ["ok"], workingDirectory: ".", environment: {}
       }, ...unsupported }] }
   } as unknown as WorkspaceExecutionContext;
-  const manager = new ExecutionManager("/tmp/devspace-runtime-policy", { executionContext: async () => context } as never, {
+  const manager = createExecutionManager("/tmp/devspace-runtime-policy", { executionContext: async () => context } as never, {
     createExec: async () => { createCalls += 1; return "never"; }
   } as never);
 
@@ -71,7 +131,7 @@ test("individual task and terminal stop fail closed without a signal attempt", a
     startExecAttached: async () => new PassThrough(),
     inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
   await manager.initialize();
   await manager.startTask({ projectId: id, workspaceId, taskRunId: terminalId, processId: operationId, taskKey: "task" }, operationId);
   await expect(manager.stop(id, workspaceId, operationId)).rejects.toMatchObject({
@@ -81,7 +141,7 @@ test("individual task and terminal stop fail closed without a signal attempt", a
   await expect(manager.closeTerminal({ projectId: id, workspaceId, terminalId })).rejects.toMatchObject({
     failure: { code: "RESOURCE_STATE_CONFLICT", details: { resource: { type: "terminal", id: terminalId }, action: "close" } }
   });
-  expect(creates).toBe(2);
+  expect(creates).toBe(1);
 });
 
 test("settles terminal execution ownership after the exact workspace runtime has stopped", async () => {
@@ -99,7 +159,8 @@ test("settles terminal execution ownership after the exact workspace runtime has
     inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: null, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const manager = new ExecutionManager(root, managed, engine);
+  const tmux = createFakePersistentRuntime();
+  const manager = createExecutionManager(root, managed, engine, durableJsonWriter, undefined, undefined, tmux.runtime);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
   expect(manager.snapshotResources().some((resource) => resource.type === "process"
@@ -125,8 +186,13 @@ test("settles terminal execution ownership after the exact workspace runtime has
     && resource.state === "lost")).toBe(true);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")))
     .toMatchObject({ desiredState: "stopped", observedState: "killed", terminalState: "lost" });
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("not currently attachable");
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toMatchObject({
+    failure: { code: "RESOURCE_STATE_CONFLICT" }
+  });
+  expect(tmux.counts.sessionsCreated).toBe(1);
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine, durableJsonWriter, undefined, undefined, tmux.runtime);
   await restarted.initialize();
   expect(restarted.snapshotResources().some((resource) => resource.type === "process"
     && resource.observation.processId === terminalId
@@ -134,6 +200,8 @@ test("settles terminal execution ownership after the exact workspace runtime has
   expect(restarted.snapshotResources().some((resource) => resource.type === "terminal"
     && resource.identity.terminalId === terminalId
     && resource.state === "lost")).toBe(true);
+  expect(() => restarted.reserveTerminalAttachment(terminalId)).toThrow("not currently attachable");
+  expect(tmux.counts.sessionsCreated).toBe(1);
 });
 
 test("an exact task.start replay reuses a recovered execution instead of hitting concurrency checks", async () => {
@@ -156,11 +224,11 @@ test("an exact task.start replay reuses a recovered execution instead of hitting
     inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine);
+  const first = createExecutionManager(root, managed, engine);
   await first.initialize();
   await first.startTask(taskInput, operationId);
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await restarted.startTask(taskInput, operationId);
 
@@ -191,7 +259,7 @@ test.each([{ exitCode: 0, state: "exited" }, { exitCode: 7, state: "failed" }] a
         return { ID: execId, Running: running, ExitCode: running ? null : exitCode, ContainerID: "container-owned" };
       }
     } as never;
-    const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+    const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
     await manager.initialize();
     await manager.startTask(input, operationId);
 
@@ -236,7 +304,7 @@ test.each([{ exitCode: 0, state: "exited" }, { exitCode: 7, state: "failed" }] a
       createExec: async () => { creates += 1; return "exec-owned"; }, startExecAttached: async () => new PassThrough(),
       inspectExec: async () => ({ ID: "exec-owned", Running: running, ExitCode: exitCode, ContainerID: "container-owned" })
     } as never;
-    const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+    const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
     await manager.initialize(); await manager.startTask(input, operationId);
     running = false; await expect(manager.inspect(id, workspaceId, operationId)).resolves.toMatchObject({ observedState: state });
     await expect(manager.startTask(input, operationId)).resolves.toBeUndefined();
@@ -268,14 +336,14 @@ test("task.start reserves before Docker and recovers an already-started exact ex
     startExecAttached: async () => { starts += 1; return new PassThrough(); },
     inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
-  const first = new ExecutionManager(root, { executionContext: async () => context } as never, engine, writer);
+  const first = createExecutionManager(root, { executionContext: async () => context } as never, engine, writer);
   await first.initialize();
   await expect(first.startTask(taskInput, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
   expect(creates).toBe(1); expect(starts).toBe(1);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${operationId}.json`), "utf8")))
     .toMatchObject({ creationPhase: "start-intent", execId: "exec-owned", observedState: "starting" });
 
-  const restarted = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const restarted = createExecutionManager(root, { executionContext: async () => context } as never, engine);
   await restarted.initialize();
   await restarted.startTask(taskInput, operationId);
   expect(creates).toBe(1); expect(starts).toBe(1);
@@ -307,14 +375,14 @@ test("task.start replay promotes an exact exec that exited before started eviden
     inspectExec: async () => ({ ID: "exec-owned", Running: false, ExitCode: executed ? 0 : null, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine, writer);
+  const first = createExecutionManager(root, managed, engine, writer);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
   expect(creates).toBe(1); expect(starts).toBe(1);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${operationId}.json`), "utf8")))
     .toMatchObject({ creationPhase: "start-intent", observedState: "starting", exitCode: null });
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await expect(restarted.startTask(input, operationId)).resolves.toBeUndefined();
   expect(creates).toBe(1); expect(starts).toBe(1);
@@ -348,14 +416,14 @@ test("task.start replay starts a genuinely never-started retained exec exactly o
     inspectExec: async () => ({ ID: "exec-owned", Running: false, ExitCode: executed ? 0 : null, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine, firstWriter);
+  const first = createExecutionManager(root, managed, engine, firstWriter);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toThrow("injected-start-intent-failure");
   expect(creates).toBe(1); expect(starts).toBe(0);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${operationId}.json`), "utf8")))
     .toMatchObject({ creationPhase: "exec-created", execId: "exec-owned" });
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await expect(restarted.startTask(input, operationId)).resolves.toBeUndefined();
   expect(creates).toBe(1); expect(starts).toBe(1);
@@ -380,12 +448,12 @@ test("an accepted task start remains resumable after the attach transport fails"
     inspectExec: async () => ({ ID: "exec-owned", Running: accepted, ExitCode: null, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine);
+  const first = createExecutionManager(root, managed, engine);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${operationId}.json`), "utf8")))
     .toMatchObject({ creationPhase: "start-intent", observedState: "starting" });
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await expect(restarted.startTask(input, operationId)).resolves.toBeUndefined();
   expect(creates).toBe(1); expect(starts).toBe(1);
@@ -412,11 +480,11 @@ test("an accepted task start that exits before recovery preserves its exit resul
     inspectExec: async () => ({ ID: "exec-owned", Running: false, ExitCode: accepted ? 7 : null, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine);
+  const first = createExecutionManager(root, managed, engine);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await expect(restarted.startTask(input, operationId)).resolves.toBeUndefined();
   expect(creates).toBe(1); expect(starts).toBe(1);
@@ -448,11 +516,11 @@ test("an ambiguous start with unavailable inspection remains resumable until exa
     }
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine);
+  const first = createExecutionManager(root, managed, engine);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await expect(restarted.startTask(input, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${operationId}.json`), "utf8")))
@@ -486,11 +554,11 @@ test("a never-started exec after ambiguous start is started exactly once after n
     inspectExec: async () => ({ ID: "exec-owned", Running: started, ExitCode: null, ContainerID: "container-owned" })
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine);
+  const first = createExecutionManager(root, managed, engine);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toBeInstanceOf(TaskStartRecoveryRequiredError);
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   allowSuccessfulStart = true;
   await expect(restarted.startTask(input, operationId)).resolves.toBeUndefined();
@@ -515,13 +583,13 @@ test("a deterministic create failure before start-intent is terminal and is not 
     startExecAttached: async () => { starts += 1; return new PassThrough(); }
   } as never;
   const managed = { executionContext: async () => context } as never;
-  const first = new ExecutionManager(root, managed, engine);
+  const first = createExecutionManager(root, managed, engine);
   await first.initialize();
   await expect(first.startTask(input, operationId)).rejects.toThrow("deterministic-create-rejection");
   expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${operationId}.json`), "utf8")))
     .toMatchObject({ creationPhase: "reserved", observedState: "failed" });
 
-  const restarted = new ExecutionManager(root, managed, engine);
+  const restarted = createExecutionManager(root, managed, engine);
   await restarted.initialize();
   await expect(restarted.startTask(input, operationId)).rejects.toMatchObject({
     failure: { code: "RESOURCE_STATE_CONFLICT" }
@@ -543,7 +611,7 @@ test("task.start persistence failure before Docker creates no exec and pre-start
     const root = await mkdtemp(path.join(tmpdir(), `devspace-task-phase-${failureWrite}-`)); roots.push(root);
     await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
     let writes = 0; let creates = 0; let starts = 0;
-    const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+    const manager = createExecutionManager(root, { executionContext: async () => context } as never, {
       createExec: async () => { creates += 1; return "exec-owned"; },
       startExecAttached: async () => { starts += 1; return new PassThrough(); }
     } as never, { write: async (filePath, value) => {
@@ -573,29 +641,25 @@ class RecordingFakeSocket extends FakeSocket {
   override send(data: Buffer): void { this.frames.push(Buffer.from(data)); }
 }
 
-test("a browser attaching after a fast terminal exit receives bounded replay and the exact exit code once", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-fast-exit-")); roots.push(root);
+test("a persistent attachment receives ready before tmux redraw and never prepends old direct replay", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-redraw-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
-  const stream = new PassThrough();
-  stream.end(Buffer.from("FAST_EXIT_DIAGNOSTIC"));
   const context = {
     projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
     runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
-  let creates = 0;
-  let starts = 0;
-  let resizes = 0;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
-    createExec: async () => { creates += 1; return "exec-fast-exit"; },
-    startExecAttached: async () => { starts += 1; return stream; },
-    inspectExec: async () => ({ ID: "exec-fast-exit", Running: false, ExitCode: 1, ContainerID: "container-owned" }),
-    resizeExec: async () => { resizes += 1; }
-  } as never);
+  const attached = new PassThrough();
+  attached.write(Buffer.from("TMUX_SCREEN_REDRAW"));
+  const tmux = createFakePersistentRuntime({
+    createAttachment: async () => ({ execId: "tmux-attach-redraw", stream: attached })
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
-  expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
-    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
+  const live = (manager as unknown as { executions: Map<string, { replay: Buffer }> }).executions.get(terminalId)!;
+  live.replay = Buffer.from("STALE_DIRECT_EXEC_REPLAY");
 
   const socket = new RecordingFakeSocket();
   await manager.reserveTerminalAttachment(terminalId).attach(socket as never);
@@ -603,49 +667,277 @@ test("a browser attaching after a fast terminal exit receives bounded replay and
     expect(result.ok).toBe(true);
     return result.ok ? result.frame : null;
   });
-  expect(decoded).toEqual([
-    { type: "ready" },
-    { type: "output", data: Buffer.from("FAST_EXIT_DIAGNOSTIC") },
-    { type: "exit", exitCode: 1 }
-  ]);
-  expect(socket.readyState).toBe(socket.CLOSING);
-  expect(socket.listenerCount("message")).toBe(0);
-  const input = encodeTerminalClientFrame({ type: "input", data: Buffer.from("must-not-be-written") });
-  socket.emit("message", Buffer.from(input), true);
-  expect(stream.writableLength).toBe(0);
-  expect(creates).toBe(1);
-  expect(starts).toBe(1);
-  expect(resizes).toBe(0);
+  expect(decoded[0]?.type).toBe("ready");
+  expect(decoded[0] !== undefined && decoded[0] !== null && "version" in decoded[0] && decoded[0].version === 2
+    && "attachmentId" in decoded[0] && typeof decoded[0].attachmentId === "string").toBe(true);
+  expect(decoded.filter((frame) => frame?.type === "output")).toHaveLength(1);
+  expect(Buffer.concat(decoded.filter((frame): frame is Extract<typeof frame, { type: "output" }> => frame?.type === "output")
+    .map((frame) => Buffer.from(frame.data)))).toEqual(Buffer.from("TMUX_SCREEN_REDRAW"));
+  expect(decoded.some((frame) => frame?.type === "output" && Buffer.from(frame.data).includes(Buffer.from("STALE_DIRECT_EXEC_REPLAY"))))
+    .toBe(false);
+  expect(tmux.counts.sessionsCreated).toBe(1);
   expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
-  expect(() => manager.reserveTerminalAttachment("018f0f00-0000-7000-8000-000000000099"))
-    .toThrow("The terminal was not found.");
+  socket.readyState = socket.CLOSED;
+  socket.emit("close");
+  await waitForTerminalAttachmentFinalization(manager, terminalId);
 });
 
-test("fast-exit replay is bounded and expires without reopening the process", async () => {
-  vi.useFakeTimers();
-  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-replay-expiry-")); roots.push(root);
+test("same terminal create retries are idempotent and keep deterministic pane identity", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-idempotent-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
-  const stream = new PassThrough();
-  stream.end(Buffer.alloc(80 * 1024, 65));
   const context = {
     projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
     runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
-    createExec: async () => "exec-expiring", startExecAttached: async () => stream,
-    inspectExec: async () => ({ ID: "exec-expiring", Running: false, ExitCode: 1, ContainerID: "container-owned" })
-  } as never);
+  const tmux = createFakePersistentRuntime();
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await Promise.all([
+    manager.createTerminal({ projectId: id, workspaceId, terminalId }),
+    manager.createTerminal({ projectId: id, workspaceId, terminalId })
+  ]);
+  const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(record).toMatchObject({ terminalBackend: "tmux", creationPhase: "started", observedState: "running",
+    terminalState: "disconnected", execId: null, persistentTerminal: {
+      backendVersion: 1, sessionName: `ds-${terminalId}`, sessionId: "$7", paneId: "%0", panePid: 4321,
+      admissionPhase: "created", createExecId: "tmux-create-1"
+    } });
+  expect(tmux.counts.sessionsCreated).toBe(1);
+});
+
+test("workspace admission allows at most eight persistent shells under concurrent creates", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-workspace-limit-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  const ids = Array.from({ length: 9 }, (_, index) => `018f0f00-0000-7000-8000-${String(index + 100).padStart(12, "0")}`);
+  const results = await Promise.allSettled(ids.map(async (terminalId) =>
+    await manager.createTerminal({ projectId: id, workspaceId, terminalId })));
+  expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(8);
+  expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+  expect(tmux.counts.sessionsCreated).toBe(8);
+});
+
+test("Agent manager restart reconciles the original tmux session without creating another shell", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-recovery-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  const managed = { executionContext: async () => context } as never;
+  const first = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
+  await first.initialize();
+  await first.createTerminal({ projectId: id, workspaceId, terminalId });
+  const restarted = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
+  await restarted.initialize();
+  const recoveredResources = restarted.snapshotResources();
+  const recoveredProcess = recoveredResources.find((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId);
+  const recoveredTerminal = recoveredResources.find((resource) => resource.type === "terminal"
+    && resource.identity.terminalId === terminalId);
+  expect(recoveredProcess).toMatchObject({ type: "process", observation: { processId: terminalId,
+    observedState: "running", desiredState: "running" } });
+  expect(recoveredTerminal).toMatchObject({ type: "terminal", identity: { terminalId }, state: "disconnected" });
+  await restarted.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(tmux.counts.sessionsCreated).toBe(1);
+  expect(tmux.counts.attachmentsCreated).toBe(0);
+});
+
+test("process inspection records exact persistent pane death instead of claiming it is still running", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-pane-exit-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
-  const executions = (manager as unknown as { executions: Map<string, { replay: Buffer }> }).executions;
-  expect(executions.get(terminalId)?.replay.byteLength).toBeLessThanOrEqual(64 * 1024);
-  const available = manager.reserveTerminalAttachment(terminalId);
-  available.release();
+  tmux.markPaneDead(`ds-${terminalId}`);
 
-  await vi.advanceTimersByTimeAsync(30_001);
-  expect(executions.get(terminalId)?.replay).toHaveLength(0);
-  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({
+    desiredState: "stopped", observedState: "exited", exitCode: 7
+  });
+  const resources = manager.snapshotResources();
+  const process = resources.find((resource) => resource.type === "process" && resource.observation.processId === terminalId);
+  const terminal = resources.find((resource) => resource.type === "terminal" && resource.identity.terminalId === terminalId);
+  expect(process).toMatchObject({ type: "process", observation: { processId: terminalId, observedState: "exited" } });
+  expect(terminal).toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
+});
+
+test("browser reattach gets a fresh Docker client, retained pane identity, resize and tmux history controls", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-reattach-controls-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  const managed = { executionContext: async () => context } as never;
+  const first = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
+  await first.initialize();
+  await first.createTerminal({ projectId: id, workspaceId, terminalId });
+  const firstSocket = new RecordingFakeSocket();
+  await first.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
+  const readyFrame = firstSocket.frames.map((frame) => decodeTerminalAgentFrame(frame)).find((result) =>
+    result.ok && result.frame.type === "ready" && "version" in result.frame);
+  const ready = readyFrame?.ok && readyFrame.frame.type === "ready" && "version" in readyFrame.frame
+    ? readyFrame.frame : null;
+  expect(ready).toMatchObject({ type: "ready", version: 2 });
+  if (ready !== null && "attachmentId" in ready) expect(typeof ready.attachmentId).toBe("string");
+  expect(() => first.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  await first.inspect(id, workspaceId, terminalId);
+  expect(first.snapshotResources().find((resource) => resource.type === "terminal"))
+    .toMatchObject({ type: "terminal", identity: { terminalId }, state: "active" });
+  for (const frame of [
+    { type: "history" as const }, { type: "resize" as const, columns: 120, rows: 40 }, { type: "live" as const }
+  ]) firstSocket.emit("message", Buffer.from(encodeTerminalClientFrame(frame)), true);
+  for (let attempt = 0; attempt < 100 && tmux.counts.live === 0; attempt += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  expect(tmux.counts).toMatchObject({ sessionsCreated: 1, attachmentsCreated: 1, resizes: 1, history: 1, live: 1 });
+  const persistentRecord = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as {
+    persistentTerminal: { panePid: number; columns: number; rows: number; createExecId: string };
+  };
+  expect(persistentRecord.persistentTerminal).toMatchObject({ panePid: 4321, columns: 120, rows: 40, createExecId: "tmux-create-1" });
+  firstSocket.readyState = firstSocket.CLOSED;
+  firstSocket.emit("close");
+  await waitForTerminalAttachmentFinalization(first, terminalId);
+
+  const restarted = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
+  await restarted.initialize();
+  const secondSocket = new RecordingFakeSocket();
+  await restarted.reserveTerminalAttachment(terminalId).attach(secondSocket as never);
+  const recoveredRecord = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as {
+    persistentTerminal: { panePid: number; createExecId: string };
+  };
+  expect(recoveredRecord.persistentTerminal).toMatchObject({ panePid: 4321, createExecId: "tmux-create-1" });
+  expect(tmux.counts.sessionsCreated).toBe(1);
+  expect(tmux.counts.attachmentsCreated).toBe(2);
+  expect(JSON.stringify(recoveredRecord)).not.toContain("tmux-attach-");
+  secondSocket.readyState = secondSocket.CLOSED;
+  secondSocket.emit("close");
+  await waitForTerminalAttachmentFinalization(restarted, terminalId);
+});
+
+test("an uncertain tmux start is never launched again on an idempotent admission retry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-uncertain-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime({
+    startCreatedExec: async () => { throw new Error("ambiguous-tmux-start"); },
+    lookupSession: async () => null
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toThrow("still being reconciled");
+  const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(record).toMatchObject({ creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+    persistentTerminal: { admissionPhase: "uncertain" } });
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toThrow("still being reconciled");
+  expect(tmux.counts.sessionsCreated).toBe(1);
+});
+
+test("a completed tmux creation exec without an exact pane remains uncertain", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-create-unproven-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime({
+    startCreatedExec: async (_binding, execId) => ({ execId, exitCode: 1, stdout: "", stderr: "tmux creation failed" }),
+    lookupSession: async () => null
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toThrow("still being reconciled");
+  const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(record).toMatchObject({ desiredState: "running", observedState: "starting", terminalState: "disconnected",
+    persistentTerminal: { admissionPhase: "uncertain" } });
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toThrow("still being reconciled");
+  expect(tmux.counts.sessionsCreated).toBe(1);
+});
+
+test("an idempotent retry resolves an ambiguous tmux create after exact pane evidence appears", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-create-late-proof-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let paneAvailable = false;
+  let lookups = 0;
+  const tmux = createFakePersistentRuntime({
+    startCreatedExec: async (_binding, execId) => ({ execId, exitCode: 1, stdout: "", stderr: "client response lost" }),
+    lookupSession: async (_binding, _identity, sessionName) => {
+      lookups += 1;
+      if (!paneAvailable) return null;
+      return { sessionName, sessionId: "$7", paneId: "%0", panePid: 4321, paneDead: false, paneDeadStatus: null };
+    }
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toThrow("still being reconciled");
+  const uncertain = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(uncertain).toMatchObject({ observedState: "starting", terminalState: "disconnected",
+    persistentTerminal: { admissionPhase: "uncertain" } });
+  paneAvailable = true;
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).resolves.toBeUndefined();
+  const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(record).toMatchObject({ creationPhase: "started", desiredState: "running", observedState: "running",
+    terminalState: "disconnected", persistentTerminal: { admissionPhase: "created", sessionId: "$7", paneId: "%0", panePid: 4321 } });
+  expect(lookups).toBeGreaterThanOrEqual(2);
+  expect(tmux.counts.sessionsCreated).toBe(1);
+});
+
+test("persistent terminal admission is fenced by runtime generation before reattachment", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-generation-fence-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = (generation: number) => ({
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext);
+  const tmux = createFakePersistentRuntime();
+  const original = createExecutionManager(root, { executionContext: async () => context(1) } as never,
+    {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
+  await original.initialize();
+  await original.createTerminal({ projectId: id, workspaceId, terminalId });
+  const restarted = createExecutionManager(root, { executionContext: async () => context(2) } as never,
+    {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
+  await restarted.initialize();
+  await expect(restarted.reserveTerminalAttachment(terminalId).attach(new FakeSocket() as never))
+    .rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+  expect(tmux.counts.sessionsCreated).toBe(1);
+  expect(tmux.counts.attachmentsCreated).toBe(0);
+  expect(restarted.snapshotResources().find((resource) => resource.type === "process"))
+    .toMatchObject({ type: "process", observation: { observedState: "starting" } });
 });
 
 async function waitForTerminalAttachmentCleanup(manager: ExecutionManager, terminalId: string): Promise<void> {
@@ -686,7 +978,7 @@ test("a CLOSING terminal attachment retains the slot until close cleanup has per
     inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: 0, ContainerID: "container-owned" }),
     resizeExec: async () => undefined
   } as never;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
 
@@ -725,16 +1017,21 @@ test("an attached terminal process exit becomes closed without requiring a reope
     runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+  let paneDead = false;
+  const tmux = createFakePersistentRuntime({ lookupSession: async (_binding, _identity, sessionName) => paneDead
+    ? { sessionName, sessionId: "$7", paneId: "%0", panePid: 4321, paneDead: true, paneDeadStatus: 0 }
+    : { sessionName, sessionId: "$7", paneId: "%0", panePid: 4321, paneDead: false, paneDeadStatus: null } });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {
     createExec: async () => "exec-owned", startExecAttached: async () => stream,
     inspectExec: async () => ({ ID: "exec-owned", Running: running, ExitCode: running ? null : 0, ContainerID: "container-owned" }),
     resizeExec: async () => undefined
-  } as never);
+  } as never, durableJsonWriter, undefined, undefined, tmux.runtime);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
   await manager.reserveTerminalAttachment(terminalId).attach(new FakeSocket() as never);
 
   running = false;
+  paneDead = true;
   await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "exited", exitCode: 0 });
   expect(manager.snapshotResources().find((resource) => resource.type === "terminal"))
     .toMatchObject({ type: "terminal", identity: { terminalId }, state: "closed" });
@@ -750,6 +1047,7 @@ test("distinct terminals keep distinct Docker exec identities and independent at
     runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
   let creates = 0;
   const engine = {
     createExec: async () => `exec-${++creates}`,
@@ -757,14 +1055,18 @@ test("distinct terminals keep distinct Docker exec identities and independent at
     inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" }),
     resizeExec: async () => undefined
   } as never;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
   await manager.createTerminal({ projectId: id, workspaceId, terminalId: secondTerminalId });
 
-  const executions = (manager as unknown as { executions: Map<string, { record: { execId: string | null } }> }).executions;
-  expect(executions.get(terminalId)?.record.execId).toBe("exec-1");
-  expect(executions.get(secondTerminalId)?.record.execId).toBe("exec-2");
+  const executions = (manager as unknown as { executions: Map<string, { record: { execId: string | null; persistentTerminal?: { sessionName: string; paneId: string | null } } }> }).executions;
+  expect(executions.get(terminalId)?.record.execId).toBeNull();
+  expect(executions.get(secondTerminalId)?.record.execId).toBeNull();
+  expect(executions.get(terminalId)?.record.persistentTerminal?.sessionName).toBe(`ds-${terminalId}`);
+  expect(executions.get(secondTerminalId)?.record.persistentTerminal?.sessionName).toBe(`ds-${secondTerminalId}`);
+  expect(tmux.counts.sessionsCreated).toBe(2);
 
   const firstSocket = new FakeSocket();
   const secondSocket = new FakeSocket();
@@ -782,7 +1084,7 @@ test("distinct terminals keep distinct Docker exec identities and independent at
   await waitForTerminalAttachmentCleanup(manager, secondTerminalId);
 });
 
-test("attachment cleanup persistence failure becomes lost without overlap or an immortal CLOSING lock", async () => {
+test("attachment cleanup persistence failure leaves the shell disconnected and attachable", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-cleanup-failure-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
   const stream = new PassThrough();
@@ -794,10 +1096,10 @@ test("attachment cleanup persistence failure becomes lost without overlap or an 
   let writes = 0;
   const writer = { write: async (filePath: string, value: unknown) => {
     writes += 1;
-    if (writes === 6) throw new Error("injected-disconnect-persistence-failure");
+    if (writes === 7) throw new Error("injected-disconnect-persistence-failure");
     await durableJsonWriter.write(filePath, value);
   } };
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {
     createExec: async () => "exec-owned", startExecAttached: async () => stream,
     inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: 0, ContainerID: "container-owned" }),
     resizeExec: async () => undefined
@@ -811,12 +1113,13 @@ test("attachment cleanup persistence failure becomes lost without overlap or an 
   await waitForTerminalAttachmentFinalization(manager, terminalId);
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const terminal = manager.snapshotResources().find((item) => item.type === "terminal");
-    if (terminal?.type === "terminal" && terminal.state === "lost") break;
+    if (terminal?.type === "terminal" && terminal.state === "disconnected") break;
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   }
   const terminal = manager.snapshotResources().find((item) => item.type === "terminal");
-  expect(terminal).toMatchObject({ type: "terminal", state: "lost" });
-  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(terminal).toMatchObject({ type: "terminal", state: "disconnected" });
+  const retry = manager.reserveTerminalAttachment(terminalId);
+  retry.release();
 });
 
 test("initial attachment persistence failure closes before releasing ownership and leaves no immortal reference", async () => {
@@ -833,14 +1136,14 @@ test("initial attachment persistence failure closes before releasing ownership a
   const attachmentPersistRelease = new Promise<void>((resolve) => { releaseAttachmentPersist = resolve; });
   const writer = { write: async (filePath: string, value: unknown) => {
     writes += 1;
-    if (writes === 5) {
+    if (writes === 6) {
       attachmentPersistEntered();
       await attachmentPersistRelease;
       throw new Error("injected-attach-persistence-failure");
     }
     await durableJsonWriter.write(filePath, value);
   } };
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, {
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {
     createExec: async () => "exec-owned", startExecAttached: async () => stream,
     inspectExec: async () => ({ ID: "exec-owned", Running: true, ExitCode: 0, ContainerID: "container-owned" }),
     resizeExec: async () => undefined
@@ -855,10 +1158,11 @@ test("initial attachment persistence failure closes before releasing ownership a
   await expect(attach).rejects.toThrow("injected-attach-persistence-failure");
   expect(socket.readyState).toBe(socket.CLOSED);
   expect(manager.snapshotResources().find((item) => item.type === "terminal"))
-    .toMatchObject({ type: "terminal", state: "lost" });
+    .toMatchObject({ type: "terminal", state: "disconnected" });
   const live = (manager as unknown as { executions: Map<string, { attachment: unknown }> }).executions.get(terminalId);
   expect(live?.attachment).toBeNull();
-  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  const retry = manager.reserveTerminalAttachment(terminalId);
+  retry.release();
 });
 
 test("createHarness execs structured argv with CODEX_HOME only on that exec", async () => {
@@ -888,7 +1192,7 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
     },
     inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
   await manager.initialize();
   const harnessTerminalId = "018f0f00-0000-7000-8000-0000000000aa";
   await manager.createHarness({
@@ -912,12 +1216,8 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
   const terminalRecord = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
   expect(terminalRecord.executionRole).toBe("terminal");
   expect(terminalRecord.harnessSessionId).toBeNull();
-  expect(created[1]).toMatchObject({
-    command: ["/bin/sh"],
-    environment: { TERM: "xterm-256color" },
-    consoleSize: { columns: 80, rows: 24 }
-  });
-  expect(created[1]!.environment.CODEX_HOME).toBeUndefined();
+  expect(terminalRecord.terminalBackend).toBe("tmux");
+  expect(created).toHaveLength(1);
 });
 
 test("ordinary task execs stay non-TTY while interactive terminals receive initial PTY geometry", async () => {
@@ -940,13 +1240,13 @@ test("ordinary task execs stay non-TTY while interactive terminals receive initi
     startExecAttached: async () => new PassThrough(),
     inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
   await manager.initialize();
   await manager.startTask({ projectId: id, workspaceId, taskRunId: terminalId, processId: operationId, taskKey: "check" }, operationId);
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
   expect(created[0]).toMatchObject({ tty: false });
   expect(created[0]?.consoleSize).toBeUndefined();
-  expect(created[1]).toMatchObject({ tty: true, consoleSize: { columns: 80, rows: 24 } });
+  expect(created).toHaveLength(1);
 });
 
 test("terminal resize failures produce one bounded private diagnostic without Docker response details", async () => {
@@ -958,15 +1258,13 @@ test("terminal resize failures produce one bounded private diagnostic without Do
     ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
   } as unknown as WorkspaceExecutionContext;
   const diagnostics: unknown[] = [];
-  const engine = {
-    createExec: async () => "exec-resize",
-    startExecAttached: async () => new PassThrough(),
-    inspectExec: async () => ({ ID: "exec-resize", Running: true, ExitCode: 0, ContainerID: "container-owned" }),
-    resizeExec: async () => { throw new DockerEngineError(500, "secret path and arbitrary response text"); }
-  } as never;
-  const manager = new ExecutionManager(root, { executionContext: async () => context } as never, engine, undefined, undefined, {
+  const engine = {} as never;
+  const tmux = createFakePersistentRuntime({ resizeAttachment: async () => {
+    throw new DockerEngineError(500, "secret path and arbitrary response text");
+  } });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine, undefined, undefined, {
     onTerminalResizeFailure: (event) => { diagnostics.push(event); }
-  });
+  }, tmux.runtime);
   await manager.initialize();
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
   const socket = new FakeSocket();

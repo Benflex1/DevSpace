@@ -5,7 +5,7 @@ import { v7 as uuidv7 } from "uuid";
 import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, FetchMutationRecoveryRequiredError, ManagedWorkspaces, RevisionAdoptionRecoveryRequiredError } from "./managed-workspaces.js";
 import { OperationJournal, type JournalRecord } from "./operation-journal.js";
-import { ExecutionManager, TaskStartRecoveryRequiredError } from "./execution-manager.js";
+import { ExecutionManager, PersistentTerminalAdmissionUncertainError, TaskStartRecoveryRequiredError } from "./execution-manager.js";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
 
 function resourceFor(record: JournalRecord): AgentResourceReference | null {
@@ -33,8 +33,11 @@ function diagnosticErrorClass(error: unknown): string {
 export class OperationExecutor {
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly projectTails = new Map<string, Promise<void>>();
+  private readonly terminalAdmissionRetryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly terminalAdmissionRetryCounts = new Map<string, number>();
   private resources: AgentSnapshotResource[] = [];
   private observationHealthy = true;
+  private shuttingDown = false;
 
   constructor(
     private readonly journal: OperationJournal,
@@ -119,7 +122,7 @@ export class OperationExecutor {
   }
 
   schedule(record: JournalRecord): void {
-    if (record.state === "succeeded" || record.state === "failed" || this.inFlight.has(record.operationId)) return;
+    if (this.shuttingDown || record.state === "succeeded" || record.state === "failed" || this.inFlight.has(record.operationId)) return;
     const projectId = (record.request as { projectId: string }).projectId;
     const previous = this.projectTails.get(projectId) ?? Promise.resolve();
     const execution = previous.catch(() => undefined).then(async () => await this.execute(record.operationId));
@@ -134,6 +137,33 @@ export class OperationExecutor {
   resumeAccepted(): void { for (const record of this.journal.resumable()) this.schedule(record); }
   isRunning(operationId: string): boolean { return this.inFlight.has(operationId); }
   async drain(): Promise<void> { await Promise.allSettled([...this.inFlight.values()]); }
+  shutdown(): void {
+    this.shuttingDown = true;
+    for (const timer of this.terminalAdmissionRetryTimers.values()) clearTimeout(timer);
+    this.terminalAdmissionRetryTimers.clear();
+    this.terminalAdmissionRetryCounts.clear();
+  }
+
+  private retryUncertainTerminalAdmission(operationId: string): void {
+    if (this.shuttingDown || this.terminalAdmissionRetryTimers.has(operationId)) return;
+    const retries = this.terminalAdmissionRetryCounts.get(operationId) ?? 0;
+    this.terminalAdmissionRetryCounts.set(operationId, retries + 1);
+    const delayMs = Math.min(1_000 * (2 ** retries), 30_000);
+    const timer = setTimeout(() => {
+      this.terminalAdmissionRetryTimers.delete(operationId);
+      const current = this.journal.get(operationId);
+      if (!this.shuttingDown && current?.operationName === "terminal.create" && current.state === "running") this.schedule(current);
+    }, delayMs);
+    timer.unref();
+    this.terminalAdmissionRetryTimers.set(operationId, timer);
+  }
+
+  private clearTerminalAdmissionRetry(operationId: string): void {
+    const timer = this.terminalAdmissionRetryTimers.get(operationId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.terminalAdmissionRetryTimers.delete(operationId);
+    this.terminalAdmissionRetryCounts.delete(operationId);
+  }
 
   private async execute(operationId: string): Promise<void> {
     let record = this.journal.get(operationId);
@@ -150,6 +180,7 @@ export class OperationExecutor {
     const previewMutation = record.operationName === "preview.activate" || record.operationName === "preview.deactivate";
     const localGitMutation = ["project.git.stage", "project.git.unstage", "project.git.commit"].includes(record.operationName);
     let taskStartCompleted = false;
+    let terminalCreateCompleted = false;
     let fetchMutationCompleted = false;
     let gitMutationCompleted = false;
     let revisionAdoptionCompleted = false;
@@ -266,6 +297,7 @@ export class OperationExecutor {
         }
         case "terminal.create":
           await this.execution.createTerminal(record.request as Parameters<ExecutionManager["createTerminal"]>[0]);
+          terminalCreateCompleted = true;
           break;
         case "terminal.close":
           await this.execution.closeTerminal(record.request as Parameters<ExecutionManager["closeTerminal"]>[0]);
@@ -308,6 +340,7 @@ export class OperationExecutor {
         }
       }
       await this.journal.succeed(operationId);
+      if (record.operationName === "terminal.create") this.clearTerminalAdmissionRetry(operationId);
       this.events.succeeded(operationId, resource);
       this.logger.info("agent.operation.completed", "Agent operation completed", {
         operationId, operationName: record.operationName, operationState: "succeeded", ...resourceFields
@@ -336,6 +369,17 @@ export class OperationExecutor {
         });
         return;
       }
+      if (record.operationName === "terminal.create"
+        && (error instanceof PersistentTerminalAdmissionUncertainError || terminalCreateCompleted)) {
+        this.logger.warn("agent.operation.terminal_admission_uncertain", terminalCreateCompleted
+          ? "Persistent terminal creation completed; its operation remains resumable after a post-creation failure."
+          : "Persistent terminal creation remains attached to its durable identity while exact tmux evidence is unresolved.", {
+          operationId, operationName: record.operationName, ...resourceFields
+        });
+        this.retryUncertainTerminalAdmission(operationId);
+        return;
+      }
+      if (record.operationName === "terminal.create") this.clearTerminalAdmissionRetry(operationId);
       const originalFailure = error instanceof AgentExecutionError ? error.failure : undefined;
       const incompatibleFailure = originalFailure !== undefined
         && !agentApiV1EndpointByOperation[record.operationName].errors.some((candidate) => candidate.code === originalFailure.code);

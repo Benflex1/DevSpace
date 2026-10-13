@@ -1293,7 +1293,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     let reservation;
     try { reservation = execution.reserveTerminalAttachment(match[1]!); }
     catch (error) {
-      rejectUpgrade(socket, error instanceof AgentExecutionError && error.failure.code === "RESOURCE_STATE_CONFLICT" ? 409 : 404); return;
+      const attachmentConflict = error instanceof AgentExecutionError && error.failure.code === "RESOURCE_STATE_CONFLICT"
+        && error.failure.message === "The terminal cannot accept another attachment.";
+      rejectUpgrade(socket, attachmentConflict ? 409 : 404); return;
     }
     try {
       terminalWebSockets.handleUpgrade(request, socket, head, (websocket) => {
@@ -1389,6 +1391,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!started) return;
       for (const response of eventResponses) response.destroy();
       eventResponses.clear();
+      executor.shutdown();
       execution.shutdownTransports();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await executor.drain();
