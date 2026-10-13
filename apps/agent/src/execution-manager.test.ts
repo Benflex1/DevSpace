@@ -724,6 +724,86 @@ test("steady persistent reconciliation reuses verified runtime state and skips u
   expect(writes).toBe(initialWrites);
 });
 
+test("persistent monitoring retries transient observations automatically and stops after pane death", async () => {
+  vi.useFakeTimers();
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-monitor-retry-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  const lookupSession = tmux.runtime.lookupSession.bind(tmux.runtime);
+  let failNextLookup = false;
+  let lookups = 0;
+  tmux.runtime.lookupSession = async (...args) => {
+    lookups += 1;
+    if (failNextLookup) {
+      failNextLookup = false;
+      throw new Error("temporary-docker-transport-failure");
+    }
+    return await lookupSession(...args);
+  };
+  let writes = 0;
+  const writer = { async write(filePath: string, value: unknown) {
+    writes += 1;
+    await durableJsonWriter.write(filePath, value);
+  } };
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    writer, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  const live = () => (manager as unknown as { executions: Map<string, {
+    persistentMonitorEligible?: boolean; persistentMonitorFailures?: number; persistentMonitorPoll?: Promise<void>
+  }> }).executions.get(terminalId)!;
+  const initialLookups = lookups;
+  const writesBeforeFailure = writes;
+  expect(tmux.counts.prepares).toBe(1);
+  expect(tmux.counts.sessionsCreated).toBe(1);
+
+  failNextLookup = true;
+  await vi.advanceTimersByTimeAsync(5_000);
+  await live().persistentMonitorPoll;
+  expect(lookups).toBe(initialLookups + 1);
+  expect(manager.snapshotResources().find((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId)).toMatchObject({
+    observation: { observedState: "starting", desiredState: "running" }
+  });
+  expect(writes).toBe(writesBeforeFailure + 1);
+  expect(live()).toMatchObject({ persistentMonitorEligible: true, persistentMonitorFailures: 1 });
+
+  // The monitor, without an external inspect(), rediscovers the original pane.
+  await vi.advanceTimersByTimeAsync(10_000);
+  await live().persistentMonitorPoll;
+  expect(lookups).toBe(initialLookups + 2);
+  expect(manager.snapshotResources().find((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId)).toMatchObject({
+    observation: { observedState: "running", desiredState: "running" }
+  });
+  expect(tmux.counts.prepares).toBe(1);
+  expect(tmux.counts.sessionsCreated).toBe(1);
+
+  const writesAfterRecovery = writes;
+  await vi.advanceTimersByTimeAsync(5_000);
+  await live().persistentMonitorPoll;
+  expect(lookups).toBe(initialLookups + 3);
+  expect(writes).toBe(writesAfterRecovery);
+
+  tmux.markPaneDead(`ds-${terminalId}`);
+  await vi.advanceTimersByTimeAsync(5_000);
+  await live().persistentMonitorPoll;
+  expect(manager.snapshotResources().find((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId)).toMatchObject({
+    observation: { observedState: "exited", desiredState: "stopped" }
+  });
+  const lookupsAfterDeath = lookups;
+  const writesAfterDeath = writes;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(lookups).toBe(lookupsAfterDeath);
+  expect(writes).toBe(writesAfterDeath);
+});
+
 test("same terminal create retries are idempotent and keep deterministic pane identity", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-idempotent-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -935,7 +1015,7 @@ test("temporary Docker failures retain cached binding while identity mismatches 
   expect(lookups).toBe(5);
 
   inspectedContainerId = "container-replaced";
-  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "starting" });
   expect(tmux.counts.prepares).toBe(2);
   inspectedContainerId = "container-owned";
   await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });

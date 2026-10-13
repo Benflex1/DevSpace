@@ -47,6 +47,7 @@ const ATTACHMENT_BACKPRESSURE_BYTES = 256 * 1024;
 const RECOVERED_HARNESS_POLL_INITIAL_MS = 250;
 const RECOVERED_HARNESS_POLL_MAX_MS = 2_000;
 const PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS = 5_000;
+const PERSISTENT_TERMINAL_RECONCILE_MAX_INTERVAL_MS = 60_000;
 
 const persistentTerminalRecordSchema = z.strictObject({
   backendVersion: z.literal(PERSISTENT_TERMINAL_BACKEND_VERSION),
@@ -179,6 +180,9 @@ type LiveExecution = {
   persistentOutputQueue: Buffer[];
   persistentOutputQueueBytes: number;
   persistentMonitorActive?: boolean;
+  persistentMonitorEligible?: boolean;
+  persistentMonitorFailures?: number;
+  persistentMonitorPoll?: Promise<void>;
 };
 
 function failure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionError {
@@ -360,7 +364,8 @@ export class ExecutionManager {
             } catch { /* retain or persist the precise uncertain phase for a later retry */ }
           }
         }
-        if (live.record.desiredState === "running" && live.record.observedState === "running") {
+        if (live.record.desiredState === "running"
+          && (live.record.observedState === "running" || live.persistentMonitorEligible === true)) {
           this.monitorPersistentTerminal(live);
         }
         continue;
@@ -561,24 +566,35 @@ export class ExecutionManager {
     const previousRecord = live.record;
     const persistent = live.record.persistentTerminal;
     if (live.record.terminalBackend !== "tmux" || persistent === undefined || live.record.terminalId === null) return false;
+    live.persistentMonitorEligible = false;
     if (live.record.desiredState !== "running" || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
+    let retryableObservationFailure = true;
     try {
       if (persistent.sessionName !== persistentTmuxSessionName(live.record.terminalId)
         || persistent.ownershipMarker !== persistentTerminalOwnershipMarker(this.persistentOwnership(live.record))) {
         live.persistentBinding = null;
+        retryableObservationFailure = false;
         throw new Error("persistent-terminal-record-identity-mismatch");
       }
       const context = await this.managed.executionContext(live.record.projectId, live.record.workspaceId);
       try { this.assertContext(live.record, context); }
-      catch (error) { live.persistentBinding = null; throw error; }
+      catch (error) { live.persistentBinding = null; retryableObservationFailure = false; throw error; }
       const container = await this.engine.inspectContainer(live.record.containerId);
-      if (container.Id !== live.record.containerId || container.State.Running !== true) {
+      if (container.Id !== live.record.containerId) {
         live.persistentBinding = null;
+        retryableObservationFailure = false;
+        throw new Error("persistent-terminal-container-identity-mismatch");
+      }
+      if (container.State.Running !== true) {
+        live.persistentBinding = null;
+        live.record = { ...live.record, desiredState: "stopped", observedState: "killed", terminalState: "lost",
+          exitCode: null, finishedAt: this.now().toISOString() };
+        await this.persistIfChanged(live, previousRecord);
         return false;
       }
       const binding = live.persistentBinding ?? await this.persistentTmux.prepare(live.record.containerId);
       try { this.assertPersistentBinding(live, binding); }
-      catch (error) { live.persistentBinding = null; throw error; }
+      catch (error) { live.persistentBinding = null; retryableObservationFailure = false; throw error; }
       live.persistentBinding = binding;
       const observation = await this.persistentTmux.lookupSession(binding, this.persistentOwnership(live.record),
         persistent.sessionName, persistent.sessionId, persistent.paneId);
@@ -587,6 +603,7 @@ export class ExecutionManager {
           live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
             persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
           await this.persistIfChanged(live, previousRecord);
+          live.persistentMonitorEligible = true;
         }
         return false;
       }
@@ -600,10 +617,13 @@ export class ExecutionManager {
         live.record = { ...live.record, creationPhase: "started", desiredState: "stopped", observedState: "exited", terminalState: "closed",
           exitCode: observation.paneDeadStatus, startedAt: live.record.startedAt ?? this.now().toISOString(),
           finishedAt: this.now().toISOString(), persistentTerminal: nextPersistent };
+        live.persistentMonitorEligible = false;
       } else {
         live.record = { ...live.record, creationPhase: "started", desiredState: "running", observedState: "running", terminalState,
           exitCode: null, startedAt: live.record.startedAt ?? this.now().toISOString(), finishedAt: null,
           persistentTerminal: nextPersistent };
+        live.persistentMonitorEligible = true;
+        live.persistentMonitorFailures = 0;
       }
       await this.persistIfChanged(live, previousRecord);
       return !observation.paneDead;
@@ -612,6 +632,10 @@ export class ExecutionManager {
       // cannot be proved leaves the original identity uncertain. Never launch
       // a replacement shell while resolving that evidence.
       if (error instanceof PersistentTmuxIdentityMismatchError) live.persistentBinding = null;
+      const definitiveFailure = error instanceof PersistentTmuxIdentityMismatchError
+        || error instanceof DockerEngineError && error.statusCode === 404
+        || error instanceof AgentExecutionError && ["PROCESS_IDENTITY_MISMATCH", "WORKSPACE_STATE_CONFLICT"].includes(error.failure.code);
+      live.persistentMonitorEligible = retryableObservationFailure && !definitiveFailure;
       live.record = { ...live.record, observedState: "starting", terminalState: "disconnected",
         persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
       await this.persistIfChanged(live, previousRecord).catch(() => undefined);
@@ -782,17 +806,38 @@ export class ExecutionManager {
 
   private monitorPersistentTerminal(live: LiveExecution): void {
     if (live.persistentMonitorActive) return;
+    if (live.record.desiredState !== "running"
+      || !["running", "starting"].includes(live.record.observedState)
+      || live.record.observedState !== "running" && live.persistentMonitorEligible !== true) return;
     live.persistentMonitorActive = true;
+    if (live.record.observedState === "running") live.persistentMonitorEligible = true;
     const poll = async () => {
       if (!live.persistentMonitorActive) return;
+      if (live.record.desiredState !== "running"
+        || ["killed", "failed", "exited", "lost"].includes(live.record.observedState)) {
+        live.persistentMonitorActive = false;
+        live.persistentMonitorEligible = false;
+        return;
+      }
       await this.refresh(live).catch(() => undefined);
-      if (live.record.desiredState === "running" && live.record.observedState === "running") {
-        setTimeout(() => { poll().catch(() => undefined); }, PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS).unref();
+      if (live.record.desiredState === "running" && live.persistentMonitorEligible === true
+        && ["running", "starting"].includes(live.record.observedState)) {
+        let delayMs = PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS;
+        if (live.record.observedState === "running") {
+          live.persistentMonitorFailures = 0;
+        } else {
+          live.persistentMonitorFailures = Math.min((live.persistentMonitorFailures ?? 0) + 1, 4);
+          delayMs = Math.min(PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS * (2 ** live.persistentMonitorFailures),
+            PERSISTENT_TERMINAL_RECONCILE_MAX_INTERVAL_MS);
+        }
+        setTimeout(() => { live.persistentMonitorPoll = poll().catch(() => undefined); }, delayMs).unref();
       } else {
         live.persistentMonitorActive = false;
       }
     };
-    setTimeout(() => { poll().catch(() => undefined); }, PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS).unref();
+    setTimeout(() => {
+      live.persistentMonitorPoll = poll().catch(() => undefined);
+    }, PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS).unref();
   }
 
   private attachStream(live: LiveExecution, stream: Duplex): void {
@@ -1196,10 +1241,12 @@ export class ExecutionManager {
         live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
           persistentTerminal: { ...live.record.persistentTerminal, admissionPhase: "uncertain" } };
         await this.persist(live).catch(() => undefined);
-        if (await this.reconcilePersistentTerminal(live) || this.persistentPaneHasExited(live)) {
+        const reconciled = await this.reconcilePersistentTerminal(live);
+        if (reconciled || this.persistentPaneHasExited(live)) {
           if (live.record.observedState === "running") this.monitorPersistentTerminal(live);
           return;
         }
+        if (live.persistentMonitorEligible === true) this.monitorPersistentTerminal(live);
       } else if (live.record.persistentTerminal?.admissionPhase === "reserved"
         || live.record.persistentTerminal?.admissionPhase === "exec-created") {
         live.record = { ...live.record, desiredState: "stopped", observedState: "failed", terminalState: "failed",
@@ -1362,6 +1409,8 @@ export class ExecutionManager {
       const previous = live.record;
       if (previous.projectId !== projectId || previous.workspaceId !== workspaceId || previous.executionRole === "harness"
         || !["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
+      live.persistentMonitorEligible = false;
+      live.persistentMonitorActive = false;
       // The managed runtime has confirmed the exact container is stopped, so
       // none of its ordinary task or terminal execs can still be running.
       live.record = { ...previous, desiredState: "stopped", observedState: "killed",
@@ -1382,6 +1431,7 @@ export class ExecutionManager {
     for (const live of this.executions.values()) {
       if (live.record.terminalBackend === "tmux") {
         live.persistentMonitorActive = false;
+        live.persistentMonitorEligible = false;
         const finalize = live.persistentAttachmentFinalize;
         if (finalize !== null) {
           live.attachment?.close(1012, "Agent restarting.");
