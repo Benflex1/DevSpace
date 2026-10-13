@@ -481,7 +481,7 @@ test("tmux feasibility container uses a writable rootfs with isolated execution 
 async function waitFor<T>(
   read: () => Promise<T>,
   matches: (value: T) => boolean,
-  message: string,
+  message: string | (() => string),
   checkpoint: string
 ): Promise<T> {
   const progress = fixtureFor().progress;
@@ -493,8 +493,9 @@ async function waitFor<T>(
     value = await progress.run(`${checkpoint}.read`, dockerOperationTimeoutMs, read);
   }
   if (!matches(value)) {
-    progress.record(checkpoint, "failed", { error: message, lastCompletedCheckpoint: progress.lastCompletedCheckpoint });
-    throw new Error(message);
+    const failureMessage = typeof message === "string" ? message : message();
+    progress.record(checkpoint, "failed", { error: failureMessage, lastCompletedCheckpoint: progress.lastCompletedCheckpoint });
+    throw new Error(failureMessage);
   }
   progress.record(checkpoint, "completed");
   return value;
@@ -598,7 +599,7 @@ async function proveExecutionManagerRecovery(
   const firstOutput = await waitFor(
     () => Promise.resolve(persistentSocketOutput(firstSocket)),
     (text) => /SHELL_PID=[1-9][0-9]*/u.test(text) && /LONG_PID=[1-9][0-9]*/u.test(text),
-    "persistent shell did not report its shell and background process PIDs",
+    () => `persistent shell did not report its shell and background process PIDs; socket=${firstSocket.readyState}; output=${JSON.stringify(persistentSocketOutput(firstSocket).slice(-1_200))}`,
     "manager.shell.pid-and-process"
   );
   expect(firstOutput).toContain("DEVSPACE_SCREEN_MARKER");
