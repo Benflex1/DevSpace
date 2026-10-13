@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { expect, test } from "vitest";
+import { DockerEngineError } from "./docker-runtime.js";
 import { collectStreamUntilEof, errorMessage, ProbeProgress } from "./persistent-terminal-probe-diagnostics.js";
 
 test("ProbeProgress persists timestamped operation checkpoints and the last completed step", async () => {
@@ -42,6 +43,25 @@ test("ProbeProgress reports a named operation deadline and runs its cancellation
 test("errorMessage retains the cause of Docker transport failures", () => {
   expect(errorMessage(new Error("Docker Engine transport request failed.", { cause: new Error("docker-engine-timeout") })))
     .toBe("Docker Engine transport request failed.:cause=docker-engine-timeout");
+});
+
+test("ProbeProgress includes bounded and redacted Docker Engine response details", async () => {
+  const progress = new ProbeProgress("node:24-bookworm");
+  const dockerError = new DockerEngineError(400,
+    `container rootfs is marked read-only; token=top-secret; {"password":"json-secret"} ${"x".repeat(600)}`);
+
+  await expect(progress.run("artifact.stage.docker-archive-put", 100, () => Promise.reject(dockerError)))
+    .rejects.toBe(dockerError);
+
+  const details = progress.events.at(-1)?.details;
+  expect(details).toMatchObject({
+    error: "Docker Engine request failed with status 400.",
+    dockerStatusCode: 400
+  });
+  expect(details?.dockerResponseBody).toContain("container rootfs is marked read-only");
+  expect(details?.dockerResponseBody).not.toContain("top-secret");
+  expect(details?.dockerResponseBody).not.toContain("json-secret");
+  expect(String(details?.dockerResponseBody).length).toBeLessThanOrEqual(512);
 });
 
 test("collectStreamUntilEof collects output through EOF", async () => {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { appendFile, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -148,6 +149,96 @@ async function commandOkay(
     throw new Error(`rootless-tmux-container-command-failed:${operationName ?? command[0] ?? "unknown"}:${result.execId}:${result.exitCode}:${result.stderr.slice(0, 300)}`);
   }
   return result.stdout;
+}
+
+async function createWritableRootlessTmuxContainer(
+  engine: DockerEngineClient,
+  name: string,
+  input: {
+    readonly imageReference: string;
+    readonly user: string;
+    readonly labels: Readonly<Record<string, string>>;
+    readonly cpuMillicores: number;
+    readonly memoryBytes: number;
+    readonly pidLimit: number;
+  }
+): Promise<string> {
+  const requestBody = Buffer.from(JSON.stringify({
+    Image: input.imageReference,
+    Entrypoint: ["/bin/sh", "-c"],
+    Cmd: ["exec sleep 2147483647"],
+    WorkingDir: "/",
+    User: input.user,
+    Env: [],
+    Labels: { ...input.labels },
+    ExposedPorts: {},
+    HostConfig: {
+      Binds: [],
+      Mounts: [],
+      Tmpfs: {
+        "/opt/devspace-codex-probe": "rw,nosuid,nodev,exec,size=1g",
+        "/tmp/devspace-codex-home": "rw,nosuid,nodev,noexec,size=16m",
+        "/tmp/devspace-codex-state": "rw,nosuid,nodev,noexec,size=16m"
+      },
+      NetworkMode: "none",
+      PortBindings: {},
+      PublishAllPorts: false,
+      Privileged: false,
+      PidMode: "",
+      IpcMode: "private",
+      UTSMode: "",
+      UsernsMode: "",
+      CgroupnsMode: "private",
+      AutoRemove: false,
+      ReadonlyRootfs: false,
+      RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      CapAdd: [],
+      CapDrop: ["ALL"],
+      Devices: [],
+      SecurityOpt: ["no-new-privileges:true"],
+      NanoCpus: input.cpuMillicores * 1_000_000,
+      Memory: input.memoryBytes,
+      MemorySwap: input.memoryBytes,
+      PidsLimit: input.pidLimit
+    }
+  }));
+  const responseBody = await new Promise<Buffer>((resolve, reject) => {
+    const request = httpRequest({
+      socketPath: engine.socketPath,
+      method: "POST",
+      path: `/containers/create?name=${encodeURIComponent(name)}`,
+      headers: { "content-type": "application/json", "content-length": String(requestBody.length) }
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      let length = 0;
+      response.on("data", (chunk: Buffer) => {
+        length += chunk.length;
+        if (length > 16 * 1024) {
+          response.destroy(new Error("rootless-tmux-container-create-response-too-large"));
+          return;
+        }
+        chunks.push(Buffer.from(chunk));
+      });
+      response.once("end", () => {
+        const result = Buffer.concat(chunks);
+        const statusCode = response.statusCode ?? 0;
+        if (statusCode < 200 || statusCode >= 300) {
+          reject(new DockerEngineError(statusCode, result.toString("utf8").slice(0, 512)));
+          return;
+        }
+        resolve(result);
+      });
+      response.once("error", reject);
+    });
+    request.setTimeout(30_000, () => request.destroy(new Error("rootless-tmux-container-create-timeout")));
+    request.once("error", reject);
+    request.end(requestBody);
+  });
+  const created = JSON.parse(responseBody.toString("utf8")) as { readonly Id?: unknown };
+  if (typeof created.Id !== "string" || !/^[a-f0-9]{64}$/u.test(created.Id)) {
+    throw new Error("rootless-tmux-container-id-invalid");
+  }
+  return created.Id;
 }
 
 async function collectFiles(root: string, relativePath = ""): Promise<readonly TerminfoEntry[]> {
@@ -324,6 +415,63 @@ test.skipIf(tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined)(
   },
   8_000
 );
+
+test("tmux feasibility container uses a writable rootfs with isolated execution limits", async () => {
+  await mkdir(path.join(process.cwd(), ".tmp"), { recursive: true });
+  const temporaryRoot = await mkdtemp(path.join(process.cwd(), ".tmp/tmux-container-fixture-"));
+  const socketPath = path.join(temporaryRoot, "docker.sock");
+  let requestBody: Record<string, unknown> | null = null;
+  let listening = false;
+  const server = createHttpServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.once("end", () => {
+      requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ Id: "a".repeat(64) }));
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        listening = true;
+        resolve();
+      });
+    });
+    await expect(createWritableRootlessTmuxContainer(new DockerEngineClient(socketPath), "devspace-tmux-fixture", {
+      imageReference: "node:24-bookworm",
+      user: testUser,
+      labels: { "devspace.test": "persistent-tmux-feasibility" },
+      cpuMillicores: 500,
+      memoryBytes: 512 * 1024 * 1024,
+      pidLimit: 64
+    })).resolves.toBe("a".repeat(64));
+
+    expect(requestBody).toMatchObject({
+      Image: "node:24-bookworm",
+      User: "1000:1000",
+      HostConfig: {
+        ReadonlyRootfs: false,
+        NetworkMode: "none",
+        Binds: [],
+        Mounts: [],
+        Privileged: false,
+        CapAdd: [],
+        CapDrop: ["ALL"],
+        Devices: [],
+        SecurityOpt: ["no-new-privileges:true"],
+        NanoCpus: 500_000_000,
+        Memory: 512 * 1024 * 1024,
+        MemorySwap: 512 * 1024 * 1024,
+        PidsLimit: 64
+      }
+    });
+  } finally {
+    if (listening) await new Promise<void>((resolve, reject) => server.close((error) => error == null ? resolve() : reject(error)));
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
 
 async function waitFor<T>(
   read: () => Promise<T>,
@@ -592,12 +740,10 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       "devspace.test-run": runId,
       "devspace.test-image": imageReference
     };
-    const containerId = await progress.run("docker.container.create", dockerOperationTimeoutMs, () => engine.createProbeContainer(containerName, {
-      imageId: image.Id,
+    const containerId = await progress.run("docker.container.create", dockerOperationTimeoutMs, () => createWritableRootlessTmuxContainer(engine, containerName, {
       imageReference,
       user: testUser,
       labels,
-      environment: {},
       cpuMillicores: 500,
       memoryBytes: 512 * 1024 * 1024,
       pidLimit: 64
@@ -613,7 +759,12 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       running: container.State.Running, status: container.State.Status
     });
     expect(container.Config.User).toBe(testUser);
-    expect(container.HostConfig).toMatchObject({ Privileged: false, NetworkMode: "none" });
+    expect(container.HostConfig).toMatchObject({
+      Privileged: false, NetworkMode: "none", ReadonlyRootfs: false,
+      NanoCpus: 500_000_000, Memory: 512 * 1024 * 1024, MemorySwap: 512 * 1024 * 1024, PidsLimit: 64,
+      CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"]
+    });
+    expect(container.Mounts.filter((mount) => mount.Type === "bind")).toEqual([]);
     expect(await commandOkay(engine, containerId, ["id", "-u"], "container.identity.uid")).toBe("1000\n");
     expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe("1000\n");
 

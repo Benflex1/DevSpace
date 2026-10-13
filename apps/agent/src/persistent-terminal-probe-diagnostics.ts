@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { Duplex } from "node:stream";
+import { redactSensitiveText } from "@devspace/diagnostics";
 
 export type ProbeProgressStatus = "started" | "completed" | "failed" | "timed_out" | "info";
 
@@ -12,6 +13,20 @@ export interface ProbeProgressEvent {
   readonly status: ProbeProgressStatus;
   readonly lastCompletedCheckpoint: string | null;
   readonly details?: Readonly<Record<string, unknown>>;
+}
+
+function dockerEngineErrorDetails(error: unknown): Readonly<Record<string, unknown>> {
+  if (!(error instanceof Error) || error.name !== "DockerEngineError") return {};
+  const dockerError = error as Error & { readonly statusCode?: unknown; readonly responseBody?: unknown };
+  if (typeof dockerError.statusCode !== "number" || !Number.isSafeInteger(dockerError.statusCode)
+    || dockerError.statusCode < 0 || dockerError.statusCode > 599 || typeof dockerError.responseBody !== "string") {
+    return {};
+  }
+  const responseBody = redactSensitiveText(dockerError.responseBody.slice(0, 512))
+    .replace(/(["']?(?:authorization|cookie|credential|environment|password|secret|token|api[_-]?key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^,}\s]+)/giu,
+      "$1[REDACTED]")
+    .slice(0, 512);
+  return { dockerStatusCode: dockerError.statusCode, dockerResponseBody: responseBody };
 }
 
 export class ProbeProgress {
@@ -72,7 +87,8 @@ export class ProbeProgress {
     } catch (error) {
       if (!timedOut) this.record(checkpoint, "failed", {
         durationMs: Date.now() - operationStartedAt,
-        error: errorMessage(error)
+        error: errorMessage(error),
+        ...dockerEngineErrorDetails(error)
       });
       throw error instanceof Error ? error : new Error(`rootless-tmux-probe-operation-failed:${checkpoint}:${errorMessage(error)}`);
     } finally {
