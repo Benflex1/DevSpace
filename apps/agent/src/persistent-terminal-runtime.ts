@@ -73,6 +73,13 @@ export type PersistentTmuxCommandResult = {
   readonly stderr: string;
 };
 
+export class PersistentTmuxIdentityMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PersistentTmuxIdentityMismatchError";
+  }
+}
+
 export type PersistentTmuxAttachment = {
   readonly execId: string;
   readonly clientPid: number;
@@ -455,30 +462,30 @@ export class PersistentTmuxRuntime {
   ): Promise<TmuxPaneObservation | null> {
     const socketExists = await this.commandResult(binding, ["test", "-e", binding.socketPath]);
     if (socketExists.exitCode === 1) return null;
-    if (socketExists.exitCode !== 0) throw new Error("persistent-tmux-socket-query-failed");
+    if (socketExists.exitCode !== 0) throw new PersistentTmuxIdentityMismatchError("persistent-tmux-socket-query-failed");
     const socketMetadata = await this.commandResult(binding, ["stat", "-c", "%F %a %u:%g", binding.socketPath]);
     const socketFields = socketMetadata.stdout.trim().split(" ");
     if (socketMetadata.exitCode !== 0 || socketFields.length !== 3 || socketFields[0] !== "socket"
       || socketFields[2] !== `${binding.uid}:${binding.gid}` || !/^6[0-7]0$/u.test(socketFields[1] ?? "")) {
-      throw new Error("persistent-tmux-socket-ownership-invalid");
+      throw new PersistentTmuxIdentityMismatchError("persistent-tmux-socket-ownership-invalid");
     }
     const panes = await this.commandResult(binding, this.tmuxCommand(binding, ["list-panes", "-a", "-F", TMUX_PANE_FORMAT]));
-    if (panes.exitCode !== 0) throw new Error("persistent-tmux-session-query-unproven");
+    if (panes.exitCode !== 0) throw new PersistentTmuxIdentityMismatchError("persistent-tmux-session-query-unproven");
     const observations = parseTmuxPaneObservations(panes.stdout);
-    if (observations === null) throw new Error("persistent-tmux-session-query-invalid");
+    if (observations === null) throw new PersistentTmuxIdentityMismatchError("persistent-tmux-session-query-invalid");
     const matches = observations.filter((observation) => observation.sessionName === sessionName);
     if (matches.length === 0) return null;
-    if (matches.length !== 1) throw new Error("persistent-tmux-session-identity-mismatch");
+    if (matches.length !== 1) throw new PersistentTmuxIdentityMismatchError("persistent-tmux-session-identity-mismatch");
     const observation = matches[0]!;
     if (knownSessionId !== null && observation.sessionId !== knownSessionId
       || knownPaneId !== null && observation.paneId !== knownPaneId) {
-      throw new Error("persistent-tmux-session-identity-mismatch");
+      throw new PersistentTmuxIdentityMismatchError("persistent-tmux-session-identity-mismatch");
     }
     const marker = await this.commandResult(binding,
       this.tmuxCommand(binding, ["show-environment", "-t", `=${sessionName}`, "DEVSPACE_TERMINAL_OWNER"]));
     const expectedMarker = `DEVSPACE_TERMINAL_OWNER=${persistentTerminalOwnershipMarker(identity)}`;
     if (marker.exitCode !== 0 || marker.stdout.trim() !== expectedMarker) {
-      throw new Error("persistent-tmux-session-owner-mismatch");
+      throw new PersistentTmuxIdentityMismatchError("persistent-tmux-session-owner-mismatch");
     }
     return observation;
   }

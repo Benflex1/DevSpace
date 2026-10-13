@@ -8,7 +8,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { ExecutionManager, TaskStartRecoveryRequiredError, isSuccessfulTaskExitCode } from "./execution-manager.js";
 import { DockerEngineError } from "./docker-runtime.js";
-import type { PersistentTmuxRuntime, PersistentTmuxBinding, PersistentTerminalOwnership } from "./persistent-terminal-runtime.js";
+import { PersistentTmuxIdentityMismatchError, type PersistentTmuxRuntime, type PersistentTmuxBinding,
+  type PersistentTerminalOwnership } from "./persistent-terminal-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter } from "./private-state.js";
 
@@ -25,15 +26,19 @@ type FakePersistentRuntime = Pick<PersistentTmuxRuntime,
 function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> = {}) {
   const sessions = new Map<string, { readonly identity: PersistentTerminalOwnership; readonly sessionName: string }>();
   const deadSessions = new Set<string>();
-  const counts = { sessionsCreated: 0, attachmentsCreated: 0, detaches: 0, resizes: 0, history: 0, live: 0 };
+  const counts = { prepares: 0, lookups: 0, sessionsCreated: 0, attachmentsCreated: 0, detaches: 0,
+    resizes: 0, history: 0, live: 0 };
   const detachedClients: Array<{ readonly sessionName: string; readonly clientPid: number; readonly clientName: string }> = [];
   const runtime = {
-    prepare: async (containerId: string): Promise<PersistentTmuxBinding> => ({
-      containerId, uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test", binaryPath: "/opt/devspace-test/tmux",
-      configPath: "/opt/devspace-test/tmux.conf", terminfoPath: "/opt/devspace-test/terminfo",
-      socketDirectory: "/tmp/devspace-persistent-tmux-1000", socketPath: "/tmp/devspace-persistent-tmux-1000/server.sock",
-      environment: { TMUX: "", TMUX_PANE: "" }
-    }),
+    prepare: async (containerId: string): Promise<PersistentTmuxBinding> => {
+      counts.prepares += 1;
+      return {
+        containerId, uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test", binaryPath: "/opt/devspace-test/tmux",
+        configPath: "/opt/devspace-test/tmux.conf", terminfoPath: "/opt/devspace-test/terminfo",
+        socketDirectory: "/tmp/devspace-persistent-tmux-1000", socketPath: "/tmp/devspace-persistent-tmux-1000/server.sock",
+        environment: { TMUX: "", TMUX_PANE: "" }
+      };
+    },
     createSessionExec: async (_binding: PersistentTmuxBinding, identity: PersistentTerminalOwnership, sessionName: string) => {
       counts.sessionsCreated += 1;
       sessions.set(sessionName, { identity, sessionName });
@@ -43,6 +48,7 @@ function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> =
     inspectExec: async (_binding: PersistentTmuxBinding, _execId: string) => ({ running: false, exitCode: null }),
     lookupSession: async (_binding: PersistentTmuxBinding, identity: PersistentTerminalOwnership,
       sessionName: string, knownSessionId: string | null, knownPaneId: string | null) => {
+      counts.lookups += 1;
       const session = sessions.get(sessionName);
       if (session === undefined || session.identity.containerId !== identity.containerId
         || session.identity.terminalId !== identity.terminalId) return null;
@@ -689,6 +695,35 @@ test("a persistent attachment receives ready before tmux redraw and never prepen
   await waitForTerminalAttachmentFinalization(manager, terminalId);
 });
 
+test("steady persistent reconciliation reuses verified runtime state and skips unchanged record writes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-steady-reconcile-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  let writes = 0;
+  const writer = { async write(filePath: string, value: unknown) {
+    writes += 1;
+    await durableJsonWriter.write(filePath, value);
+  } };
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    writer, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+
+  expect(tmux.counts.prepares).toBe(1);
+  const initialLookups = tmux.counts.lookups;
+  const initialWrites = writes;
+  for (let poll = 0; poll < 3; poll += 1) await manager.inspect(id, workspaceId, terminalId);
+
+  expect(tmux.counts.prepares).toBe(1);
+  expect(tmux.counts.lookups).toBe(initialLookups + 3);
+  expect(writes).toBe(initialWrites);
+});
+
 test("same terminal create retries are idempotent and keep deterministic pane identity", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-idempotent-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -747,8 +782,10 @@ test("Agent manager restart reconciles the original tmux session without creatin
   const first = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
   await first.initialize();
   await first.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(tmux.counts.prepares).toBe(1);
   const restarted = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
   await restarted.initialize();
+  expect(tmux.counts.prepares).toBe(2);
   const recoveredResources = restarted.snapshotResources();
   const recoveredProcess = recoveredResources.find((resource) => resource.type === "process"
     && resource.observation.processId === terminalId);
@@ -758,6 +795,7 @@ test("Agent manager restart reconciles the original tmux session without creatin
     observedState: "running", desiredState: "running" } });
   expect(recoveredTerminal).toMatchObject({ type: "terminal", identity: { terminalId }, state: "disconnected" });
   await restarted.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(tmux.counts.prepares).toBe(2);
   expect(tmux.counts.sessionsCreated).toBe(1);
   expect(tmux.counts.attachmentsCreated).toBe(0);
 });
@@ -846,6 +884,64 @@ test("browser reattach gets a fresh Docker client, retained pane identity, resiz
     { sessionName: `ds-${terminalId}`, clientPid: 5432, clientName: "/dev/pts/5" },
     { sessionName: `ds-${terminalId}`, clientPid: 5432, clientName: "/dev/pts/5" }
   ]);
+});
+
+test("temporary Docker failures retain cached binding while identity mismatches invalidate it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-binding-fence-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let lookupError: Error | null = null;
+  let lookups = 0;
+  let sessionsCreated = 0;
+  let inspectedContainerId = "container-owned";
+  const tmux = createFakePersistentRuntime({
+    createSessionExec: async () => {
+      sessionsCreated += 1;
+      return `tmux-create-${sessionsCreated}`;
+    },
+    lookupSession: async (_binding, _identity, sessionName, knownSessionId, knownPaneId) => {
+      lookups += 1;
+      if (lookupError !== null) throw lookupError;
+      if (!sessionsCreated || sessionName !== `ds-${terminalId}`) return null;
+      if (knownSessionId !== null && knownSessionId !== "$7" || knownPaneId !== null && knownPaneId !== "%0") return null;
+      return { sessionName, sessionId: "$7", paneId: "%0", panePid: 4321, paneDead: false, paneDeadStatus: null };
+    }
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {
+    inspectContainer: async () => ({ Id: inspectedContainerId, State: { Running: true } })
+  } as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  expect(tmux.counts.prepares).toBe(1);
+
+  lookupError = new Error("temporary-docker-transport-failure");
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "starting" });
+  expect(tmux.counts.prepares).toBe(1);
+
+  lookupError = null;
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  expect(tmux.counts.prepares).toBe(1);
+
+  lookupError = new PersistentTmuxIdentityMismatchError("persistent-tmux-session-owner-mismatch");
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "starting" });
+  lookupError = null;
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  expect(tmux.counts.prepares).toBe(2);
+  expect(lookups).toBe(5);
+
+  inspectedContainerId = "container-replaced";
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  expect(tmux.counts.prepares).toBe(2);
+  inspectedContainerId = "container-owned";
+  await expect(manager.inspect(id, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  expect(tmux.counts.prepares).toBe(3);
+  expect(lookups).toBe(6);
+  expect(sessionsCreated).toBe(1);
 });
 
 test("an uncertain tmux start is never launched again on an idempotent admission retry", async () => {

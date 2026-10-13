@@ -535,6 +535,25 @@ class PersistentTerminalSocket extends EventEmitter {
   }
 }
 
+function countDockerExecCreations(engine: DockerEngineClient): {
+  readonly engine: DockerEngineClient;
+  readonly count: () => number;
+} {
+  let count = 0;
+  const counted = new Proxy(engine, {
+    get(target, property, receiver) {
+      if (property === "createExec") {
+        return (...args: Parameters<DockerEngineClient["createExec"]>) => {
+          count += 1;
+          return target.createExec(...args);
+        };
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    }
+  });
+  return { engine: counted, count: () => count };
+}
+
 function persistentSocketOutput(socket: PersistentTerminalSocket): string {
   return socket.frames.flatMap((bytes) => {
     const result = decodeTerminalAgentFrame(bytes);
@@ -564,6 +583,8 @@ async function proveExecutionManagerRecovery(
   readonly terminalId: string;
   readonly shellPid: number;
   readonly longRunningPid: number;
+  readonly previousPollExecCreates: number;
+  readonly optimizedPollExecCreates: number;
 }> {
   const projectId = uuidv7();
   const workspaceId = uuidv7();
@@ -580,10 +601,18 @@ async function proveExecutionManagerRecovery(
   const managed = { executionContext: () => Promise.resolve(context) };
   const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-persistent-terminal-manager-"));
   fixture.temporaryRoots.add(stateRoot);
-  const manager = new ExecutionManager(stateRoot, managed as never, fixture.engine, undefined, undefined, undefined,
-    new PersistentTmuxRuntime(fixture.engine));
+  const counted = countDockerExecCreations(fixture.engine);
+  const persistentRuntime = new PersistentTmuxRuntime(counted.engine);
+  const manager = new ExecutionManager(stateRoot, managed as never, counted.engine, undefined, undefined, undefined,
+    persistentRuntime);
   await manager.initialize();
   await manager.createTerminal({ projectId, workspaceId, terminalId });
+  const internalState = manager as unknown as {
+    readonly executions: Map<string, { persistentMonitorActive: boolean }>;
+  };
+  const live = internalState.executions.get(terminalId);
+  if (live === undefined) throw new Error("rootless-persistent-terminal-live-record-missing");
+  live.persistentMonitorActive = false;
 
   const recordPath = path.join(stateRoot, "ownership", "executions", `${terminalId}.json`);
   const initialRecord = JSON.parse(await readFile(recordPath, "utf8")) as {
@@ -593,6 +622,28 @@ async function proveExecutionManagerRecovery(
   expect(initialRecord.persistentTerminal.sessionName).toBe(`ds-${terminalId}`);
   expect(initialRecord.persistentTerminal.sessionId).toMatch(/^\$[0-9]+$/u);
   expect(initialRecord.persistentTerminal.paneId).toMatch(/^%[0-9]+$/u);
+
+  const ownership = {
+    projectId, workspaceId, terminalId, processId: terminalId, containerId, generation: 1,
+    revisionId, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`
+  };
+  const previousPollStart = counted.count();
+  const previousPollBinding = await persistentRuntime.prepare(containerId);
+  const previousPollObservation = await persistentRuntime.lookupSession(previousPollBinding, ownership,
+    initialRecord.persistentTerminal.sessionName, initialRecord.persistentTerminal.sessionId,
+    initialRecord.persistentTerminal.paneId);
+  const previousPollExecCreates = counted.count() - previousPollStart;
+  expect(previousPollObservation).not.toBeNull();
+  expect(previousPollExecCreates).toBe(11);
+
+  const optimizedPollStart = counted.count();
+  await expect(manager.inspect(projectId, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  const optimizedPollExecCreates = counted.count() - optimizedPollStart;
+  expect(optimizedPollExecCreates).toBe(4);
+  fixture.progress.record("manager.idle-reconcile.exec-counts", "completed", {
+    containerId, terminalId, previousPollExecCreates, optimizedPollExecCreates
+  });
 
   const firstSocket = new PersistentTerminalSocket();
   await manager.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
@@ -709,7 +760,8 @@ async function proveExecutionManagerRecovery(
     "list-sessions", "-F", "#{session_name}"
   ], "manager.restart.no-duplicate-session")).trim().split("\n").filter((name) => name === initialRecord.persistentTerminal.sessionName))
     .toHaveLength(1);
-  return { manager: restarted, projectId, workspaceId, terminalId, shellPid: originalPanePid, longRunningPid };
+  return { manager: restarted, projectId, workspaceId, terminalId, shellPid: originalPanePid, longRunningPid,
+    previousPollExecCreates, optimizedPollExecCreates };
 }
 
 function attachmentText(attachment: TmuxAttachment): string {
@@ -1213,7 +1265,9 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       resize: "100x32", historyLines: 100, stopElapsedMs, elapsedMs,
       persistentManagerTerminalId: managerEvidence.terminalId,
       persistentManagerShellPid: managerEvidence.shellPid,
-      persistentManagerLongRunningPid: managerEvidence.longRunningPid
+      persistentManagerLongRunningPid: managerEvidence.longRunningPid,
+      previousPollExecCreates: managerEvidence.previousPollExecCreates,
+      optimizedPollExecCreates: managerEvidence.optimizedPollExecCreates
     });
     const evidence = {
       image: imageReference,
@@ -1232,6 +1286,8 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       persistentManagerTerminalId: managerEvidence.terminalId,
       persistentManagerShellPid: managerEvidence.shellPid,
       persistentManagerLongRunningPid: managerEvidence.longRunningPid,
+      previousPollExecCreates: managerEvidence.previousPollExecCreates,
+      optimizedPollExecCreates: managerEvidence.optimizedPollExecCreates,
       resize: "100x32",
       historyLines: 100,
       stopElapsedMs,
@@ -1246,6 +1302,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
         `- Session/pane: \`${sessionId}\` / \`${paneId}\`; shell PID remained \`${shellPid}\` across execs \`${first.execId}\` and \`${second.execId}\`.`,
         `- tmux 3.7c artifact SHA-256: \`${archiveSha256}\` archive, \`${tmuxBinarySha256}\` binary.`,
         `- Production Agent manager shell PID remained \`${managerEvidence.shellPid}\`; background PID \`${managerEvidence.longRunningPid}\` survived manager reinitialization and reattachment.`,
+        `- Warm idle poll Docker exec creations: \`${managerEvidence.previousPollExecCreates}\` on the previous \`prepare()\` + lookup path, \`${managerEvidence.optimizedPollExecCreates}\` after caching verified runtime identity.`,
         `- Verified 100 history lines, v2-ready redraw, input, resize to 100×32, tmux History / Return to live, and Stop reattachment rejection in ${stopElapsedMs} ms.`,
         `- Probe elapsed: ${elapsedMs} ms.`,
         ""

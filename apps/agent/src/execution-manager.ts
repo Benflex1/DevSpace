@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { Duplex } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import {
   TERMINAL_FAILURE_CLOSE_CODE,
   TERMINAL_MAX_PAYLOAD_BYTES,
@@ -32,6 +33,7 @@ import {
   PERSISTENT_TMUX_BACKPRESSURE_BYTES,
   PERSISTENT_TMUX_MAX_COLUMNS,
   PERSISTENT_TMUX_MAX_ROWS,
+  PersistentTmuxIdentityMismatchError,
   PersistentTmuxRuntime,
   persistentTmuxSessionName,
   persistentTerminalOwnershipMarker,
@@ -351,7 +353,7 @@ export class ExecutionManager {
             try {
               const context = await this.managed.executionContext(record.projectId, record.workspaceId);
               this.assertContext(record, context);
-              const binding = await this.persistentTmux.prepare(record.containerId);
+              const binding = live.persistentBinding ?? await this.persistentTmux.prepare(record.containerId);
               this.assertPersistentBinding(live, binding);
               live.persistentBinding = binding;
               await this.startPersistentSession(live, binding);
@@ -540,6 +542,13 @@ export class ExecutionManager {
     await this.writer.write(this.recordPath(live.record.processId), executionRecordSchema.parse(live.record));
   }
 
+  private async persistIfChanged(live: LiveExecution, previous: ExecutionRecord): Promise<void> {
+    const before = executionRecordSchema.parse(previous);
+    const next = executionRecordSchema.parse(live.record);
+    if (isDeepStrictEqual(before, next)) return;
+    await this.writer.write(this.recordPath(live.record.processId), next);
+  }
+
   private persistentOwnership(record: ExecutionRecord): PersistentTerminalOwnership {
     return {
       projectId: record.projectId, workspaceId: record.workspaceId, terminalId: record.terminalId!,
@@ -549,27 +558,35 @@ export class ExecutionManager {
   }
 
   private async reconcilePersistentTerminal(live: LiveExecution): Promise<boolean> {
+    const previousRecord = live.record;
     const persistent = live.record.persistentTerminal;
     if (live.record.terminalBackend !== "tmux" || persistent === undefined || live.record.terminalId === null) return false;
     if (live.record.desiredState !== "running" || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
     try {
       if (persistent.sessionName !== persistentTmuxSessionName(live.record.terminalId)
         || persistent.ownershipMarker !== persistentTerminalOwnershipMarker(this.persistentOwnership(live.record))) {
+        live.persistentBinding = null;
         throw new Error("persistent-terminal-record-identity-mismatch");
       }
       const context = await this.managed.executionContext(live.record.projectId, live.record.workspaceId);
-      this.assertContext(live.record, context);
+      try { this.assertContext(live.record, context); }
+      catch (error) { live.persistentBinding = null; throw error; }
       const container = await this.engine.inspectContainer(live.record.containerId);
-      if (container.Id !== live.record.containerId || container.State.Running !== true) return false;
-      const binding = await this.persistentTmux.prepare(live.record.containerId);
-      this.assertPersistentBinding(live, binding);
+      if (container.Id !== live.record.containerId || container.State.Running !== true) {
+        live.persistentBinding = null;
+        return false;
+      }
+      const binding = live.persistentBinding ?? await this.persistentTmux.prepare(live.record.containerId);
+      try { this.assertPersistentBinding(live, binding); }
+      catch (error) { live.persistentBinding = null; throw error; }
+      live.persistentBinding = binding;
       const observation = await this.persistentTmux.lookupSession(binding, this.persistentOwnership(live.record),
         persistent.sessionName, persistent.sessionId, persistent.paneId);
       if (observation === null) {
         if (persistent.admissionPhase !== "reserved" && persistent.admissionPhase !== "exec-created") {
           live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
             persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
-          await this.persist(live);
+          await this.persistIfChanged(live, previousRecord);
         }
         return false;
       }
@@ -588,16 +605,16 @@ export class ExecutionManager {
           exitCode: null, startedAt: live.record.startedAt ?? this.now().toISOString(), finishedAt: null,
           persistentTerminal: nextPersistent };
       }
-      live.persistentBinding = binding;
-      await this.persist(live);
+      await this.persistIfChanged(live, previousRecord);
       return !observation.paneDead;
-    } catch {
+    } catch (error) {
       // A mismatch, unavailable Agent/engine response, or owner marker that
       // cannot be proved leaves the original identity uncertain. Never launch
       // a replacement shell while resolving that evidence.
+      if (error instanceof PersistentTmuxIdentityMismatchError) live.persistentBinding = null;
       live.record = { ...live.record, observedState: "starting", terminalState: "disconnected",
         persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
-      await this.persist(live).catch(() => undefined);
+      await this.persistIfChanged(live, previousRecord).catch(() => undefined);
       return false;
     }
   }
@@ -1108,7 +1125,7 @@ export class ExecutionManager {
       const recovered = await this.reconcilePersistentTerminal(existing);
       const phase = existing.record.persistentTerminal.admissionPhase;
       if (!recovered && (phase === "reserved" || phase === "exec-created")) {
-        const binding = await this.persistentTmux.prepare(existing.record.containerId);
+        const binding = existing.persistentBinding ?? await this.persistentTmux.prepare(existing.record.containerId);
         this.assertPersistentBinding(existing, binding);
         existing.persistentBinding = binding;
         await this.startPersistentSession(existing, binding);
