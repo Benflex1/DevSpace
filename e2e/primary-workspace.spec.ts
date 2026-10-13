@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "@playwright/test";
+import { decodeTerminalAgentFrame } from "@devspace/contracts";
 import WebSocket from "ws";
 
 const exec = promisify(execFile);
@@ -37,6 +38,44 @@ async function rejectedWebSocket(url: string, origin: string): Promise<number> {
     socket.once("unexpected-response", (_request, response) => { response.resume(); resolve(response.statusCode ?? 0); });
     socket.once("open", () => { socket.close(); reject(new Error("WebSocket unexpectedly opened.")); });
     socket.once("error", () => undefined);
+  });
+}
+
+async function conflictedWebSocket(url: string, origin: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const socket = new WebSocket(url, "devspace.terminal.v1", { origin });
+    let receivedConflict = false;
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      finish(new Error("Terminal attachment conflict response timed out."));
+    }, 5_000);
+    socket.once("message", (data, isBinary) => {
+      const decoded = isBinary && Buffer.isBuffer(data) ? decodeTerminalAgentFrame(data) : null;
+      if (decoded === null || !decoded.ok || decoded.frame.type !== "attachment-conflict") {
+        socket.close();
+        finish(new Error("Terminal attachment conflict frame was missing or invalid."));
+        return;
+      }
+      receivedConflict = true;
+    });
+    socket.once("close", (code) => {
+      if (!receivedConflict) finish(new Error("Terminal attachment closed without reporting a conflict."));
+      else if (code !== 1008) finish(new Error(`Terminal attachment conflict used unexpected close code ${code}.`));
+      else finish();
+    });
+    socket.once("unexpected-response", (_request, response) => {
+      response.resume();
+      finish(new Error(`Terminal attachment conflict failed before protocol response: HTTP ${response.statusCode ?? 0}.`));
+    });
+    socket.once("error", (error) => finish(error));
   });
 }
 
@@ -212,7 +251,10 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   if (terminalRow === undefined) throw new Error("The terminal row was not persisted.");
   const terminalUrl = `ws://127.0.0.1:3100/api/projects/${projectId}/workspaces/${workspaces[0].id}/terminals/${terminalRow.id}/stream`;
   await expect(rejectedWebSocket(terminalUrl, "http://cross-origin.invalid")).resolves.toBe(400);
-  await expect(rejectedWebSocket(terminalUrl, "http://127.0.0.1:3100")).resolves.toBe(409);
+  await conflictedWebSocket(terminalUrl, "http://127.0.0.1:3100");
+  await terminal.locator(".xterm-helper-textarea").focus();
+  await recoveredPage.keyboard.type("echo terminal-conflict-owner-ok"); await recoveredPage.keyboard.press("Enter");
+  await expect(terminal.getByText(/terminal-conflict-owner-ok/u)).toBeVisible();
   await expect.poll(async () => {
     const snapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", { headers: { authorization: `Bearer ${fixture.controlToken}` } })
       .then(async (response) => await response.json()) as { execs: DockerExec[] };
