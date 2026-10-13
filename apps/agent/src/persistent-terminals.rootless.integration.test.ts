@@ -592,6 +592,8 @@ async function proveExecutionManagerRecovery(
   });
   await waitFor(() => Promise.resolve(persistentSocketOutput(firstSocket)), (text) => text.length > 0,
     "persistent terminal did not send its initial tmux redraw", "manager.initial-redraw");
+  // The browser sends resize from xterm's write-complete callback for this redraw.
+  await delay(50);
   firstSocket.receive(encodeTerminalClientFrame({ type: "resize", columns: 100, rows: 32 }));
   firstSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from(
     "printf 'SHELL_PID=%s\\n' \"$$\"; sleep 900 & printf 'LONG_PID=%s\\n' \"$!\"; printf 'DEVSPACE_SCREEN_MARKER\\n'\r"

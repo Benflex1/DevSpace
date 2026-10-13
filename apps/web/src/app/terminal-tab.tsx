@@ -207,13 +207,13 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
               nativeFirstOutput = true;
               markNativeHarness("devspace.native-harness.first-terminal-output");
             }
-            terminalInstance.write(decoded.frame.data);
-            if (persistentResizePending) {
+            terminalInstance.write(decoded.frame.data, () => {
+              if (!persistentResizePending || currentSocket !== webSocket) return;
               persistentResizePending = false;
               lastColumns = terminalInstance.cols;
               lastRows = terminalInstance.rows;
               send(encodeTerminalClientFrame({ type: "resize", columns: terminalInstance.cols, rows: terminalInstance.rows }));
-            }
+            });
             return;
           }
           if (decoded.frame.type === "attachment-conflict") {

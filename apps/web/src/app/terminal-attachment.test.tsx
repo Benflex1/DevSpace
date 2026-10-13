@@ -7,7 +7,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import { buttonText, FakeNode, findButtons, installTerminalTestDom, settleReact } from "./terminal-test-dom.js";
 import { decodeTerminalClientFrame, encodeTerminalAgentFrame } from "@devspace/contracts";
 
-const xtermState = vi.hoisted(() => ({ writes: [] as Uint8Array[], resets: 0, selection: "selected history text" }));
+const xtermState = vi.hoisted(() => ({ writes: [] as Uint8Array[], writeCallbacks: [] as Array<() => void>, resets: 0,
+  selection: "selected history text" }));
 
 class FakeSocket {
   static readonly OPEN = 1;
@@ -60,7 +61,10 @@ vi.mock("@xterm/xterm", () => ({
     focus() { /* focus is irrelevant */ }
     reset() { xtermState.resets += 1; }
     getSelection() { return xtermState.selection; }
-    write(data: Uint8Array) { xtermState.writes.push(data); }
+    write(data: Uint8Array, callback?: () => void) {
+      xtermState.writes.push(data);
+      if (callback !== undefined) xtermState.writeCallbacks.push(callback);
+    }
     onData() { return { dispose() { /* unused */ } }; }
     onBinary() { return { dispose() { /* unused */ } }; }
     dispose() { /* attachment teardown */ }
@@ -84,6 +88,7 @@ afterEach(() => {
   roots.length = 0;
   FakeSocket.instances = [];
   xtermState.writes = [];
+  xtermState.writeCallbacks = [];
   xtermState.resets = 0;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -224,6 +229,10 @@ test("persistent ready resets xterm, resizes after the first redraw, and exposes
   const redraw = new TextEncoder().encode("restored tmux screen");
   act(() => { socket.emitOutput(redraw); });
   expect(xtermState.writes).toEqual([redraw]);
+  expect(sentFrames()).not.toContainEqual({ type: "resize", columns: 80, rows: 24 });
+  const finishRedraw = xtermState.writeCallbacks.shift();
+  expect(finishRedraw).toBeDefined();
+  act(() => { finishRedraw?.(); });
   expect(sentFrames()).toContainEqual({ type: "resize", columns: 80, rows: 24 });
   const buttons = findButtons(body);
   for (const label of ["History", "Return to live", "Copy selection"]) {
