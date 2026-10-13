@@ -1,8 +1,9 @@
 # Persistent terminal feasibility — 2026-10-13
 
 Recommendation: [ADR 017](../decisions/017-persistent-workspace-terminals.md), tmux native
-attachment inside the exact workspace container. Evidence supports this direction, with Docker
-acceptance still required. No product code or provider requests were run.
+attachment inside the exact workspace container. The bounded rootless-Docker feasibility gate
+passed on the two target Debian images. Full DevSpace Agent/Web restart and Native Codex acceptance
+remain outstanding. No product code or provider requests were run.
 
 ## Current loss points at f38a832
 
@@ -41,7 +42,38 @@ with `TIOCSWINSZ` and SIGWINCH. Temporary driver/results stayed outside the repo
 | Interactive TUI | `top` PID 1492881 stayed the same and its screen redrew after SIGKILL of the client. Sending `q` left the retained pane dead with status 0. No Codex/provider request was needed. |
 | Fast exit | A command printed `FAST_EXIT` and exited 7; retained pane preserved both output and `pane_dead_status=7`. |
 | Explicit shell close | Killing its tmux session did not immediately remove the background sleep PID. Session death is not proof of descendant quiescence; the driver explicitly terminated its own child. |
-| Docker reattachment / container Stop | **Not run.** Local PTYs do not prove Docker exec disconnect behavior, rootless UID behavior or Stop settlement. |
+| Docker reattachment / container Stop | Passed in the bounded rootless-Docker gate for `node:24-bookworm` and `node:24-bookworm-slim`; see the recorded run evidence below. |
+
+## Real rootless-Docker feasibility results
+
+[Hosted run 38428192241](https://github.com/Benflex1/DevSpace/actions/runs/38428192241) reported all
+four tests in the probe file as passed, including both real Docker cases. Its post-test workflow
+guard incorrectly expected two total tests and marked the step failed; that guard is corrected in
+this PR. The Docker assertions themselves passed.
+
+| Image | Container ID | User | Session / pane | Stable shell PID | Test duration |
+| --- | --- | --- | --- | --- | --- |
+| `node:24-bookworm` | `8c0a0e24626acc2ee4afb76fee09f40837d25d4e915a02ec01ff431f1ae482d5` | `1000:1000` | `$0` / `%0` | `104` | 12.2 s |
+| `node:24-bookworm-slim` | `4105a32b5e1a57b523ecec7d07a52e169e1dddd5c0e799aa86496b1ff334a314` | `1000:1000` | `$0` / `%0` | `107` | 15.7 s |
+
+The first/second attachment exec IDs were `14fdec3ae73b2c75d01dbf644b24d2c6b09a7d78ffde44fee309fe361b8fa14d` /
+`7fed4f1b49364c2755e9c8db1e201b0ab6436a6a6d10324d8d8688b21385cfaa` for bookworm, and
+`15995cc0dba7db4df238d77a6c3bbda17b5071fa1f7aeb2037e87c36db9e69ed` /
+`2f24e6b9ace4923e272bc9de76c9024261c1e9ccc908d47a4adfa4bdb5c949ca` for bookworm-slim.
+
+Both cases created tmux sessions inside their respective running containers, terminated the first
+Docker exec attachment, and attached through a distinct exec ID. The shell PID remained unchanged.
+The second attachment redrew `DEVSPACE_SCREEN_MARKER`, accepted input and printed
+`REATTACHED_INPUT_OK`. Resizing changed the pane from 80×24 to 100×32, and the shell reported
+`stty size` as `32 100`. Tmux retained and recaptured all 100 generated history lines after
+reattachment. Container Stop ended the attachment, inspection reported the container stopped, and
+a later exec was rejected with Docker status 409. Stop took 10.065 s for bookworm and 10.060 s for
+slim.
+
+This proves tmux persistence across disposable Docker exec clients in these two rootless test
+containers. The probe does not restart DevSpace Agent or Web and does not exercise browser reload
+or the browser History UI. Native Codex process survival, lease continuity and recovery remain
+unverified.
 
 Initial driver attempts used a session-only selector for pane commands; explicit
 `=session:0.0` fixed targeting. A malformed empty exit-message config obscured the shell until
@@ -61,21 +93,22 @@ Archive SHA-256: `cc56bd1cc873eb6089c615f0496b072385bda8a6d944069f38564a5d49c128
 Binary SHA-256: `7d0f1e85c5b11df7fe127ab90674c6a15663ad72a25fcf7fabadba6bbb0b29d5`.
 These identify the observed artifact, not an implemented release supply chain.
 
-The executor already supplied both terminfo entries. Minimal-image terminfo, archive staging,
-UID-owned socket directory and the proposed argv launcher remain **unverified**. Static delivery
-avoids assuming image libevent/ncurses libraries exist. Debian also
+The executor already supplied both terminfo entries. The rootless-Docker gate verified the
+staged static tmux binary and terminfo in both target images, plus UID/GID 1000 ownership and
+permissions for the artifact directory and tmux socket. It also verified the tmux argv launcher.
+Static delivery avoids assuming image libevent/ncurses libraries exist. Debian also
 [publishes tmux packages](https://packages.debian.org/bookworm/tmux), but in-place package setup
-is not currently a supported DevSpace runtime operation. First implementation acceptance should
-use `node:24-bookworm` and `node:24-bookworm-slim`, configured default and nonroot users, with
-unchanged mounts. Additional image families are capabilities to validate, not assumed support.
+is not currently a supported DevSpace runtime operation. The gate exercised `node:24-bookworm`
+and `node:24-bookworm-slim` as UID/GID 1000 without changing production mount topology. Additional
+image families are capabilities to validate, not assumed support.
 
 ## Architectural feasibility and comparison
 
 The [Docker Engine v1.47 schema](https://raw.githubusercontent.com/docker/docs/main/_vendor/github.com/moby/moby/api/docs/v1.47.yaml)
 and current adapter support the needed exec/create/start/resize/inspect and archive operations.
-Inference: a fresh structured exec of the staged tmux attach client can reach its in-container
-Unix socket; the outer Docker PTY is disposable, while tmux owns the child PTY. This requires no
-new network endpoint or arbitrary shell invocation. Confirm it on disposable rootless Docker.
+The rootless-Docker gate confirmed a fresh structured exec can attach a tmux client to its
+in-container Unix socket while the tmux-owned shell survives loss of the previous client. The
+outer Docker PTY is disposable; this requires no new network endpoint or arbitrary shell request.
 
 [tmux native attachment](https://github.com/tmux/tmux/wiki/Getting-Started) supplies screen redraw
 and persistent pane history; [copy mode](https://man.openbsd.org/tmux.1) makes that history usable
@@ -93,7 +126,8 @@ session is absent; persisted history alone does not establish live-process survi
 browser recovery ideas are useful, but moving host PTYs into DevSpace would cross the existing
 execution boundary. No upstream code was copied.
 
-Stop the spike here. Remaining acceptance is narrowly Docker/DevSpace integration, browser
-History usability and Native Codex compatibility/lease continuity. Container Stop is expected
-to end the tmux server and all container processes; it deliberately ends persistence. Only
-observed Stop/absence may authorize recovery writeback when pane liveness is unproven.
+Stop the spike here. Remaining acceptance is full DevSpace Agent/Web restart and browser reload,
+browser History usability, and Native Codex compatibility/lease continuity. Container Stop
+stopped the probe containers, ended their attachments and prevented later exec creation; it
+deliberately ends persistence. Only observed Stop/absence may authorize recovery writeback when
+pane liveness is unproven.

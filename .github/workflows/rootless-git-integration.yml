@@ -381,20 +381,31 @@ jobs:
           node --input-type=module - "$report" <<'NODE'
           import { readFile } from 'node:fs/promises';
           const report = JSON.parse(await readFile(process.argv[2], 'utf8'));
-          const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+          const testResults = report.testResults ?? [];
+          const assertions = testResults.flatMap((suite) => suite.assertionResults ?? []);
+          const testNames = assertions.map((assertion) => String(assertion.fullName ?? assertion.title ?? ''));
+          const dockerCasePrefix = 'real rootless Docker preserves the tmux shell across disposable exec clients';
+          const dockerCaseNames = testNames.filter((name) => name.startsWith(`${dockerCasePrefix} (`));
+          const requiredDockerCases = [
+            `${dockerCasePrefix} (node:24-bookworm)`,
+            `${dockerCasePrefix} (node:24-bookworm-slim)`
+          ];
           if (report.success !== true
-            || report.numTotalTests !== 2
-            || report.numPassedTests !== 2
+            || report.numTotalTests !== 4
+            || report.numPassedTests !== 4
             || report.numFailedTests !== 0
+            || (report.numSkippedTests ?? assertions.filter((assertion) => assertion.status === 'skipped').length) !== 0
             || report.numPendingTests !== 0
             || report.numTodoTests !== 0
-            || assertions.length !== 2
-            || assertions.some((assertion) => assertion.status !== 'passed'
-              || !String(assertion.fullName ?? assertion.title ?? '').includes('real rootless Docker preserves the tmux shell across disposable exec clients'))) {
+            || testResults.some((suite) => suite.status !== 'passed')
+            || assertions.length !== 4
+            || assertions.some((assertion) => assertion.status !== 'passed')
+            || dockerCaseNames.length !== requiredDockerCases.length
+            || requiredDockerCases.some((name) => !dockerCaseNames.includes(name))) {
             console.error(JSON.stringify(report, null, 2));
             throw new Error('Both rootless tmux feasibility cases must run and pass; skipped tests are failures.');
           }
-          console.log('Verified both Debian development images passed the real rootless tmux feasibility gate with no skipped or pending tests.');
+          console.log('Verified all four rootless tmux tests passed, including both Debian images, with no skipped, pending, or todo tests.');
           NODE
           test -S "$socket"
 
