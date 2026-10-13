@@ -346,8 +346,12 @@ jobs:
             echo
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Run tmux probe diagnostics unit tests
-        run: pnpm exec vitest run --project @devspace/agent apps/agent/src/persistent-terminal-probe-diagnostics.test.ts
+      - name: Run tmux probe archive and diagnostics tests
+        run: >-
+          env -u DEVSPACE_TEST_DOCKER_SOCKET_PATH pnpm exec vitest run --project @devspace/agent
+          apps/agent/src/persistent-terminal-probe-diagnostics.test.ts
+          apps/agent/src/docker-runtime.test.ts
+          apps/agent/src/persistent-terminals.rootless.integration.test.ts
 
       - name: Run real tmux persistence feasibility gate
         shell: bash

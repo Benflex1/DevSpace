@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, readFile, readdir } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { appendFile, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { Readable, type Duplex } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import * as tar from "tar-stream";
 import { afterEach, expect, onTestFailed, test } from "vitest";
 import { collectStreamUntilEof, errorMessage, ProbeProgress } from "./persistent-terminal-probe-diagnostics.js";
@@ -28,6 +31,7 @@ interface ActiveFixture {
   readonly containerIds: Set<string>;
   readonly attachments: Set<Duplex>;
   readonly commandStreams: Set<Duplex>;
+  readonly temporaryRoots: Set<string>;
   readonly execs: Map<string, string>;
   readonly attachmentExecIds: Set<string>;
   readonly diagnosticExecIds: Set<string>;
@@ -217,6 +221,109 @@ function artifactArchive(runId: string): Readable {
   });
   return archive;
 }
+
+async function writeArtifactArchiveFile(runId: string, archivePath: string, signal: AbortSignal): Promise<void> {
+  await pipeline(artifactArchive(runId), createWriteStream(archivePath, { flags: "wx", mode: 0o600 }), { signal });
+}
+
+async function validateArtifactArchive(
+  archiveBytes: Buffer,
+  runId: string,
+  signal: AbortSignal
+): Promise<{ readonly entryCount: number; readonly binaryBytes: number }> {
+  if (tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined) {
+    throw new Error("rootless-tmux-artifact-paths-are-required");
+  }
+  const directoryName = `persistent-tmux-${runId}`;
+  const binary = await readFile(tmuxBinaryPath);
+  const terminfoEntries = await collectFiles(tmuxTerminfoPath);
+  const selectedEntries = ["xterm-256color", "tmux-256color"].map((name) => {
+    const entry = terminfoEntries.find((candidate) => path.posix.basename(candidate.relativePath) === name);
+    if (entry === undefined || entry.bytes.length === 0) throw new Error(`rootless-tmux-terminfo-entry-missing:${name}`);
+    return entry;
+  });
+  const directories = new Set([directoryName, `${directoryName}/terminfo`]);
+  for (const entry of selectedEntries) {
+    const parts = entry.relativePath.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      directories.add(`${directoryName}/terminfo/${parts.slice(0, index).join("/")}`);
+    }
+  }
+  const config = Buffer.from([
+    'set-option -g default-terminal "tmux-256color"',
+    "set-option -g history-limit 2000",
+    "set-option -g status off",
+    "set-option -g remain-on-exit on",
+    ""
+  ].join("\n"));
+  const expected = new Map<string, { readonly type: string; readonly mode: number; readonly bytes: Buffer }>();
+  for (const directory of directories) {
+    expected.set(`${directory}/`, { type: "directory", mode: 0o700, bytes: Buffer.alloc(0) });
+  }
+  expected.set(`${directoryName}/tmux`, { type: "file", mode: 0o755, bytes: binary });
+  expected.set(`${directoryName}/tmux.conf`, { type: "file", mode: 0o600, bytes: config });
+  for (const entry of selectedEntries) {
+    expected.set(`${directoryName}/terminfo/${entry.relativePath}`, { type: "file", mode: 0o644, bytes: entry.bytes });
+  }
+
+  const extract = tar.extract();
+  const observed = new Set<string>();
+  extract.on("entry", (header, body, next) => {
+    void (async () => {
+      const expectedEntry = expected.get(header.name);
+      if (expectedEntry === undefined || observed.has(header.name)
+        || header.type !== expectedEntry.type || header.mode !== expectedEntry.mode
+        || header.uid !== 1000 || header.gid !== 1000 || header.size !== expectedEntry.bytes.length) {
+        throw new Error(`rootless-tmux-archive-entry-metadata-mismatch:${header.name}`);
+      }
+      const chunks: Buffer[] = [];
+      let byteLength = 0;
+      for await (const value of body) {
+        const bytes = chunkBuffer(value as unknown);
+        byteLength += bytes.length;
+        if (byteLength > expectedEntry.bytes.length) throw new Error(`rootless-tmux-archive-entry-oversized:${header.name}`);
+        chunks.push(bytes);
+      }
+      const actualBytes = Buffer.concat(chunks, byteLength);
+      if (!actualBytes.equals(expectedEntry.bytes)) throw new Error(`rootless-tmux-archive-entry-content-mismatch:${header.name}`);
+      observed.add(header.name);
+      next();
+    })().catch((error: unknown) => extract.destroy(error instanceof Error ? error : new Error("rootless-tmux-archive-validation-failed")));
+  });
+  await pipeline(Readable.from([archiveBytes]), extract, { signal });
+  if (observed.size !== expected.size) {
+    throw new Error(`rootless-tmux-archive-entry-count-mismatch:${observed.size}:${expected.size}`);
+  }
+  return { entryCount: observed.size, binaryBytes: binary.length };
+}
+
+test.skipIf(tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined)(
+  "probe archive is written, reaches EOF, and extracts with expected content and ownership",
+  async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), "devspace-tmux-archive-test-"));
+    const runId = `local-${randomUUID()}`;
+    const archivePath = path.join(temporaryRoot, "tmux-artifacts.tar");
+    const writeAbort = new AbortController();
+    const validateAbort = new AbortController();
+    const progress = new ProbeProgress("local-tmux-archive-test");
+    try {
+      await progress.run("archive.local.write-and-eof", 2_000,
+        () => writeArtifactArchiveFile(runId, archivePath, writeAbort.signal),
+        () => writeAbort.abort(new Error("rootless-tmux-local-archive-generation-timeout")));
+      const archiveFile = await stat(archivePath);
+      expect(archiveFile.mode & 0o777).toBe(0o600);
+      expect(archiveFile.size).toBeGreaterThan(2_200_000);
+      const archiveBytes = await readFile(archivePath);
+      const validated = await progress.run("archive.local.extract-and-validate", 2_000,
+        () => validateArtifactArchive(archiveBytes, runId, validateAbort.signal),
+        () => validateAbort.abort(new Error("rootless-tmux-local-archive-extract-timeout")));
+      expect(validated).toMatchObject({ entryCount: 8, binaryBytes: 2_232_808 });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  },
+  8_000
+);
 
 async function waitFor<T>(
   read: () => Promise<T>,
@@ -412,6 +519,15 @@ afterEach(async () => {
       cleanupError ??= error;
     }
   }
+  for (const temporaryRoot of fixture.temporaryRoots) {
+    try {
+      await fixture.progress.run("cleanup.archive-temporary-root", 10_000,
+        () => rm(temporaryRoot, { recursive: true, force: true }));
+      fixture.temporaryRoots.delete(temporaryRoot);
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
   fixture.progress.record("cleanup.finished", cleanupError === undefined ? "completed" : "failed", {
     remainingContainerIds: [...fixture.containerIds],
     ...(cleanupError === undefined ? {} : { error: errorMessage(cleanupError) })
@@ -438,6 +554,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       containerIds: new Set(),
       attachments: new Set(),
       commandStreams: new Set(),
+      temporaryRoots: new Set(),
       execs: new Map(),
       attachmentExecIds: new Set(),
       diagnosticExecIds: new Set(),
@@ -510,8 +627,55 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const sessionName = `shell-${runId.slice(0, 8)}`;
     await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", artifactRoot], "container.artifact-dir.create");
     progress.record("artifact.stage.started", "started", { containerId, destination: "/opt/devspace-codex-probe" });
-    await progress.run("artifact.stage", dockerOperationTimeoutMs,
-      () => engine.putContainerArchive(containerId, "/opt/devspace-codex-probe", artifactArchive(runId), 30_000));
+    const archiveTemporaryRoot = await progress.run("artifact.archive-temporary-root.create", dockerOperationTimeoutMs,
+      () => mkdtemp(path.join(tmpdir(), "devspace-tmux-probe-")));
+    fixture.temporaryRoots.add(archiveTemporaryRoot);
+    const archivePath = path.join(archiveTemporaryRoot, "tmux-artifacts.tar");
+    const archiveWriteAbort = new AbortController();
+    await progress.run("artifact.archive.generate-and-write", commandTimeoutMs,
+      () => writeArtifactArchiveFile(runId, archivePath, archiveWriteAbort.signal),
+      () => archiveWriteAbort.abort(new Error("rootless-tmux-archive-generation-timeout")));
+    const archiveFile = await progress.run("artifact.archive.stat", dockerOperationTimeoutMs, () => stat(archivePath));
+    if (archiveFile.size < 2_200_000 || archiveFile.size > 4 * 1024 * 1024) {
+      throw new Error(`rootless-tmux-archive-size-invalid:${archiveFile.size}`);
+    }
+    progress.record("artifact.archive.file-created", "completed", {
+      archiveBytes: archiveFile.size, mode: archiveFile.mode & 0o777
+    });
+    const archiveBytes = await progress.run("artifact.archive.read-for-validation", dockerOperationTimeoutMs,
+      () => readFile(archivePath));
+    const archiveValidationAbort = new AbortController();
+    const archiveValidation = await progress.run("artifact.archive.validate", commandTimeoutMs,
+      () => validateArtifactArchive(archiveBytes, runId, archiveValidationAbort.signal),
+      () => archiveValidationAbort.abort(new Error("rootless-tmux-archive-validation-timeout")));
+    progress.record("artifact.archive.verified", "completed", { ...archiveValidation, archiveBytes: archiveBytes.length });
+
+    const upload = createReadStream(archivePath);
+    upload.once("end", () => progress.record("artifact.upload.source-eof", "completed", {
+      containerId, archiveBytes: upload.bytesRead
+    }));
+    upload.once("error", (error: Error) => progress.record("artifact.upload.source-error", "failed", {
+      containerId, archiveBytes: upload.bytesRead, error: errorMessage(error)
+    }));
+    const uploadOperation = engine.putContainerArchive(containerId, "/opt/devspace-codex-probe", upload, 30_000);
+    try {
+      await progress.run("artifact.stage.docker-archive-put", dockerOperationTimeoutMs,
+        () => uploadOperation,
+        () => {
+          progress.record("artifact.upload.cancel-requested", "info", {
+            containerId, archiveBytes: upload.bytesRead, sourceEnded: upload.readableEnded
+          });
+          upload.destroy(new Error("rootless-tmux-docker-archive-put-cancelled"));
+        });
+    } catch (error) {
+      await Promise.race([uploadOperation.then(() => undefined, () => undefined), delay(1_000)]);
+      throw error;
+    } finally {
+      if (!upload.destroyed) upload.destroy();
+    }
+    progress.record("artifact.stage.docker-response", "completed", {
+      containerId, archiveBytes: upload.bytesRead, sourceEnded: upload.readableEnded
+    });
     progress.record("artifact.stage.completed", "completed", { containerId, destination: "/opt/devspace-codex-probe" });
     expect(await commandOkay(engine, containerId, ["sha256sum", "--", binaryPath], "artifact.verify.binary-sha256"))
       .toContain(tmuxBinarySha256);
