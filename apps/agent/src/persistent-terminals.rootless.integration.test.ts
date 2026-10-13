@@ -684,12 +684,12 @@ async function proveExecutionManagerRecovery(
   await waitFor(async () => await commandOkay(fixture.engine, containerId, [
     binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
     "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_in_mode}"
-  ], "manager.history.verify"), (value) => value === "1", "browser History did not enter tmux copy mode", "manager.history.confirm");
+  ], "manager.history.verify"), (value) => value.trim() === "1", "browser History did not enter tmux copy mode", "manager.history.confirm");
   secondSocket.receive(encodeTerminalClientFrame({ type: "live" }));
   await waitFor(async () => await commandOkay(fixture.engine, containerId, [
     binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
     "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_in_mode}"
-  ], "manager.live.verify"), (value) => value === "0", "browser Return to live did not exit tmux copy mode", "manager.live.confirm");
+  ], "manager.live.verify"), (value) => value.trim() === "0", "browser Return to live did not exit tmux copy mode", "manager.live.confirm");
   secondSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from("printf 'AFTER_RESTART_INPUT_OK\\n'\r") }));
   await waitForPersistentSocketText(secondSocket, "AFTER_RESTART_INPUT_OK", "manager.restart.keyboard-input");
   expect(await commandOkay(fixture.engine, containerId,

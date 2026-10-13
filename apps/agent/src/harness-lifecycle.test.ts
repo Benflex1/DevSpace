@@ -11,6 +11,7 @@ import { ExecutionManager, type HarnessRecoveryIdentity } from "./execution-mana
 import { createHarnessHomeStore } from "./harness-home.js";
 import { createHarnessRuntime } from "./harness-runtime.js";
 import type { WorkspaceExecutionContext } from "./managed-workspaces.js";
+import type { PersistentTmuxRuntime } from "./persistent-terminal-runtime.js";
 import { durableJsonWriter } from "./private-state.js";
 
 const projectId = "018f1f34-7000-7000-8000-000000000001";
@@ -183,7 +184,7 @@ async function nativeAdmissionFixture(engine: object, onSettled?: () => void | P
   return { root, home, manager, runtime };
 }
 
-test("real exec exit settles once and a shell exit does not", async () => {
+test("harness exec exit settles once while a persistent shell exit does not", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-lifecycle-"));
   roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -203,16 +204,40 @@ test("real exec exit settles once and a shell exit does not", async () => {
       Running: running.get(execId) !== false,
       ExitCode: running.get(execId) === false ? 0 : null,
       ContainerID: "container-owned"
-    })
+    }),
+    inspectContainer: async () => ({ Id: "container-owned", State: { Running: true, Status: "running" } })
   };
+  let shellPaneDead = false;
+  const persistentTmux = {
+    prepare: async (containerId: string) => ({
+      containerId, uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test", binaryPath: "/opt/devspace-test/tmux",
+      configPath: "/opt/devspace-test/tmux.conf", terminfoPath: "/opt/devspace-test/terminfo",
+      socketDirectory: "/tmp/devspace-persistent-tmux-1000", socketPath: "/tmp/devspace-persistent-tmux-1000/server.sock",
+      environment: { TMUX: "", TMUX_PANE: "" }
+    }),
+    createSessionExec: async () => "tmux-create-shell",
+    inspectExec: async () => ({ running: false, exitCode: null }),
+    startCreatedExec: async (execId: string) => ({ execId, exitCode: 0, stdout: "", stderr: "" }),
+    lookupSession: async (_binding: unknown, _identity: unknown, sessionName: string) => ({
+      sessionName, sessionId: "$8", paneId: "%2", panePid: 4321,
+      paneDead: shellPaneDead, paneDeadStatus: shellPaneDead ? 0 : null
+    }),
+    createAttachment: async () => ({ execId: "tmux-attach-shell", clientPid: 5432, clientName: "/dev/pts/5",
+      stream: new PassThrough() }),
+    detachClient: async () => {},
+    resizeAttachment: async () => {},
+    history: async () => {},
+    live: async () => {}
+  } as unknown as PersistentTmuxRuntime;
   const hooks: string[] = [];
   let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"), {
+  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
+    undefined, () => new Date("2026-09-24T00:00:00.000Z"), {
     onHarnessSettled: async (event) => {
       hooks.push(event.processId);
       await runtime.settleByProcess(event.processId);
     }
-  });
+  }, persistentTmux);
   runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -225,9 +250,9 @@ test("real exec exit settles once and a shell exit does not", async () => {
   });
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "live" });
   await manager.createTerminal({ projectId, workspaceId, terminalId: shellTerminalId });
-  expect(streams).toHaveLength(2);
-  running.set("exec-2", false);
-  streams[1]!.end();
+  expect(streams).toHaveLength(1);
+  shellPaneDead = true;
+  await manager.inspect(projectId, workspaceId, shellTerminalId);
   await waitFor(async () => manager.snapshotResources().some((resource) => resource.type === "terminal" && resource.identity.terminalId === shellTerminalId && resource.state === "closed"));
   expect(hooks).toEqual([]);
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "live" });
@@ -304,7 +329,7 @@ test("same-Agent retry does not report uncertain harness admission active when i
   const retainedLease = JSON.parse(await readFile(path.join(root, "harness-homes", "codex", ".lease", "metadata.json"), "utf8")) as Record<string, unknown>;
   expect(lostPrivate).toMatchObject({ state: "lost", recoveryPending: true, leaseId: pendingPrivate.leaseId, processGeneration: 1 });
   expect(retainedLease).toMatchObject({ leaseId: pendingPrivate.leaseId, workspaceId, aiSessionId: sessionId, processGeneration: 1 });
-  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("not currently attachable");
   expect(creates).toBe(1);
   expect(starts).toBe(1);
 
@@ -395,7 +420,7 @@ test("same-Agent retry settles an exact already-exited harness without relaunch 
   expect(manager.snapshotResources()).toContainEqual(expect.objectContaining({
     type: "terminal", identity: expect.objectContaining({ terminalId }), state: "closed"
   }));
-  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("not currently attachable");
   expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8"))
     .toContain(nativeId);
   expect(settlements).toBe(1);
