@@ -1,5 +1,14 @@
 # Current State
 
+## Persistent terminals: design proposed
+
+[ADR 017](decisions/017-persistent-workspace-terminals.md) proposes in-container tmux ownership
+of shell and Native harness PTYs, with fresh Docker exec clients after attachment loss.
+[Feasibility evidence](feasibility/persistent-terminals-2026-10-13.md) covers local shell/TUI
+continuity and a static tmux artifact; Docker restart/Stop and browser acceptance remain unverified.
+No persistent-terminal implementation is included. Current Agent restart still loses terminal
+attachment; Native orphans retain their private-home lease until exact exit or workspace Stop.
+
 ## Test-suite audit
 
 The [2026-10-10 audit](audits/test-suite-2026-10-10.md) is closed after two planned
