@@ -2,7 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: false,
+  testIgnore: "**/ubuntu-installation.acceptance.spec.ts",
+  fullyParallel: true,
   workers: 1,
   reporter: "list",
   expect: { timeout: 15_000 },

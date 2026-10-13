@@ -22,6 +22,7 @@ test("runs the fake-provider AI session through interactions, navigation, refres
     await expect(project.getByText("Running", { exact: true })).toBeVisible({ timeout: 120_000 });
   }
   await workbench.getByRole("button", { name: /AI/ }).click();
+  await workbench.getByRole("tablist", { name: "AI presentation" }).getByRole("tab", { name: "Legacy" }).click();
   const ai = page.locator(".ai-tab-surface");
   await expect(ai.getByText("Start an AI session")).toBeVisible({ timeout: 60_000 });
   await ai.getByRole("button", { name: "Create session" }).click();
@@ -73,7 +74,9 @@ test("runs the fake-provider AI session through interactions, navigation, refres
   await expect(page.locator('section[aria-label="Editor for devspace-ai-beta-check.txt"][aria-hidden="false"]')).toBeVisible();
 
   await page.reload();
-  await page.locator("main.workbench").getByRole("button", { name: /AI/ }).click();
+  const refreshedWorkbench = page.locator("main.workbench");
+  await refreshedWorkbench.getByRole("button", { name: /AI/ }).click();
+  await refreshedWorkbench.getByRole("tablist", { name: "AI presentation" }).getByRole("tab", { name: "Legacy" }).click();
   const refreshed = page.locator(".ai-tab-surface");
   await expect(refreshed.getByText("Hello from the deterministic provider.")).toBeVisible();
   await expect(refreshed.getByText("Some older interaction history is omitted", { exact: false })).toHaveCount(0);

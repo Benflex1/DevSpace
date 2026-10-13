@@ -1,0 +1,63 @@
+name: Browser tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playwright-shard-1:
+    name: Browser shard 1/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 1
+
+  playwright-shard-2:
+    name: Browser shard 2/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 2
+
+  playwright-shard-3:
+    name: Browser shard 3/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 3
+
+  playwright-shard-4:
+    name: Browser shard 4/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 4
+
+  playwright:
+    name: Playwright browser tests
+    if: ${{ always() }}
+    needs:
+      - playwright-shard-1
+      - playwright-shard-2
+      - playwright-shard-3
+      - playwright-shard-4
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+
+    steps:
+      - name: Require all four shards to pass
+        env:
+          SHARD_1_RESULT: ${{ needs.playwright-shard-1.result }}
+          SHARD_2_RESULT: ${{ needs.playwright-shard-2.result }}
+          SHARD_3_RESULT: ${{ needs.playwright-shard-3.result }}
+          SHARD_4_RESULT: ${{ needs.playwright-shard-4.result }}
+        run: |
+          for result in "$SHARD_1_RESULT" "$SHARD_2_RESULT" "$SHARD_3_RESULT" "$SHARD_4_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Every browser shard must pass; observed result: $result" >&2
+              exit 1
+            fi
+          done
+          echo "All four browser shards passed."
