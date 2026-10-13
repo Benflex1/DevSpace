@@ -769,7 +769,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe("1000\n");
 
     const directoryName = `persistent-tmux-${runId}`;
-    const artifactRoot = `/opt/devspace-codex-probe/${directoryName}`;
+    const artifactRoot = `/opt/${directoryName}`;
     const binaryPath = `${artifactRoot}/tmux`;
     const configPath = `${artifactRoot}/tmux.conf`;
     const terminfoPath = `${artifactRoot}/terminfo`;
@@ -777,7 +777,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const socketPath = `${socketDirectory}/server.sock`;
     const sessionName = `shell-${runId.slice(0, 8)}`;
     await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", artifactRoot], "container.artifact-dir.create");
-    progress.record("artifact.stage.started", "started", { containerId, destination: "/opt/devspace-codex-probe" });
+    progress.record("artifact.stage.started", "started", { containerId, destination: "/opt" });
     const archiveTemporaryRoot = await progress.run("artifact.archive-temporary-root.create", dockerOperationTimeoutMs,
       () => mkdtemp(path.join(tmpdir(), "devspace-tmux-probe-")));
     fixture.temporaryRoots.add(archiveTemporaryRoot);
@@ -808,7 +808,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     upload.once("error", (error: Error) => progress.record("artifact.upload.source-error", "failed", {
       containerId, archiveBytes: upload.bytesRead, error: errorMessage(error)
     }));
-    const uploadOperation = engine.putContainerArchive(containerId, "/opt/devspace-codex-probe", upload, 30_000);
+    const uploadOperation = engine.putContainerArchive(containerId, "/opt", upload, 30_000);
     try {
       await progress.run("artifact.stage.docker-archive-put", dockerOperationTimeoutMs,
         () => uploadOperation,
@@ -827,19 +827,25 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     progress.record("artifact.stage.docker-response", "completed", {
       containerId, archiveBytes: upload.bytesRead, sourceEnded: upload.readableEnded
     });
-    progress.record("artifact.stage.completed", "completed", { containerId, destination: "/opt/devspace-codex-probe" });
+    progress.record("artifact.stage.completed", "completed", { containerId, destination: "/opt" });
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "artifact.verify.exec-uid")).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-g"], "artifact.verify.exec-gid")).toBe("1000\n");
     expect(await commandOkay(engine, containerId, ["sha256sum", "--", binaryPath], "artifact.verify.binary-sha256"))
       .toContain(tmuxBinarySha256);
+    expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", artifactRoot], "artifact.verify.root-ownership"))
+      .toBe("700 1000:1000\n");
     expect(await commandOkay(engine, containerId, [binaryPath, "-V"], "artifact.verify.tmux-version")).toBe("tmux 3.7c\n");
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", binaryPath], "artifact.verify.binary-ownership"))
       .toBe("755 1000:1000\n");
+    expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", configPath], "artifact.verify.config-ownership"))
+      .toBe("600 1000:1000\n");
     for (const name of ["xterm-256color", "tmux-256color"]) {
       const entry = (await collectFiles(tmuxTerminfoPath)).find((candidate) => path.posix.basename(candidate.relativePath) === name);
       if (entry === undefined) throw new Error(`rootless-tmux-terminfo-entry-missing:${name}`);
       const stagedPath = `${terminfoPath}/${entry.relativePath}`;
       expect(await commandOkay(engine, containerId, ["test", "-s", stagedPath], `artifact.verify.terminfo.${name}.exists`)).toBe("");
-      expect(await commandOkay(engine, containerId, ["stat", "-c", "%u:%g", stagedPath], `artifact.verify.terminfo.${name}.owner`))
-        .toBe("1000:1000\n");
+      expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", stagedPath], `artifact.verify.terminfo.${name}.metadata`))
+        .toBe("644 1000:1000\n");
     }
     await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", socketDirectory], "tmux.socket-directory.create");
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", socketDirectory], "tmux.socket-directory.verify"))
