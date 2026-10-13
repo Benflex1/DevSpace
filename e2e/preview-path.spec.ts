@@ -79,8 +79,18 @@ async function websocketUpgrade(port: number, hostname: string): Promise<string>
 }
 
 async function dismissLostTerminalDialog(page: import("@playwright/test").Page): Promise<void> {
-  const dialog = page.getByRole("dialog", { name: "Terminal session lost" });
-  if (await dialog.isVisible().catch(() => false)) await dialog.getByRole("button", { name: "Dismiss" }).click();
+  const dialog = page.locator(".lost-terminal-dialog");
+  try {
+    await dialog.waitFor({ state: "visible", timeout: 5_000 });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") return;
+    throw error;
+  }
+
+  const dismiss = dialog.getByRole("button", { name: "Dismiss", exact: true });
+  if (await dismiss.isVisible()) await dismiss.click();
+  await dialog.getByRole("button", { name: "Dismiss anyway", exact: true }).click();
+  await expect(page.locator(".lost-terminal-dialog-backdrop")).toBeHidden();
 }
 
 test("follows the deterministic workspace preview path", async ({ page }) => {
