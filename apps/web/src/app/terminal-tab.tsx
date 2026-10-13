@@ -118,6 +118,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
       };
       let lastColumns = 0;
       let lastRows = 0;
+      let persistentResizePending = false;
       const scheduleResize = () => {
         if (!activeRef.current) return;
         if (resizeFrame !== null) return;
@@ -137,6 +138,11 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
             return;
           }
           fit.fit();
+          if (persistentResizePending) {
+            lastColumns = terminalInstance.cols;
+            lastRows = terminalInstance.rows;
+            return;
+          }
           if (terminalInstance.cols === lastColumns && terminalInstance.rows === lastRows) return;
           lastColumns = terminalInstance.cols;
           lastRows = terminalInstance.rows;
@@ -160,6 +166,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
         currentSocket = webSocket;
         socket.current = webSocket;
         ready = false;
+        persistentResizePending = false;
         setPersistentReady(false);
         persistentControl.current = null;
         webSocket.onmessage = (event) => {
@@ -170,6 +177,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
           if (decoded.frame.type === "ready") {
             const isPersistent = "version" in decoded.frame && decoded.frame.version === 2;
             if (isPersistent) {
+              persistentResizePending = true;
               terminalInstance.reset();
               lastColumns = 0;
               lastRows = 0;
@@ -187,7 +195,6 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
             if (isPersistent) {
               lastColumns = terminalInstance.cols;
               lastRows = terminalInstance.rows;
-              send(encodeTerminalClientFrame({ type: "resize", columns: terminalInstance.cols, rows: terminalInstance.rows }));
             }
             scheduleResize();
             setManualReconnectAvailable(false);
@@ -201,6 +208,12 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
               markNativeHarness("devspace.native-harness.first-terminal-output");
             }
             terminalInstance.write(decoded.frame.data);
+            if (persistentResizePending) {
+              persistentResizePending = false;
+              lastColumns = terminalInstance.cols;
+              lastRows = terminalInstance.rows;
+              send(encodeTerminalClientFrame({ type: "resize", columns: terminalInstance.cols, rows: terminalInstance.rows }));
+            }
             return;
           }
           if (decoded.frame.type === "attachment-conflict") {

@@ -198,7 +198,7 @@ test("valid PTY output after ready reaches xterm with ANSI and screen-control by
   expect(xtermState.writes).toEqual([bytes]);
 });
 
-test("persistent ready resets xterm, resizes each attachment, and exposes history and copy controls", async () => {
+test("persistent ready resets xterm, resizes after the first redraw, and exposes history and copy controls", async () => {
   const body = installTerminalTestDom(FakeSocket);
   const clipboardWrite = vi.fn().mockResolvedValue(undefined);
   vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
@@ -216,11 +216,15 @@ test("persistent ready resets xterm, resizes each attachment, and exposes histor
   await settleReact();
 
   expect(xtermState.resets).toBe(1);
-  expect(socket.sent.map((frame) => {
+  const sentFrames = () => socket.sent.map((frame) => {
     const decoded = decodeTerminalClientFrame(frame);
     return decoded.ok ? decoded.frame : null;
-  }))
-    .toContainEqual({ type: "resize", columns: 80, rows: 24 });
+  });
+  expect(sentFrames()).not.toContainEqual({ type: "resize", columns: 80, rows: 24 });
+  const redraw = new TextEncoder().encode("restored tmux screen");
+  act(() => { socket.emitOutput(redraw); });
+  expect(xtermState.writes).toEqual([redraw]);
+  expect(sentFrames()).toContainEqual({ type: "resize", columns: 80, rows: 24 });
   const buttons = findButtons(body);
   for (const label of ["History", "Return to live", "Copy selection"]) {
     const button = buttons.find((candidate) => buttonText(candidate) === label);

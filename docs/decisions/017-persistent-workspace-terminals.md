@@ -95,7 +95,8 @@ reconnects by ID with bounded retries and a manual Reconnect action after exhaus
 an attachment UUID and requires xterm reset, including history, on **every** connection. Register
 the stream reader before consuming output, bound any initial queue, deliver `ready` first,
 then forward the new tmux client's ordered redraw/live byte stream. Chunk at the existing
-65,536-byte payload limit. Resize again after ready, even when dimensions have not changed.
+65,536-byte payload limit. After the first tmux output frame, resize again on every attachment,
+even when dimensions have not changed, so the attached tmux client has initialized its PTY.
 No old 64 KiB raw tail or separately captured visible screen is prepended: tmux redraw is the
 snapshot, and tmux orders subsequent updates on that same stream. Late frames from old sockets
 are ignored. There is no custom snapshot/live sequence protocol to maintain.
