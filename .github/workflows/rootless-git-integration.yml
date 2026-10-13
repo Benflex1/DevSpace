@@ -346,6 +346,9 @@ jobs:
             echo
           } >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Run tmux probe diagnostics unit tests
+        run: pnpm exec vitest run --project @devspace/agent apps/agent/src/persistent-terminal-probe-diagnostics.test.ts
+
       - name: Run real tmux persistence feasibility gate
         shell: bash
         run: |
@@ -358,10 +361,13 @@ jobs:
           test -x "$DEVSPACE_TEST_TMUX_BINARY_PATH"
           test -d "$DEVSPACE_TEST_TMUX_TERMINFO_PATH"
           report="$root/tmux-feasibility-vitest.json"
+          progress="$root/tmux-progress.jsonl"
+          : >"$progress"
           env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
             DEVSPACE_TEST_DOCKER_SOCKET_PATH="$socket" \
             DEVSPACE_TEST_TMUX_BINARY_PATH="$DEVSPACE_TEST_TMUX_BINARY_PATH" \
             DEVSPACE_TEST_TMUX_TERMINFO_PATH="$DEVSPACE_TEST_TMUX_TERMINFO_PATH" \
+            DEVSPACE_TEST_TMUX_PROGRESS_FILE="$progress" \
             DOCKER_CONFIG="$root/docker-config" \
             pnpm exec vitest run \
               --project @devspace/agent \
@@ -405,6 +411,10 @@ jobs:
           if [[ -f "$root/tmux-feasibility-vitest.json" ]]; then
             echo "Rootless tmux feasibility Vitest report:"
             cat "$root/tmux-feasibility-vitest.json"
+          fi
+          if [[ -f "$root/tmux-progress.jsonl" ]]; then
+            echo "Rootless tmux feasibility progress checkpoints:"
+            cat "$root/tmux-progress.jsonl"
           fi
           if [[ -d "$root/tmux-3.7c" ]]; then
             echo "Pinned tmux artifact hashes and terminfo preparation state:"

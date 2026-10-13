@@ -3,9 +3,10 @@ import { appendFile, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
-import { Readable } from "node:stream";
+import { Readable, type Duplex } from "node:stream";
 import * as tar from "tar-stream";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, onTestFailed, test } from "vitest";
+import { collectStreamUntilEof, errorMessage, ProbeProgress } from "./persistent-terminal-probe-diagnostics.js";
 import { DockerEngineClient, DockerEngineError } from "./docker-runtime.js";
 
 const dockerSocketPath = process.env.DEVSPACE_TEST_DOCKER_SOCKET_PATH;
@@ -16,12 +17,22 @@ const tmuxBinarySha256 = "7d0f1e85c5b11df7fe127ab90674c6a15663ad72a25fcf7fabadba
 const testImages = ["node:24-bookworm", "node:24-bookworm-slim"] as const;
 const testUser = "1000:1000";
 const commandTimeoutMs = 15_000;
+const streamTimeoutMs = 20_000;
+const dockerOperationTimeoutMs = 35_000;
+const diagnosticOperationTimeoutMs = 35_000;
 
 interface ActiveFixture {
   readonly engine: DockerEngineClient;
   readonly runId: string;
+  readonly progress: ProbeProgress;
   readonly containerIds: Set<string>;
-  readonly attachments: Set<import("node:stream").Duplex>;
+  readonly attachments: Set<Duplex>;
+  readonly commandStreams: Set<Duplex>;
+  readonly execs: Map<string, string>;
+  readonly attachmentExecIds: Set<string>;
+  readonly diagnosticExecIds: Set<string>;
+  latestExecId: string | null;
+  failureCheckpoint: { readonly lastCheckpoint: string | null; readonly lastCompletedCheckpoint: string | null } | null;
 }
 
 interface DockerCommandResult {
@@ -45,6 +56,14 @@ interface TerminfoEntry {
 }
 
 let activeFixture: ActiveFixture | null = null;
+
+function fixtureFor(containerId?: string): ActiveFixture {
+  const fixture = activeFixture;
+  if (fixture === null || (containerId !== undefined && !fixture.containerIds.has(containerId))) {
+    throw new Error("rootless-tmux-active-container-fixture-missing");
+  }
+  return fixture;
+}
 
 function chunkBuffer(value: unknown): Buffer {
   if (Buffer.isBuffer(value)) return value;
@@ -72,24 +91,57 @@ async function containerCommand(
   engine: DockerEngineClient,
   containerId: string,
   command: readonly string[],
-  environment: Readonly<Record<string, string>> = {}
+  environment: Readonly<Record<string, string>> = {},
+  operationName?: string
 ): Promise<DockerCommandResult> {
-  const execId = await engine.createExec(containerId, {
+  const fixture = activeFixture;
+  if (fixture === null || !fixture.containerIds.has(containerId)) throw new Error("rootless-tmux-active-container-fixture-missing");
+  const name = operationName ?? `container.command:${command.slice(0, 3).join(" ")}`;
+  const execId = await fixture.progress.run(`${name}.exec-create`, dockerOperationTimeoutMs, () => engine.createExec(containerId, {
     command, workingDirectory: "/", environment, attachStdin: false, tty: false
-  });
-  const stream = await engine.startExecAttached(execId, false);
-  const chunks: Buffer[] = [];
-  for await (const value of stream) chunks.push(chunkBuffer(value as unknown));
-  const output = decodeDockerFrames(Buffer.concat(chunks));
-  const inspection = await engine.inspectExec(execId);
-  if (inspection.Running || inspection.ExitCode === null) throw new Error("rootless-tmux-docker-exec-did-not-finish");
-  return { execId, ...output, exitCode: inspection.ExitCode };
+  }));
+  fixture.latestExecId = execId;
+  fixture.execs.set(execId, name);
+  for (const existing of fixture.diagnosticExecIds) {
+    if (!fixture.attachmentExecIds.has(existing)) fixture.diagnosticExecIds.delete(existing);
+  }
+  fixture.diagnosticExecIds.add(execId);
+  fixture.progress.record(`${name}.exec-created`, "info", { containerId, execId, command });
+
+  let stream: Duplex | null = null;
+  try {
+    stream = await fixture.progress.run(`${name}.attach-stream`, dockerOperationTimeoutMs,
+      () => engine.startExecAttached(execId, false));
+    fixture.commandStreams.add(stream);
+    const framedOutput = await fixture.progress.run(`${name}.collect-output-eof`, streamTimeoutMs + 2_000,
+      () => collectStreamUntilEof(stream!, `${name}.exec-${execId}`, streamTimeoutMs), () => stream?.destroy());
+    const output = decodeDockerFrames(framedOutput);
+    const inspection = await fixture.progress.run(`${name}.inspect-final-exec`, dockerOperationTimeoutMs,
+      () => engine.inspectExec(execId));
+    fixture.progress.record(`${name}.exec-finished`, "info", {
+      containerId, execId, running: inspection.Running, exitCode: inspection.ExitCode
+    });
+    if (inspection.Running || inspection.ExitCode === null) {
+      throw new Error(`rootless-tmux-docker-exec-did-not-finish:${execId}:running=${inspection.Running}:exitCode=${inspection.ExitCode}`);
+    }
+    return { execId, ...output, exitCode: inspection.ExitCode };
+  } finally {
+    if (stream !== null) {
+      if (!stream.destroyed) stream.destroy();
+      fixture.commandStreams.delete(stream);
+    }
+  }
 }
 
-async function commandOkay(engine: DockerEngineClient, containerId: string, command: readonly string[]): Promise<string> {
-  const result = await containerCommand(engine, containerId, command);
+async function commandOkay(
+  engine: DockerEngineClient,
+  containerId: string,
+  command: readonly string[],
+  operationName?: string
+): Promise<string> {
+  const result = await containerCommand(engine, containerId, command, {}, operationName);
   if (result.exitCode !== 0) {
-    throw new Error(`rootless-tmux-container-command-failed:${command[0] ?? "unknown"}:${result.exitCode}:${result.stderr.slice(0, 300)}`);
+    throw new Error(`rootless-tmux-container-command-failed:${operationName ?? command[0] ?? "unknown"}:${result.execId}:${result.exitCode}:${result.stderr.slice(0, 300)}`);
   }
   return result.stdout;
 }
@@ -166,14 +218,25 @@ function artifactArchive(runId: string): Readable {
   return archive;
 }
 
-async function waitFor<T>(read: () => Promise<T>, matches: (value: T) => boolean, message: string): Promise<T> {
+async function waitFor<T>(
+  read: () => Promise<T>,
+  matches: (value: T) => boolean,
+  message: string,
+  checkpoint: string
+): Promise<T> {
+  const progress = fixtureFor().progress;
+  progress.record(checkpoint, "started", { timeoutMs: commandTimeoutMs });
   const deadline = Date.now() + commandTimeoutMs;
-  let value = await read();
+  let value = await progress.run(`${checkpoint}.read`, dockerOperationTimeoutMs, read);
   while (!matches(value) && Date.now() < deadline) {
     await delay(50);
-    value = await read();
+    value = await progress.run(`${checkpoint}.read`, dockerOperationTimeoutMs, read);
   }
-  if (!matches(value)) throw new Error(message);
+  if (!matches(value)) {
+    progress.record(checkpoint, "failed", { error: message, lastCompletedCheckpoint: progress.lastCompletedCheckpoint });
+    throw new Error(message);
+  }
+  progress.record(checkpoint, "completed");
   return value;
 }
 
@@ -181,27 +244,27 @@ function attachmentText(attachment: TmuxAttachment): string {
   return Buffer.concat(attachment.chunks).toString("utf8");
 }
 
-async function waitForAttachmentText(attachment: TmuxAttachment, marker: string): Promise<string> {
-  const deadline = Date.now() + commandTimeoutMs;
-  while (!attachmentText(attachment).includes(marker) && Date.now() < deadline) {
-    if (attachment.streamError !== null && attachment.streamError !== undefined) {
-      const detail = attachment.streamError instanceof Error
-        ? attachment.streamError.message
-        : typeof attachment.streamError === "string" ? attachment.streamError : "unknown-stream-error";
-      throw new Error(`rootless-tmux-attachment-stream-failed:${detail}`);
+async function waitForAttachmentText(attachment: TmuxAttachment, marker: string, checkpoint: string): Promise<string> {
+  const fixture = fixtureFor();
+  return await fixture.progress.run(checkpoint, commandTimeoutMs + 1_000, async () => {
+    const deadline = Date.now() + commandTimeoutMs;
+    while (!attachmentText(attachment).includes(marker) && Date.now() < deadline) {
+      if (attachment.streamError !== null && attachment.streamError !== undefined) {
+        throw new Error(`rootless-tmux-attachment-stream-failed:${errorMessage(attachment.streamError)}`);
+      }
+      if (attachment.stream.destroyed) throw new Error(`rootless-tmux-attachment-closed-before:${marker}`);
+      await delay(25);
     }
-    if (attachment.stream.destroyed) throw new Error(`rootless-tmux-attachment-closed-before:${marker}`);
-    await delay(25);
-  }
-  const text = attachmentText(attachment);
-  if (!text.includes(marker)) throw new Error(`rootless-tmux-attachment-marker-timeout:${marker}`);
-  return text;
+    const text = attachmentText(attachment);
+    if (!text.includes(marker)) throw new Error(`rootless-tmux-attachment-marker-timeout:${marker}`);
+    return text;
+  }, () => attachment.stream.destroy());
 }
 
-async function writeAttachment(attachment: TmuxAttachment, text: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+async function writeAttachment(attachment: TmuxAttachment, text: string, checkpoint: string): Promise<void> {
+  await fixtureFor().progress.run(checkpoint, 10_000, () => new Promise<void>((resolve, reject) => {
     attachment.stream.write(Buffer.from(`${text}\r`, "utf8"), (error) => error == null ? resolve() : reject(error));
-  });
+  }), () => attachment.stream.destroy());
 }
 
 async function startAttachment(
@@ -215,15 +278,23 @@ async function startAttachment(
   columns: number,
   rows: number
 ): Promise<TmuxAttachment> {
-  const execId = await engine.createExec(containerId, {
+  const fixture = fixtureFor(containerId);
+  const execId = await fixture.progress.run("tmux.attachment.exec-create", dockerOperationTimeoutMs, () => engine.createExec(containerId, {
     command: [binaryPath, "-S", socketPath, "-f", configPath, "attach-session", "-t", sessionName],
     workingDirectory: "/",
     environment: { TERM: "xterm-256color", TERMINFO: terminfoPath, TMUX_TMPDIR: path.posix.dirname(socketPath) },
     attachStdin: true,
     tty: true,
     consoleSize: { columns, rows }
-  });
-  const stream = await engine.startExecAttached(execId, true);
+  }));
+  fixture.latestExecId = execId;
+  fixture.execs.set(execId, "tmux.attach");
+  fixture.attachmentExecIds.add(execId);
+  fixture.diagnosticExecIds.add(execId);
+  fixture.progress.record("tmux.attachment.exec-created", "info", { containerId, execId, sessionName, columns, rows });
+  const stream = await fixture.progress.run("tmux.attachment.stream-establish", dockerOperationTimeoutMs,
+    () => engine.startExecAttached(execId, true));
+  fixture.progress.record("tmux.attachment.stream-established", "completed", { containerId, execId });
   const attachment: TmuxAttachment = { execId, stream, chunks: [], byteLength: 0, streamError: null };
   stream.on("data", (value: unknown) => {
     const bytes = chunkBuffer(value);
@@ -243,19 +314,25 @@ async function paneIdentity(engine: DockerEngineClient, containerId: string, bin
   return (await commandOkay(engine, containerId, [
     binaryPath, "-S", socketPath, "-f", configPath, "display-message", "-p", "-t", sessionName,
     "#{session_id}|#{pane_id}|#{pane_pid}|#{pane_width}x#{pane_height}"
-  ])).trim();
+  ], "tmux.pane-identity")).trim();
 }
 
 async function cleanupContainer(fixture: ActiveFixture, containerId: string): Promise<void> {
-  const container = await fixture.engine.inspectContainer(containerId);
+  const container = await fixture.progress.run("cleanup.container.inspect", dockerOperationTimeoutMs,
+    () => fixture.engine.inspectContainer(containerId));
   if (container.Config.Labels["devspace.test"] !== "persistent-tmux-feasibility"
     || container.Config.Labels["devspace.test-run"] !== fixture.runId) {
     throw new Error("rootless-tmux-refusing-to-remove-unowned-container");
   }
-  if (container.State.Running) await fixture.engine.stopContainer(containerId);
-  await fixture.engine.removeContainer(containerId);
+  if (container.State.Running) {
+    await fixture.progress.run("cleanup.container.stop", dockerOperationTimeoutMs,
+      () => fixture.engine.stopContainer(containerId));
+  }
+  await fixture.progress.run("cleanup.container.remove", dockerOperationTimeoutMs,
+    () => fixture.engine.removeContainer(containerId));
   try {
-    await fixture.engine.inspectContainer(containerId);
+    await fixture.progress.run("cleanup.container.verify-removed", dockerOperationTimeoutMs,
+      () => fixture.engine.inspectContainer(containerId));
     throw new Error("rootless-tmux-container-removal-not-observed");
   } catch (error) {
     if (!(error instanceof DockerEngineError) || error.statusCode !== 404) throw error;
@@ -263,10 +340,67 @@ async function cleanupContainer(fixture: ActiveFixture, containerId: string): Pr
   fixture.containerIds.delete(containerId);
 }
 
+async function captureDiagnosticState(fixture: ActiveFixture, reason: string, error?: unknown): Promise<void> {
+  const failedAtCheckpoint = fixture.progress.lastCheckpoint;
+  const lastCompletedCheckpoint = fixture.progress.lastCompletedCheckpoint;
+  fixture.failureCheckpoint = { lastCheckpoint: failedAtCheckpoint, lastCompletedCheckpoint };
+  fixture.progress.record("diagnostic.snapshot", "info", {
+    reason,
+    ...(error === undefined ? {} : { error: errorMessage(error) }),
+    failedAtCheckpoint,
+    lastCompletedCheckpoint,
+    containerIds: [...fixture.containerIds],
+    execIds: [...fixture.diagnosticExecIds].map((execId) => ({ execId, operation: fixture.execs.get(execId) ?? "unknown" }))
+  });
+
+  for (const containerId of fixture.containerIds) {
+    try {
+      const container = await fixture.progress.run("diagnostic.container.inspect", diagnosticOperationTimeoutMs,
+        () => fixture.engine.inspectContainer(containerId));
+      fixture.progress.record("diagnostic.container.state", "info", {
+        containerId,
+        image: container.Config.Image,
+        user: container.Config.User,
+        running: container.State.Running,
+        status: container.State.Status,
+        exitCode: container.State.ExitCode
+      });
+    } catch (inspectError) {
+      fixture.progress.record("diagnostic.container.state-unavailable", "failed", {
+        containerId, error: errorMessage(inspectError)
+      });
+    }
+  }
+
+  await Promise.all([...fixture.diagnosticExecIds].map(async (execId) => {
+    try {
+      const execution = await fixture.progress.run("diagnostic.exec.inspect", diagnosticOperationTimeoutMs,
+        () => fixture.engine.inspectExec(execId));
+      fixture.progress.record("diagnostic.exec.state", "info", {
+        execId,
+        operation: fixture.execs.get(execId) ?? "unknown",
+        containerId: execution.ContainerID,
+        running: execution.Running,
+        exitCode: execution.ExitCode
+      });
+    } catch (inspectError) {
+      fixture.progress.record("diagnostic.exec.state-unavailable", "failed", {
+        execId, operation: fixture.execs.get(execId) ?? "unknown", error: errorMessage(inspectError)
+      });
+    }
+  }));
+}
+
 afterEach(async () => {
   const fixture = activeFixture;
   if (fixture === null) return;
   let cleanupError: unknown;
+  await captureDiagnosticState(fixture, "before-disposable-container-cleanup");
+  fixture.progress.record("cleanup.begin", "info", {
+    lastCompletedCheckpoint: fixture.progress.lastCompletedCheckpoint,
+    containerIds: [...fixture.containerIds]
+  });
+  for (const stream of fixture.commandStreams) stream.destroy();
   for (const attachment of fixture.attachments) attachment.destroy();
   for (const containerId of fixture.containerIds) {
     try { await cleanupContainer(fixture, containerId); }
@@ -278,11 +412,15 @@ afterEach(async () => {
       cleanupError ??= error;
     }
   }
+  fixture.progress.record("cleanup.finished", cleanupError === undefined ? "completed" : "failed", {
+    remainingContainerIds: [...fixture.containerIds],
+    ...(cleanupError === undefined ? {} : { error: errorMessage(cleanupError) })
+  });
   activeFixture = null;
   if (cleanupError !== undefined) {
     throw cleanupError instanceof Error ? cleanupError : new Error("rootless-tmux-fixture-cleanup-failed", { cause: cleanupError });
   }
-});
+}, 90_000);
 
 test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined)
   .each(testImages)("real rootless Docker preserves the tmux shell across disposable exec clients (%s)", async (imageReference) => {
@@ -291,13 +429,44 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     }
     const startedAt = performance.now();
     const engine = new DockerEngineClient(dockerSocketPath);
-    await engine.assertRootlessAvailable();
     const runId = randomUUID();
-    const fixture: ActiveFixture = { engine, runId, containerIds: new Set(), attachments: new Set() };
+    const progress = new ProbeProgress(imageReference, process.env.DEVSPACE_TEST_TMUX_PROGRESS_FILE);
+    const fixture: ActiveFixture = {
+      engine,
+      runId,
+      progress,
+      containerIds: new Set(),
+      attachments: new Set(),
+      commandStreams: new Set(),
+      execs: new Map(),
+      attachmentExecIds: new Set(),
+      diagnosticExecIds: new Set(),
+      latestExecId: null,
+      failureCheckpoint: null
+    };
     activeFixture = fixture;
-    await engine.ensureImage(imageReference);
-    const image = await engine.inspectImage(imageReference);
+    progress.record("probe.started", "info", { runId, dockerSocketPath });
+    onTestFailed(({ task }) => {
+      const result = task.result as unknown as {
+        readonly state?: string;
+        readonly errors?: readonly { readonly name?: string; readonly message?: string; readonly stack?: string }[];
+      } | undefined;
+      progress.record("probe.test-failed", "failed", {
+        state: result?.state,
+        lastCompletedCheckpoint: fixture.failureCheckpoint?.lastCompletedCheckpoint ?? progress.lastCompletedCheckpoint,
+        lastCheckpoint: fixture.failureCheckpoint?.lastCheckpoint ?? progress.lastCheckpoint,
+        errors: (result?.errors ?? []).map((error) => ({
+          name: error.name,
+          message: error.message,
+          stack: error.stack?.slice(0, 2_000)
+        }))
+      });
+    });
+    await progress.run("docker.daemon.assert-rootless", dockerOperationTimeoutMs, () => engine.assertRootlessAvailable());
+    await progress.run("docker.image.ensure", dockerOperationTimeoutMs, () => engine.ensureImage(imageReference));
+    const image = await progress.run("docker.image.inspect", dockerOperationTimeoutMs, () => engine.inspectImage(imageReference));
     expect(image).toMatchObject({ Os: "linux", Architecture: "amd64" });
+    progress.record("docker.image.verified", "info", { imageReference, imageId: image.Id, architecture: image.Architecture });
 
     const role = imageReference.endsWith("-slim") ? "slim" : "bookworm";
     const containerName = `devspace-tmux-${runId.slice(0, 8)}-${role}`;
@@ -306,7 +475,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       "devspace.test-run": runId,
       "devspace.test-image": imageReference
     };
-    const containerId = await engine.createProbeContainer(containerName, {
+    const containerId = await progress.run("docker.container.create", dockerOperationTimeoutMs, () => engine.createProbeContainer(containerName, {
       imageId: image.Id,
       imageReference,
       user: testUser,
@@ -315,14 +484,21 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       cpuMillicores: 500,
       memoryBytes: 512 * 1024 * 1024,
       pidLimit: 64
-    });
+    }));
     fixture.containerIds.add(containerId);
-    await engine.startContainer(containerId);
-    const container = await engine.inspectContainer(containerId);
+    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser: testUser });
+    await progress.run("docker.container.start", dockerOperationTimeoutMs, () => engine.startContainer(containerId));
+    progress.record("docker.container.started", "info", { containerId });
+    const container = await progress.run("docker.container.inspect-after-start", dockerOperationTimeoutMs,
+      () => engine.inspectContainer(containerId));
+    progress.record("docker.container.state", "info", {
+      containerId, image: container.Config.Image, user: container.Config.User,
+      running: container.State.Running, status: container.State.Status
+    });
     expect(container.Config.User).toBe(testUser);
     expect(container.HostConfig).toMatchObject({ Privileged: false, NetworkMode: "none" });
-    expect(await commandOkay(engine, containerId, ["id", "-u"])).toBe("1000\n");
-    expect(await commandOkay(engine, containerId, ["id", "-g"])).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.identity.uid")).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe("1000\n");
 
     const directoryName = `persistent-tmux-${runId}`;
     const artifactRoot = `/opt/devspace-codex-probe/${directoryName}`;
@@ -332,27 +508,37 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const socketDirectory = `${artifactRoot}/socket`;
     const socketPath = `${socketDirectory}/server.sock`;
     const sessionName = `shell-${runId.slice(0, 8)}`;
-    await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", artifactRoot]);
-    await engine.putContainerArchive(containerId, "/opt/devspace-codex-probe", artifactArchive(runId), 30_000);
-    expect(await commandOkay(engine, containerId, ["sha256sum", "--", binaryPath])).toContain(tmuxBinarySha256);
-    expect(await commandOkay(engine, containerId, [binaryPath, "-V"])).toBe("tmux 3.7c\n");
-    expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", binaryPath])).toBe("755 1000:1000\n");
+    await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", artifactRoot], "container.artifact-dir.create");
+    progress.record("artifact.stage.started", "started", { containerId, destination: "/opt/devspace-codex-probe" });
+    await progress.run("artifact.stage", dockerOperationTimeoutMs,
+      () => engine.putContainerArchive(containerId, "/opt/devspace-codex-probe", artifactArchive(runId), 30_000));
+    progress.record("artifact.stage.completed", "completed", { containerId, destination: "/opt/devspace-codex-probe" });
+    expect(await commandOkay(engine, containerId, ["sha256sum", "--", binaryPath], "artifact.verify.binary-sha256"))
+      .toContain(tmuxBinarySha256);
+    expect(await commandOkay(engine, containerId, [binaryPath, "-V"], "artifact.verify.tmux-version")).toBe("tmux 3.7c\n");
+    expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", binaryPath], "artifact.verify.binary-ownership"))
+      .toBe("755 1000:1000\n");
     for (const name of ["xterm-256color", "tmux-256color"]) {
       const entry = (await collectFiles(tmuxTerminfoPath)).find((candidate) => path.posix.basename(candidate.relativePath) === name);
       if (entry === undefined) throw new Error(`rootless-tmux-terminfo-entry-missing:${name}`);
       const stagedPath = `${terminfoPath}/${entry.relativePath}`;
-      expect(await commandOkay(engine, containerId, ["test", "-s", stagedPath])).toBe("");
-      expect(await commandOkay(engine, containerId, ["stat", "-c", "%u:%g", stagedPath])).toBe("1000:1000\n");
+      expect(await commandOkay(engine, containerId, ["test", "-s", stagedPath], `artifact.verify.terminfo.${name}.exists`)).toBe("");
+      expect(await commandOkay(engine, containerId, ["stat", "-c", "%u:%g", stagedPath], `artifact.verify.terminfo.${name}.owner`))
+        .toBe("1000:1000\n");
     }
-    await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", socketDirectory]);
-    expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", socketDirectory])).toBe("700 1000:1000\n");
+    await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", socketDirectory], "tmux.socket-directory.create");
+    expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", socketDirectory], "tmux.socket-directory.verify"))
+      .toBe("700 1000:1000\n");
 
+    progress.record("tmux.session-create.started", "started", { containerId, sessionName, shell: "/bin/sh -i" });
     const creation = await containerCommand(engine, containerId, [
       binaryPath, "-S", socketPath, "-f", configPath,
       "new-session", "-d", "-s", sessionName, "-x", "80", "-y", "24", "/bin/sh", "-i"
-    ], { TERM: "xterm-256color", TERMINFO: terminfoPath, TMUX_TMPDIR: socketDirectory });
+    ], { TERM: "xterm-256color", TERMINFO: terminfoPath, TMUX_TMPDIR: socketDirectory }, "tmux.session-create");
+    progress.record("tmux.session-create.completed", "completed", { containerId, execId: creation.execId, exitCode: creation.exitCode });
     expect(creation.exitCode).toBe(0);
-    const socketInfo = (await commandOkay(engine, containerId, ["stat", "-c", "%F %a %u:%g", socketPath])).trim().split(" ");
+    const socketInfo = (await commandOkay(engine, containerId, ["stat", "-c", "%F %a %u:%g", socketPath],
+      "tmux.socket.verify-owner-mode")).trim().split(" ");
     expect(socketInfo[0]).toBe("socket");
     expect(socketInfo[2]).toBe("1000:1000");
     const socketMode = Number.parseInt(socketInfo[1] ?? "", 8);
@@ -360,28 +546,34 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
 
     const identityBefore = await paneIdentity(engine, containerId, binaryPath, socketPath, configPath, sessionName);
     const [sessionId, paneId, shellPid] = identityBefore.split("|");
+    progress.record("tmux.session.identity", "info", { containerId, sessionId, paneId, shellPid, identity: identityBefore });
     expect(sessionId).toMatch(/^\$[0-9]+$/u);
     expect(paneId).toMatch(/^%[0-9]+$/u);
     expect(shellPid).toMatch(/^[1-9][0-9]*$/u);
     const first = await startAttachment(engine, containerId, binaryPath, socketPath, configPath, terminfoPath, sessionName, 80, 24);
-    expect((await engine.inspectExec(first.execId)).Running).toBe(true);
+    expect((await progress.run("tmux.first-attachment.inspect-exec", dockerOperationTimeoutMs,
+      () => engine.inspectExec(first.execId))).Running).toBe(true);
 
-    await writeAttachment(first, "printf 'SHELL_PID=%s\\n' \"$$\"; printf 'SHELL_TERM=%s\\n' \"$TERM\"");
-    await waitForAttachmentText(first, `SHELL_PID=${shellPid}`);
-    await waitForAttachmentText(first, "SHELL_TERM=tmux-256color");
-    await engine.resizeExec(first.execId, 100, 32);
+    await writeAttachment(first, "printf 'SHELL_PID=%s\\n' \"$$\"; printf 'SHELL_TERM=%s\\n' \"$TERM\"",
+      "tmux.first-attachment.write-pid-term");
+    await waitForAttachmentText(first, `SHELL_PID=${shellPid}`, "tmux.first-attachment.read-pid");
+    await waitForAttachmentText(first, "SHELL_TERM=tmux-256color", "tmux.first-attachment.read-term");
+    await progress.run("tmux.first-attachment.resize", dockerOperationTimeoutMs,
+      () => engine.resizeExec(first.execId, 100, 32));
     const resizedIdentity = await waitFor(
       async () => await paneIdentity(engine, containerId, binaryPath, socketPath, configPath, sessionName),
       (value) => value.endsWith("100x32"),
-      "rootless-tmux-pane-did-not-follow-docker-exec-resize"
+      "rootless-tmux-pane-did-not-follow-docker-exec-resize",
+      "tmux.first-attachment.resize-confirm"
     );
     expect(resizedIdentity.split("|").slice(0, 3).join("|")).toBe(identityBefore.split("|").slice(0, 3).join("|"));
-    await writeAttachment(first, "printf 'RESIZE_STTY=%s\\n' \"$(stty size)\"");
-    await waitForAttachmentText(first, "RESIZE_STTY=32 100");
+    await writeAttachment(first, "printf 'RESIZE_STTY=%s\\n' \"$(stty size)\"", "tmux.first-attachment.write-resize-check");
+    await waitForAttachmentText(first, "RESIZE_STTY=32 100", "tmux.first-attachment.read-resize-check");
 
     await writeAttachment(first,
-      "i=1; while [ \"$i\" -le 100 ]; do printf 'HISTORY_LINE_%03d\\n' \"$i\"; i=$((i + 1)); done; printf 'HISTORY_DONE\\n'");
-    await waitForAttachmentText(first, "HISTORY_DONE");
+      "i=1; while [ \"$i\" -le 100 ]; do printf 'HISTORY_LINE_%03d\\n' \"$i\"; i=$((i + 1)); done; printf 'HISTORY_DONE\\n'",
+      "tmux.first-attachment.write-history");
+    await waitForAttachmentText(first, "HISTORY_DONE", "tmux.first-attachment.read-history-complete");
     const history = await commandOkay(engine, containerId, [
       binaryPath, "-S", socketPath, "-f", configPath, "capture-pane", "-p", "-S", "-", "-t", sessionName
     ]);
@@ -396,8 +588,9 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       binaryPath, "-S", socketPath, "-f", configPath, "display-message", "-p", "-t", sessionName, "#{pane_in_mode}"
     ])).toBe("0\n");
 
-    await writeAttachment(first, "printf '\\033[2J\\033[HDEVSPACE_SCREEN_MARKER\\n'; printf 'SHELL_PID=%s\\n' \"$$\"");
-    const firstScreen = await waitForAttachmentText(first, "DEVSPACE_SCREEN_MARKER");
+    await writeAttachment(first, "printf '\\033[2J\\033[HDEVSPACE_SCREEN_MARKER\\n'; printf 'SHELL_PID=%s\\n' \"$$\"",
+      "tmux.first-attachment.write-screen-marker");
+    const firstScreen = await waitForAttachmentText(first, "DEVSPACE_SCREEN_MARKER", "tmux.first-attachment.read-screen-marker");
     expect(firstScreen).toContain(`SHELL_PID=${shellPid}`);
     expect(await commandOkay(engine, containerId, [
       binaryPath, "-S", socketPath, "-f", configPath, "capture-pane", "-p", "-S", "-", "-t", sessionName
@@ -409,13 +602,15 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const clientPid = clientPidText.trim();
     expect(clientPid).toMatch(/^[1-9][0-9]*$/u);
     await commandOkay(engine, containerId, ["/bin/sh", "-c", "kill -KILL \"$1\"", "sh", clientPid]);
-    await waitFor(async () => (await engine.inspectExec(first.execId)).Running, (running) => !running,
-      "rootless-tmux-first-docker-exec-client-did-not-exit");
+    await waitFor(async () => (await progress.run("docker.exec.first-attachment.inspect", dockerOperationTimeoutMs,
+      () => engine.inspectExec(first.execId))).Running, (running) => !running,
+    "rootless-tmux-first-docker-exec-client-did-not-exit", "tmux.first-attachment.detach-confirm");
     await waitFor(
       async () => await commandOkay(engine, containerId, [binaryPath, "-S", socketPath, "-f", configPath,
         "list-clients", "-t", sessionName, "-F", "#{client_pid}"]),
       (value) => value.trim() === "",
-      "rootless-tmux-client-remained-attached-after-termination"
+      "rootless-tmux-client-remained-attached-after-termination",
+      "tmux.first-attachment.detach-client-confirm"
     );
     const detachedIdentity = await paneIdentity(engine, containerId, binaryPath, socketPath, configPath, sessionName);
     expect(detachedIdentity.split("|").slice(0, 3).join("|")).toBe(identityBefore.split("|").slice(0, 3).join("|"));
@@ -423,7 +618,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
 
     const second = await startAttachment(engine, containerId, binaryPath, socketPath, configPath, terminfoPath, sessionName, 100, 32);
     expect(second.execId).not.toBe(first.execId);
-    const redrawn = await waitForAttachmentText(second, "DEVSPACE_SCREEN_MARKER");
+    const redrawn = await waitForAttachmentText(second, "DEVSPACE_SCREEN_MARKER", "tmux.second-attachment.redraw");
     expect(redrawn.includes(`${String.fromCharCode(27)}[`)).toBe(true);
     expect(await paneIdentity(engine, containerId, binaryPath, socketPath, configPath, sessionName)).toBe(resizedIdentity);
     const retainedHistory = await commandOkay(engine, containerId, [
@@ -436,22 +631,24 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       binaryPath, "-S", socketPath, "-f", configPath, "display-message", "-p", "-t", sessionName, "#{pane_in_mode}"
     ])).toBe("1\n");
     await commandOkay(engine, containerId, [binaryPath, "-S", socketPath, "-f", configPath, "send-keys", "-X", "-t", sessionName, "cancel"]);
-    await writeAttachment(second, "printf 'REATTACHED_INPUT_OK\\n'");
-    await waitForAttachmentText(second, "REATTACHED_INPUT_OK");
+    await writeAttachment(second, "printf 'REATTACHED_INPUT_OK\\n'", "tmux.second-attachment.write-input");
+    await waitForAttachmentText(second, "REATTACHED_INPUT_OK", "tmux.second-attachment.read-input");
 
     const stoppedAt = performance.now();
-    await engine.stopContainer(containerId);
-    expect((await engine.inspectContainer(containerId)).State.Running).toBe(false);
-    await waitFor(async () => (await engine.inspectExec(second.execId)).Running, (running) => !running,
-      "rootless-tmux-attachment-remained-running-after-container-stop");
+    await progress.run("docker.container.stop", dockerOperationTimeoutMs, () => engine.stopContainer(containerId));
+    expect((await progress.run("docker.container.inspect-after-stop", dockerOperationTimeoutMs,
+      () => engine.inspectContainer(containerId))).State.Running).toBe(false);
+    await waitFor(async () => (await progress.run("docker.exec.second-attachment.inspect", dockerOperationTimeoutMs,
+      () => engine.inspectExec(second.execId))).Running, (running) => !running,
+    "rootless-tmux-attachment-remained-running-after-container-stop", "docker.container-stop.attachment-exit");
     second.stream.destroy();
     let stoppedAttachRejected = false;
     try {
-      await engine.createExec(containerId, {
+      await progress.run("docker.exec.create-after-container-stop", dockerOperationTimeoutMs, () => engine.createExec(containerId, {
         command: [binaryPath, "-S", socketPath, "-f", configPath, "attach-session", "-t", sessionName],
         workingDirectory: "/", environment: { TERM: "xterm-256color", TERMINFO: terminfoPath },
         attachStdin: true, tty: true, consoleSize: { columns: 100, rows: 32 }
-      });
+      }));
     } catch (error) {
       if (!(error instanceof DockerEngineError) || ![404, 409].includes(error.statusCode)) throw error;
       stoppedAttachRejected = true;
@@ -460,6 +657,10 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const stopElapsedMs = Math.round(performance.now() - stoppedAt);
 
     const elapsedMs = Math.round(performance.now() - startedAt);
+    progress.record("tmux.feasibility-assertions.completed", "completed", {
+      containerId, sessionId, paneId, shellPid, firstAttachExecId: first.execId, secondAttachExecId: second.execId,
+      resize: "100x32", historyLines: 100, stopElapsedMs, elapsedMs
+    });
     const evidence = {
       image: imageReference,
       architecture: image.Architecture,
