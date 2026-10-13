@@ -594,12 +594,12 @@ async function proveExecutionManagerRecovery(
     "persistent terminal did not send its initial tmux redraw", "manager.initial-redraw");
   firstSocket.receive(encodeTerminalClientFrame({ type: "resize", columns: 100, rows: 32 }));
   firstSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from(
-    "printf 'SHELL_PID=%s\\n' \"$$\"; sleep 900 & printf 'LONG_PID=%s\\n' \"$!\"; printf '\\033[2J\\033[HDEVSPACE_SCREEN_MARKER\\n'\r"
+    "printf 'SHELL_PID=%s\\n' \"$$\"; sleep 900 & printf 'LONG_PID=%s\\n' \"$!\"; printf 'DEVSPACE_SCREEN_MARKER\\n'\r"
   ) }));
   const firstOutput = await waitFor(
     () => Promise.resolve(persistentSocketOutput(firstSocket)),
     (text) => /SHELL_PID=[1-9][0-9]*/u.test(text) && /LONG_PID=[1-9][0-9]*/u.test(text),
-    () => `persistent shell did not report its shell and background process PIDs; socket=${firstSocket.readyState}; output=${JSON.stringify(persistentSocketOutput(firstSocket).slice(-1_200))}`,
+    () => `persistent shell did not report its shell and background process PIDs; socket=${firstSocket.readyState}; output=${JSON.stringify(persistentSocketOutput(firstSocket).slice(-400))}`,
     "manager.shell.pid-and-process"
   );
   expect(firstOutput).toContain("DEVSPACE_SCREEN_MARKER");
