@@ -109,7 +109,7 @@ function appendArchiveEntry(pack: tar.Pack, header: tar.Header, bytes?: Buffer):
 }
 
 export async function buildPersistentTmuxArchive(uid: number, gid: number): Promise<Readable> {
-  if (!Number.isSafeInteger(uid) || uid < 1 || !Number.isSafeInteger(gid) || gid < 0) {
+  if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
     throw new Error("persistent-tmux-execution-identity-invalid");
   }
   const [binary, configuration, xtermTerminfo, tmuxTerminfo] = await Promise.all([

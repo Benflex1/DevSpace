@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
+import { pipeline } from "node:stream/promises";
+import * as tar from "tar-stream";
 import {
+  buildPersistentTmuxArchive,
   persistentTerminalOwnershipMarker,
   persistentTmuxBinding,
   persistentTmuxSessionName,
@@ -37,6 +40,20 @@ describe("persistent tmux identity", () => {
       socketDirectory: "/tmp/devspace-persistent-tmux-0",
       socketPath: "/tmp/devspace-persistent-tmux-0/server.sock"
     });
+  });
+
+  test("packages tmux artifacts for a root-owned workspace execution identity", async () => {
+    const headers: Array<{ readonly uid?: number; readonly gid?: number }> = [];
+    const extract = tar.extract();
+    extract.on("entry", (header, stream, next) => {
+      headers.push({ uid: header.uid ?? -1, gid: header.gid ?? -1 });
+      stream.on("end", next);
+      stream.resume();
+    });
+    await pipeline(await buildPersistentTmuxArchive(0, 0), extract);
+
+    expect(headers.length).toBeGreaterThan(0);
+    expect(headers.every((header) => header.uid === 0 && header.gid === 0)).toBe(true);
   });
 
   test("parses one exact pane and retains pane-death evidence", () => {

@@ -52,7 +52,7 @@ const persistentTerminalRecordSchema = z.strictObject({
   sessionId: z.string().regex(/^\$[0-9]+$/u).nullable(),
   paneId: z.string().regex(/^%[0-9]+$/u).nullable(),
   panePid: z.number().int().positive().nullable(),
-  uid: z.number().int().positive(),
+  uid: z.number().int().nonnegative(),
   gid: z.number().int().nonnegative(),
   socketPath: z.string().min(1),
   ownershipMarker: z.string().regex(/^[0-9a-f]{64}$/u),

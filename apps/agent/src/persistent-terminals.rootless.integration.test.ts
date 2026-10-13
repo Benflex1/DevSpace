@@ -21,7 +21,6 @@ import { persistentTmuxBinding, PersistentTmuxRuntime } from "./persistent-termi
 const dockerSocketPath = process.env.DEVSPACE_TEST_DOCKER_SOCKET_PATH;
 const tmuxBinaryPath = process.env.DEVSPACE_TEST_TMUX_BINARY_PATH;
 const tmuxTerminfoPath = process.env.DEVSPACE_TEST_TMUX_TERMINFO_PATH;
-const tmuxArchiveSha256 = "cc56bd1cc873eb6089c615f0496b072385bda8a6d944069f38564a5d49c128aa";
 const tmuxBinarySha256 = "7d0f1e85c5b11df7fe127ab90674c6a15663ad72a25fcf7fabadba6bbb0b29d5";
 const testImages = ["node:24-bookworm", "node:24-bookworm-slim"] as const;
 const testUser = "1000:1000";
@@ -263,7 +262,7 @@ function appendArchiveEntry(pack: tar.Pack, header: tar.Header, bytes?: Buffer):
   });
 }
 
-function artifactArchive(runId: string): Readable {
+function artifactArchive(runId: string, uid = 1000, gid = uid): Readable {
   if (tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined) {
     throw new Error("rootless-tmux-artifact-paths-are-required");
   }
@@ -289,11 +288,11 @@ function artifactArchive(runId: string): Readable {
     }
     for (const directory of [...directories].sort((left, right) => left.split("/").length - right.split("/").length)) {
       await appendArchiveEntry(archive, {
-        name: `${directory}/`, type: "directory", mode: 0o700, uid: 1000, gid: 1000, mtime: new Date(0)
+        name: `${directory}/`, type: "directory", mode: 0o700, uid, gid, mtime: new Date(0)
       });
     }
     await appendArchiveEntry(archive, {
-      name: `${directoryName}/tmux`, type: "file", mode: 0o755, uid: 1000, gid: 1000, mtime: new Date(0)
+      name: `${directoryName}/tmux`, type: "file", mode: 0o755, uid, gid, mtime: new Date(0)
     }, binary);
     const config = Buffer.from([
       'set-option -g default-terminal "tmux-256color"',
@@ -303,12 +302,12 @@ function artifactArchive(runId: string): Readable {
       ""
     ].join("\n"));
     await appendArchiveEntry(archive, {
-      name: `${directoryName}/tmux.conf`, type: "file", mode: 0o600, uid: 1000, gid: 1000, mtime: new Date(0)
+      name: `${directoryName}/tmux.conf`, type: "file", mode: 0o600, uid, gid, mtime: new Date(0)
     }, config);
     for (const entry of selectedEntries) {
       await appendArchiveEntry(archive, {
         name: `${directoryName}/terminfo/${entry.relativePath}`, type: "file", mode: 0o644,
-        uid: 1000, gid: 1000, mtime: new Date(0)
+        uid, gid, mtime: new Date(0)
       }, entry.bytes);
     }
     archive.finalize();
@@ -318,14 +317,22 @@ function artifactArchive(runId: string): Readable {
   return archive;
 }
 
-async function writeArtifactArchiveFile(runId: string, archivePath: string, signal: AbortSignal): Promise<void> {
-  await pipeline(artifactArchive(runId), createWriteStream(archivePath, { flags: "wx", mode: 0o600 }), { signal });
+async function writeArtifactArchiveFile(
+  runId: string,
+  archivePath: string,
+  signal: AbortSignal,
+  uid = 1000,
+  gid = uid
+): Promise<void> {
+  await pipeline(artifactArchive(runId, uid, gid), createWriteStream(archivePath, { flags: "wx", mode: 0o600 }), { signal });
 }
 
 async function validateArtifactArchive(
   archiveBytes: Buffer,
   runId: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  uid = 1000,
+  gid = uid
 ): Promise<{ readonly entryCount: number; readonly binaryBytes: number }> {
   if (tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined) {
     throw new Error("rootless-tmux-artifact-paths-are-required");
@@ -369,7 +376,7 @@ async function validateArtifactArchive(
       const expectedEntry = expected.get(header.name);
       if (expectedEntry === undefined || observed.has(header.name)
         || header.type !== expectedEntry.type || header.mode !== expectedEntry.mode
-        || header.uid !== 1000 || header.gid !== 1000 || header.size !== expectedEntry.bytes.length) {
+        || header.uid !== uid || header.gid !== gid || header.size !== expectedEntry.bytes.length) {
         throw new Error(`rootless-tmux-archive-entry-metadata-mismatch:${header.name}`);
       }
       const chunks: Buffer[] = [];
@@ -547,7 +554,9 @@ async function waitForPersistentSocketText(
 
 async function proveExecutionManagerRecovery(
   fixture: ActiveFixture,
-  containerId: string
+  containerId: string,
+  uid: number,
+  gid: number
 ): Promise<{
   readonly manager: ExecutionManager;
   readonly projectId: string;
@@ -610,7 +619,7 @@ async function proveExecutionManagerRecovery(
   expect(shellPidMatch?.[1]).toBe(String(originalPanePid));
   const longRunningPid = Number(longRunningPidMatch?.[1]);
   expect(Number.isSafeInteger(longRunningPid) && longRunningPid > 0).toBe(true);
-  const binding = persistentTmuxBinding(containerId, 1000, 1000);
+  const binding = persistentTmuxBinding(containerId, uid, gid);
   let observedPaneSize = "not-read";
   let observedPersistedSize = "not-read";
   const paneSize = await waitFor(async () => {
@@ -944,6 +953,8 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const role = imageReference.endsWith("-slim") ? "slim" : "bookworm";
     const executionUser = role === "slim" ? "0:0" : testUser;
     const executionUid = role === "slim" ? 0 : 1000;
+    const executionGid = role === "slim" ? 0 : 1000;
+    const expectedOwner = `${executionUid}:${executionGid}`;
     const containerName = `devspace-tmux-${runId.slice(0, 8)}-${role}`;
     const labels = {
       "devspace.test": "persistent-tmux-feasibility",
@@ -995,7 +1006,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const archivePath = path.join(archiveTemporaryRoot, "tmux-artifacts.tar");
     const archiveWriteAbort = new AbortController();
     await progress.run("artifact.archive.generate-and-write", commandTimeoutMs,
-      () => writeArtifactArchiveFile(runId, archivePath, archiveWriteAbort.signal),
+      () => writeArtifactArchiveFile(runId, archivePath, archiveWriteAbort.signal, executionUid, executionGid),
       () => archiveWriteAbort.abort(new Error("rootless-tmux-archive-generation-timeout")));
     const archiveFile = await progress.run("artifact.archive.stat", dockerOperationTimeoutMs, () => stat(archivePath));
     if (archiveFile.size < 2_200_000 || archiveFile.size > 4 * 1024 * 1024) {
@@ -1008,9 +1019,10 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       () => readFile(archivePath));
     const archiveValidationAbort = new AbortController();
     const archiveValidation = await progress.run("artifact.archive.validate", commandTimeoutMs,
-      () => validateArtifactArchive(archiveBytes, runId, archiveValidationAbort.signal),
+      () => validateArtifactArchive(archiveBytes, runId, archiveValidationAbort.signal, executionUid, executionGid),
       () => archiveValidationAbort.abort(new Error("rootless-tmux-archive-validation-timeout")));
-    progress.record("artifact.archive.verified", "completed", { ...archiveValidation, archiveBytes: archiveBytes.length });
+    const archiveSha256 = createHash("sha256").update(archiveBytes).digest("hex");
+    progress.record("artifact.archive.verified", "completed", { ...archiveValidation, archiveBytes: archiveBytes.length, archiveSha256 });
 
     const upload = createReadStream(archivePath);
     upload.once("end", () => progress.record("artifact.upload.source-eof", "completed", {
@@ -1039,28 +1051,28 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       containerId, archiveBytes: upload.bytesRead, sourceEnded: upload.readableEnded
     });
     progress.record("artifact.stage.completed", "completed", { containerId, destination: "/opt" });
-    expect(await commandOkay(engine, containerId, ["id", "-u"], "artifact.verify.exec-uid")).toBe("1000\n");
-    expect(await commandOkay(engine, containerId, ["id", "-g"], "artifact.verify.exec-gid")).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "artifact.verify.exec-uid")).toBe(`${executionUid}\n`);
+    expect(await commandOkay(engine, containerId, ["id", "-g"], "artifact.verify.exec-gid")).toBe(`${executionGid}\n`);
     expect(await commandOkay(engine, containerId, ["sha256sum", "--", binaryPath], "artifact.verify.binary-sha256"))
       .toContain(tmuxBinarySha256);
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", artifactRoot], "artifact.verify.root-ownership"))
-      .toBe("700 1000:1000\n");
+      .toBe(`700 ${expectedOwner}\n`);
     expect(await commandOkay(engine, containerId, [binaryPath, "-V"], "artifact.verify.tmux-version")).toBe("tmux 3.7c\n");
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", binaryPath], "artifact.verify.binary-ownership"))
-      .toBe("755 1000:1000\n");
+      .toBe(`755 ${expectedOwner}\n`);
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", configPath], "artifact.verify.config-ownership"))
-      .toBe("600 1000:1000\n");
+      .toBe(`600 ${expectedOwner}\n`);
     for (const name of ["xterm-256color", "tmux-256color"]) {
       const entry = (await collectFiles(tmuxTerminfoPath)).find((candidate) => path.posix.basename(candidate.relativePath) === name);
       if (entry === undefined) throw new Error(`rootless-tmux-terminfo-entry-missing:${name}`);
       const stagedPath = `${terminfoPath}/${entry.relativePath}`;
       expect(await commandOkay(engine, containerId, ["test", "-s", stagedPath], `artifact.verify.terminfo.${name}.exists`)).toBe("");
       expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", stagedPath], `artifact.verify.terminfo.${name}.metadata`))
-        .toBe("644 1000:1000\n");
+        .toBe(`644 ${expectedOwner}\n`);
     }
     await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", socketDirectory], "tmux.socket-directory.create");
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", socketDirectory], "tmux.socket-directory.verify"))
-      .toBe("700 1000:1000\n");
+      .toBe(`700 ${expectedOwner}\n`);
 
     progress.record("tmux.session-create.started", "started", { containerId, sessionName, shell: "/bin/sh -i" });
     const creation = await containerCommand(engine, containerId, [
@@ -1072,7 +1084,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const socketInfo = (await commandOkay(engine, containerId, ["stat", "-c", "%F %a %u:%g", socketPath],
       "tmux.socket.verify-owner-mode")).trim().split(" ");
     expect(socketInfo[0]).toBe("socket");
-    expect(socketInfo[2]).toBe("1000:1000");
+    expect(socketInfo[2]).toBe(expectedOwner);
     const socketMode = Number.parseInt(socketInfo[1] ?? "", 8);
     expect(Number.isInteger(socketMode) && (socketMode & 0o600) === 0o600 && (socketMode & 0o077) === 0).toBe(true);
 
@@ -1166,7 +1178,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     await writeAttachment(second, "printf 'REATTACHED_INPUT_OK\\n'", "tmux.second-attachment.write-input");
     await waitForAttachmentText(second, "REATTACHED_INPUT_OK", "tmux.second-attachment.read-input");
 
-    const managerEvidence = await proveExecutionManagerRecovery(fixture, containerId);
+    const managerEvidence = await proveExecutionManagerRecovery(fixture, containerId, executionUid, executionGid);
 
     const stoppedAt = performance.now();
     await progress.run("docker.container.stop", dockerOperationTimeoutMs, () => engine.stopContainer(containerId));
@@ -1207,9 +1219,9 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       image: imageReference,
       architecture: image.Architecture,
       containerId,
-      executionUser: testUser,
+      executionUser,
       tmuxVersion: "3.7c",
-      archiveSha256: tmuxArchiveSha256,
+      archiveSha256,
       binarySha256: tmuxBinarySha256,
       sessionId,
       paneId,
@@ -1230,9 +1242,9 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       await appendFile(process.env.GITHUB_STEP_SUMMARY, [
         `### Rootless persistent terminal acceptance: ${imageReference}`,
         "",
-        `- Container: \`${containerId}\` (${testUser}, linux/${image.Architecture})`,
+        `- Container: \`${containerId}\` (${executionUser}, linux/${image.Architecture})`,
         `- Session/pane: \`${sessionId}\` / \`${paneId}\`; shell PID remained \`${shellPid}\` across execs \`${first.execId}\` and \`${second.execId}\`.`,
-        `- tmux 3.7c artifact SHA-256: \`${tmuxArchiveSha256}\` archive, \`${tmuxBinarySha256}\` binary.`,
+        `- tmux 3.7c artifact SHA-256: \`${archiveSha256}\` archive, \`${tmuxBinarySha256}\` binary.`,
         `- Production Agent manager shell PID remained \`${managerEvidence.shellPid}\`; background PID \`${managerEvidence.longRunningPid}\` survived manager reinitialization and reattachment.`,
         `- Verified 100 history lines, v2-ready redraw, input, resize to 100×32, tmux History / Return to live, and Stop reattachment rejection in ${stopElapsedMs} ms.`,
         `- Probe elapsed: ${elapsedMs} ms.`,
