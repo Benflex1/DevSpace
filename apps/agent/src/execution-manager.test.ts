@@ -26,7 +26,7 @@ function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> =
   const sessions = new Map<string, { readonly identity: PersistentTerminalOwnership; readonly sessionName: string }>();
   const deadSessions = new Set<string>();
   const counts = { sessionsCreated: 0, attachmentsCreated: 0, detaches: 0, resizes: 0, history: 0, live: 0 };
-  const detachedClients: Array<{ readonly sessionName: string; readonly clientPid: number }> = [];
+  const detachedClients: Array<{ readonly sessionName: string; readonly clientPid: number; readonly clientName: string }> = [];
   const runtime = {
     prepare: async (containerId: string): Promise<PersistentTmuxBinding> => ({
       containerId, uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test", binaryPath: "/opt/devspace-test/tmux",
@@ -52,11 +52,12 @@ function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> =
     },
     createAttachment: async () => {
       counts.attachmentsCreated += 1;
-      return { execId: `tmux-attach-${counts.attachmentsCreated}`, clientPid: 5432, stream: new PassThrough() };
+      return { execId: `tmux-attach-${counts.attachmentsCreated}`, clientPid: 5432, clientName: "/dev/pts/5",
+        stream: new PassThrough() };
     },
-    detachClient: async (_binding: PersistentTmuxBinding, sessionName: string, clientPid: number) => {
+    detachClient: async (_binding: PersistentTmuxBinding, sessionName: string, clientPid: number, clientName: string) => {
       counts.detaches += 1;
-      detachedClients.push({ sessionName, clientPid });
+      detachedClients.push({ sessionName, clientPid, clientName });
     },
     resizeAttachment: async () => { counts.resizes += 1; },
     history: async () => { counts.history += 1; },
@@ -657,7 +658,8 @@ test("a persistent attachment receives ready before tmux redraw and never prepen
   const attached = new PassThrough();
   attached.write(Buffer.from("TMUX_SCREEN_REDRAW"));
   const tmux = createFakePersistentRuntime({
-    createAttachment: async () => ({ execId: "tmux-attach-redraw", clientPid: 5432, stream: attached })
+    createAttachment: async () => ({ execId: "tmux-attach-redraw", clientPid: 5432, clientName: "/dev/pts/5",
+      stream: attached })
   });
   const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
     durableJsonWriter, undefined, undefined, tmux.runtime);
@@ -825,7 +827,7 @@ test("browser reattach gets a fresh Docker client, retained pane identity, resiz
   firstSocket.emit("close");
   await waitForTerminalAttachmentFinalization(first, terminalId);
   expect(tmux.counts.detaches).toBe(1);
-  expect(tmux.detachedClients).toEqual([{ sessionName: `ds-${terminalId}`, clientPid: 5432 }]);
+  expect(tmux.detachedClients).toEqual([{ sessionName: `ds-${terminalId}`, clientPid: 5432, clientName: "/dev/pts/5" }]);
 
   const restarted = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
   await restarted.initialize();
@@ -841,8 +843,8 @@ test("browser reattach gets a fresh Docker client, retained pane identity, resiz
   await restarted.shutdownTransports();
   expect(tmux.counts.detaches).toBe(2);
   expect(tmux.detachedClients).toEqual([
-    { sessionName: `ds-${terminalId}`, clientPid: 5432 },
-    { sessionName: `ds-${terminalId}`, clientPid: 5432 }
+    { sessionName: `ds-${terminalId}`, clientPid: 5432, clientName: "/dev/pts/5" },
+    { sessionName: `ds-${terminalId}`, clientPid: 5432, clientName: "/dev/pts/5" }
   ]);
 });
 

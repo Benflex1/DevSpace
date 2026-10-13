@@ -76,7 +76,13 @@ export type PersistentTmuxCommandResult = {
 export type PersistentTmuxAttachment = {
   readonly execId: string;
   readonly clientPid: number;
+  readonly clientName: string;
   readonly stream: Duplex;
+};
+
+type PersistentTmuxClientIdentity = {
+  readonly clientPid: number;
+  readonly clientName: string;
 };
 
 function digest(bytes: Uint8Array): string {
@@ -486,7 +492,7 @@ export class PersistentTmuxRuntime {
       || !Number.isInteger(size.rows) || size.rows < 1 || size.rows > PERSISTENT_TMUX_MAX_ROWS) {
       throw new Error("persistent-tmux-console-size-invalid");
     }
-    const previousClientPids = await this.listClientPids(binding, sessionName);
+    const previousClients = await this.listClients(binding, sessionName);
     const command = this.tmuxCommand(binding, ["attach-session", "-d", "-t", `=${sessionName}`]);
     const execId = await this.engine.createExec(binding.containerId, {
       command, workingDirectory: "/", environment: binding.environment, attachStdin: true, tty: true,
@@ -499,55 +505,71 @@ export class PersistentTmuxRuntime {
     }
     const stream = await this.engine.startExecAttached(execId, true);
     try {
-      const clientPid = await this.waitForNewClientPid(binding, sessionName, previousClientPids);
-      return { execId, clientPid, stream };
+      const client = await this.waitForNewClient(binding, sessionName, previousClients);
+      return { execId, clientPid: client.clientPid, clientName: client.clientName, stream };
     } catch (error) {
       if (!stream.destroyed) stream.destroy();
       throw error;
     }
   }
 
-  private async listClientPids(binding: PersistentTmuxBinding, sessionName: string): Promise<number[]> {
+  private async listClients(binding: PersistentTmuxBinding, sessionName: string): Promise<PersistentTmuxClientIdentity[]> {
     const result = await this.commandResult(binding, this.tmuxCommand(binding, [
-      "list-clients", "-t", `=${sessionName}`, "-F", "#{client_pid}"
+      "list-clients", "-t", `=${sessionName}`, "-F", "#{client_pid}|#{client_name}"
     ]));
     if (result.exitCode !== 0) throw new Error("persistent-tmux-client-query-unproven");
     const output = result.stdout.trim();
     if (output === "") return [];
-    const pids = output.split(/\r?\n/u).map((line) => {
-      if (!/^[1-9][0-9]{0,9}$/u.test(line)) throw new Error("persistent-tmux-client-identity-invalid");
-      const pid = Number(line);
-      if (!Number.isSafeInteger(pid)) throw new Error("persistent-tmux-client-identity-invalid");
-      return pid;
+    const clients = output.split(/\r?\n/u).map((line) => {
+      const separator = line.indexOf("|");
+      if (separator < 1 || separator !== line.lastIndexOf("|")) {
+        throw new Error("persistent-tmux-client-identity-invalid");
+      }
+      const pidText = line.slice(0, separator);
+      const clientName = line.slice(separator + 1);
+      if (!/^[1-9][0-9]{0,9}$/u.test(pidText)
+        || !(/^(?:\/dev\/pts\/[0-9]+|client-[1-9][0-9]{0,9})$/u.test(clientName))) {
+        throw new Error("persistent-tmux-client-identity-invalid");
+      }
+      const clientPid = Number(pidText);
+      if (!Number.isSafeInteger(clientPid)) throw new Error("persistent-tmux-client-identity-invalid");
+      return { clientPid, clientName };
     });
-    if (new Set(pids).size !== pids.length) throw new Error("persistent-tmux-client-identity-ambiguous");
-    return pids;
+    if (new Set(clients.map((client) => client.clientPid)).size !== clients.length
+      || new Set(clients.map((client) => client.clientName)).size !== clients.length) {
+      throw new Error("persistent-tmux-client-identity-ambiguous");
+    }
+    return clients;
   }
 
-  private async waitForNewClientPid(
+  private async waitForNewClient(
     binding: PersistentTmuxBinding,
     sessionName: string,
-    previousClientPids: readonly number[]
-  ): Promise<number> {
+    previousClients: readonly PersistentTmuxClientIdentity[]
+  ): Promise<PersistentTmuxClientIdentity> {
     const deadline = Date.now() + TMUX_CLIENT_RESOLUTION_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const pids = await this.listClientPids(binding, sessionName);
-      const newPids = pids.filter((pid) => !previousClientPids.includes(pid));
-      if (pids.length === 1 && newPids.length === 1) return newPids[0]!;
+      const clients = await this.listClients(binding, sessionName);
+      const newClients = clients.filter((client) => !previousClients.some((previous) =>
+        previous.clientPid === client.clientPid && previous.clientName === client.clientName));
+      if (clients.length === 1 && newClients.length === 1) return newClients[0]!;
       await new Promise<void>((resolve) => setTimeout(resolve, TMUX_CLIENT_POLL_INTERVAL_MS));
     }
     throw new Error("persistent-tmux-client-identity-unresolved");
   }
 
-  async detachClient(binding: PersistentTmuxBinding, sessionName: string, clientPid: number): Promise<void> {
+  async detachClient(binding: PersistentTmuxBinding, sessionName: string, clientPid: number, clientName: string): Promise<void> {
     if (!Number.isSafeInteger(clientPid) || clientPid < 1) throw new Error("persistent-tmux-client-identity-invalid");
-    const before = await this.listClientPids(binding, sessionName);
-    if (!before.includes(clientPid)) return;
+    if (!/^(?:\/dev\/pts\/[0-9]+|client-[1-9][0-9]{0,9})$/u.test(clientName)) {
+      throw new Error("persistent-tmux-client-identity-invalid");
+    }
+    const before = await this.listClients(binding, sessionName);
+    if (!before.some((client) => client.clientPid === clientPid && client.clientName === clientName)) return;
     const detached = await this.commandResult(binding, this.tmuxCommand(binding, [
-      "detach-client", "-t", String(clientPid)
+      "detach-client", "-t", clientName
     ]));
-    const after = await this.listClientPids(binding, sessionName);
-    if (!after.includes(clientPid)) return;
+    const after = await this.listClients(binding, sessionName);
+    if (!after.some((client) => client.clientPid === clientPid && client.clientName === clientName)) return;
     if (detached.exitCode !== 0) throw new Error("persistent-tmux-client-detach-unproven");
     throw new Error("persistent-tmux-client-remained-attached");
   }
