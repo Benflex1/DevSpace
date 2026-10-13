@@ -131,6 +131,30 @@ describe("dedicated rootless Docker boundary", () => {
     expect(Buffer.concat(chunks).toString("utf8")).toBe("archive-readback");
   });
 
+  test("cancels the archive source and socket when the Docker response deadline expires", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-archive-timeout-")); directories.push(directory);
+    const socket = path.join(directory, "engine.sock");
+    let resolveSocketClosed!: () => void;
+    const socketClosed = new Promise<void>((resolve) => { resolveSocketClosed = resolve; });
+    const server = http.createServer((request) => {
+      request.resume();
+      request.socket.once("close", () => resolveSocketClosed());
+    });
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+    const source = Readable.from([Buffer.alloc(64 * 1024)]);
+    const startedAt = performance.now();
+
+    await expect(new DockerEngineClient(socket).putContainerArchive("container-1", "/opt", source, 100)).rejects.toBeDefined();
+    await Promise.race([
+      socketClosed,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("docker-archive-timeout-socket-remained-open")), 500))
+    ]);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(source.destroyed).toBe(true);
+  });
+
   test("rejects a missing socket and a regular file path", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "devspace-docker-invalid-")); directories.push(directory);
     await expect(new DockerEngineClient(path.join(directory, "missing.sock")).assertRootlessAvailable()).rejects.toBeDefined();
