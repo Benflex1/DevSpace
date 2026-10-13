@@ -1,0 +1,170 @@
+import { execFile } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { expect, test } from "@playwright/test";
+
+const exec = promisify(execFile);
+const appOrigin = "https://127.0.0.1:3444";
+
+async function authenticatedStatus(pathname: string): Promise<number> {
+  const response = await fetch(`${appOrigin}${pathname}`);
+  return response.status;
+}
+
+test("fresh installation completes project, workspace, terminal, task, and persistence workflow", async ({ page }) => {
+  test.setTimeout(900_000);
+  const terminalStreamIds = new Set<string>();
+  page.on("websocket", (websocket) => {
+    const pathname = new URL(websocket.url()).pathname;
+    const terminalId = pathname.match(/\/terminals\/([^/]+)\/stream$/u)?.[1];
+    if (terminalId === undefined) return;
+    terminalStreamIds.add(terminalId);
+    console.log(`[installation-browser] terminal websocket opened path=${pathname}`);
+    let receivedFrames = 0;
+    websocket.on("framereceived", () => { receivedFrames += 1; });
+    websocket.on("close", () => console.log(`[installation-browser] terminal websocket closed after ${receivedFrames} received frames`));
+  });
+  const unauthenticated = await fetch("http://127.0.0.1:3000/api/projects/00000000-0000-4000-8000-000000000000/runtime");
+  expect(unauthenticated.status).toBe(403);
+
+  const pageResponse = await page.goto("/");
+  expect(pageResponse?.status()).toBe(200);
+  await expect(page.getByRole("heading", { name: "DevSpace" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible();
+
+  const suffix = process.env.GITHUB_RUN_ID ?? `${Date.now()}`;
+  const projectName = `Installation Acceptance ${suffix}`;
+  const projectSlug = `install-${suffix}`;
+  await page.getByRole("textbox", { name: /Repository URL/u }).fill("https://127.0.0.1:3443/repository.git");
+  await page.getByLabel("Project name").fill(projectName);
+  await page.getByLabel("Project slug").fill(projectSlug);
+  const registerResponse = page.waitForResponse((response) => response.url().endsWith("/api/projects")
+    && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Inspect and register" }).click();
+  const registered = await registerResponse;
+  expect(registered.status()).toBe(201);
+
+  const dashboardProject = page.locator("article", { has: page.getByRole("heading", { name: projectName }) });
+  await expect(dashboardProject.getByText("Registered — workspace setup pending")).toBeVisible({ timeout: 120_000 });
+  const projectHref = await dashboardProject.getByRole("link", { name: "Open project" }).getAttribute("href");
+  if (projectHref === null) throw new Error("The installation acceptance project link is missing.");
+  const projectId = projectHref.split("/").pop();
+  if (projectId === undefined || projectId === "") throw new Error("The installation acceptance project ID is missing.");
+  await dashboardProject.getByRole("link", { name: "Open project" }).click();
+
+  await page.getByLabel("Development container image").fill("mcr.microsoft.com/devcontainers/base:ubuntu-24.04");
+  let workspaceId: string | null = null;
+  for (let attempt = 0; attempt < 120 && workspaceId === null; attempt += 1) {
+    const setupResponsePromise = page.waitForResponse((response) => response.url().endsWith(`/api/projects/${projectId}/setup`)
+      && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Set up primary workspace" }).click();
+    const setupResponse = await setupResponsePromise;
+    const setupBody: unknown = await setupResponse.json();
+    if (setupResponse.status() === 202) {
+      await page.waitForTimeout(5_000);
+      continue;
+    }
+    expect(setupResponse.status()).toBe(200);
+    if (setupBody === null || typeof setupBody !== "object" || !("workspace" in setupBody)
+      || typeof setupBody.workspace !== "object" || setupBody.workspace === null
+      || !("workspaceId" in setupBody.workspace) || typeof setupBody.workspace.workspaceId !== "string") {
+      throw new Error("Workspace setup did not return its workspace ID.");
+    }
+    workspaceId = setupBody.workspace.workspaceId;
+  }
+  if (workspaceId === null) throw new Error("Primary workspace setup did not finish within ten minutes.");
+
+  const workbench = page.locator("main.workbench");
+  await expect(workbench).toBeVisible({ timeout: 120_000 });
+  await expect(workbench.locator(".runtime-chip.absent")).toHaveText("Offline");
+
+  await exec("/usr/bin/sudo", ["systemctl", "restart", "devspace-agent.service"], { timeout: 90_000 });
+  await exec("/usr/bin/sudo", ["systemctl", "restart", "devspace-web.service"], { timeout: 90_000 });
+  await expect.poll(async () => await authenticatedStatus(`/api/projects/${projectId}/runtime`), { timeout: 90_000 }).toBe(200);
+  await page.goto(`/projects/${projectId}`);
+  await expect(page.locator("main.workbench")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Agent connected" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Start runtime" }).click();
+  await expect(page.locator(".runtime-chip.running")).toHaveText("Running", { timeout: 300_000 });
+  await expect(page.getByRole("button", { name: "Stop runtime" })).toBeVisible();
+  await page.getByRole("button", { name: "Create terminal", exact: true }).click();
+  await expect(page.locator(".terminal-list li").first()).toContainText("active", { timeout: 60_000 });
+  const firstTerminal = page.locator(".terminal-tab-surface.is-active");
+  await firstTerminal.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("pwd; printf 'fresh-host-terminal-ok\\n'; printf 'fresh-host-persistence-ok\\n' > /workspace/install-acceptance.txt");
+  await page.keyboard.press("Enter");
+  await expect(firstTerminal.getByText("/workspace", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(firstTerminal.getByText("fresh-host-terminal-ok", { exact: true })).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "Stop runtime" }).click();
+  await expect(page.locator(".runtime-chip.stopped")).toHaveText("Stopped", { timeout: 180_000 });
+  await page.getByRole("button", { name: "Project Options" }).click();
+  await page.getByRole("button", { name: "Add task" }).click();
+  await expect(page.getByLabel("Task check name")).toHaveValue("Check workspace");
+  await page.getByRole("button", { name: "Save Draft" }).click();
+  await expect(page.locator(".options-draft-identity")).toContainText("Saved draft", { timeout: 60_000 });
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  const applyResponsePromise = page.waitForResponse((response) => response.url().endsWith(`/api/projects/${projectId}/options/apply`)
+    && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Confirm Apply" }).click();
+  const applyResponse = await applyResponsePromise;
+  const applyBody: unknown = await applyResponse.json();
+  const applySummary = applyBody !== null && typeof applyBody === "object"
+    ? { state: "state" in applyBody ? applyBody.state : undefined,
+      code: "code" in applyBody ? applyBody.code : undefined,
+      message: "message" in applyBody ? applyBody.message : undefined }
+    : null;
+  console.log(`[installation-browser] Project Options Apply HTTP ${applyResponse.status()} ${JSON.stringify(applySummary)}`);
+  expect(applyResponse.status()).toBe(200);
+  expect(applySummary?.state).toBe("applied");
+  await expect(page.locator(".options-apply-status.success")).toContainText("Applied", { timeout: 180_000 });
+
+  await page.getByRole("button", { name: "Start runtime" }).click();
+  await expect(page.locator(".runtime-chip.running")).toHaveText("Running", { timeout: 300_000 });
+  const taskRow = page.locator(".sidebar-task-list li", { hasText: "Check workspace" });
+  await taskRow.getByRole("button", { name: "Run", exact: true }).click();
+  const taskRuns = page.locator(".sidebar-task-runs");
+  await expect(taskRuns).toContainText("passed", { timeout: 120_000 });
+  await expect(taskRuns).toContainText("Exit code: 0");
+
+  const terminalCreateResponsePromise = page.waitForResponse((response) => response.url().endsWith(`/api/projects/${projectId}/terminals`)
+    && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Create terminal", exact: true }).click();
+  const terminalCreateResponse = await terminalCreateResponsePromise;
+  expect(terminalCreateResponse.status()).toBe(200);
+  const terminalCreateBody: unknown = await terminalCreateResponse.json();
+  if (terminalCreateBody === null || typeof terminalCreateBody !== "object" || !("terminalId" in terminalCreateBody)
+    || typeof terminalCreateBody.terminalId !== "string" || !("workspaceId" in terminalCreateBody)
+    || terminalCreateBody.workspaceId !== workspaceId) {
+    throw new Error("Terminal creation did not return the expected terminal and workspace IDs.");
+  }
+  const terminalId = terminalCreateBody.terminalId;
+  const readCreatedTerminalState = async (): Promise<string | null> => await page.evaluate<
+    string | null, { projectId: string; terminalId: string }
+  >(async ({ projectId, terminalId }) => {
+    const response = await fetch(`/api/projects/${projectId}/tasks`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const body: unknown = await response.json();
+    if (body === null || typeof body !== "object" || !("terminals" in body) || !Array.isArray(body.terminals)) return null;
+    const terminals = body.terminals as unknown[];
+    const terminal = terminals.find((candidate) => candidate !== null && typeof candidate === "object"
+      && "id" in candidate && candidate.id === terminalId);
+    return terminal !== undefined && terminal !== null && typeof terminal === "object"
+      && "state" in terminal && typeof terminal.state === "string" ? terminal.state : null;
+  }, { projectId, terminalId });
+  await expect.poll(readCreatedTerminalState, { timeout: 60_000 }).toBe("active");
+  await expect.poll(() => terminalStreamIds.has(terminalId), { timeout: 60_000 }).toBe(true);
+  const createdTerminal = page.locator(".terminal-tab-surface.is-active");
+  await expect(createdTerminal).toBeVisible();
+  await createdTerminal.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("cat /workspace/install-acceptance.txt");
+  await page.keyboard.press("Enter");
+  await expect(createdTerminal.getByText(/fresh-host-persistence-ok/u)).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "Stop runtime" }).click();
+  await expect(page.locator(".runtime-chip.stopped")).toHaveText("Stopped", { timeout: 180_000 });
+  const resultFile = process.env.INSTALL_ACCEPTANCE_RESULT_FILE;
+  if (resultFile === undefined) throw new Error("INSTALL_ACCEPTANCE_RESULT_FILE is required.");
+  await writeFile(resultFile, `${JSON.stringify({ projectId, workspaceId, projectSlug })}\n`, { mode: 0o600 });
+});

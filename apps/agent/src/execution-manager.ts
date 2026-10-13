@@ -302,7 +302,7 @@ export class ExecutionManager {
           await this.persist(live);
         } else {
           await this.refresh(live);
-          if (["running", "stopping"].includes(live.record.observedState)) this.monitorRecovered(live);
+          if (["running", "stopping"].includes(live.record.observedState)) this.monitorExecution(live);
         }
       }
     }
@@ -439,19 +439,19 @@ export class ExecutionManager {
     if (observation === "running") {
       live.record = { ...live.record, observedState: "running" };
       await this.persist(live);
-      this.monitorRecovered(live);
+      this.monitorExecution(live);
       return;
     }
     if (observation === "terminated" || observation === "definitely-gone") {
       live.record = { ...live.record, desiredState: "stopped", observedState: "lost", terminalState: "lost", finishedAt: null };
       await this.persist(live);
       await this.notifyHarnessRecovered(live).catch(() => undefined);
-      if (!this.settledHarnessProcessIds.has(live.record.processId) && live.record.execId !== null) this.monitorRecovered(live);
+      if (!this.settledHarnessProcessIds.has(live.record.processId) && live.record.execId !== null) this.monitorExecution(live);
       return;
     }
     live.record = { ...live.record, observedState: "lost" };
     await this.persist(live);
-    if (live.record.execId !== null) this.monitorRecovered(live);
+    if (live.record.execId !== null) this.monitorExecution(live);
   }
 
   private recordPath(processId: string): string { return path.join(this.recordsRoot, `${uuidV7Schema.parse(processId)}.json`); }
@@ -539,7 +539,7 @@ export class ExecutionManager {
     }
   }
 
-  private monitorRecovered(live: LiveExecution): void {
+  private monitorExecution(live: LiveExecution): void {
     let delayMs = RECOVERED_HARNESS_POLL_INITIAL_MS;
     const poll = async () => {
       await this.refresh(live).catch(() => undefined);
@@ -697,6 +697,7 @@ export class ExecutionManager {
     } else if (stream !== null) {
       stream.destroy();
     }
+    if (live.record.kind === "task" && live.record.observedState === "running") this.monitorExecution(live);
     if (terminal) {
       // Settlement failure must not turn a started exec into a second launch.
       // flushHarnessSettlements retries until the hook succeeds once.
@@ -793,7 +794,6 @@ export class ExecutionManager {
         }
         if (inspection.Running) {
           await this.persistStartedObservation(existing, null, null);
-          this.monitorRecovered(existing);
           return;
         }
         if (inspection.ExitCode !== null) {
@@ -926,7 +926,7 @@ export class ExecutionManager {
         return "uncertain";
       }
       this.harnessProcessIds.add(record.processId);
-      this.monitorRecovered(live);
+      this.monitorExecution(live);
       return "running-without-stream";
     }
 
@@ -977,10 +977,27 @@ export class ExecutionManager {
   }
 
   stopWorkspace(projectId: string, workspaceId: string): Promise<void> {
-    // The exact container lifecycle reclaims every exec when the workspace runtime stops.
-    // M1 deliberately does not attempt to signal individual task or terminal descendants.
-    void projectId; void workspaceId;
-    return Promise.resolve();
+    return this.settleWorkspaceExecutions(projectId, workspaceId);
+  }
+
+  private async settleWorkspaceExecutions(projectId: string, workspaceId: string): Promise<void> {
+    for (const live of this.executions.values()) {
+      const previous = live.record;
+      if (previous.projectId !== projectId || previous.workspaceId !== workspaceId || previous.executionRole === "harness"
+        || !["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
+      // The managed runtime has confirmed the exact container is stopped, so
+      // none of its ordinary task or terminal execs can still be running.
+      live.record = { ...previous, desiredState: "stopped", observedState: "killed",
+        terminalState: previous.kind === "terminal" ? "lost" : null,
+        exitCode: null, finishedAt: this.now().toISOString() };
+      try { await this.persist(live); }
+      catch (error) { live.record = previous; throw error; }
+      if (live.stream !== null) {
+        live.stream.destroy();
+        live.stream = null;
+      }
+      if (live.attachment !== null) this.requestAttachmentClose(live.attachment);
+    }
   }
 
   shutdownTransports(): void {

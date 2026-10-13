@@ -1,5 +1,8 @@
 # DevSpace
 
+**[Install DevSpace on Ubuntu 24.04](docs/installation-ubuntu-24.04.md)** — supported host
+prerequisites, rootless Docker, Cloudflare Access, persistent systemd services, and first-run steps.
+
 DevSpace is a self-hosted, single-user, AI-first development control plane. Each project is
 intended to have a managed primary workspace in an isolated development environment.
 

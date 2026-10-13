@@ -4,8 +4,17 @@ on:
   pull_request:
     paths:
       - "apps/agent/src/**"
+      - "apps/web/src/**"
       - "packages/contracts/**"
       - "packages/project-options/**"
+      - "deploy/ubuntu/**"
+      - "docs/installation-ubuntu-24.04.md"
+      - "e2e/ubuntu-installation.acceptance.spec.ts"
+      - "playwright.installation.config.ts"
+      - "tooling/acceptance/**"
+      - "tooling/install-preflight.mjs"
+      - "tooling/tests/install-preflight.test.mjs"
+      - ".github/scripts/ubuntu-installation-acceptance.sh"
       - ".github/workflows/rootless-git-integration.yml"
   workflow_dispatch:
 
@@ -41,6 +50,14 @@ jobs:
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run workspace-stop terminal-retirement regression tests
+        run: pnpm exec vitest run --project @devspace/web apps/web/src/server/execution.test.ts
+
+      - name: Run Agent workspace-stop execution regression tests
+        run: >-
+          pnpm exec vitest run --project @devspace/agent
+          apps/agent/src/execution-manager.test.ts apps/agent/src/operation-executor.test.ts
 
       - name: Prepare official rootless Docker components
         shell: bash
@@ -299,3 +316,56 @@ jobs:
         if: always()
         shell: bash
         run: bash -euo pipefail .github/scripts/rootless-docker-cleanup.sh
+
+  ubuntu-installation-acceptance:
+    name: Fresh Ubuntu installation and workspace acceptance (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+
+    steps:
+      - name: Check out selected source revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install source revision as a clean host
+        shell: bash
+        run: bash .github/scripts/ubuntu-installation-acceptance.sh prepare "$GITHUB_SHA"
+
+      - name: Install Playwright Chromium dependencies
+        working-directory: /opt/devspace
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Exercise production-authenticated first-run browser workflow
+        working-directory: /opt/devspace
+        env:
+          NODE_EXTRA_CA_CERTS: /etc/devspace/installation-test-ca.pem
+        run: pnpm exec playwright test --config=playwright.installation.config.ts --project=chromium
+
+      - name: Verify workspace host bind path and persistent state ownership
+        run: bash .github/scripts/ubuntu-installation-acceptance.sh verify
+
+      - name: Show installation service and rootless daemon logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          sudo journalctl -u devspace-agent.service -n 200 --no-pager || true
+          sudo journalctl -u devspace-web.service -n 200 --no-pager || true
+          if getent passwd devspace-agent >/dev/null; then
+            agent_uid="$(id -u devspace-agent)"
+            sudo -u devspace-agent env XDG_RUNTIME_DIR="/run/user/$agent_uid" \
+              DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$agent_uid/bus" \
+              systemctl --user status docker.service --no-pager --full || true
+            sudo -u devspace-agent env XDG_RUNTIME_DIR="/run/user/$agent_uid" \
+              DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$agent_uid/bus" \
+              journalctl --user -u docker.service -n 200 --no-pager || true
+          fi
+          if [[ -n "${INSTALL_ACCEPTANCE_ROOT:-}" && -f "$INSTALL_ACCEPTANCE_ROOT/fixtures.log" ]]; then
+            cat "$INSTALL_ACCEPTANCE_ROOT/fixtures.log"
+          fi
+
+      - name: Stop services and clean disposable installation resources
+        if: always()
+        shell: bash
+        run: bash .github/scripts/ubuntu-installation-acceptance.sh cleanup

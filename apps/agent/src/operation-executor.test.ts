@@ -137,6 +137,34 @@ test("dispatches project.push through ManagedWorkspaces exactly once", async () 
   expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
 });
 
+test("workspace stop settles execution records after stopping the managed runtime", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-stop-execution-order-")); roots.push(root);
+  const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);
+  const journal = new OperationJournal(journalRoot, () => new Date(timestamp)); await journal.initialize();
+  const operationId = "018f0f00-0000-7000-8000-000000000014";
+  const request = { projectId: project, workspaceId: targetWorkspace };
+  const order: string[] = [];
+  const managed = {
+    awaitProjectExecutionFence: async () => undefined,
+    inspectWorkspaceRuntime: async () => ({ desiredState: "running" as const, observedState: "running" as const }),
+    stopWorkspace: async () => { order.push("runtime-stopped"); },
+    snapshotResources: () => projectResources()
+  } as unknown as ManagedWorkspaces;
+  const execution = {
+    snapshotResources: () => [],
+    stopWorkspace: async () => { order.push("execution-settled"); }
+  };
+  const accepted = await journal.accept(operationId, "workspace.stop", request);
+  const executor = new OperationExecutor(journal, managed, new AgentEventLog(boot, () => new Date(timestamp)), undefined,
+    execution as never);
+
+  executor.schedule(accepted);
+  await executor.drain();
+
+  expect(order).toEqual(["runtime-stopped", "execution-settled"]);
+  expect(journal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+});
+
 test("records a safe phase when workspace start fails during its initial inspection", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-start-inspection-diagnostic-")); roots.push(root);
   const journalRoot = path.join(root, "operations"); await mkdir(journalRoot);

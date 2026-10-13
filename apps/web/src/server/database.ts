@@ -2419,6 +2419,9 @@ export function openProjectDatabase(path: string, options: {
         | { state: "failed"; code: string; message: string } }): void {
       client.transaction(() => {
         const timestamp = now().toISOString();
+        const operation = db.select({ operationName: operations.operationName, projectId: operations.projectId,
+          workspaceId: operations.workspaceId }).from(operations)
+          .where(eq(operations.operationId, input.operationId)).get();
         const stack = db.select().from(runtimeStacks).where(eq(runtimeStacks.workspaceId, input.workspaceId)).get();
         if (stack === undefined) throw new ProjectSetupConflictError("The runtime stack no longer exists.");
         if (input.outcome.state === "succeeded") {
@@ -2429,6 +2432,16 @@ export function openProjectDatabase(path: string, options: {
           db.update(workspaceServices).set({ observedState: input.outcome.runtimeObserved, healthState: "unknown", lastObservedAt: timestamp,
             startedAt: input.outcome.runtimeObserved === "running" ? timestamp : null,
             stoppedAt: input.outcome.runtimeObserved === "stopped" ? timestamp : null }).where(eq(workspaceServices.runtimeStackId, stack.id)).run();
+          if (operation?.operationName === "workspace.stop" && operation.projectId === input.projectId
+            && operation.workspaceId === input.workspaceId && input.outcome.workspaceObserved === "stopped"
+            && input.outcome.runtimeObserved === "stopped") {
+            db.update(terminalSessions).set({ state: "lost", closedAt: timestamp }).where(and(
+              eq(terminalSessions.workspaceId, input.workspaceId),
+              or(eq(terminalSessions.state, "creating"), eq(terminalSessions.state, "active"),
+                eq(terminalSessions.state, "disconnected"), eq(terminalSessions.state, "closing"))
+            )).run();
+            retireLostTerminalResources(input.workspaceId);
+          }
         } else {
           db.update(runtimeStacks).set({ updatedAt: timestamp, lastObservedAt: timestamp, lastErrorCode: input.outcome.code,
             lastErrorMessage: input.outcome.message.slice(0, 512) }).where(eq(runtimeStacks.id, stack.id)).run();

@@ -2,6 +2,7 @@
 
 ## Durable sources
 
+- `installation-ubuntu-24.04.md` — supported fresh-host installation and first-run guide.
 - `architecture.md` — system structure and service boundaries.
 - `security/threat-model.md` — trust boundaries, assets, and security assumptions.
 - `static-analysis.md` — Semgrep CE workflow, report summary, and AI triage policy.
