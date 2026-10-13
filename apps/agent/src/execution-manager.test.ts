@@ -20,12 +20,13 @@ const roots: string[] = [];
 
 type FakePersistentRuntime = Pick<PersistentTmuxRuntime,
   "prepare" | "createSessionExec" | "startCreatedExec" | "inspectExec" | "lookupSession" | "createAttachment"
-  | "resizeAttachment" | "history" | "live">;
+  | "detachClient" | "resizeAttachment" | "history" | "live">;
 
 function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> = {}) {
   const sessions = new Map<string, { readonly identity: PersistentTerminalOwnership; readonly sessionName: string }>();
   const deadSessions = new Set<string>();
-  const counts = { sessionsCreated: 0, attachmentsCreated: 0, resizes: 0, history: 0, live: 0 };
+  const counts = { sessionsCreated: 0, attachmentsCreated: 0, detaches: 0, resizes: 0, history: 0, live: 0 };
+  const detachedClients: Array<{ readonly sessionName: string; readonly clientPid: number }> = [];
   const runtime = {
     prepare: async (containerId: string): Promise<PersistentTmuxBinding> => ({
       containerId, uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test", binaryPath: "/opt/devspace-test/tmux",
@@ -51,14 +52,18 @@ function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> =
     },
     createAttachment: async () => {
       counts.attachmentsCreated += 1;
-      return { execId: `tmux-attach-${counts.attachmentsCreated}`, stream: new PassThrough() };
+      return { execId: `tmux-attach-${counts.attachmentsCreated}`, clientPid: 5432, stream: new PassThrough() };
+    },
+    detachClient: async (_binding: PersistentTmuxBinding, sessionName: string, clientPid: number) => {
+      counts.detaches += 1;
+      detachedClients.push({ sessionName, clientPid });
     },
     resizeAttachment: async () => { counts.resizes += 1; },
     history: async () => { counts.history += 1; },
     live: async () => { counts.live += 1; },
     ...overrides
   };
-  return { runtime: runtime as unknown as PersistentTmuxRuntime, sessions, counts,
+  return { runtime: runtime as unknown as PersistentTmuxRuntime, sessions, counts, detachedClients,
     markPaneDead: (sessionName: string) => deadSessions.add(sessionName) };
 }
 
@@ -652,7 +657,7 @@ test("a persistent attachment receives ready before tmux redraw and never prepen
   const attached = new PassThrough();
   attached.write(Buffer.from("TMUX_SCREEN_REDRAW"));
   const tmux = createFakePersistentRuntime({
-    createAttachment: async () => ({ execId: "tmux-attach-redraw", stream: attached })
+    createAttachment: async () => ({ execId: "tmux-attach-redraw", clientPid: 5432, stream: attached })
   });
   const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
     durableJsonWriter, undefined, undefined, tmux.runtime);
@@ -819,6 +824,8 @@ test("browser reattach gets a fresh Docker client, retained pane identity, resiz
   firstSocket.readyState = firstSocket.CLOSED;
   firstSocket.emit("close");
   await waitForTerminalAttachmentFinalization(first, terminalId);
+  expect(tmux.counts.detaches).toBe(1);
+  expect(tmux.detachedClients).toEqual([{ sessionName: `ds-${terminalId}`, clientPid: 5432 }]);
 
   const restarted = createExecutionManager(root, managed, {} as never, durableJsonWriter, undefined, undefined, tmux.runtime);
   await restarted.initialize();
@@ -831,9 +838,12 @@ test("browser reattach gets a fresh Docker client, retained pane identity, resiz
   expect(tmux.counts.sessionsCreated).toBe(1);
   expect(tmux.counts.attachmentsCreated).toBe(2);
   expect(JSON.stringify(recoveredRecord)).not.toContain("tmux-attach-");
-  secondSocket.readyState = secondSocket.CLOSED;
-  secondSocket.emit("close");
-  await waitForTerminalAttachmentFinalization(restarted, terminalId);
+  await restarted.shutdownTransports();
+  expect(tmux.counts.detaches).toBe(2);
+  expect(tmux.detachedClients).toEqual([
+    { sessionName: `ds-${terminalId}`, clientPid: 5432 },
+    { sessionName: `ds-${terminalId}`, clientPid: 5432 }
+  ]);
 });
 
 test("an uncertain tmux start is never launched again on an idempotent admission retry", async () => {

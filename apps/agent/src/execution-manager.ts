@@ -171,6 +171,8 @@ type LiveExecution = {
   terminalReplayWaiters: Set<() => void>;
   persistentBinding: PersistentTmuxBinding | null;
   persistentAttachmentExecId: string | null;
+  persistentAttachmentClientPid: number | null;
+  persistentAttachmentFinalize: (() => Promise<void>) | null;
   persistentOutputQueue: Buffer[];
   persistentOutputQueueBytes: number;
   persistentMonitorActive?: boolean;
@@ -328,7 +330,8 @@ export class ExecutionManager {
         attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
         terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
         terminalReplayComplete: true, terminalReplayWaiters: new Set(), persistentBinding: null,
-        persistentAttachmentExecId: null, persistentOutputQueue: [], persistentOutputQueueBytes: 0 };
+        persistentAttachmentExecId: null, persistentAttachmentClientPid: null, persistentAttachmentFinalize: null,
+        persistentOutputQueue: [], persistentOutputQueueBytes: 0 };
       this.executions.set(record.processId, live);
       if (adopted.kind === "harness" && (stored.executionRole !== "harness"
         || stored.harnessSessionId !== adopted.sessionId || stored.harnessGeneration !== adopted.processGeneration
@@ -393,7 +396,8 @@ export class ExecutionManager {
       attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
       terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
       terminalReplayComplete: true, terminalReplayWaiters: new Set(), persistentBinding: null,
-      persistentAttachmentExecId: null, persistentOutputQueue: [], persistentOutputQueueBytes: 0
+      persistentAttachmentExecId: null, persistentAttachmentClientPid: null, persistentAttachmentFinalize: null,
+        persistentOutputQueue: [], persistentOutputQueueBytes: 0
     };
     this.executions.set(stored.processId, live);
     // Preserve the legacy shape so a later startup can still reconcile it if
@@ -818,7 +822,8 @@ export class ExecutionManager {
       attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
       terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
       terminalReplayComplete: true, terminalReplayWaiters: new Set(), persistentBinding: null,
-      persistentAttachmentExecId: null, persistentOutputQueue: [], persistentOutputQueueBytes: 0 };
+      persistentAttachmentExecId: null, persistentAttachmentClientPid: null, persistentAttachmentFinalize: null,
+      persistentOutputQueue: [], persistentOutputQueueBytes: 0 };
     // The exact request/operation binding is durable before Docker sees a side effect.
     await this.persist(live);
     this.executions.set(record.processId, live);
@@ -1119,6 +1124,7 @@ export class ExecutionManager {
       replay: Buffer.alloc(0), resizeFailureReported: false, terminalReplayExpiresAt: null,
       terminalReplayClaimed: false, terminalReplayTimer: null, terminalReplayComplete: true,
       terminalReplayWaiters: new Set(), persistentBinding: binding, persistentAttachmentExecId: null,
+      persistentAttachmentClientPid: null, persistentAttachmentFinalize: null,
       persistentOutputQueue: [], persistentOutputQueueBytes: 0
     };
     const activeInWorkspace = [...this.executions.values()].filter((candidate) =>
@@ -1326,13 +1332,25 @@ export class ExecutionManager {
     }
   }
 
-  shutdownTransports(): void {
+  async shutdownTransports(): Promise<void> {
+    const persistentFinalizers: Promise<void>[] = [];
     for (const live of this.executions.values()) {
-      if (live.record.terminalBackend === "tmux") live.persistentMonitorActive = false;
+      if (live.record.terminalBackend === "tmux") {
+        live.persistentMonitorActive = false;
+        const finalize = live.persistentAttachmentFinalize;
+        if (finalize !== null) {
+          live.attachment?.close(1012, "Agent restarting.");
+          persistentFinalizers.push(finalize());
+          continue;
+        }
+      }
       live.attachment?.close(1012, "Agent restarting.");
       live.stream?.destroy();
       live.stream = null;
     }
+    const results = await Promise.allSettled(persistentFinalizers);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed !== undefined) throw failed.reason;
   }
 
   private requestAttachmentClose(socket: WebSocket): void {
@@ -1447,6 +1465,19 @@ export class ExecutionManager {
         live.persistentAttachmentExecId = null;
         live.persistentOutputQueue = [];
         live.persistentOutputQueueBytes = 0;
+        let detachFailure: unknown;
+        const clientPid = live.persistentAttachmentClientPid;
+        const binding = live.persistentBinding;
+        const persistent = live.record.persistentTerminal;
+        if (clientPid !== null && binding !== null && persistent !== undefined
+          && live.record.observedState !== "killed") {
+          try {
+            await this.persistentTmux.detachClient(binding, persistent.sessionName, clientPid);
+            live.persistentAttachmentClientPid = null;
+          } catch (error) { detachFailure = error; }
+        } else {
+          live.persistentAttachmentClientPid = null;
+        }
         if (stream !== null && !stream.destroyed) stream.destroy();
         if (live.record.desiredState === "running" && live.record.observedState === "running"
           && live.record.terminalState !== "closed") {
@@ -1455,14 +1486,20 @@ export class ExecutionManager {
         }
         await this.waitForAttachmentClosed(socket);
         if (live.attachment === socket) live.attachment = null;
+        if (live.persistentAttachmentFinalize === finalize) live.persistentAttachmentFinalize = null;
+        if (detachFailure !== undefined) {
+          throw detachFailure instanceof Error ? detachFailure : new Error("persistent-tmux-client-detach-failed", { cause: detachFailure });
+        }
       })();
       finalization = cleanup;
       live.attachmentCleanup = cleanup;
       void cleanup.finally(() => {
         if (live.attachmentCleanup === cleanup) live.attachmentCleanup = null;
+        if (finalization === cleanup) finalization = null;
       }).catch(() => undefined);
       return cleanup;
     };
+    live.persistentAttachmentFinalize = finalize;
     socket.once("close", () => { void finalize().catch(() => undefined); });
     socket.once("error", () => { void finalize().catch(() => undefined); });
     try {
@@ -1481,14 +1518,15 @@ export class ExecutionManager {
       }
       const attachment = await this.persistentTmux.createAttachment(binding, persistent.sessionName,
         { columns: persistent.columns, rows: persistent.rows });
+      live.stream = attachment.stream;
+      live.persistentAttachmentExecId = attachment.execId;
+      live.persistentAttachmentClientPid = attachment.clientPid;
+      live.persistentOutputQueue = [];
+      live.persistentOutputQueueBytes = 0;
       if (socket.readyState !== socket.OPEN) {
         attachment.stream.destroy();
         return;
       }
-      live.stream = attachment.stream;
-      live.persistentAttachmentExecId = attachment.execId;
-      live.persistentOutputQueue = [];
-      live.persistentOutputQueueBytes = 0;
       attachment.stream.on("data", (chunk: Buffer) => {
         const bytes = Buffer.from(chunk);
         if (!ready) {

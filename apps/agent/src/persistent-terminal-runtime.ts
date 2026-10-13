@@ -16,6 +16,8 @@ export const PERSISTENT_TMUX_MAX_COLUMNS = 240 as const;
 export const PERSISTENT_TMUX_MAX_ROWS = 100 as const;
 export const PERSISTENT_TMUX_OUTPUT_LIMIT_BYTES = 256 * 1024;
 export const PERSISTENT_TMUX_BACKPRESSURE_BYTES = 256 * 1024;
+const TMUX_CLIENT_RESOLUTION_TIMEOUT_MS = 5_000;
+const TMUX_CLIENT_POLL_INTERVAL_MS = 50;
 
 const TMUX_ARCHIVE_ROOT = "devspace-persistent-tmux-3.7c";
 const TMUX_ASSET_ROOT = fileURLToPath(new URL("../assets/", import.meta.url));
@@ -73,6 +75,7 @@ export type PersistentTmuxCommandResult = {
 
 export type PersistentTmuxAttachment = {
   readonly execId: string;
+  readonly clientPid: number;
   readonly stream: Duplex;
 };
 
@@ -483,6 +486,7 @@ export class PersistentTmuxRuntime {
       || !Number.isInteger(size.rows) || size.rows < 1 || size.rows > PERSISTENT_TMUX_MAX_ROWS) {
       throw new Error("persistent-tmux-console-size-invalid");
     }
+    const previousClientPids = await this.listClientPids(binding, sessionName);
     const command = this.tmuxCommand(binding, ["attach-session", "-d", "-t", `=${sessionName}`]);
     const execId = await this.engine.createExec(binding.containerId, {
       command, workingDirectory: "/", environment: binding.environment, attachStdin: true, tty: true,
@@ -494,7 +498,58 @@ export class PersistentTmuxRuntime {
       throw new Error("persistent-tmux-attachment-exec-identity-invalid");
     }
     const stream = await this.engine.startExecAttached(execId, true);
-    return { execId, stream };
+    try {
+      const clientPid = await this.waitForNewClientPid(binding, sessionName, previousClientPids);
+      return { execId, clientPid, stream };
+    } catch (error) {
+      if (!stream.destroyed) stream.destroy();
+      throw error;
+    }
+  }
+
+  private async listClientPids(binding: PersistentTmuxBinding, sessionName: string): Promise<number[]> {
+    const result = await this.commandResult(binding, this.tmuxCommand(binding, [
+      "list-clients", "-t", `=${sessionName}`, "-F", "#{client_pid}"
+    ]));
+    if (result.exitCode !== 0) throw new Error("persistent-tmux-client-query-unproven");
+    const output = result.stdout.trim();
+    if (output === "") return [];
+    const pids = output.split(/\r?\n/u).map((line) => {
+      if (!/^[1-9][0-9]{0,9}$/u.test(line)) throw new Error("persistent-tmux-client-identity-invalid");
+      const pid = Number(line);
+      if (!Number.isSafeInteger(pid)) throw new Error("persistent-tmux-client-identity-invalid");
+      return pid;
+    });
+    if (new Set(pids).size !== pids.length) throw new Error("persistent-tmux-client-identity-ambiguous");
+    return pids;
+  }
+
+  private async waitForNewClientPid(
+    binding: PersistentTmuxBinding,
+    sessionName: string,
+    previousClientPids: readonly number[]
+  ): Promise<number> {
+    const deadline = Date.now() + TMUX_CLIENT_RESOLUTION_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const pids = await this.listClientPids(binding, sessionName);
+      const newPids = pids.filter((pid) => !previousClientPids.includes(pid));
+      if (pids.length === 1 && newPids.length === 1) return newPids[0]!;
+      await new Promise<void>((resolve) => setTimeout(resolve, TMUX_CLIENT_POLL_INTERVAL_MS));
+    }
+    throw new Error("persistent-tmux-client-identity-unresolved");
+  }
+
+  async detachClient(binding: PersistentTmuxBinding, sessionName: string, clientPid: number): Promise<void> {
+    if (!Number.isSafeInteger(clientPid) || clientPid < 1) throw new Error("persistent-tmux-client-identity-invalid");
+    const before = await this.listClientPids(binding, sessionName);
+    if (!before.includes(clientPid)) return;
+    const detached = await this.commandResult(binding, this.tmuxCommand(binding, [
+      "detach-client", "-t", String(clientPid)
+    ]));
+    const after = await this.listClientPids(binding, sessionName);
+    if (!after.includes(clientPid)) return;
+    if (detached.exitCode !== 0) throw new Error("persistent-tmux-client-detach-unproven");
+    throw new Error("persistent-tmux-client-remained-attached");
   }
 
   async resizeAttachment(execId: string, columns: number, rows: number): Promise<void> {

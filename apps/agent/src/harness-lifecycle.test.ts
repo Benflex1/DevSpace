@@ -172,7 +172,7 @@ async function nativeAdmissionFixture(engine: object, onSettled?: () => void | P
   await manager.initialize();
   fixtureCleanups.push(async () => {
     stopping = true;
-    manager.shutdownTransports();
+    await manager.shutdownTransports();
     const inspections = manager.snapshotResources().flatMap((resource) => resource.type === "process"
       ? [manager.inspect(resource.observation.projectId, resource.observation.workspaceId, resource.observation.processId)]
       : []);

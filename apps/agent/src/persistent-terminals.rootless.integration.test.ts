@@ -633,7 +633,7 @@ async function proveExecutionManagerRecovery(
   catch (error) { duplicateRejected = error instanceof Error && error.message.includes("cannot accept another attachment"); }
   expect(duplicateRejected).toBe(true);
 
-  manager.shutdownTransports();
+  await manager.shutdownTransports();
   await waitFor(async () => await commandOkay(fixture.engine, containerId, [
     binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
     "list-clients", "-t", `=${initialRecord.persistentTerminal.sessionName}`, "-F", "#{client_pid}"

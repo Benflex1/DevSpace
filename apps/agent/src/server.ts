@@ -1392,7 +1392,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       for (const response of eventResponses) response.destroy();
       eventResponses.clear();
       executor.shutdown();
-      execution.shutdownTransports();
+      let transportShutdownError: Error | null = null;
+      try { await execution.shutdownTransports(); }
+      catch (error) {
+        transportShutdownError = error instanceof Error ? error : new Error("agent-terminal-transport-shutdown-failed", { cause: error });
+      }
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await executor.drain();
       await managed.shutdown();
@@ -1408,6 +1412,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
       started = false;
       ownedSocket = undefined;
+      if (transportShutdownError !== null) throw transportShutdownError;
     }
   };
 }
