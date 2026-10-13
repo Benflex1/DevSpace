@@ -589,6 +589,9 @@ async function proveExecutionManagerRecovery(
   expect(decodeTerminalAgentFrame(firstSocket.frames[0] ?? new Uint8Array())).toMatchObject({
     ok: true, frame: { type: "ready", version: 2 }
   });
+  await waitFor(() => Promise.resolve(persistentSocketOutput(firstSocket)), (text) => text.length > 0,
+    "persistent terminal did not send its initial tmux redraw", "manager.initial-redraw");
+  firstSocket.receive(encodeTerminalClientFrame({ type: "resize", columns: 100, rows: 32 }));
   firstSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from(
     "printf 'SHELL_PID=%s\\n' \"$$\"; sleep 900 & printf 'LONG_PID=%s\\n' \"$!\"; printf '\\033[2J\\033[HDEVSPACE_SCREEN_MARKER\\n'\r"
   ) }));
@@ -599,7 +602,6 @@ async function proveExecutionManagerRecovery(
     "manager.shell.pid-and-process"
   );
   expect(firstOutput).toContain("DEVSPACE_SCREEN_MARKER");
-  firstSocket.receive(encodeTerminalClientFrame({ type: "resize", columns: 100, rows: 32 }));
   const shellPidMatch = /SHELL_PID=([1-9][0-9]*)/u.exec(firstOutput);
   const longRunningPidMatch = /LONG_PID=([1-9][0-9]*)/u.exec(firstOutput);
   expect(shellPidMatch?.[1]).toBe(String(originalPanePid));
