@@ -611,10 +611,21 @@ async function proveExecutionManagerRecovery(
   const longRunningPid = Number(longRunningPidMatch?.[1]);
   expect(Number.isSafeInteger(longRunningPid) && longRunningPid > 0).toBe(true);
   const binding = persistentTmuxBinding(containerId, 1000, 1000);
-  const paneSize = await waitFor(async () => await commandOkay(fixture.engine, containerId, [
-    binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
-    "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_width}x#{pane_height}"
-  ], "manager.first-resize.verify"), (value) => value === "100x32", "persistent terminal ignored initial resize", "manager.first-resize.confirm");
+  let observedPaneSize = "not-read";
+  let observedPersistedSize = "not-read";
+  const paneSize = await waitFor(async () => {
+    observedPaneSize = await commandOkay(fixture.engine, containerId, [
+      binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+      "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_width}x#{pane_height}"
+    ], "manager.first-resize.verify");
+    const currentRecord = JSON.parse(await readFile(recordPath, "utf8")) as {
+      readonly persistentTerminal: { readonly columns: number; readonly rows: number };
+    };
+    observedPersistedSize = `${currentRecord.persistentTerminal.columns}x${currentRecord.persistentTerminal.rows}`;
+    return observedPaneSize;
+  }, (value) => value === "100x32",
+  () => `persistent terminal ignored initial resize; pane=${JSON.stringify(observedPaneSize.trim())}; persisted=${observedPersistedSize}; socket=${firstSocket.readyState}`,
+  "manager.first-resize.confirm");
   expect(paneSize).toBe("100x32");
 
   let duplicateRejected = false;
