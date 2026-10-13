@@ -977,8 +977,8 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"]
     });
     expect(container.Mounts.filter((mount) => mount.Type === "bind")).toEqual([]);
-    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.identity.uid")).toBe("1000\n");
-    expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.identity.uid")).toBe(`${executionUid}\n`);
+    expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe(`${executionUid}\n`);
 
     const directoryName = `persistent-tmux-${runId}`;
     const artifactRoot = `/opt/${directoryName}`;

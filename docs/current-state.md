@@ -33,13 +33,15 @@ daemon, or disposable-host facility; its offline frozen dependency install stopp
 Clean-host workspace Start, terminal, task, and Stop/Start preservation acceptance therefore remain
 unverified. Do not describe the installation path as host-accepted until that run is performed.
 
-## Public-alpha acceptance gap: browser verification in CI
+## Browser and persistent-terminal acceptance
 
-Playwright's 11 browser cases are not currently executed in CI. Unit/tooling and real
-rootless Docker acceptance checks do not establish browser workflow acceptance. Before
-public-alpha acceptance, run the browser suite on disposable CI infrastructure and record
-its results. This delivery gap is separate from test deletion and fixture cleanup; no CI
-workflow changes are included in the audit PR.
+Playwright browser tests run in four CI shards. This Slice 1 branch keeps those tests on the
+legacy direct-exec fixture so they continue to cover existing Web and Agent workflows; focused
+terminal tests cover the new attachment protocol and controls. The separate rootless Docker
+workflow exercises the production tmux runtime and manager reinitialization against a live
+container. Neither test path proves the full real Agent/Web process restart and browser reload
+sequence with PID continuity. Keep the Slice 1 PR in draft until that process-level acceptance
+is run and recorded.
 
 ## Native harness slice
 
@@ -193,7 +195,9 @@ terminalized as non-retryable `GIT_MUTATION_OUTCOME_UNCERTAIN` failures and are 
 `accepted` local Git mutations remain resumable because they may not have started. A live-process
 mutation that is known to have completed but cannot settle observation or its journal remains
 recoverable, preserving mutation truthfulness until restart reconciliation. Project creation from
-scratch, persistent terminals, and later Workbench polish remain deferred product work.
+scratch and later Workbench polish remain deferred product work. Persistent ordinary shells are
+implemented in Slice 1 and in review. Native continuity is deferred to Slice 2; full persistent-
+terminal exit and close settlement is deferred to Slice 3.
 
 ## Private GitHub Repository Access status
 
