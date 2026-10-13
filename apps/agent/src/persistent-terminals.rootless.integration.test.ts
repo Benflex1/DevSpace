@@ -776,7 +776,6 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const socketDirectory = `${artifactRoot}/socket`;
     const socketPath = `${socketDirectory}/server.sock`;
     const sessionName = `shell-${runId.slice(0, 8)}`;
-    await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", artifactRoot], "container.artifact-dir.create");
     progress.record("artifact.stage.started", "started", { containerId, destination: "/opt" });
     const archiveTemporaryRoot = await progress.run("artifact.archive-temporary-root.create", dockerOperationTimeoutMs,
       () => mkdtemp(path.join(tmpdir(), "devspace-tmux-probe-")));
