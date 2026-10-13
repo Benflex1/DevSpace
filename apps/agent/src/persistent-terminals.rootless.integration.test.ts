@@ -593,7 +593,12 @@ async function proveExecutionManagerRecovery(
   firstSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from(
     "printf 'SHELL_PID=%s\\n' \"$$\"; sleep 900 & printf 'LONG_PID=%s\\n' \"$!\"; printf '\\033[2J\\033[HDEVSPACE_SCREEN_MARKER\\n'\r"
   ) }));
-  const firstOutput = await waitForPersistentSocketText(firstSocket, "LONG_PID=", "manager.shell.pid-and-process");
+  const firstOutput = await waitFor(
+    () => Promise.resolve(persistentSocketOutput(firstSocket)),
+    (text) => /SHELL_PID=[1-9][0-9]*/u.test(text) && /LONG_PID=[1-9][0-9]*/u.test(text),
+    "persistent shell did not report its shell and background process PIDs",
+    "manager.shell.pid-and-process"
+  );
   expect(firstOutput).toContain("DEVSPACE_SCREEN_MARKER");
   const shellPidMatch = /SHELL_PID=([1-9][0-9]*)/u.exec(firstOutput);
   const longRunningPidMatch = /LONG_PID=([1-9][0-9]*)/u.exec(firstOutput);
