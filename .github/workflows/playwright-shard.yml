@@ -48,7 +48,9 @@ jobs:
         run: pnpm --filter @devspace/web run prepare:deps
 
       - name: Run browser shard
-        run: pnpm exec playwright test --shard=${{ inputs.shard }}/4
+        env:
+          PLAYWRIGHT_SHARD: ${{ inputs.shard }}
+        run: pnpm exec playwright test --shard="$PLAYWRIGHT_SHARD/4"
 
       - name: Upload Playwright failure traces
         if: failure()
