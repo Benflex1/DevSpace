@@ -623,10 +623,10 @@ async function proveExecutionManagerRecovery(
     };
     observedPersistedSize = `${currentRecord.persistentTerminal.columns}x${currentRecord.persistentTerminal.rows}`;
     return observedPaneSize;
-  }, (value) => value === "100x32",
+  }, (value) => value.trim() === "100x32",
   () => `persistent terminal ignored initial resize; pane=${JSON.stringify(observedPaneSize.trim())}; persisted=${observedPersistedSize}; socket=${firstSocket.readyState}`,
   "manager.first-resize.confirm");
-  expect(paneSize).toBe("100x32");
+  expect(paneSize.trim()).toBe("100x32");
 
   let duplicateRejected = false;
   try { manager.reserveTerminalAttachment(terminalId); }
@@ -675,7 +675,7 @@ async function proveExecutionManagerRecovery(
   await waitFor(async () => await commandOkay(fixture.engine, containerId, [
     binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
     "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_width}x#{pane_height}"
-  ], "manager.recovered-resize.verify"), (value) => value === "100x32", "recovered attachment resize was not applied",
+  ], "manager.recovered-resize.verify"), (value) => value.trim() === "100x32", "recovered attachment resize was not applied",
   "manager.recovered-resize.confirm");
   secondSocket.receive(encodeTerminalClientFrame({ type: "live" }));
   secondSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from("printf 'RETURN_LIVE_NOOP_OK\\n'\r") }));
