@@ -76,7 +76,7 @@ jobs:
           # pre-existing rootful Docker service.
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            apparmor ca-certificates curl dbus-user-session fuse-overlayfs iptables slirp4netns uidmap
+            apparmor ca-certificates curl dbus-user-session fuse-overlayfs iptables ncurses-bin ncurses-term slirp4netns uidmap
 
           # Use Docker's signed package repository for the officially supported rootless
           # components. Refuse any package plan that would install, remove, or replace the
@@ -296,6 +296,98 @@ jobs:
           cat "$GITHUB_STEP_SUMMARY"
           test -S "$socket"
 
+      - name: Verify pinned tmux artifact and compile terminal entries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          artifact_root="$root/tmux-3.7c"
+          if [[ -e "$artifact_root" || -L "$artifact_root" ]]; then
+            echo "Refusing to reuse an existing tmux artifact directory: $artifact_root" >&2
+            exit 1
+          fi
+          install -d -m 0700 "$artifact_root" "$artifact_root/extracted" "$artifact_root/terminfo" "$artifact_root/source"
+          archive="$artifact_root/tmux-3.7c-linux-x86_64.tar.gz"
+          archive_url="https://github.com/tmux/tmux-builds/releases/download/v3.7c/tmux-3.7c-linux-x86_64.tar.gz"
+          curl --fail --silent --show-error --location --connect-timeout 15 --max-time 120 "$archive_url" -o "$archive"
+          printf '%s  %s\n' \
+            'cc56bd1cc873eb6089c615f0496b072385bda8a6d944069f38564a5d49c128aa' "$archive" \
+            | sha256sum --check
+          mapfile -t archive_entries < <(tar -tzf "$archive")
+          if [[ "${#archive_entries[@]}" -ne 1 || "${archive_entries[0]}" != tmux ]]; then
+            printf 'Unexpected tmux release archive contents: %s\n' "${archive_entries[*]}" >&2
+            exit 1
+          fi
+          tar -xzf "$archive" -C "$artifact_root/extracted"
+          binary="$artifact_root/extracted/tmux"
+          test -x "$binary"
+          printf '%s  %s\n' \
+            '7d0f1e85c5b11df7fe127ab90674c6a15663ad72a25fcf7fabadba6bbb0b29d5' "$binary" \
+            | sha256sum --check
+          test "$("$binary" -V)" = 'tmux 3.7c'
+
+          terminfo="$artifact_root/terminfo"
+          source_dir="$artifact_root/source"
+          for terminal in xterm-256color tmux-256color; do
+            infocmp -x "$terminal" >"$source_dir/$terminal.src"
+            tic -x -o "$terminfo" "$source_dir/$terminal.src"
+            TERMINFO="$terminfo" infocmp -x "$terminal" >/dev/null
+            printf 'Compiled and verified terminfo entry: %s\n' "$terminal"
+          done
+          printf 'DEVSPACE_TEST_TMUX_BINARY_PATH=%s\n' "$binary" >>"$GITHUB_ENV"
+          printf 'DEVSPACE_TEST_TMUX_TERMINFO_PATH=%s\n' "$terminfo" >>"$GITHUB_ENV"
+          {
+            echo '### Pinned tmux feasibility artifact'
+            echo
+            echo '- Source: [tmux/tmux-builds v3.7c](https://github.com/tmux/tmux-builds/releases/tag/v3.7c), Linux x86_64 release asset.'
+            echo '- Archive and executable hashes matched the feasibility report.'
+            echo '- Runner terminfo entries compiled and looked up: `xterm-256color`, `tmux-256color`.'
+            echo
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Run real tmux persistence feasibility gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runner_temp="$(realpath -e "$RUNNER_TEMP")"
+          root="$runner_temp/devspace-rootless-git-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          socket="$root/runtime/docker.sock"
+          test -S "$socket"
+          test "$DEVSPACE_TEST_DOCKER_SOCKET_PATH" = "$socket"
+          test -x "$DEVSPACE_TEST_TMUX_BINARY_PATH"
+          test -d "$DEVSPACE_TEST_TMUX_TERMINFO_PATH"
+          report="$root/tmux-feasibility-vitest.json"
+          env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+            DEVSPACE_TEST_DOCKER_SOCKET_PATH="$socket" \
+            DEVSPACE_TEST_TMUX_BINARY_PATH="$DEVSPACE_TEST_TMUX_BINARY_PATH" \
+            DEVSPACE_TEST_TMUX_TERMINFO_PATH="$DEVSPACE_TEST_TMUX_TERMINFO_PATH" \
+            DOCKER_CONFIG="$root/docker-config" \
+            pnpm exec vitest run \
+              --project @devspace/agent \
+              apps/agent/src/persistent-terminals.rootless.integration.test.ts \
+              --reporter=json \
+              --outputFile="$report"
+          node --input-type=module - "$report" <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          const report = JSON.parse(await readFile(process.argv[2], 'utf8'));
+          const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+          if (report.success !== true
+            || report.numTotalTests !== 2
+            || report.numPassedTests !== 2
+            || report.numFailedTests !== 0
+            || report.numPendingTests !== 0
+            || report.numTodoTests !== 0
+            || assertions.length !== 2
+            || assertions.some((assertion) => assertion.status !== 'passed'
+              || !String(assertion.fullName ?? assertion.title ?? '').includes('real rootless Docker preserves the tmux shell across disposable exec clients'))) {
+            console.error(JSON.stringify(report, null, 2));
+            throw new Error('Both rootless tmux feasibility cases must run and pass; skipped tests are failures.');
+          }
+          console.log('Verified both Debian development images passed the real rootless tmux feasibility gate with no skipped or pending tests.');
+          NODE
+          test -S "$socket"
+
       - name: Show rootless test and daemon logs on failure
         if: failure()
         shell: bash
@@ -309,6 +401,14 @@ jobs:
           if [[ -f "$root/artifact-staging-vitest.json" ]]; then
             echo "Rootless Codex artifact staging Vitest report:"
             cat "$root/artifact-staging-vitest.json"
+          fi
+          if [[ -f "$root/tmux-feasibility-vitest.json" ]]; then
+            echo "Rootless tmux feasibility Vitest report:"
+            cat "$root/tmux-feasibility-vitest.json"
+          fi
+          if [[ -d "$root/tmux-3.7c" ]]; then
+            echo "Pinned tmux artifact hashes and terminfo preparation state:"
+            find "$root/tmux-3.7c" -maxdepth 3 -type f -print
           fi
           if [[ -f "$root/daemon.log" ]]; then cat "$root/daemon.log"; fi
 
