@@ -11,44 +11,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  playwright-shard-1:
+    name: Browser shard 1/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 1
+
+  playwright-shard-2:
+    name: Browser shard 2/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 2
+
+  playwright-shard-3:
+    name: Browser shard 3/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 3
+
+  playwright-shard-4:
+    name: Browser shard 4/4
+    uses: ./.github/workflows/playwright-shard.yml
+    with:
+      shard: 4
+
   playwright:
     name: Playwright browser tests
+    if: ${{ always() }}
+    needs:
+      - playwright-shard-1
+      - playwright-shard-2
+      - playwright-shard-3
+      - playwright-shard-4
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 2
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: "24.18.0"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
-        with:
-          version: "11.13.0"
-          cache: true
-          cache_dependency_path: pnpm-lock.yaml
-          run_install: false
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Install Playwright Chromium dependencies
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run browser tests
-        run: pnpm test:e2e
-
-      - name: Upload Playwright failure traces
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: playwright-failure-traces
-          path: test-results/
-          if-no-files-found: ignore
-          retention-days: 7
+      - name: Require all four shards to pass
+        env:
+          SHARD_1_RESULT: ${{ needs.playwright-shard-1.result }}
+          SHARD_2_RESULT: ${{ needs.playwright-shard-2.result }}
+          SHARD_3_RESULT: ${{ needs.playwright-shard-3.result }}
+          SHARD_4_RESULT: ${{ needs.playwright-shard-4.result }}
+        run: |
+          for result in "$SHARD_1_RESULT" "$SHARD_2_RESULT" "$SHARD_3_RESULT" "$SHARD_4_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Every browser shard must pass; observed result: $result" >&2
+              exit 1
+            fi
+          done
+          echo "All four browser shards passed."
