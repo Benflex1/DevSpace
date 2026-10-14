@@ -28,7 +28,8 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationConflictError, OperationJournal } from "./operation-journal.js";
-import { ExecutionManager, type HarnessRecoveryIdentity, type TerminalResizeFailureDiagnostic } from "./execution-manager.js";
+import { ExecutionManager, type HarnessRecoveryIdentity, type PersistentTerminalAttachmentFailureDiagnostic,
+  type TerminalResizeFailureDiagnostic } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -349,6 +350,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     onHarnessSettled?: (event: { processId: string }) => Promise<void>;
     onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void>;
     onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
+    onPersistentTerminalAttachmentFailure?: (event: PersistentTerminalAttachmentFailureDiagnostic) => void;
   } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
     new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks,
@@ -363,6 +365,18 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       rows: event.rows,
       failureClass: event.failureClass,
       failureCode: event.failureCode === null ? "unknown" : String(event.failureCode)
+    }
+  );
+  harnessHooks.onPersistentTerminalAttachmentFailure = (event) => logger.error(
+    "agent.terminal.persistent_attachment_failed",
+    "Persistent terminal attachment failed at the Agent boundary.",
+    {
+      terminalId: event.terminalId,
+      phase: event.phase,
+      errorCategory: event.failureCategory,
+      failureCategory: event.failureCategory === "docker-http" ? "dependency-unavailable"
+        : event.failureCategory === "docker-transport" ? "transport-failure"
+          : event.failureCategory === "internal" ? "internal-failure" : "state-conflict"
     }
   );
   const harnessHome = createHarnessHomeStore(managedRoots.state, {

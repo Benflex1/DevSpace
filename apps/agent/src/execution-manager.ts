@@ -176,6 +176,7 @@ type LiveExecution = {
   persistentAttachmentExecId: string | null;
   persistentAttachmentClientPid: number | null;
   persistentAttachmentClientName: string | null;
+  persistentReconciliationFailureCategory?: PersistentTerminalAttachmentFailureCategory | null;
   persistentAttachmentFinalize: (() => Promise<void>) | null;
   persistentOutputQueue: Buffer[];
   persistentOutputQueueBytes: number;
@@ -278,6 +279,23 @@ export type TerminalResizeFailureDiagnostic = {
   readonly failureCode: number | null;
 };
 
+type PersistentTerminalAttachmentFailureCategory =
+  | "docker-http" | "docker-transport" | "identity-mismatch" | "state-conflict" | "session-unverified" | "internal";
+
+export type PersistentTerminalAttachmentFailureDiagnostic = {
+  readonly terminalId: string;
+  readonly phase: "reconciliation" | "identity-verification" | "attachment-creation" | "relay-setup";
+  readonly failureCategory: PersistentTerminalAttachmentFailureCategory;
+};
+
+function persistentTerminalAttachmentFailureCategory(error: unknown): PersistentTerminalAttachmentFailureCategory {
+  if (error instanceof DockerEngineError) return "docker-http";
+  if (error instanceof DockerEngineTransportError) return "docker-transport";
+  if (error instanceof PersistentTmuxIdentityMismatchError) return "identity-mismatch";
+  if (error instanceof AgentExecutionError) return "state-conflict";
+  return "internal";
+}
+
 export class ExecutionManager {
   private readonly recordsRoot: string;
   private readonly stateRoot: string;
@@ -300,6 +318,7 @@ export class ExecutionManager {
       readonly onHarnessSettled?: (event: HarnessExecutionSettlement) => void | Promise<void>;
       readonly onHarnessRecovered?: (event: HarnessRecoveryIdentity) => void | Promise<void>;
       readonly onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
+      readonly onPersistentTerminalAttachmentFailure?: (event: PersistentTerminalAttachmentFailureDiagnostic) => void;
     } = {},
     persistentTmux?: PersistentTmuxRuntime,
     terminalAdmissionMode: "persistent" | "legacy-direct-exec" = "persistent"
@@ -568,6 +587,7 @@ export class ExecutionManager {
     if (live.record.terminalBackend !== "tmux" || persistent === undefined || live.record.terminalId === null) return false;
     live.persistentMonitorEligible = false;
     if (live.record.desiredState !== "running" || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
+    live.persistentReconciliationFailureCategory = null;
     let retryableObservationFailure = true;
     try {
       if (persistent.sessionName !== persistentTmuxSessionName(live.record.terminalId)
@@ -589,6 +609,7 @@ export class ExecutionManager {
         live.persistentBinding = null;
         live.record = { ...live.record, desiredState: "stopped", observedState: "killed", terminalState: "lost",
           exitCode: null, finishedAt: this.now().toISOString() };
+        live.persistentReconciliationFailureCategory = "state-conflict";
         await this.persistIfChanged(live, previousRecord);
         return false;
       }
@@ -605,6 +626,7 @@ export class ExecutionManager {
           await this.persistIfChanged(live, previousRecord);
           live.persistentMonitorEligible = true;
         }
+        live.persistentReconciliationFailureCategory = "session-unverified";
         return false;
       }
       const nextPersistent = {
@@ -618,12 +640,14 @@ export class ExecutionManager {
           exitCode: observation.paneDeadStatus, startedAt: live.record.startedAt ?? this.now().toISOString(),
           finishedAt: this.now().toISOString(), persistentTerminal: nextPersistent };
         live.persistentMonitorEligible = false;
+        live.persistentReconciliationFailureCategory = "state-conflict";
       } else {
         live.record = { ...live.record, creationPhase: "started", desiredState: "running", observedState: "running", terminalState,
           exitCode: null, startedAt: live.record.startedAt ?? this.now().toISOString(), finishedAt: null,
           persistentTerminal: nextPersistent };
         live.persistentMonitorEligible = true;
         live.persistentMonitorFailures = 0;
+        live.persistentReconciliationFailureCategory = null;
       }
       await this.persistIfChanged(live, previousRecord);
       return !observation.paneDead;
@@ -632,6 +656,7 @@ export class ExecutionManager {
       // cannot be proved leaves the original identity uncertain. Never launch
       // a replacement shell while resolving that evidence.
       if (error instanceof PersistentTmuxIdentityMismatchError) live.persistentBinding = null;
+      live.persistentReconciliationFailureCategory = persistentTerminalAttachmentFailureCategory(error);
       const definitiveFailure = error instanceof PersistentTmuxIdentityMismatchError
         || error instanceof DockerEngineError && error.statusCode === 404
         || error instanceof AgentExecutionError && ["PROCESS_IDENTITY_MISMATCH", "WORKSPACE_STATE_CONFLICT"].includes(error.failure.code);
@@ -1501,6 +1526,23 @@ export class ExecutionManager {
     }
   }
 
+  private reportPersistentTerminalAttachmentFailure(
+    live: LiveExecution,
+    phase: PersistentTerminalAttachmentFailureDiagnostic["phase"],
+    error: unknown
+  ): void {
+    const terminalId = live.record.terminalId;
+    if (terminalId === null) return;
+    const failureCategory = phase === "reconciliation"
+      ? live.persistentReconciliationFailureCategory ?? persistentTerminalAttachmentFailureCategory(error)
+      : persistentTerminalAttachmentFailureCategory(error);
+    try {
+      this.hooks.onPersistentTerminalAttachmentFailure?.({ terminalId, phase, failureCategory });
+    } catch {
+      // Diagnostics must not alter terminal attachment behavior.
+    }
+  }
+
   private retainTerminalReplay(live: LiveExecution): void {
     if (live.record.kind !== "terminal" || live.record.terminalState !== "closed"
       || live.terminalReplayExpiresAt !== null) return;
@@ -1551,6 +1593,7 @@ export class ExecutionManager {
     const setupComplete = new Promise<void>((resolve) => { finishSetup = resolve; });
     let finalization: Promise<void> | null = null;
     let ready = false;
+    let phase: PersistentTerminalAttachmentFailureDiagnostic["phase"] = "reconciliation";
     const finalize = (): Promise<void> => {
       if (finalization !== null) return finalization;
       const cleanup = (async () => {
@@ -1605,6 +1648,7 @@ export class ExecutionManager {
       if (!reconciled) throw failure("RESOURCE_STATE_CONFLICT", "The persistent terminal session is not attachable yet.", {
         resource: { type: "terminal", id: live.record.terminalId }, action: "attach"
       });
+      phase = "identity-verification";
       const persistent = live.record.persistentTerminal!;
       this.monitorPersistentTerminal(live);
       const binding = live.persistentBinding;
@@ -1614,6 +1658,7 @@ export class ExecutionManager {
           resource: { type: "terminal", id: live.record.terminalId }, action: "attach"
         });
       }
+      phase = "attachment-creation";
       const attachment = await this.persistentTmux.createAttachment(binding, persistent.sessionName,
         { columns: persistent.columns, rows: persistent.rows });
       live.stream = attachment.stream;
@@ -1621,6 +1666,7 @@ export class ExecutionManager {
       live.persistentAttachmentClientPid = attachment.clientPid;
       live.persistentAttachmentClientName = attachment.clientName;
       live.persistentOutputQueue = [];
+      phase = "relay-setup";
       live.persistentOutputQueueBytes = 0;
       if (socket.readyState !== socket.OPEN) {
         attachment.stream.destroy();
@@ -1718,6 +1764,7 @@ export class ExecutionManager {
       live.persistentOutputQueue = [];
       live.persistentOutputQueueBytes = 0;
     } catch (error) {
+      this.reportPersistentTerminalAttachmentFailure(live, phase, error);
       socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Persistent terminal attachment failed.");
       finishSetup();
       await finalize().catch(() => undefined);

@@ -653,6 +653,17 @@ class RecordingFakeSocket extends FakeSocket {
   override send(data: Buffer): void { this.frames.push(Buffer.from(data)); }
 }
 
+class AutoClosingFakeSocket extends RecordingFakeSocket {
+  closeCode: number | undefined;
+  closeReason: string | undefined;
+  override close(code?: number, reason?: string): void {
+    this.closeCode = code;
+    this.closeReason = reason;
+    this.readyState = this.CLOSED;
+    queueMicrotask(() => this.emit("close"));
+  }
+}
+
 test("a persistent attachment receives ready before tmux redraw and never prepends old direct replay", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-redraw-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
@@ -1070,7 +1081,7 @@ test("a completed tmux creation exec without an exact pane remains uncertain", a
   expect(tmux.counts.sessionsCreated).toBe(1);
 });
 
-test("an idempotent retry resolves an ambiguous tmux create after exact pane evidence appears", async () => {
+test("Agent restart reconciles an uncertain tmux create after exact pane evidence appears", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-create-late-proof-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
   const context = {
@@ -1096,11 +1107,51 @@ test("an idempotent retry resolves an ambiguous tmux create after exact pane evi
   expect(uncertain).toMatchObject({ observedState: "starting", terminalState: "disconnected",
     persistentTerminal: { admissionPhase: "uncertain" } });
   paneAvailable = true;
-  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).resolves.toBeUndefined();
+  const restarted = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await restarted.initialize();
   const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
   expect(record).toMatchObject({ creationPhase: "started", desiredState: "running", observedState: "running",
     terminalState: "disconnected", persistentTerminal: { admissionPhase: "created", sessionId: "$7", paneId: "%0", panePid: 4321 } });
   expect(lookups).toBeGreaterThanOrEqual(2);
+  expect(tmux.counts.sessionsCreated).toBe(1);
+  const socket = new RecordingFakeSocket();
+  await restarted.reserveTerminalAttachment(terminalId).attach(socket as never);
+  expect(socket.frames.map((frame) => decodeTerminalAgentFrame(frame)).some((frame) =>
+    frame.ok && frame.frame.type === "ready")).toBe(true);
+  expect(tmux.counts).toMatchObject({ sessionsCreated: 1, attachmentsCreated: 1 });
+});
+
+test("an idempotent retry resolves an ambiguous tmux create after exact pane evidence appears", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-create-retry-proof-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let paneAvailable = false;
+  const tmux = createFakePersistentRuntime({
+    startCreatedExec: async (_binding, execId) => ({ execId, exitCode: 1, stdout: "", stderr: "client response lost" }),
+    lookupSession: async (_binding, _identity, sessionName) => paneAvailable
+      ? { sessionName, sessionId: "$7", paneId: "%0", panePid: 4321, paneDead: false, paneDeadStatus: null }
+      : null
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).rejects.toThrow("still being reconciled");
+  const uncertain = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(uncertain).toMatchObject({ observedState: "starting", terminalState: "disconnected",
+    persistentTerminal: { admissionPhase: "uncertain", sessionName: `ds-${terminalId}` } });
+
+  paneAvailable = true;
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId })).resolves.toBeUndefined();
+  const recovered = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(recovered).toMatchObject({ creationPhase: "started", desiredState: "running", observedState: "running",
+    terminalState: "disconnected", persistentTerminal: {
+      admissionPhase: "created", sessionName: `ds-${terminalId}`, sessionId: "$7", paneId: "%0", panePid: 4321
+    } });
   expect(tmux.counts.sessionsCreated).toBe(1);
 });
 
@@ -1351,6 +1402,34 @@ test("initial attachment persistence failure closes before releasing ownership a
   expect(live?.attachment).toBeNull();
   const retry = manager.reserveTerminalAttachment(terminalId);
   retry.release();
+});
+
+test("persistent attachment failure reports only a bounded private phase and category", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-attach-diagnostic-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const diagnostics: unknown[] = [];
+  const tmux = createFakePersistentRuntime();
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, { onPersistentTerminalAttachmentFailure: (event) => diagnostics.push(event) }, tmux.runtime);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  tmux.runtime.lookupSession = async () => {
+    throw new PersistentTmuxIdentityMismatchError("socket /tmp/private-runtime-details");
+  };
+  const socket = new AutoClosingFakeSocket();
+  await expect(manager.reserveTerminalAttachment(terminalId).attach(socket as never)).rejects.toThrow();
+
+  expect(diagnostics).toEqual([{ terminalId, phase: "reconciliation", failureCategory: "identity-mismatch" }]);
+  expect(socket.closeCode).toBe(1011);
+  expect(socket.closeReason).toBe("Persistent terminal attachment failed.");
+  expect(JSON.stringify(diagnostics)).not.toContain("private-runtime-details");
+  expect(JSON.stringify(diagnostics)).not.toContain("container-owned");
+  expect(tmux.counts.sessionsCreated).toBe(1);
 });
 
 test("createHarness execs structured argv with CODEX_HOME only on that exec", async () => {

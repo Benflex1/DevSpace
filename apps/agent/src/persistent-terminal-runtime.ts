@@ -96,6 +96,21 @@ function digest(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * Accept tmux's secure owner-only mode alongside the legacy rw-owner socket
+ * modes. Group bits remain supported for compatibility, but other-user access
+ * and every mode outside the previously accepted set stay forbidden.
+ */
+function isOwnedSecurePersistentTmuxSocketMetadata(
+  metadata: string,
+  uid: number,
+  gid: number
+): boolean {
+  const fields = metadata.trim().split(" ");
+  if (fields.length !== 3 || fields[0] !== "socket" || fields[2] !== `${uid}:${gid}`) return false;
+  return /^(?:6[0-7]0|700)$/u.test(fields[1] ?? "");
+}
+
 async function verifiedAsset(relativePath: string, expectedDigest: string): Promise<Buffer> {
   const assetPath = path.join(TMUX_ASSET_ROOT, ...relativePath.split("/"));
   const bytes = await readFile(assetPath);
@@ -464,9 +479,8 @@ export class PersistentTmuxRuntime {
     if (socketExists.exitCode === 1) return null;
     if (socketExists.exitCode !== 0) throw new PersistentTmuxIdentityMismatchError("persistent-tmux-socket-query-failed");
     const socketMetadata = await this.commandResult(binding, ["stat", "-c", "%F %a %u:%g", binding.socketPath]);
-    const socketFields = socketMetadata.stdout.trim().split(" ");
-    if (socketMetadata.exitCode !== 0 || socketFields.length !== 3 || socketFields[0] !== "socket"
-      || socketFields[2] !== `${binding.uid}:${binding.gid}` || !/^6[0-7]0$/u.test(socketFields[1] ?? "")) {
+    if (socketMetadata.exitCode !== 0
+      || !isOwnedSecurePersistentTmuxSocketMetadata(socketMetadata.stdout, binding.uid, binding.gid)) {
       throw new PersistentTmuxIdentityMismatchError("persistent-tmux-socket-ownership-invalid");
     }
     const panes = await this.commandResult(binding, this.tmuxCommand(binding, ["list-panes", "-a", "-F", TMUX_PANE_FORMAT]));
@@ -615,9 +629,8 @@ export class PersistentTmuxRuntime {
       ]));
       if (created.exitCode !== 0) throw new Error("persistent-tmux-probe-session-failed");
       const socketMetadata = await this.commandResult(probeBinding, ["stat", "-c", "%F %a %u:%g", probeSocket]);
-      const fields = socketMetadata.stdout.trim().split(" ");
-      if (socketMetadata.exitCode !== 0 || fields.length !== 3 || fields[0] !== "socket"
-        || fields[2] !== `${binding.uid}:${binding.gid}` || !/^6[0-7]0$/u.test(fields[1] ?? "")) {
+      if (socketMetadata.exitCode !== 0
+        || !isOwnedSecurePersistentTmuxSocketMetadata(socketMetadata.stdout, binding.uid, binding.gid)) {
         throw new Error("persistent-tmux-probe-socket-invalid");
       }
       const command = this.tmuxCommand(probeBinding, ["attach-session", "-t", `=${probeName}`]);
