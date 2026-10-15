@@ -735,6 +735,45 @@ test("steady persistent reconciliation reuses verified runtime state and skips u
   expect(writes).toBe(initialWrites);
 });
 
+test("workspace stop fences an in-flight persistent reconciliation from reopening attachment", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-stop-reconcile-race-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  const tmux = createFakePersistentRuntime();
+  let lookupEntered!: () => void;
+  const lookupStarted = new Promise<void>((resolve) => { lookupEntered = resolve; });
+  let releaseLookup!: () => void;
+  const lookupRelease = new Promise<void>((resolve) => { releaseLookup = resolve; });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  await manager.createTerminal({ projectId: id, workspaceId, terminalId });
+  tmux.runtime.lookupSession = async () => {
+    lookupEntered();
+    await lookupRelease;
+    throw new Error("container-stopped-during-tmux-lookup");
+  };
+
+  const internals = manager as unknown as {
+    executions: Map<string, object>;
+    reconcilePersistentTerminal(live: object): Promise<boolean>;
+  };
+  const reconciliation = internals.reconcilePersistentTerminal(internals.executions.get(terminalId)!);
+  await lookupStarted;
+  const stopping = manager.stopWorkspace(id, workspaceId);
+  releaseLookup();
+  await Promise.all([reconciliation, stopping]);
+
+  expect(() => manager.reserveTerminalAttachment(terminalId)).toThrow("attachable");
+  expect(JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")))
+    .toMatchObject({ desiredState: "stopped", observedState: "killed", terminalState: "lost" });
+  expect(tmux.counts.sessionsCreated).toBe(1);
+});
+
 test("persistent monitoring retries transient observations automatically and stops after pane death", async () => {
   vi.useFakeTimers();
   const root = await mkdtemp(path.join(tmpdir(), "devspace-terminal-monitor-retry-")); roots.push(root);

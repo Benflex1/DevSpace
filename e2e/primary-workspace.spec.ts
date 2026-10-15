@@ -254,7 +254,8 @@ test("sets up and recovers the real managed primary workspace", async ({ page })
   await conflictedWebSocket(terminalUrl, "http://127.0.0.1:3100");
   await terminal.locator(".xterm-helper-textarea").focus();
   await recoveredPage.keyboard.type("echo terminal-conflict-owner-ok"); await recoveredPage.keyboard.press("Enter");
-  await expect(terminal.getByText(/terminal-conflict-owner-ok/u)).toBeVisible();
+  await expect(terminal.locator(".xterm-rows"))
+    .toContainText("terminal-conflict-owner-ok");
   await expect.poll(async () => {
     const snapshot = await fetch("http://127.0.0.1:3199/docker-snapshot", { headers: { authorization: `Bearer ${fixture.controlToken}` } })
       .then(async (response) => await response.json()) as { execs: DockerExec[] };

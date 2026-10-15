@@ -177,6 +177,8 @@ type LiveExecution = {
   persistentAttachmentClientPid: number | null;
   persistentAttachmentClientName: string | null;
   persistentReconciliationFailureCategory?: PersistentTerminalAttachmentFailureCategory | null;
+  persistentReconciliation?: Promise<boolean> | null;
+  persistentWorkspaceStopped?: boolean;
   persistentAttachmentFinalize: (() => Promise<void>) | null;
   persistentOutputQueue: Buffer[];
   persistentOutputQueueBytes: number;
@@ -581,12 +583,25 @@ export class ExecutionManager {
     };
   }
 
-  private async reconcilePersistentTerminal(live: LiveExecution): Promise<boolean> {
+  private reconcilePersistentTerminal(live: LiveExecution): Promise<boolean> {
+    if (live.persistentReconciliation !== undefined && live.persistentReconciliation !== null) {
+      return live.persistentReconciliation;
+    }
+    const reconciliation = this.reconcilePersistentTerminalOnce(live);
+    live.persistentReconciliation = reconciliation;
+    void reconciliation.finally(() => {
+      if (live.persistentReconciliation === reconciliation) live.persistentReconciliation = null;
+    }).catch(() => undefined);
+    return reconciliation;
+  }
+
+  private async reconcilePersistentTerminalOnce(live: LiveExecution): Promise<boolean> {
     const previousRecord = live.record;
     const persistent = live.record.persistentTerminal;
     if (live.record.terminalBackend !== "tmux" || persistent === undefined || live.record.terminalId === null) return false;
     live.persistentMonitorEligible = false;
-    if (live.record.desiredState !== "running" || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
+    if (live.persistentWorkspaceStopped === true || live.record.desiredState !== "running"
+      || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
     live.persistentReconciliationFailureCategory = null;
     let retryableObservationFailure = true;
     try {
@@ -607,6 +622,7 @@ export class ExecutionManager {
       }
       if (container.State.Running !== true) {
         live.persistentBinding = null;
+        live.persistentWorkspaceStopped = true;
         live.record = { ...live.record, desiredState: "stopped", observedState: "killed", terminalState: "lost",
           exitCode: null, finishedAt: this.now().toISOString() };
         live.persistentReconciliationFailureCategory = "state-conflict";
@@ -1431,9 +1447,16 @@ export class ExecutionManager {
 
   private async settleWorkspaceExecutions(projectId: string, workspaceId: string): Promise<void> {
     for (const live of this.executions.values()) {
+      const current = live.record;
+      if (current.projectId !== projectId || current.workspaceId !== workspaceId || current.executionRole === "harness") continue;
+      if (current.terminalBackend === "tmux") {
+        live.persistentWorkspaceStopped = true;
+        live.persistentMonitorEligible = false;
+        live.persistentMonitorActive = false;
+        await live.persistentReconciliation?.catch(() => false);
+      }
       const previous = live.record;
-      if (previous.projectId !== projectId || previous.workspaceId !== workspaceId || previous.executionRole === "harness"
-        || !["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
+      if (!["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
       live.persistentMonitorEligible = false;
       live.persistentMonitorActive = false;
       // The managed runtime has confirmed the exact container is stopped, so
@@ -1782,6 +1805,12 @@ export class ExecutionManager {
       && !live.terminalReplayClaimed;
     if (live.attachmentReserved || live.attachment !== null || live.attachmentCleanup !== null) {
       throw failure("RESOURCE_STATE_CONFLICT", "The terminal cannot accept another attachment.", {
+        resource: { type: "terminal", id: terminalId }, action: "attach"
+      });
+    }
+    if (live.record.terminalBackend === "tmux" && (live.persistentWorkspaceStopped === true
+      || live.record.desiredState !== "running")) {
+      throw failure("RESOURCE_STATE_CONFLICT", "The terminal is not currently attachable.", {
         resource: { type: "terminal", id: terminalId }, action: "attach"
       });
     }
