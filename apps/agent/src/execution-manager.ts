@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { Duplex } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import {
   TERMINAL_FAILURE_CLOSE_CODE,
   TERMINAL_MAX_PAYLOAD_BYTES,
@@ -22,15 +23,47 @@ import {
 import type { ProjectOptionsV1 } from "@devspace/project-options";
 import * as z from "zod";
 import type WebSocket from "ws";
+import { v7 as uuidv7 } from "uuid";
 import { DockerEngineClient, DockerEngineError, DockerEngineTransportError } from "./docker-runtime.js";
 import { AgentExecutionError, ManagedWorkspaces, type WorkspaceExecutionContext } from "./managed-workspaces.js";
 import { durableJsonWriter, establishPinnedDirectory, readStrictJson, type AtomicJsonWriter } from "./private-state.js";
+import {
+  PERSISTENT_TERMINALS_PER_WORKSPACE_LIMIT,
+  PERSISTENT_TERMINAL_BACKEND_VERSION,
+  PERSISTENT_TMUX_BACKPRESSURE_BYTES,
+  PERSISTENT_TMUX_MAX_COLUMNS,
+  PERSISTENT_TMUX_MAX_ROWS,
+  PersistentTmuxIdentityMismatchError,
+  PersistentTmuxRuntime,
+  persistentTmuxSessionName,
+  persistentTerminalOwnershipMarker,
+  type PersistentTerminalOwnership,
+  type PersistentTmuxBinding
+} from "./persistent-terminal-runtime.js";
 
 const REPLAY_LIMIT_BYTES = 64 * 1024;
 const TERMINAL_REPLAY_DRAIN_WAIT_MS = 1_000;
 const ATTACHMENT_BACKPRESSURE_BYTES = 256 * 1024;
 const RECOVERED_HARNESS_POLL_INITIAL_MS = 250;
 const RECOVERED_HARNESS_POLL_MAX_MS = 2_000;
+const PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS = 5_000;
+const PERSISTENT_TERMINAL_RECONCILE_MAX_INTERVAL_MS = 60_000;
+
+const persistentTerminalRecordSchema = z.strictObject({
+  backendVersion: z.literal(PERSISTENT_TERMINAL_BACKEND_VERSION),
+  sessionName: z.string().min(1),
+  sessionId: z.string().regex(/^\$[0-9]+$/u).nullable(),
+  paneId: z.string().regex(/^%[0-9]+$/u).nullable(),
+  panePid: z.number().int().positive().nullable(),
+  uid: z.number().int().nonnegative(),
+  gid: z.number().int().nonnegative(),
+  socketPath: z.string().min(1),
+  ownershipMarker: z.string().regex(/^[0-9a-f]{64}$/u),
+  admissionPhase: z.enum(["reserved", "exec-created", "start-intent", "uncertain", "created"]),
+  createExecId: z.string().min(1).nullable(),
+  columns: z.number().int().min(1).max(PERSISTENT_TMUX_MAX_COLUMNS),
+  rows: z.number().int().min(1).max(PERSISTENT_TMUX_MAX_ROWS)
+});
 
 const executionRecordSchema = z.strictObject({
   version: z.literal(1),
@@ -52,6 +85,8 @@ const executionRecordSchema = z.strictObject({
   generation: z.number().int().positive(),
   containerId: z.string().min(1),
   execId: z.string().min(1).nullable(),
+  terminalBackend: z.enum(["direct-exec", "tmux"]).optional(),
+  persistentTerminal: persistentTerminalRecordSchema.optional(),
   operationId: uuidV7Schema.nullable().default(null),
   // start-intent is private recovery evidence: Docker exec start is ambiguous
   // across an Agent crash, so the exact retained exec is inspected before any
@@ -137,6 +172,20 @@ type LiveExecution = {
   terminalReplayTimer: NodeJS.Timeout | null;
   terminalReplayComplete: boolean;
   terminalReplayWaiters: Set<() => void>;
+  persistentBinding: PersistentTmuxBinding | null;
+  persistentAttachmentExecId: string | null;
+  persistentAttachmentClientPid: number | null;
+  persistentAttachmentClientName: string | null;
+  persistentReconciliationFailureCategory?: PersistentTerminalAttachmentFailureCategory | null;
+  persistentReconciliation?: Promise<boolean> | null;
+  persistentWorkspaceStopped?: boolean;
+  persistentAttachmentFinalize: (() => Promise<void>) | null;
+  persistentOutputQueue: Buffer[];
+  persistentOutputQueueBytes: number;
+  persistentMonitorActive?: boolean;
+  persistentMonitorEligible?: boolean;
+  persistentMonitorFailures?: number;
+  persistentMonitorPoll?: Promise<void>;
 };
 
 function failure(code: AgentExecutionFailure["code"], message: string, details: Record<string, unknown>): AgentExecutionError {
@@ -188,6 +237,13 @@ export class TaskStartRecoveryRequiredError extends Error {
   }
 }
 
+export class PersistentTerminalAdmissionUncertainError extends Error {
+  constructor() {
+    super("The persistent terminal admission is still being reconciled against its exact tmux session.");
+    this.name = "PersistentTerminalAdmissionUncertainError";
+  }
+}
+
 export type HarnessExecutionSettlement = {
   readonly processId: string;
   readonly terminalId: string;
@@ -225,13 +281,34 @@ export type TerminalResizeFailureDiagnostic = {
   readonly failureCode: number | null;
 };
 
+type PersistentTerminalAttachmentFailureCategory =
+  | "docker-http" | "docker-transport" | "identity-mismatch" | "state-conflict" | "session-unverified" | "internal";
+
+export type PersistentTerminalAttachmentFailureDiagnostic = {
+  readonly terminalId: string;
+  readonly phase: "reconciliation" | "identity-verification" | "attachment-creation" | "relay-setup";
+  readonly failureCategory: PersistentTerminalAttachmentFailureCategory;
+};
+
+function persistentTerminalAttachmentFailureCategory(error: unknown): PersistentTerminalAttachmentFailureCategory {
+  if (error instanceof DockerEngineError) return "docker-http";
+  if (error instanceof DockerEngineTransportError) return "docker-transport";
+  if (error instanceof PersistentTmuxIdentityMismatchError) return "identity-mismatch";
+  if (error instanceof AgentExecutionError) return "state-conflict";
+  return "internal";
+}
+
 export class ExecutionManager {
   private readonly recordsRoot: string;
   private readonly stateRoot: string;
   private readonly recoveryReports: HarnessRecoveryReport[] = [];
   private readonly executions = new Map<string, LiveExecution>();
+  private readonly terminalAdmissions = new Map<string, Promise<void>>();
+  private readonly workspaceAdmissions = new Map<string, Promise<void>>();
+  private readonly persistentTmux: PersistentTmuxRuntime;
   private readonly harnessProcessIds = new Set<string>();
   private readonly settledHarnessProcessIds = new Set<string>();
+  private readonly terminalAdmissionMode: "persistent" | "legacy-direct-exec";
 
   constructor(
     stateRoot: string,
@@ -243,10 +320,15 @@ export class ExecutionManager {
       readonly onHarnessSettled?: (event: HarnessExecutionSettlement) => void | Promise<void>;
       readonly onHarnessRecovered?: (event: HarnessRecoveryIdentity) => void | Promise<void>;
       readonly onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
-    } = {}
+      readonly onPersistentTerminalAttachmentFailure?: (event: PersistentTerminalAttachmentFailureDiagnostic) => void;
+    } = {},
+    persistentTmux?: PersistentTmuxRuntime,
+    terminalAdmissionMode: "persistent" | "legacy-direct-exec" = "persistent"
   ) {
     this.recordsRoot = path.join(path.resolve(stateRoot), "ownership", "executions");
     this.stateRoot = path.resolve(stateRoot);
+    this.persistentTmux = persistentTmux ?? new PersistentTmuxRuntime(engine);
+    this.terminalAdmissionMode = terminalAdmissionMode;
   }
 
   harnessRecoveryReports(): readonly HarnessRecoveryReport[] {
@@ -278,12 +360,36 @@ export class ExecutionManager {
       const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
         attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
         terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
-        terminalReplayComplete: true, terminalReplayWaiters: new Set() };
+        terminalReplayComplete: true, terminalReplayWaiters: new Set(), persistentBinding: null,
+        persistentAttachmentExecId: null, persistentAttachmentClientPid: null, persistentAttachmentClientName: null,
+        persistentAttachmentFinalize: null,
+        persistentOutputQueue: [], persistentOutputQueueBytes: 0 };
       this.executions.set(record.processId, live);
       if (adopted.kind === "harness" && (stored.executionRole !== "harness"
         || stored.harnessSessionId !== adopted.sessionId || stored.harnessGeneration !== adopted.processGeneration
         || stored.harnessLeaseId !== adopted.leaseId)) {
         await this.persist(live);
+      }
+      if (record.terminalBackend === "tmux" && record.persistentTerminal !== undefined) {
+        if (record.desiredState === "running" && ["creating", "active", "disconnected"].includes(record.terminalState ?? "")) {
+          const recovered = await this.reconcilePersistentTerminal(live).catch(() => false);
+          const phase = live.record.persistentTerminal?.admissionPhase;
+          if (!recovered && (phase === "reserved" || phase === "exec-created")) {
+            try {
+              const context = await this.managed.executionContext(record.projectId, record.workspaceId);
+              this.assertContext(record, context);
+              const binding = live.persistentBinding ?? await this.persistentTmux.prepare(record.containerId);
+              this.assertPersistentBinding(live, binding);
+              live.persistentBinding = binding;
+              await this.startPersistentSession(live, binding);
+            } catch { /* retain or persist the precise uncertain phase for a later retry */ }
+          }
+        }
+        if (live.record.desiredState === "running"
+          && (live.record.observedState === "running" || live.persistentMonitorEligible === true)) {
+          this.monitorPersistentTerminal(live);
+        }
+        continue;
       }
       const pendingRecoveredHarness = record.executionRole === "harness"
         && record.terminalState === "lost";
@@ -322,7 +428,10 @@ export class ExecutionManager {
       record: normalizeExecutionRecord(retained), stream: null, attachment: null, attachmentReserved: false,
       attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
       terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
-      terminalReplayComplete: true, terminalReplayWaiters: new Set()
+      terminalReplayComplete: true, terminalReplayWaiters: new Set(), persistentBinding: null,
+      persistentAttachmentExecId: null, persistentAttachmentClientPid: null, persistentAttachmentClientName: null,
+      persistentAttachmentFinalize: null,
+        persistentOutputQueue: [], persistentOutputQueueBytes: 0
     };
     this.executions.set(stored.processId, live);
     // Preserve the legacy shape so a later startup can still reconcile it if
@@ -459,6 +568,182 @@ export class ExecutionManager {
     await this.writer.write(this.recordPath(live.record.processId), executionRecordSchema.parse(live.record));
   }
 
+  private async persistIfChanged(live: LiveExecution, previous: ExecutionRecord): Promise<void> {
+    const before = executionRecordSchema.parse(previous);
+    const next = executionRecordSchema.parse(live.record);
+    if (isDeepStrictEqual(before, next)) return;
+    await this.writer.write(this.recordPath(live.record.processId), next);
+  }
+
+  private persistentOwnership(record: ExecutionRecord): PersistentTerminalOwnership {
+    return {
+      projectId: record.projectId, workspaceId: record.workspaceId, terminalId: record.terminalId!,
+      processId: record.processId, containerId: record.containerId, generation: record.generation,
+      revisionId: record.revisionId, revisionHash: record.revisionHash, runtimePlanHash: record.runtimePlanHash
+    };
+  }
+
+  private reconcilePersistentTerminal(live: LiveExecution): Promise<boolean> {
+    if (live.persistentReconciliation !== undefined && live.persistentReconciliation !== null) {
+      return live.persistentReconciliation;
+    }
+    const reconciliation = this.reconcilePersistentTerminalOnce(live);
+    live.persistentReconciliation = reconciliation;
+    void reconciliation.finally(() => {
+      if (live.persistentReconciliation === reconciliation) live.persistentReconciliation = null;
+    }).catch(() => undefined);
+    return reconciliation;
+  }
+
+  private async reconcilePersistentTerminalOnce(live: LiveExecution): Promise<boolean> {
+    const previousRecord = live.record;
+    const persistent = live.record.persistentTerminal;
+    if (live.record.terminalBackend !== "tmux" || persistent === undefined || live.record.terminalId === null) return false;
+    live.persistentMonitorEligible = false;
+    if (live.persistentWorkspaceStopped === true || live.record.desiredState !== "running"
+      || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
+    live.persistentReconciliationFailureCategory = null;
+    let retryableObservationFailure = true;
+    try {
+      if (persistent.sessionName !== persistentTmuxSessionName(live.record.terminalId)
+        || persistent.ownershipMarker !== persistentTerminalOwnershipMarker(this.persistentOwnership(live.record))) {
+        live.persistentBinding = null;
+        retryableObservationFailure = false;
+        throw new Error("persistent-terminal-record-identity-mismatch");
+      }
+      const context = await this.managed.executionContext(live.record.projectId, live.record.workspaceId);
+      try { this.assertContext(live.record, context); }
+      catch (error) { live.persistentBinding = null; retryableObservationFailure = false; throw error; }
+      const container = await this.engine.inspectContainer(live.record.containerId);
+      if (container.Id !== live.record.containerId) {
+        live.persistentBinding = null;
+        retryableObservationFailure = false;
+        throw new Error("persistent-terminal-container-identity-mismatch");
+      }
+      if (container.State.Running !== true) {
+        live.persistentBinding = null;
+        live.persistentWorkspaceStopped = true;
+        live.record = { ...live.record, desiredState: "stopped", observedState: "killed", terminalState: "lost",
+          exitCode: null, finishedAt: this.now().toISOString() };
+        live.persistentReconciliationFailureCategory = "state-conflict";
+        await this.persistIfChanged(live, previousRecord);
+        return false;
+      }
+      const binding = live.persistentBinding ?? await this.persistentTmux.prepare(live.record.containerId);
+      try { this.assertPersistentBinding(live, binding); }
+      catch (error) { live.persistentBinding = null; retryableObservationFailure = false; throw error; }
+      live.persistentBinding = binding;
+      const observation = await this.persistentTmux.lookupSession(binding, this.persistentOwnership(live.record),
+        persistent.sessionName, persistent.sessionId, persistent.paneId);
+      if (observation === null) {
+        if (persistent.admissionPhase !== "reserved" && persistent.admissionPhase !== "exec-created") {
+          live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+            persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
+          await this.persistIfChanged(live, previousRecord);
+          live.persistentMonitorEligible = true;
+        }
+        live.persistentReconciliationFailureCategory = "session-unverified";
+        return false;
+      }
+      const nextPersistent = {
+        ...persistent, admissionPhase: "created" as const, sessionId: observation.sessionId,
+        paneId: observation.paneId, panePid: observation.panePid
+      };
+      const terminalState = live.attachment !== null && live.attachment.readyState === live.attachment.OPEN
+        ? "active" as const : "disconnected" as const;
+      if (observation.paneDead) {
+        live.record = { ...live.record, creationPhase: "started", desiredState: "stopped", observedState: "exited", terminalState: "closed",
+          exitCode: observation.paneDeadStatus, startedAt: live.record.startedAt ?? this.now().toISOString(),
+          finishedAt: this.now().toISOString(), persistentTerminal: nextPersistent };
+        live.persistentMonitorEligible = false;
+        live.persistentReconciliationFailureCategory = "state-conflict";
+      } else {
+        live.record = { ...live.record, creationPhase: "started", desiredState: "running", observedState: "running", terminalState,
+          exitCode: null, startedAt: live.record.startedAt ?? this.now().toISOString(), finishedAt: null,
+          persistentTerminal: nextPersistent };
+        live.persistentMonitorEligible = true;
+        live.persistentMonitorFailures = 0;
+        live.persistentReconciliationFailureCategory = null;
+      }
+      await this.persistIfChanged(live, previousRecord);
+      return !observation.paneDead;
+    } catch (error) {
+      // A mismatch, unavailable Agent/engine response, or owner marker that
+      // cannot be proved leaves the original identity uncertain. Never launch
+      // a replacement shell while resolving that evidence.
+      if (error instanceof PersistentTmuxIdentityMismatchError) live.persistentBinding = null;
+      live.persistentReconciliationFailureCategory = persistentTerminalAttachmentFailureCategory(error);
+      const definitiveFailure = error instanceof PersistentTmuxIdentityMismatchError
+        || error instanceof DockerEngineError && error.statusCode === 404
+        || error instanceof AgentExecutionError && ["PROCESS_IDENTITY_MISMATCH", "WORKSPACE_STATE_CONFLICT"].includes(error.failure.code);
+      live.persistentMonitorEligible = retryableObservationFailure && !definitiveFailure;
+      live.record = { ...live.record, observedState: "starting", terminalState: "disconnected",
+        persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
+      await this.persistIfChanged(live, previousRecord).catch(() => undefined);
+      return false;
+    }
+  }
+
+  private assertPersistentBinding(live: LiveExecution, binding: PersistentTmuxBinding): void {
+    const persistent = live.record.persistentTerminal;
+    if (persistent === undefined || binding.containerId !== live.record.containerId
+      || binding.uid !== persistent.uid || binding.gid !== persistent.gid || binding.socketPath !== persistent.socketPath) {
+      throw new Error("persistent-terminal-execution-identity-changed");
+    }
+  }
+
+  private persistentPaneHasExited(live: LiveExecution): boolean {
+    return live.record.terminalBackend === "tmux"
+      && live.record.persistentTerminal?.admissionPhase === "created"
+      && live.record.desiredState === "stopped"
+      && live.record.observedState === "exited"
+      && live.record.terminalState === "closed";
+  }
+
+  private async startPersistentSession(live: LiveExecution, binding: PersistentTmuxBinding): Promise<void> {
+    let persistent = live.record.persistentTerminal;
+    if (persistent === undefined || live.record.terminalId === null) throw new Error("persistent-terminal-record-missing");
+    const ownership = this.persistentOwnership(live.record);
+    if (persistent.admissionPhase === "reserved") {
+      const createExecId = await this.persistentTmux.createSessionExec(binding, ownership, persistent.sessionName);
+      persistent = { ...persistent, admissionPhase: "exec-created", createExecId };
+      live.record = { ...live.record, creationPhase: "exec-created", persistentTerminal: persistent, observedState: "starting" };
+      await this.persist(live);
+    }
+    if (persistent.admissionPhase !== "exec-created" || persistent.createExecId === null) return;
+    const status = await this.persistentTmux.inspectExec(binding, persistent.createExecId);
+    if (status.running || status.exitCode !== null) {
+      if (await this.reconcilePersistentTerminal(live) || this.persistentPaneHasExited(live)) return;
+      live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+        persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
+      await this.persist(live);
+      throw new PersistentTerminalAdmissionUncertainError();
+    }
+    persistent = { ...persistent, admissionPhase: "start-intent" };
+    live.record = { ...live.record, creationPhase: "start-intent", persistentTerminal: persistent, observedState: "starting" };
+    await this.persist(live);
+    let started: Awaited<ReturnType<PersistentTmuxRuntime["startCreatedExec"]>>;
+    try { started = await this.persistentTmux.startCreatedExec(binding, persistent.createExecId!); }
+    catch {
+      live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+        persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
+      await this.persist(live).catch(() => undefined);
+      if (await this.reconcilePersistentTerminal(live) || this.persistentPaneHasExited(live)) return;
+      throw new PersistentTerminalAdmissionUncertainError();
+    }
+    if (await this.reconcilePersistentTerminal(live) || this.persistentPaneHasExited(live)) return;
+    if (started.exitCode !== 0) {
+      live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+        persistentTerminal: { ...live.record.persistentTerminal!, admissionPhase: "uncertain" } };
+      await this.persist(live);
+      throw new PersistentTerminalAdmissionUncertainError();
+    }
+      live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+      persistentTerminal: { ...live.record.persistentTerminal!, admissionPhase: "uncertain" } };
+    await this.persist(live);
+    throw new PersistentTerminalAdmissionUncertainError();
+  }
+
   private assertContext(record: ExecutionRecord, context: WorkspaceExecutionContext): void {
     if (record.projectId !== context.projectId || record.workspaceId !== context.workspaceId
       || record.revisionId !== context.revisionId || record.revisionHash !== context.revisionHash
@@ -487,6 +772,10 @@ export class ExecutionManager {
     const recoveredHarnessLost = live.record.executionRole === "harness" && live.record.terminalState === "lost";
     if (recoveredHarnessLost && this.settledHarnessProcessIds.has(live.record.processId)) return;
     if (!["queued", "starting", "running", "stopping"].includes(live.record.observedState) && !recoveredHarnessLost) return;
+    if (live.record.terminalBackend === "tmux" && live.record.persistentTerminal !== undefined) {
+      await this.reconcilePersistentTerminal(live);
+      return;
+    }
     if (live.record.creationPhase !== "started") return;
     if (recoveredHarnessLost) {
       const observation = await this.harnessObservation(live);
@@ -556,6 +845,42 @@ export class ExecutionManager {
     }
   }
 
+  private monitorPersistentTerminal(live: LiveExecution): void {
+    if (live.persistentMonitorActive) return;
+    if (live.record.desiredState !== "running"
+      || !["running", "starting"].includes(live.record.observedState)
+      || live.record.observedState !== "running" && live.persistentMonitorEligible !== true) return;
+    live.persistentMonitorActive = true;
+    if (live.record.observedState === "running") live.persistentMonitorEligible = true;
+    const poll = async () => {
+      if (!live.persistentMonitorActive) return;
+      if (live.record.desiredState !== "running"
+        || ["killed", "failed", "exited", "lost"].includes(live.record.observedState)) {
+        live.persistentMonitorActive = false;
+        live.persistentMonitorEligible = false;
+        return;
+      }
+      await this.refresh(live).catch(() => undefined);
+      if (live.record.desiredState === "running" && live.persistentMonitorEligible === true
+        && ["running", "starting"].includes(live.record.observedState)) {
+        let delayMs = PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS;
+        if (live.record.observedState === "running") {
+          live.persistentMonitorFailures = 0;
+        } else {
+          live.persistentMonitorFailures = Math.min((live.persistentMonitorFailures ?? 0) + 1, 4);
+          delayMs = Math.min(PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS * (2 ** live.persistentMonitorFailures),
+            PERSISTENT_TERMINAL_RECONCILE_MAX_INTERVAL_MS);
+        }
+        setTimeout(() => { live.persistentMonitorPoll = poll().catch(() => undefined); }, delayMs).unref();
+      } else {
+        live.persistentMonitorActive = false;
+      }
+    };
+    setTimeout(() => {
+      live.persistentMonitorPoll = poll().catch(() => undefined);
+    }, PERSISTENT_TERMINAL_RECONCILE_INTERVAL_MS).unref();
+  }
+
   private attachStream(live: LiveExecution, stream: Duplex): void {
     live.stream = stream;
     live.terminalReplayComplete = false;
@@ -605,7 +930,10 @@ export class ExecutionManager {
     const live: LiveExecution = { record, stream: null, attachment: null, attachmentReserved: false,
       attachmentCleanup: null, replay: Buffer.alloc(0), resizeFailureReported: false,
       terminalReplayExpiresAt: null, terminalReplayClaimed: false, terminalReplayTimer: null,
-      terminalReplayComplete: true, terminalReplayWaiters: new Set() };
+      terminalReplayComplete: true, terminalReplayWaiters: new Set(), persistentBinding: null,
+      persistentAttachmentExecId: null, persistentAttachmentClientPid: null, persistentAttachmentClientName: null,
+      persistentAttachmentFinalize: null,
+      persistentOutputQueue: [], persistentOutputQueueBytes: 0 };
     // The exact request/operation binding is durable before Docker sees a side effect.
     await this.persist(live);
     this.executions.set(record.processId, live);
@@ -820,17 +1148,154 @@ export class ExecutionManager {
   }
 
   async createTerminal(input: TerminalIdentityData): Promise<void> {
+    const terminalId = uuidV7Schema.parse(input.terminalId);
+    const pending = this.terminalAdmissions.get(terminalId);
+    if (pending !== undefined) return await pending;
+    const identity = { ...input, terminalId };
+    const admission = this.serializeWorkspaceAdmission(input.workspaceId,
+      async () => this.terminalAdmissionMode === "legacy-direct-exec"
+        ? await this.admitLegacyDirectTerminal(identity)
+        : await this.admitPersistentTerminal(identity));
+    this.terminalAdmissions.set(terminalId, admission);
+    try { await admission; }
+    finally { if (this.terminalAdmissions.get(terminalId) === admission) this.terminalAdmissions.delete(terminalId); }
+  }
+
+  private async serializeWorkspaceAdmission(workspaceId: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.workspaceAdmissions.get(workspaceId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.workspaceAdmissions.set(workspaceId, current);
+    await previous.catch(() => undefined);
+    try { await operation(); }
+    finally {
+      release();
+      if (this.workspaceAdmissions.get(workspaceId) === current) this.workspaceAdmissions.delete(workspaceId);
+    }
+  }
+
+  private async admitLegacyDirectTerminal(input: TerminalIdentityData): Promise<void> {
+    const existing = [...this.executions.values()].find((candidate) => candidate.record.terminalId === input.terminalId);
+    if (existing !== undefined) {
+      if (existing.record.executionRole === "terminal" && existing.record.terminalBackend !== "tmux"
+        && existing.record.projectId === input.projectId && existing.record.workspaceId === input.workspaceId) return;
+      throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
+        resource: { type: "terminal", id: input.terminalId }, action: "create"
+      });
+    }
     const context = await this.managed.executionContext(input.projectId, input.workspaceId);
-    const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId);
-    if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
-      resource: { type: "terminal", id: input.terminalId }, action: "create"
-    });
     await this.createExec(context, {
       kind: "terminal", executionRole: "terminal", harnessSessionId: null, harnessGeneration: null, harnessLeaseId: null,
       processId: input.terminalId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
       successExitCodes: [0], command: ["/bin/sh"], workingDirectory: "/workspace",
       environment: { TERM: "xterm-256color" }, attachStdin: true, tty: true, operationId: null
     });
+  }
+
+  private async admitPersistentTerminal(input: TerminalIdentityData): Promise<void> {
+    const existing = [...this.executions.values()].find((candidate) => candidate.record.terminalId === input.terminalId);
+    if (existing !== undefined) {
+      if (existing.record.terminalBackend !== "tmux" || existing.record.persistentTerminal === undefined
+        || existing.record.projectId !== input.projectId || existing.record.workspaceId !== input.workspaceId) {
+        throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
+          resource: { type: "terminal", id: input.terminalId }, action: "create"
+        });
+      }
+      if (existing.record.desiredState === "stopped" || ["closed", "failed", "lost"].includes(existing.record.terminalState ?? "")) {
+        throw failure("RESOURCE_STATE_CONFLICT", "The persistent terminal is no longer attachable.", {
+          resource: { type: "terminal", id: input.terminalId }, action: "create"
+        });
+      }
+      const context = await this.managed.executionContext(input.projectId, input.workspaceId);
+      this.assertContext(existing.record, context);
+      const recovered = await this.reconcilePersistentTerminal(existing);
+      const phase = existing.record.persistentTerminal.admissionPhase;
+      if (!recovered && (phase === "reserved" || phase === "exec-created")) {
+        const binding = existing.persistentBinding ?? await this.persistentTmux.prepare(existing.record.containerId);
+        this.assertPersistentBinding(existing, binding);
+        existing.persistentBinding = binding;
+        await this.startPersistentSession(existing, binding);
+      }
+      if (existing.record.persistentTerminal.admissionPhase === "created"
+        && existing.record.observedState === "running" && existing.record.desiredState === "running") {
+        this.monitorPersistentTerminal(existing);
+        return;
+      }
+      if (this.persistentPaneHasExited(existing)) return;
+      throw new PersistentTerminalAdmissionUncertainError();
+    }
+
+    const context = await this.managed.executionContext(input.projectId, input.workspaceId);
+    const containerId = context.ownership.developmentContainer.id;
+    const binding = await this.persistentTmux.prepare(containerId);
+    const sessionName = persistentTmuxSessionName(input.terminalId);
+    const ownership: PersistentTerminalOwnership = {
+      projectId: context.projectId, workspaceId: context.workspaceId, terminalId: input.terminalId,
+      processId: input.terminalId, containerId, generation: context.generation,
+      revisionId: context.revisionId, revisionHash: context.revisionHash, runtimePlanHash: context.runtimePlanHash
+    };
+    const live: LiveExecution = {
+      record: {
+        version: 1, kind: "terminal", executionRole: "terminal", harnessSessionId: null,
+        harnessGeneration: null, harnessLeaseId: null, projectId: context.projectId,
+        workspaceId: context.workspaceId, processId: input.terminalId, terminalId: input.terminalId,
+        taskRunId: null, taskKey: null, successExitCodes: [0], revisionId: context.revisionId,
+        revisionHash: context.revisionHash, runtimePlanHash: context.runtimePlanHash,
+        generation: context.generation, containerId, execId: null, terminalBackend: "tmux",
+        operationId: null, creationPhase: "reserved", desiredState: "running", observedState: "queued",
+        terminalState: "creating", exitCode: null, startedAt: null, finishedAt: null,
+        persistentTerminal: {
+          backendVersion: PERSISTENT_TERMINAL_BACKEND_VERSION, sessionName, sessionId: null, paneId: null,
+          panePid: null, uid: binding.uid, gid: binding.gid, socketPath: binding.socketPath,
+          ownershipMarker: persistentTerminalOwnershipMarker(ownership), admissionPhase: "reserved",
+          createExecId: null, columns: 80, rows: 24
+        }
+      },
+      stream: null, attachment: null, attachmentReserved: false, attachmentCleanup: null,
+      replay: Buffer.alloc(0), resizeFailureReported: false, terminalReplayExpiresAt: null,
+      terminalReplayClaimed: false, terminalReplayTimer: null, terminalReplayComplete: true,
+      terminalReplayWaiters: new Set(), persistentBinding: binding, persistentAttachmentExecId: null,
+      persistentAttachmentClientPid: null, persistentAttachmentClientName: null, persistentAttachmentFinalize: null,
+      persistentOutputQueue: [], persistentOutputQueueBytes: 0
+    };
+    const activeInWorkspace = [...this.executions.values()].filter((candidate) =>
+      candidate.record.workspaceId === input.workspaceId && candidate.record.terminalBackend === "tmux"
+      && candidate.record.desiredState === "running"
+      && !["closed", "failed", "lost"].includes(candidate.record.terminalState ?? "")
+    ).length;
+    if (activeInWorkspace >= PERSISTENT_TERMINALS_PER_WORKSPACE_LIMIT) {
+      throw failure("RESOURCE_STATE_CONFLICT", "This workspace already has the maximum number of persistent terminals.", {
+        resource: { type: "terminal", id: input.terminalId }, action: "create",
+        maximum: PERSISTENT_TERMINALS_PER_WORKSPACE_LIMIT
+      });
+    }
+    await this.persist(live);
+    this.executions.set(input.terminalId, live);
+    try {
+      await this.startPersistentSession(live, binding);
+      if (live.record.persistentTerminal?.admissionPhase === "created" && live.record.observedState === "running") {
+        this.monitorPersistentTerminal(live);
+        return;
+      }
+    } catch (error) {
+      if (live.record.persistentTerminal?.admissionPhase === "start-intent") {
+        live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
+          persistentTerminal: { ...live.record.persistentTerminal, admissionPhase: "uncertain" } };
+        await this.persist(live).catch(() => undefined);
+        const reconciled = await this.reconcilePersistentTerminal(live);
+        if (reconciled || this.persistentPaneHasExited(live)) {
+          if (live.record.observedState === "running") this.monitorPersistentTerminal(live);
+          return;
+        }
+        if (live.persistentMonitorEligible === true) this.monitorPersistentTerminal(live);
+      } else if (live.record.persistentTerminal?.admissionPhase === "reserved"
+        || live.record.persistentTerminal?.admissionPhase === "exec-created") {
+        live.record = { ...live.record, desiredState: "stopped", observedState: "failed", terminalState: "failed",
+          finishedAt: this.now().toISOString() };
+        await this.persist(live).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async createHarness(input: {
@@ -982,9 +1447,18 @@ export class ExecutionManager {
 
   private async settleWorkspaceExecutions(projectId: string, workspaceId: string): Promise<void> {
     for (const live of this.executions.values()) {
+      const current = live.record;
+      if (current.projectId !== projectId || current.workspaceId !== workspaceId || current.executionRole === "harness") continue;
+      if (current.terminalBackend === "tmux") {
+        live.persistentWorkspaceStopped = true;
+        live.persistentMonitorEligible = false;
+        live.persistentMonitorActive = false;
+        await live.persistentReconciliation?.catch(() => false);
+      }
       const previous = live.record;
-      if (previous.projectId !== projectId || previous.workspaceId !== workspaceId || previous.executionRole === "harness"
-        || !["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
+      if (!["queued", "starting", "running", "stopping", "lost"].includes(previous.observedState)) continue;
+      live.persistentMonitorEligible = false;
+      live.persistentMonitorActive = false;
       // The managed runtime has confirmed the exact container is stopped, so
       // none of its ordinary task or terminal execs can still be running.
       live.record = { ...previous, desiredState: "stopped", observedState: "killed",
@@ -1000,12 +1474,26 @@ export class ExecutionManager {
     }
   }
 
-  shutdownTransports(): void {
+  async shutdownTransports(): Promise<void> {
+    const persistentFinalizers: Promise<void>[] = [];
     for (const live of this.executions.values()) {
+      if (live.record.terminalBackend === "tmux") {
+        live.persistentMonitorActive = false;
+        live.persistentMonitorEligible = false;
+        const finalize = live.persistentAttachmentFinalize;
+        if (finalize !== null) {
+          live.attachment?.close(1012, "Agent restarting.");
+          persistentFinalizers.push(finalize());
+          continue;
+        }
+      }
       live.attachment?.close(1012, "Agent restarting.");
       live.stream?.destroy();
       live.stream = null;
     }
+    const results = await Promise.allSettled(persistentFinalizers);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed !== undefined) throw failed.reason;
   }
 
   private requestAttachmentClose(socket: WebSocket): void {
@@ -1061,6 +1549,23 @@ export class ExecutionManager {
     }
   }
 
+  private reportPersistentTerminalAttachmentFailure(
+    live: LiveExecution,
+    phase: PersistentTerminalAttachmentFailureDiagnostic["phase"],
+    error: unknown
+  ): void {
+    const terminalId = live.record.terminalId;
+    if (terminalId === null) return;
+    const failureCategory = phase === "reconciliation"
+      ? live.persistentReconciliationFailureCategory ?? persistentTerminalAttachmentFailureCategory(error)
+      : persistentTerminalAttachmentFailureCategory(error);
+    try {
+      this.hooks.onPersistentTerminalAttachmentFailure?.({ terminalId, phase, failureCategory });
+    } catch {
+      // Diagnostics must not alter terminal attachment behavior.
+    }
+  }
+
   private retainTerminalReplay(live: LiveExecution): void {
     if (live.record.kind !== "terminal" || live.record.terminalState !== "closed"
       || live.terminalReplayExpiresAt !== null) return;
@@ -1106,15 +1611,211 @@ export class ExecutionManager {
     }
   }
 
+  private async attachPersistentTerminal(live: LiveExecution, socket: WebSocket): Promise<void> {
+    let finishSetup!: () => void;
+    const setupComplete = new Promise<void>((resolve) => { finishSetup = resolve; });
+    let finalization: Promise<void> | null = null;
+    let ready = false;
+    let phase: PersistentTerminalAttachmentFailureDiagnostic["phase"] = "reconciliation";
+    const finalize = (): Promise<void> => {
+      if (finalization !== null) return finalization;
+      const cleanup = (async () => {
+        await setupComplete;
+        const stream = live.stream;
+        live.stream = null;
+        live.persistentAttachmentExecId = null;
+        live.persistentOutputQueue = [];
+        live.persistentOutputQueueBytes = 0;
+        let detachFailure: unknown;
+        const clientPid = live.persistentAttachmentClientPid;
+        const clientName = live.persistentAttachmentClientName;
+        const binding = live.persistentBinding;
+        const persistent = live.record.persistentTerminal;
+        if (clientPid !== null && clientName !== null && binding !== null && persistent !== undefined
+          && live.record.observedState !== "killed") {
+          try {
+            await this.persistentTmux.detachClient(binding, persistent.sessionName, clientPid, clientName);
+            live.persistentAttachmentClientPid = null;
+            live.persistentAttachmentClientName = null;
+          } catch (error) { detachFailure = error; }
+        } else {
+          live.persistentAttachmentClientPid = null;
+          live.persistentAttachmentClientName = null;
+        }
+        if (stream !== null && !stream.destroyed) stream.destroy();
+        if (live.record.desiredState === "running" && live.record.observedState === "running"
+          && live.record.terminalState !== "closed") {
+          live.record = { ...live.record, terminalState: "disconnected" };
+          await this.persist(live).catch(() => undefined);
+        }
+        await this.waitForAttachmentClosed(socket);
+        if (live.attachment === socket) live.attachment = null;
+        if (live.persistentAttachmentFinalize === finalize) live.persistentAttachmentFinalize = null;
+        if (detachFailure !== undefined) {
+          throw detachFailure instanceof Error ? detachFailure : new Error("persistent-tmux-client-detach-failed", { cause: detachFailure });
+        }
+      })();
+      finalization = cleanup;
+      live.attachmentCleanup = cleanup;
+      void cleanup.finally(() => {
+        if (live.attachmentCleanup === cleanup) live.attachmentCleanup = null;
+        if (finalization === cleanup) finalization = null;
+      }).catch(() => undefined);
+      return cleanup;
+    };
+    live.persistentAttachmentFinalize = finalize;
+    socket.once("close", () => { void finalize().catch(() => undefined); });
+    socket.once("error", () => { void finalize().catch(() => undefined); });
+    try {
+      const reconciled = await this.reconcilePersistentTerminal(live);
+      if (!reconciled) throw failure("RESOURCE_STATE_CONFLICT", "The persistent terminal session is not attachable yet.", {
+        resource: { type: "terminal", id: live.record.terminalId }, action: "attach"
+      });
+      phase = "identity-verification";
+      const persistent = live.record.persistentTerminal!;
+      this.monitorPersistentTerminal(live);
+      const binding = live.persistentBinding;
+      if (binding === null || persistent.sessionId === null || persistent.paneId === null
+        || persistent.admissionPhase !== "created") {
+        throw failure("RESOURCE_STATE_CONFLICT", "The persistent terminal session identity is not verified.", {
+          resource: { type: "terminal", id: live.record.terminalId }, action: "attach"
+        });
+      }
+      phase = "attachment-creation";
+      const attachment = await this.persistentTmux.createAttachment(binding, persistent.sessionName,
+        { columns: persistent.columns, rows: persistent.rows });
+      live.stream = attachment.stream;
+      live.persistentAttachmentExecId = attachment.execId;
+      live.persistentAttachmentClientPid = attachment.clientPid;
+      live.persistentAttachmentClientName = attachment.clientName;
+      live.persistentOutputQueue = [];
+      phase = "relay-setup";
+      live.persistentOutputQueueBytes = 0;
+      if (socket.readyState !== socket.OPEN) {
+        attachment.stream.destroy();
+        return;
+      }
+      attachment.stream.on("data", (chunk: Buffer) => {
+        const bytes = Buffer.from(chunk);
+        if (!ready) {
+          live.persistentOutputQueueBytes += bytes.length;
+          if (live.persistentOutputQueueBytes > PERSISTENT_TMUX_BACKPRESSURE_BYTES) {
+            socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal attachment backpressure limit reached.");
+            return;
+          }
+          live.persistentOutputQueue.push(bytes);
+          return;
+        }
+        if (socket.readyState !== socket.OPEN) return;
+        if (socket.bufferedAmount > ATTACHMENT_BACKPRESSURE_BYTES) {
+          socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal relay backpressure limit reached.");
+          return;
+        }
+        for (let offset = 0; offset < bytes.length; offset += TERMINAL_MAX_PAYLOAD_BYTES) {
+          socket.send(encodeTerminalAgentFrame({ type: "output", data: bytes.subarray(offset, offset + TERMINAL_MAX_PAYLOAD_BYTES) }), { binary: true });
+        }
+      });
+      const attachmentEnded = () => {
+        if (live.stream !== attachment.stream) return;
+        if (socket.readyState === socket.OPEN) socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Persistent terminal attachment ended.");
+        void finalize().catch(() => undefined);
+        void this.reconcilePersistentTerminal(live).catch(() => undefined);
+      };
+      attachment.stream.once("close", attachmentEnded);
+      attachment.stream.once("end", attachmentEnded);
+      attachment.stream.once("error", attachmentEnded);
+      let controls = Promise.resolve();
+      attachment.stream.resume();
+      socket.on("message", (data, isBinary) => {
+        if (!ready) {
+          socket.close(TERMINAL_PROTOCOL_ERROR_CLOSE_CODE, "Terminal attachment is not ready."); return;
+        }
+        if (!isBinary || !(data instanceof Buffer) || data.length > TERMINAL_MAX_PAYLOAD_BYTES + 1) {
+          socket.close(TERMINAL_PROTOCOL_ERROR_CLOSE_CODE, "Invalid terminal frame."); return;
+        }
+        const decoded = decodeTerminalClientFrame(data);
+        if (!decoded.ok) { socket.close(TERMINAL_PROTOCOL_ERROR_CLOSE_CODE, decoded.error); return; }
+        if (decoded.frame.type === "detach") { socket.close(TERMINAL_NORMAL_CLOSE_CODE); return; }
+        controls = controls.then(async () => {
+          if (socket.readyState !== socket.OPEN || live.stream !== attachment.stream || attachment.stream.destroyed) return;
+          if (decoded.frame.type === "resize") {
+            const { columns, rows } = decoded.frame;
+            if (columns > PERSISTENT_TMUX_MAX_COLUMNS || rows > PERSISTENT_TMUX_MAX_ROWS) {
+              socket.close(TERMINAL_PROTOCOL_ERROR_CLOSE_CODE, "Terminal dimensions exceed the persistent terminal limit."); return;
+            }
+            try { await this.persistentTmux.resizeAttachment(attachment.execId, columns, rows); }
+            catch (error) {
+              this.reportTerminalResizeFailure(live, columns, rows, error);
+              throw error;
+            }
+            const current = live.record.persistentTerminal;
+            if (current !== undefined) {
+              live.record = { ...live.record, persistentTerminal: { ...current, columns, rows } };
+              await this.persist(live);
+            }
+            return;
+          }
+          if (decoded.frame.type === "history") {
+            await this.persistentTmux.history(binding, persistent.sessionName);
+            return;
+          }
+          if (decoded.frame.type === "live") {
+            await this.persistentTmux.live(binding, persistent.sessionName);
+            return;
+          }
+          if (decoded.frame.type !== "input") {
+            socket.close(TERMINAL_PROTOCOL_ERROR_CLOSE_CODE, "Persistent terminal controls are unavailable."); return;
+          }
+          if (attachment.stream.writableLength > ATTACHMENT_BACKPRESSURE_BYTES) {
+            socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal input backpressure limit reached."); return;
+          }
+          attachment.stream.write(decoded.frame.data);
+        }).catch(() => {
+          if (socket.readyState === socket.OPEN) socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal control failed.");
+        });
+      });
+      live.record = { ...live.record, terminalState: "active" };
+      await this.persist(live);
+      socket.send(encodeTerminalAgentFrame({ type: "ready", version: 2, attachmentId: uuidv7() }), { binary: true });
+      ready = true;
+      for (const bytes of live.persistentOutputQueue) {
+        if (socket.readyState !== socket.OPEN) break;
+        for (let offset = 0; offset < bytes.length; offset += TERMINAL_MAX_PAYLOAD_BYTES) {
+          socket.send(encodeTerminalAgentFrame({ type: "output", data: bytes.subarray(offset, offset + TERMINAL_MAX_PAYLOAD_BYTES) }), { binary: true });
+        }
+      }
+      live.persistentOutputQueue = [];
+      live.persistentOutputQueueBytes = 0;
+    } catch (error) {
+      this.reportPersistentTerminalAttachmentFailure(live, phase, error);
+      socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Persistent terminal attachment failed.");
+      finishSetup();
+      await finalize().catch(() => undefined);
+      throw error;
+    } finally {
+      finishSetup();
+    }
+  }
+
   reserveTerminalAttachment(terminalId: string): { attach(socket: WebSocket): Promise<void>; release(): void } {
     const live = [...this.executions.values()].find((candidate) => candidate.record.terminalId === uuidV7Schema.parse(terminalId));
     if (live === undefined) throw terminalNotFound(terminalId);
     const postExitReplay = live.record.terminalState === "closed"
       && live.terminalReplayExpiresAt !== null && Date.now() < live.terminalReplayExpiresAt
       && !live.terminalReplayClaimed;
-    if (live.attachmentReserved || live.attachment !== null || live.attachmentCleanup !== null
-      || (!postExitReplay && !["active", "disconnected"].includes(live.record.terminalState ?? ""))) {
+    if (live.attachmentReserved || live.attachment !== null || live.attachmentCleanup !== null) {
       throw failure("RESOURCE_STATE_CONFLICT", "The terminal cannot accept another attachment.", {
+        resource: { type: "terminal", id: terminalId }, action: "attach"
+      });
+    }
+    if (live.record.terminalBackend === "tmux" && (live.persistentWorkspaceStopped === true
+      || live.record.desiredState !== "running")) {
+      throw failure("RESOURCE_STATE_CONFLICT", "The terminal is not currently attachable.", {
+        resource: { type: "terminal", id: terminalId }, action: "attach"
+      });
+    }
+    if (!postExitReplay && !["active", "disconnected"].includes(live.record.terminalState ?? "")) {
+      throw failure("RESOURCE_STATE_CONFLICT", "The terminal is not currently attachable.", {
         resource: { type: "terminal", id: terminalId }, action: "attach"
       });
     }
@@ -1144,6 +1845,10 @@ export class ExecutionManager {
           return;
         }
         live.attachment = socket;
+        if (live.record.terminalBackend === "tmux" && live.record.persistentTerminal !== undefined) {
+          await this.attachPersistentTerminal(live, socket);
+          return;
+        }
         let finishSetup!: () => void;
         const setupComplete = new Promise<void>((resolve) => { finishSetup = resolve; });
         let lostRequested = false;
@@ -1203,6 +1908,9 @@ export class ExecutionManager {
             void this.engine.resizeExec(live.record.execId, columns, rows)
               .catch((error: unknown) => this.reportTerminalResizeFailure(live, columns, rows, error));
             return;
+          }
+          if (decoded.frame.type !== "input") {
+            socket.close(TERMINAL_PROTOCOL_ERROR_CLOSE_CODE, "Terminal control is unavailable for this session."); return;
           }
           if (live.stream === null || live.stream.destroyed || live.stream.writableLength > ATTACHMENT_BACKPRESSURE_BYTES) {
             socket.close(TERMINAL_FAILURE_CLOSE_CODE, "Terminal input backpressure limit reached."); return;

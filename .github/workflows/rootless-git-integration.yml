@@ -353,7 +353,7 @@ jobs:
           apps/agent/src/docker-runtime.test.ts
           apps/agent/src/persistent-terminals.rootless.integration.test.ts
 
-      - name: Run real tmux persistence feasibility gate
+      - name: Run persistent terminal acceptance in rootless Docker
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -364,7 +364,7 @@ jobs:
           test "$DEVSPACE_TEST_DOCKER_SOCKET_PATH" = "$socket"
           test -x "$DEVSPACE_TEST_TMUX_BINARY_PATH"
           test -d "$DEVSPACE_TEST_TMUX_TERMINFO_PATH"
-          report="$root/tmux-feasibility-vitest.json"
+          report="$root/persistent-terminal-vitest.json"
           progress="$root/tmux-progress.jsonl"
           : >"$progress"
           env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
@@ -384,7 +384,7 @@ jobs:
           const testResults = report.testResults ?? [];
           const assertions = testResults.flatMap((suite) => suite.assertionResults ?? []);
           const testNames = assertions.map((assertion) => String(assertion.fullName ?? assertion.title ?? ''));
-          const dockerCasePrefix = 'real rootless Docker preserves the tmux shell across disposable exec clients';
+          const dockerCasePrefix = 'real rootless Docker preserves persistent shells across exec and manager recovery';
           const dockerCaseNames = testNames.filter((name) => name.startsWith(`${dockerCasePrefix} (`));
           const requiredDockerCases = [
             `${dockerCasePrefix} (node:24-bookworm)`,
@@ -403,9 +403,9 @@ jobs:
             || dockerCaseNames.length !== requiredDockerCases.length
             || requiredDockerCases.some((name) => !dockerCaseNames.includes(name))) {
             console.error(JSON.stringify(report, null, 2));
-            throw new Error('Both rootless tmux feasibility cases must run and pass; skipped tests are failures.');
+            throw new Error('Persistent terminal acceptance must pass on both rootless Debian images; skipped tests are failures.');
           }
-          console.log('Verified all four rootless tmux tests passed, including both Debian images, with no skipped, pending, or todo tests.');
+          console.log('Verified both rootless persistent-terminal acceptance cases and all helper tests passed, with no skipped, pending, or todo tests.');
           NODE
           test -S "$socket"
 
@@ -423,9 +423,9 @@ jobs:
             echo "Rootless Codex artifact staging Vitest report:"
             cat "$root/artifact-staging-vitest.json"
           fi
-          if [[ -f "$root/tmux-feasibility-vitest.json" ]]; then
-            echo "Rootless tmux feasibility Vitest report:"
-            cat "$root/tmux-feasibility-vitest.json"
+          if [[ -f "$root/persistent-terminal-vitest.json" ]]; then
+            echo "Rootless persistent-terminal Vitest report:"
+            cat "$root/persistent-terminal-vitest.json"
           fi
           if [[ -f "$root/tmux-progress.jsonl" ]]; then
             echo "Rootless tmux feasibility progress checkpoints:"

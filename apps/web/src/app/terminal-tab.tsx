@@ -18,6 +18,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
 }) {
   const [state, setState] = useState<TerminalUiState>(() => terminalUiState(terminal.state));
   const [message, setMessage] = useState("");
+  const [persistentReady, setPersistentReady] = useState(false);
+  const [manualReconnectAvailable, setManualReconnectAvailable] = useState(false);
   const terminalElement = useRef<HTMLDivElement>(null);
   const xterm = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
@@ -31,6 +33,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
   const authoritativeState = useRef(terminal.state);
   authoritativeState.current = terminal.state;
   const closeAttachment = useRef<(() => void) | null>(null);
+  const manualReconnect = useRef<(() => void) | null>(null);
+  const persistentControl = useRef<((type: "history" | "live") => void) | null>(null);
   const onRefreshRef = useRef(onRefresh);
   const onTerminalStateChangeRef = useRef(onTerminalStateChange);
   onRefreshRef.current = onRefresh;
@@ -74,6 +78,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
     let nativeAttachStarted = false;
     let nativeAttached = false;
     let nativeFirstOutput = false;
+    let attachmentConflict = false;
     const markNativeHarness = (name: string) => {
       const sessionId = nativeHarnessSessionIdRef.current;
       if (sessionId === undefined) return;
@@ -113,6 +118,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
       };
       let lastColumns = 0;
       let lastRows = 0;
+      let persistentResizePending = false;
       const scheduleResize = () => {
         if (!activeRef.current) return;
         if (resizeFrame !== null) return;
@@ -132,6 +138,11 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
             return;
           }
           fit.fit();
+          if (persistentResizePending) {
+            lastColumns = terminalInstance.cols;
+            lastRows = terminalInstance.rows;
+            return;
+          }
           if (terminalInstance.cols === lastColumns && terminalInstance.rows === lastRows) return;
           lastColumns = terminalInstance.cols;
           lastRows = terminalInstance.rows;
@@ -155,12 +166,24 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
         currentSocket = webSocket;
         socket.current = webSocket;
         ready = false;
+        persistentResizePending = false;
+        setPersistentReady(false);
+        persistentControl.current = null;
         webSocket.onmessage = (event) => {
           if (currentSocket !== webSocket) return;
           if (!(event.data instanceof ArrayBuffer)) { webSocket.close(1002); return; }
           const decoded = decodeTerminalAgentFrame(new Uint8Array(event.data));
           if (!decoded.ok) { webSocket.close(1002); return; }
           if (decoded.frame.type === "ready") {
+            const isPersistent = "version" in decoded.frame && decoded.frame.version === 2;
+            if (isPersistent) {
+              persistentResizePending = true;
+              terminalInstance.reset();
+              lastColumns = 0;
+              lastRows = 0;
+              setPersistentReady(true);
+              persistentControl.current = (type) => send(encodeTerminalClientFrame({ type }));
+            }
             ready = true;
             if (!nativeAttached) {
               nativeAttached = true;
@@ -169,9 +192,14 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
             updateState("active");
             onTerminalStateChangeRef.current(terminal.id, "active");
             requestRefresh();
+            if (isPersistent) {
+              lastColumns = terminalInstance.cols;
+              lastRows = terminalInstance.rows;
+            }
             scheduleResize();
+            setManualReconnectAvailable(false);
             if (stableConnectionTimer !== null) window.clearTimeout(stableConnectionTimer);
-            stableConnectionTimer = window.setTimeout(() => { reconnectAttempts = 0; }, 1_000);
+            stableConnectionTimer = window.setTimeout(() => { stableConnectionTimer = null; reconnectAttempts = 0; }, 1_000);
             return;
           }
           if (decoded.frame.type === "output") {
@@ -179,7 +207,21 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
               nativeFirstOutput = true;
               markNativeHarness("devspace.native-harness.first-terminal-output");
             }
-            terminalInstance.write(decoded.frame.data);
+            terminalInstance.write(decoded.frame.data, () => {
+              if (!persistentResizePending || currentSocket !== webSocket) return;
+              persistentResizePending = false;
+              lastColumns = terminalInstance.cols;
+              lastRows = terminalInstance.rows;
+              send(encodeTerminalClientFrame({ type: "resize", columns: terminalInstance.cols, rows: terminalInstance.rows }));
+            });
+            return;
+          }
+          if (decoded.frame.type === "attachment-conflict") {
+            attachmentConflict = true;
+            setManualReconnectAvailable(true);
+            updateState("disconnected");
+            setMessage("This terminal is already attached in another browser tab. Close that tab, then reconnect here.");
+            webSocket.close(1000, "Terminal already attached.");
             return;
           }
           terminalEnded = true;
@@ -193,6 +235,11 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
           ready = false;
           currentSocket = null;
           if (socket.current === webSocket) socket.current = null;
+          if (stableConnectionTimer !== null) {
+            window.clearTimeout(stableConnectionTimer);
+            stableConnectionTimer = null;
+          }
+          if (attachmentConflict) return;
           const action = terminalSocketCloseAction({ terminalEnded, cancelled, terminalState: authoritativeState.current, closeCode: event.code });
           if (action === "ignore") return;
           if (action === "refresh") {
@@ -207,14 +254,24 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
           onTerminalStateChangeRef.current(terminal.id, "disconnected");
           reconnectAttempts += 1;
           if (reconnectAttempts > 8) {
-            updateState("failed");
-            onTerminalStateChangeRef.current(terminal.id, "failed");
+            updateState("disconnected");
+            setManualReconnectAvailable(true);
+            setMessage("Automatic reconnect stopped. You can try again when the Agent is available.");
             requestRefresh();
             return;
           }
           reconnectTimer = window.setTimeout(connectSocket, Math.min(150 * (2 ** (reconnectAttempts - 1)), 2_000));
         };
         webSocket.onerror = () => undefined;
+      };
+      manualReconnect.current = () => {
+        if (cancelled || terminalEnded) return;
+        attachmentConflict = false;
+        reconnectAttempts = 0;
+        setManualReconnectAvailable(false);
+        setMessage("");
+        updateState("connecting");
+        connectSocket();
       };
       connectSocket();
       closeAttachment.current = () => {
@@ -232,6 +289,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
           sendFrame(currentSocket, encodeTerminalClientFrame({ type: "detach" }));
         }
         if (currentSocket?.readyState !== WebSocket.CLOSED) currentSocket?.close();
+        persistentControl.current = null;
+        manualReconnect.current = null;
         terminalInstance.dispose();
         if (xterm.current === terminalInstance) xterm.current = null;
         if (fitAddon.current === fit) fitAddon.current = null;
@@ -252,7 +311,24 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
 
   return <section className={`terminal-tab-surface ${active ? "is-active" : "is-inactive"}`} aria-hidden={!active}
     aria-label="Terminal session" role={active ? "region" : undefined}>
+    {persistentReady && <div className="terminal-toolbar" role="toolbar" aria-label="Persistent terminal controls">
+      <button type="button" onClick={() => { persistentControl.current?.("history"); xterm.current?.focus(); }}>History</button>
+      <button type="button" onClick={() => { persistentControl.current?.("live"); xterm.current?.focus(); }}>Return to live</button>
+      <button type="button" onClick={() => {
+        const selection = xterm.current?.getSelection() ?? "";
+        if (selection.length === 0) { setMessage("Select terminal text first, then copy it."); return; }
+        try {
+          navigator.clipboard.writeText(selection).then(
+            () => setMessage("Selection copied."),
+            () => setMessage("Clipboard access is unavailable in this browser.")
+          );
+        } catch { setMessage("Clipboard access is unavailable in this browser."); }
+      }}>Copy selection</button>
+    </div>}
     <div ref={terminalElement} className="terminal-canvas" />
+    {manualReconnectAvailable && <button type="button" className="terminal-reconnect" onClick={() => manualReconnect.current?.()}>
+      Reconnect
+    </button>}
     {message !== "" && <p className="message" role={active ? "status" : undefined}>{message}</p>}
     {active && ["creating", "closing", "closed", "failed", "lost"].includes(state) && <p className="terminal-help">
       {terminalStateMessage(state)}

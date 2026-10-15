@@ -198,7 +198,8 @@ function safeValue(key: string, value: unknown): unknown {
       "runtime-startup", "runtime-verification", "preview-binding", "preview-settled",
       "artifact-resolution", "agent-side-stage-copy", "readback-helper-load", "readback-helper-integrity",
       "staged-artifact-verification", "readback-helper-upload", "artifact-entry-upload",
-      "artifact-entry-readback", "final-closure-verification", "failure-cleanup"
+      "artifact-entry-readback", "final-closure-verification", "failure-cleanup",
+      "reconciliation", "identity-verification", "attachment-creation", "relay-setup"
     ].includes(value) ? value : undefined;
   }
   if (key === "failureCode") {

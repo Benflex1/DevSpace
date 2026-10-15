@@ -28,7 +28,8 @@ import { AgentEventLog } from "./event-log.js";
 import { AgentExecutionError, ConfigurationValidationError, ManagedWorkspaces, type ManagedWorkspaceRoots } from "./managed-workspaces.js";
 import { OperationExecutor } from "./operation-executor.js";
 import { OperationConflictError, OperationJournal } from "./operation-journal.js";
-import { ExecutionManager, type HarnessRecoveryIdentity, type TerminalResizeFailureDiagnostic } from "./execution-manager.js";
+import { ExecutionManager, type HarnessRecoveryIdentity, type PersistentTerminalAttachmentFailureDiagnostic,
+  type TerminalResizeFailureDiagnostic } from "./execution-manager.js";
 import { DockerEngineClient, defaultRootlessDockerSocketPath } from "./docker-runtime.js";
 import type { ApprovedPreviewBaseRegistry } from "@devspace/security";
 import { classifyFailureCode, createLogger, type StructuredLogger } from "@devspace/diagnostics";
@@ -84,6 +85,8 @@ export interface AgentServerOptions {
   readonly previewGatewayFactory?: (resolveLease: OpaqueLeaseResolver) => PreviewGatewayAdapterContract;
   readonly previewLeaseResolverSocketPath?: string;
   readonly operationJournal?: OperationJournal;
+  /** Internal E2E seam for the legacy direct-exec terminal fixture. */
+  readonly terminalAdmissionModeForTests?: "legacy-direct-exec";
   readonly eventRetention?: number;
   readonly now?: () => Date;
   readonly createId?: () => string;
@@ -347,9 +350,11 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     onHarnessSettled?: (event: { processId: string }) => Promise<void>;
     onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void>;
     onTerminalResizeFailure?: (event: TerminalResizeFailureDiagnostic) => void;
+    onPersistentTerminalAttachmentFailure?: (event: PersistentTerminalAttachmentFailureDiagnostic) => void;
   } = {};
   const execution = new ExecutionManager(managedRoots.state, managed,
-    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks);
+    new DockerEngineClient(process.env.DEVSPACE_DOCKER_SOCKET_PATH ?? defaultRootlessDockerSocketPath()), undefined, now, harnessHooks,
+    undefined, options.terminalAdmissionModeForTests);
   harnessHooks.onTerminalResizeFailure = (event) => logger.error(
     "agent.terminal.resize_failed",
     "Terminal resize failed at the Docker boundary.",
@@ -360,6 +365,18 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       rows: event.rows,
       failureClass: event.failureClass,
       failureCode: event.failureCode === null ? "unknown" : String(event.failureCode)
+    }
+  );
+  harnessHooks.onPersistentTerminalAttachmentFailure = (event) => logger.error(
+    "agent.terminal.persistent_attachment_failed",
+    "Persistent terminal attachment failed at the Agent boundary.",
+    {
+      terminalId: event.terminalId,
+      phase: event.phase,
+      errorCategory: event.failureCategory,
+      failureCategory: event.failureCategory === "docker-http" ? "dependency-unavailable"
+        : event.failureCategory === "docker-transport" ? "transport-failure"
+          : event.failureCategory === "internal" ? "internal-failure" : "state-conflict"
     }
   );
   const harnessHome = createHarnessHomeStore(managedRoots.state, {
@@ -1293,7 +1310,9 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
     let reservation;
     try { reservation = execution.reserveTerminalAttachment(match[1]!); }
     catch (error) {
-      rejectUpgrade(socket, error instanceof AgentExecutionError && error.failure.code === "RESOURCE_STATE_CONFLICT" ? 409 : 404); return;
+      const attachmentConflict = error instanceof AgentExecutionError && error.failure.code === "RESOURCE_STATE_CONFLICT"
+        && error.failure.message === "The terminal cannot accept another attachment.";
+      rejectUpgrade(socket, attachmentConflict ? 409 : 404); return;
     }
     try {
       terminalWebSockets.handleUpgrade(request, socket, head, (websocket) => {
@@ -1389,7 +1408,12 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       if (!started) return;
       for (const response of eventResponses) response.destroy();
       eventResponses.clear();
-      execution.shutdownTransports();
+      executor.shutdown();
+      let transportShutdownError: Error | null = null;
+      try { await execution.shutdownTransports(); }
+      catch (error) {
+        transportShutdownError = error instanceof Error ? error : new Error("agent-terminal-transport-shutdown-failed", { cause: error });
+      }
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await executor.drain();
       await managed.shutdown();
@@ -1405,6 +1429,7 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       }
       started = false;
       ownedSocket = undefined;
+      if (transportShutdownError !== null) throw transportShutdownError;
     }
   };
 }

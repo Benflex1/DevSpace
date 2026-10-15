@@ -353,6 +353,30 @@ test("an already-retired lost terminal is ignored by later Agent snapshots and d
   ]);
 });
 
+test("stale Agent process snapshots cannot revive a terminal after it has stopped", async () => {
+  const { database, project, databasePath, workspaceId } = await createReadyProject();
+  const terminal = database.prepareTerminalCreate(project.id, "actor");
+  const agentBootId = "018f0f00-0000-7000-8000-000000000102";
+  const snapshot = (observedState: "running" | "killed") => ({
+    agentBootId,
+    throughCursor: `v1.${agentBootId}.3` as const,
+    resources: [{ type: "process" as const, observation: {
+      projectId: project.id, workspaceId, processId: terminal.terminalId, kind: "terminal" as const,
+      desiredState: observedState === "killed" ? "stopped" as const : "running" as const,
+      observedState, exitCode: null, startedAt: null,
+      finishedAt: observedState === "killed" ? "2026-07-19T00:00:01.000Z" : null
+    } }],
+    operationObservations: []
+  });
+  database.applyExecutionSnapshot(snapshot("killed"));
+  database.applyExecutionSnapshot(snapshot("running"));
+
+  const raw = new BetterSqlite3(databasePath);
+  expect(raw.prepare("select desired_state as desiredState, observed_state as observedState from processes where id = ?")
+    .get(terminal.terminalId)).toEqual({ desiredState: "stopped", observedState: "killed" });
+  raw.close();
+});
+
 test("expired lost terminals do not reserve display numbers while preserving live labels", async () => {
   let currentTime = new Date("2026-07-19T00:00:00.000Z");
   const { database, project, workspaceId } = await createReadyProject({ now: () => currentTime });
@@ -425,6 +449,32 @@ test("compensates a deterministic Agent terminal-create failure into a failed te
     expect.objectContaining({ state: "failed" })
   ]);
   expect(database.getManagedProject(project.id)?.terminals.some((terminal) => terminal.state === "creating")).toBe(false);
+});
+
+test("a stale terminal-create failure cannot overwrite a terminal retired by workspace Stop", async () => {
+  const currentTime = new Date("2026-07-19T00:00:00.000Z");
+  const { database, project, databasePath, workspaceId } = await createReadyProject({ now: () => currentTime });
+  const intent = database.prepareTerminalCreate(project.id, "actor");
+  const raw = new BetterSqlite3(databasePath);
+  raw.prepare("update terminal_sessions set state = 'lost', closed_at = ? where id = ?")
+    .run(currentTime.toISOString(), intent.terminalId);
+  raw.prepare("update processes set desired_state = 'stopped', observed_state = 'killed', finished_at = ? where id = ?")
+    .run("2026-07-19T00:00:01.000Z", intent.terminalId);
+  raw.close();
+
+  database.applyExecutionSnapshot({
+    ...terminalSnapshot({ projectId: project.id, workspaceId, terminalId: intent.terminalId, state: "active" }),
+    operationObservations: [{ operationId: intent.operation.operationId, state: "failed", updatedAt: "2026-07-19T00:00:02.000Z",
+      failure: { code: "ROOTLESS_RUNTIME_UNAVAILABLE", message: "The runtime is unavailable.", retryable: true, details: { component: "docker" } } }]
+  });
+
+  expect(database.getManagedProject(project.id)?.terminals).toEqual([
+    expect.objectContaining({ id: intent.terminalId, state: "lost" })
+  ]);
+  const retired = new BetterSqlite3(databasePath);
+  expect(retired.prepare("select desired_state as desiredState, observed_state as observedState from processes where id = ?")
+    .get(intent.terminalId)).toEqual({ desiredState: "stopped", observedState: "killed" });
+  retired.close();
 });
 
 test("closing after authoritative terminal loss preserves the lost state", async () => {
@@ -558,8 +608,8 @@ test("Web relays a closed fast-exit terminal's one-shot Agent replay before the 
   expect(agentClaims).toBe(1);
 
   const second = await receive(url);
-  expect(second.status).toBe(409);
-  expect(second.frames).toEqual([]);
+  expect(second.status).toBe(null);
+  expect(second.frames).toEqual([{ ok: true, frame: { type: "attachment-conflict" } }]);
   expect(agentClaims).toBe(2);
 
   const foreign = await receive(`ws://127.0.0.1:${address.port}/api/projects/${project.id}/workspaces/${workspaceId}/terminals/018f0f00-0000-7000-8000-000000000086/stream`);

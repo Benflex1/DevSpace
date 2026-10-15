@@ -1,8 +1,8 @@
 # ADR 017: Persist workspace terminals with tmux
 
-- Status: Proposed; implementation requires owner review
+- Status: Accepted
 - Date: 2026-10-13
-- Baseline: `f38a8327465dd3497fff09f00c35518157d9a7d7`
+- Baseline: `ce721c990a0871088b98abe36f68b6cebe5a5edb`
 - On acceptance, supersedes ADR 016's restart-loss behavior for new persistent Native PTYs
 - Preserves ADRs 002, 003, 005, 006 and Native identity/home contracts in ADR 016
 
@@ -78,14 +78,16 @@ from a controlled container baseline before adding harness variables: tmux inher
 environment globally. Supply `CODEX_HOME` and custom harness variables only to their intended
 session. Disable attach-time environment updates; attaching must not change provider environment.
 
-Keep one Agent attachment reservation before upgrade. A second browser gets 409 and a clear
-“already attached” state; it does not steal input or retry indefinitely. Because browser WebSocket
-APIs hide upgrade HTTP status, resolve conflicts through an authenticated terminal-status read.
+Keep one Agent attachment reservation before upgrade. A second browser gets a clear
+“already attached” state; it does not steal input or retry indefinitely. The Web relay maps Agent
+HTTP 409 into the versioned attachment-conflict WebSocket frame because browser WebSocket APIs hide
+upgrade HTTP status. Other availability checks continue to use authenticated terminal status.
 Heartbeat both relay legs (15-second ping, 30-second expiry); expire only the attachment so a
 silent connection cannot hold the input reservation forever. After Agent restart,
 `attach-session -d` may evict an abandoned tmux client only after exact ownership validation and
-reservation. Input and resize are accepted only from the current attachment UUID; stale cleanup
-cannot detach its successor. Web restart drops its relay, then a new relay attaches the same
+reservation. Input and resize are accepted only from the reserved active socket; stale cleanup
+cannot detach its successor. The ready frame carries the attachment UUID so the browser can ignore
+late frames from older sockets. Web restart drops its relay, then a new relay attaches the same
 terminal. Agent startup recovers sessions as disconnected; browser reload/temporary loss
 reconnects by ID with bounded retries and a manual Reconnect action after exhaustion.
 
@@ -93,16 +95,18 @@ reconnects by ID with bounded retries and a manual Reconnect action after exhaus
 an attachment UUID and requires xterm reset, including history, on **every** connection. Register
 the stream reader before consuming output, bound any initial queue, deliver `ready` first,
 then forward the new tmux client's ordered redraw/live byte stream. Chunk at the existing
-65,536-byte payload limit. Resize again after ready, even when dimensions have not changed.
+65,536-byte payload limit. After xterm processes the first tmux output frame, resize again on every
+attachment, even when dimensions have not changed, so the attached tmux client has initialized its PTY.
 No old 64 KiB raw tail or separately captured visible screen is prepended: tmux redraw is the
 snapshot, and tmux orders subsequent updates on that same stream. Late frames from old sockets
 are ignored. There is no custom snapshot/live sequence protocol to maintain.
 
 Retained history lives in tmux, **not xterm's browser-local scrollback**. Provide a visible
 History / Return to live control, mapped by the Agent to fixed copy-mode/cancel commands on the
-owned pane. Page navigation and selection use tmux copy mode; running output continues while
-viewing history. Disable the normal prefix, status bar and unrelated root bindings. Preserve
-copy-mode navigation. Ordinary browser scrolling after reload is not the restored-history
+owned pane. Tmux copy mode provides history navigation; xterm renders that view and its browser
+selection/copy support remains available for selecting visible text. Keep tmux mouse capture off
+so browser selection works. Disable the normal prefix, status bar and unrelated root bindings.
+Preserve copy-mode navigation. Ordinary browser scrolling after reload is not the restored-history
 interface. Alternate-screen applications retain their current screen; history contains lines
 tmux actually retained, not every earlier TUI frame. This product tradeoff requires owner review.
 
@@ -154,13 +158,16 @@ practical browser acceptance. The t3code comparison is recorded in the feasibili
 
 ## Evidence, risks and delivery slices
 
-[Feasibility report](../feasibility/persistent-terminals-2026-10-13.md): local tmux 3.4 and a
+[Feasibility report](../feasibility/persistent-terminals-2026-10-13.md): local tmux 3.4 and the
 static 3.7c artifact preserved shell/TUI PIDs, redraw, cursor, resize, input and history through
-client loss. Docker and full DevSpace restart/Stop acceptance remain unverified. Main risks are
-image/UID/terminfo provisioning and TUI key/display compatibility. Tmux server/container death
-loses live state; persistence covers Web/Agent/browser loss while the container keeps running.
-Rare ambiguous admission and hostile same-container mutation keep conservative recovery; perfect
-crash recovery, multi-owner fencing and full browser history serialization are deferred.
+client loss. PR #75 passed its rootless Docker feasibility gate for both target Debian images.
+Slice 1 implements ordinary shells and extends that existing Docker acceptance test through the
+production Agent manager across manager reinitialization. Full Agent/Web process restart and
+browser acceptance remain unverified delivery gates. Main risks are image/UID/terminfo coverage
+and TUI key/display compatibility. Tmux server/container death loses live state; persistence
+covers Web/Agent/browser loss while the container keeps running. Rare ambiguous admission and
+hostile same-container mutation keep conservative recovery; perfect crash recovery, multi-owner
+fencing and full browser history serialization are deferred.
 
 1. **Persistent shell slice:** binary delivery, exact identity/admission and Agent recovery;
    browser attach/reset/resize, History control and single input owner. Prove a running shell
@@ -178,4 +185,6 @@ crash recovery, multi-owner fencing and full browser history serialization are d
    Codex must continue the same live session. Then Stop, verify no live old processes/attachments
    and safe home settlement; Start must not silently resurrect them.
 
-Each slice is separately reviewable. This ADR and report implement none of them.
+Each slice is separately reviewable. Slice 1 implements persistent ordinary shells and browser
+recovery. Native continuity and full exit/close settlement remain deferred to Slices 2 and 3.
+The required full Agent/Web restart acceptance remains a delivery gate for the Slice 1 PR.

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { createReadStream, createWriteStream } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
@@ -9,14 +10,17 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Readable, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as tar from "tar-stream";
+import { decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { afterEach, expect, onTestFailed, test } from "vitest";
+import { v7 as uuidv7 } from "uuid";
 import { collectStreamUntilEof, errorMessage, ProbeProgress } from "./persistent-terminal-probe-diagnostics.js";
 import { DockerEngineClient, DockerEngineError } from "./docker-runtime.js";
+import { ExecutionManager } from "./execution-manager.js";
+import { persistentTmuxBinding, PersistentTmuxRuntime } from "./persistent-terminal-runtime.js";
 
 const dockerSocketPath = process.env.DEVSPACE_TEST_DOCKER_SOCKET_PATH;
 const tmuxBinaryPath = process.env.DEVSPACE_TEST_TMUX_BINARY_PATH;
 const tmuxTerminfoPath = process.env.DEVSPACE_TEST_TMUX_TERMINFO_PATH;
-const tmuxArchiveSha256 = "cc56bd1cc873eb6089c615f0496b072385bda8a6d944069f38564a5d49c128aa";
 const tmuxBinarySha256 = "7d0f1e85c5b11df7fe127ab90674c6a15663ad72a25fcf7fabadba6bbb0b29d5";
 const testImages = ["node:24-bookworm", "node:24-bookworm-slim"] as const;
 const testUser = "1000:1000";
@@ -167,7 +171,7 @@ async function createWritableRootlessTmuxContainer(
     Image: input.imageReference,
     Entrypoint: ["/bin/sh", "-c"],
     Cmd: ["exec sleep 2147483647"],
-    WorkingDir: "/",
+    WorkingDir: "/workspace",
     User: input.user,
     Env: [],
     Labels: { ...input.labels },
@@ -258,7 +262,7 @@ function appendArchiveEntry(pack: tar.Pack, header: tar.Header, bytes?: Buffer):
   });
 }
 
-function artifactArchive(runId: string): Readable {
+function artifactArchive(runId: string, uid = 1000, gid = uid): Readable {
   if (tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined) {
     throw new Error("rootless-tmux-artifact-paths-are-required");
   }
@@ -284,11 +288,11 @@ function artifactArchive(runId: string): Readable {
     }
     for (const directory of [...directories].sort((left, right) => left.split("/").length - right.split("/").length)) {
       await appendArchiveEntry(archive, {
-        name: `${directory}/`, type: "directory", mode: 0o700, uid: 1000, gid: 1000, mtime: new Date(0)
+        name: `${directory}/`, type: "directory", mode: 0o700, uid, gid, mtime: new Date(0)
       });
     }
     await appendArchiveEntry(archive, {
-      name: `${directoryName}/tmux`, type: "file", mode: 0o755, uid: 1000, gid: 1000, mtime: new Date(0)
+      name: `${directoryName}/tmux`, type: "file", mode: 0o755, uid, gid, mtime: new Date(0)
     }, binary);
     const config = Buffer.from([
       'set-option -g default-terminal "tmux-256color"',
@@ -298,12 +302,12 @@ function artifactArchive(runId: string): Readable {
       ""
     ].join("\n"));
     await appendArchiveEntry(archive, {
-      name: `${directoryName}/tmux.conf`, type: "file", mode: 0o600, uid: 1000, gid: 1000, mtime: new Date(0)
+      name: `${directoryName}/tmux.conf`, type: "file", mode: 0o600, uid, gid, mtime: new Date(0)
     }, config);
     for (const entry of selectedEntries) {
       await appendArchiveEntry(archive, {
         name: `${directoryName}/terminfo/${entry.relativePath}`, type: "file", mode: 0o644,
-        uid: 1000, gid: 1000, mtime: new Date(0)
+        uid, gid, mtime: new Date(0)
       }, entry.bytes);
     }
     archive.finalize();
@@ -313,14 +317,22 @@ function artifactArchive(runId: string): Readable {
   return archive;
 }
 
-async function writeArtifactArchiveFile(runId: string, archivePath: string, signal: AbortSignal): Promise<void> {
-  await pipeline(artifactArchive(runId), createWriteStream(archivePath, { flags: "wx", mode: 0o600 }), { signal });
+async function writeArtifactArchiveFile(
+  runId: string,
+  archivePath: string,
+  signal: AbortSignal,
+  uid = 1000,
+  gid = uid
+): Promise<void> {
+  await pipeline(artifactArchive(runId, uid, gid), createWriteStream(archivePath, { flags: "wx", mode: 0o600 }), { signal });
 }
 
 async function validateArtifactArchive(
   archiveBytes: Buffer,
   runId: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  uid = 1000,
+  gid = uid
 ): Promise<{ readonly entryCount: number; readonly binaryBytes: number }> {
   if (tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined) {
     throw new Error("rootless-tmux-artifact-paths-are-required");
@@ -364,7 +376,7 @@ async function validateArtifactArchive(
       const expectedEntry = expected.get(header.name);
       if (expectedEntry === undefined || observed.has(header.name)
         || header.type !== expectedEntry.type || header.mode !== expectedEntry.mode
-        || header.uid !== 1000 || header.gid !== 1000 || header.size !== expectedEntry.bytes.length) {
+        || header.uid !== uid || header.gid !== gid || header.size !== expectedEntry.bytes.length) {
         throw new Error(`rootless-tmux-archive-entry-metadata-mismatch:${header.name}`);
       }
       const chunks: Buffer[] = [];
@@ -476,7 +488,7 @@ test("tmux feasibility container uses a writable rootfs with isolated execution 
 async function waitFor<T>(
   read: () => Promise<T>,
   matches: (value: T) => boolean,
-  message: string,
+  message: string | (() => string),
   checkpoint: string
 ): Promise<T> {
   const progress = fixtureFor().progress;
@@ -488,11 +500,268 @@ async function waitFor<T>(
     value = await progress.run(`${checkpoint}.read`, dockerOperationTimeoutMs, read);
   }
   if (!matches(value)) {
-    progress.record(checkpoint, "failed", { error: message, lastCompletedCheckpoint: progress.lastCompletedCheckpoint });
-    throw new Error(message);
+    const failureMessage = typeof message === "string" ? message : message();
+    progress.record(checkpoint, "failed", { error: failureMessage, lastCompletedCheckpoint: progress.lastCompletedCheckpoint });
+    throw new Error(failureMessage);
   }
   progress.record(checkpoint, "completed");
   return value;
+}
+
+class PersistentTerminalSocket extends EventEmitter {
+  readonly OPEN = 1;
+  readonly CLOSING = 2;
+  readonly CLOSED = 3;
+  readonly frames: Buffer[] = [];
+  readyState = this.OPEN;
+  bufferedAmount = 0;
+
+  send(data: Uint8Array): void {
+    this.frames.push(Buffer.from(data));
+  }
+
+  receive(data: Uint8Array): void {
+    if (this.readyState === this.OPEN) this.emit("message", Buffer.from(data), true);
+  }
+
+  close(): void {
+    if (this.readyState === this.CLOSED) return;
+    this.readyState = this.CLOSED;
+    queueMicrotask(() => this.emit("close"));
+  }
+
+  terminate(): void {
+    this.close();
+  }
+}
+
+function countDockerExecCreations(engine: DockerEngineClient): {
+  readonly engine: DockerEngineClient;
+  readonly count: () => number;
+} {
+  let count = 0;
+  const counted = new Proxy(engine, {
+    get(target, property, receiver) {
+      if (property === "createExec") {
+        return (...args: Parameters<DockerEngineClient["createExec"]>) => {
+          count += 1;
+          return target.createExec(...args);
+        };
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    }
+  });
+  return { engine: counted, count: () => count };
+}
+
+function persistentSocketOutput(socket: PersistentTerminalSocket): string {
+  return socket.frames.flatMap((bytes) => {
+    const result = decodeTerminalAgentFrame(bytes);
+    if (!result.ok || result.frame.type !== "output") return [];
+    return [Buffer.from(result.frame.data)];
+  }).map((bytes) => bytes.toString("utf8")).join("");
+}
+
+async function waitForPersistentSocketText(
+  socket: PersistentTerminalSocket,
+  marker: string,
+  checkpoint: string
+): Promise<string> {
+  return await waitFor(() => Promise.resolve(persistentSocketOutput(socket)), (text) => text.includes(marker),
+    `rootless-persistent-terminal-output-missing:${marker}`, checkpoint);
+}
+
+async function proveExecutionManagerRecovery(
+  fixture: ActiveFixture,
+  containerId: string,
+  uid: number,
+  gid: number
+): Promise<{
+  readonly manager: ExecutionManager;
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly terminalId: string;
+  readonly shellPid: number;
+  readonly longRunningPid: number;
+  readonly previousPollExecCreates: number;
+  readonly optimizedPollExecCreates: number;
+}> {
+  const projectId = uuidv7();
+  const workspaceId = uuidv7();
+  const revisionId = uuidv7();
+  const terminalId = uuidv7();
+  const context = {
+    projectId, workspaceId, revisionId,
+    revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`,
+    generation: 1,
+    ownership: { developmentContainer: { id: containerId } },
+    options: { tasks: [] }
+  };
+  const managed = { executionContext: () => Promise.resolve(context) };
+  const stateRoot = await mkdtemp(path.join(tmpdir(), "devspace-persistent-terminal-manager-"));
+  fixture.temporaryRoots.add(stateRoot);
+  const counted = countDockerExecCreations(fixture.engine);
+  const persistentRuntime = new PersistentTmuxRuntime(counted.engine);
+  const manager = new ExecutionManager(stateRoot, managed as never, counted.engine, undefined, undefined, undefined,
+    persistentRuntime);
+  await manager.initialize();
+  await manager.createTerminal({ projectId, workspaceId, terminalId });
+  const internalState = manager as unknown as {
+    readonly executions: Map<string, { persistentMonitorActive: boolean }>;
+  };
+  const live = internalState.executions.get(terminalId);
+  if (live === undefined) throw new Error("rootless-persistent-terminal-live-record-missing");
+  live.persistentMonitorActive = false;
+
+  const recordPath = path.join(stateRoot, "ownership", "executions", `${terminalId}.json`);
+  const initialRecord = JSON.parse(await readFile(recordPath, "utf8")) as {
+    readonly persistentTerminal: { readonly sessionName: string; readonly sessionId: string; readonly paneId: string; readonly panePid: number };
+  };
+  const originalPanePid = initialRecord.persistentTerminal.panePid;
+  expect(initialRecord.persistentTerminal.sessionName).toBe(`ds-${terminalId}`);
+  expect(initialRecord.persistentTerminal.sessionId).toMatch(/^\$[0-9]+$/u);
+  expect(initialRecord.persistentTerminal.paneId).toMatch(/^%[0-9]+$/u);
+
+  const ownership = {
+    projectId, workspaceId, terminalId, processId: terminalId, containerId, generation: 1,
+    revisionId, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`
+  };
+  const previousPollStart = counted.count();
+  const previousPollBinding = await persistentRuntime.prepare(containerId);
+  const previousPollObservation = await persistentRuntime.lookupSession(previousPollBinding, ownership,
+    initialRecord.persistentTerminal.sessionName, initialRecord.persistentTerminal.sessionId,
+    initialRecord.persistentTerminal.paneId);
+  const previousPollExecCreates = counted.count() - previousPollStart;
+  expect(previousPollObservation).not.toBeNull();
+  expect(previousPollExecCreates).toBe(11);
+
+  const optimizedPollStart = counted.count();
+  await expect(manager.inspect(projectId, workspaceId, terminalId)).resolves.toMatchObject({ observedState: "running" });
+  const optimizedPollExecCreates = counted.count() - optimizedPollStart;
+  expect(optimizedPollExecCreates).toBe(4);
+  fixture.progress.record("manager.idle-reconcile.exec-counts", "completed", {
+    containerId, terminalId, previousPollExecCreates, optimizedPollExecCreates
+  });
+
+  const firstSocket = new PersistentTerminalSocket();
+  await manager.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
+  expect(decodeTerminalAgentFrame(firstSocket.frames[0] ?? new Uint8Array())).toMatchObject({
+    ok: true, frame: { type: "ready", version: 2 }
+  });
+  await waitFor(() => Promise.resolve(persistentSocketOutput(firstSocket)), (text) => text.length > 0,
+    "persistent terminal did not send its initial tmux redraw", "manager.initial-redraw");
+  // The browser sends resize from xterm's write-complete callback for this redraw.
+  await delay(50);
+  firstSocket.receive(encodeTerminalClientFrame({ type: "resize", columns: 100, rows: 32 }));
+  firstSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from(
+    "printf 'SHELL_PID=%s\\n' \"$$\"; sleep 900 & printf 'LONG_PID=%s\\n' \"$!\"; printf 'DEVSPACE_SCREEN_MARKER\\n'\r"
+  ) }));
+  const firstOutput = await waitFor(
+    () => Promise.resolve(persistentSocketOutput(firstSocket)),
+    (text) => /SHELL_PID=[1-9][0-9]*/u.test(text) && /LONG_PID=[1-9][0-9]*/u.test(text),
+    () => `persistent shell did not report its shell and background process PIDs; socket=${firstSocket.readyState}; output=${JSON.stringify(persistentSocketOutput(firstSocket).slice(-400))}`,
+    "manager.shell.pid-and-process"
+  );
+  expect(firstOutput).toContain("DEVSPACE_SCREEN_MARKER");
+  const shellPidMatch = /SHELL_PID=([1-9][0-9]*)/u.exec(firstOutput);
+  const longRunningPidMatch = /LONG_PID=([1-9][0-9]*)/u.exec(firstOutput);
+  expect(shellPidMatch?.[1]).toBe(String(originalPanePid));
+  const longRunningPid = Number(longRunningPidMatch?.[1]);
+  expect(Number.isSafeInteger(longRunningPid) && longRunningPid > 0).toBe(true);
+  const binding = persistentTmuxBinding(containerId, uid, gid);
+  let observedPaneSize = "not-read";
+  let observedPersistedSize = "not-read";
+  const paneSize = await waitFor(async () => {
+    observedPaneSize = await commandOkay(fixture.engine, containerId, [
+      binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+      "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_width}x#{pane_height}"
+    ], "manager.first-resize.verify");
+    const currentRecord = JSON.parse(await readFile(recordPath, "utf8")) as {
+      readonly persistentTerminal: { readonly columns: number; readonly rows: number };
+    };
+    observedPersistedSize = `${currentRecord.persistentTerminal.columns}x${currentRecord.persistentTerminal.rows}`;
+    return observedPaneSize;
+  }, (value) => value.trim() === "100x32",
+  () => `persistent terminal ignored initial resize; pane=${JSON.stringify(observedPaneSize.trim())}; persisted=${observedPersistedSize}; socket=${firstSocket.readyState}`,
+  "manager.first-resize.confirm");
+  expect(paneSize.trim()).toBe("100x32");
+
+  let duplicateRejected = false;
+  try { manager.reserveTerminalAttachment(terminalId); }
+  catch (error) { duplicateRejected = error instanceof Error && error.message.includes("cannot accept another attachment"); }
+  expect(duplicateRejected).toBe(true);
+
+  await manager.shutdownTransports();
+  await waitFor(async () => await commandOkay(fixture.engine, containerId, [
+    binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+    "list-clients", "-t", `=${initialRecord.persistentTerminal.sessionName}`, "-F", "#{client_pid}"
+  ], "manager.restart.detach-confirm"), (value) => value.trim() === "",
+  "Agent transport shutdown left its tmux attachment behind", "manager.restart.detach-confirm");
+  await waitFor(async () => JSON.parse(await readFile(recordPath, "utf8")) as { readonly terminalState: string },
+    (record) => record.terminalState === "disconnected", "Agent shutdown did not persist a disconnected attachment",
+    "manager.restart.disconnected-state");
+
+  const restarted = new ExecutionManager(stateRoot, managed as never, fixture.engine, undefined, undefined, undefined,
+    new PersistentTmuxRuntime(fixture.engine));
+  await restarted.initialize();
+  const recoveredResources = restarted.snapshotResources();
+  const recoveredProcess = recoveredResources.find((resource) => resource.type === "process"
+    && resource.observation.processId === terminalId);
+  const recoveredTerminal = recoveredResources.find((resource) => resource.type === "terminal"
+    && resource.identity.terminalId === terminalId);
+  expect(recoveredProcess).toMatchObject({ type: "process", observation: { processId: terminalId, observedState: "running" } });
+  expect(recoveredTerminal).toMatchObject({ type: "terminal", identity: { terminalId }, state: "disconnected" });
+  const recoveredRecord = JSON.parse(await readFile(recordPath, "utf8")) as typeof initialRecord;
+  expect(recoveredRecord.persistentTerminal).toMatchObject({
+    sessionName: initialRecord.persistentTerminal.sessionName,
+    sessionId: initialRecord.persistentTerminal.sessionId,
+    paneId: initialRecord.persistentTerminal.paneId,
+    panePid: originalPanePid
+  });
+  const processCheck = await commandOkay(fixture.engine, containerId,
+    ["/bin/sh", "-c", "kill -0 \"$1\"", "sh", String(longRunningPid)], "manager.restart.long-process-survives");
+  expect(processCheck).toBe("");
+
+  const secondSocket = new PersistentTerminalSocket();
+  await restarted.reserveTerminalAttachment(terminalId).attach(secondSocket as never);
+  expect(decodeTerminalAgentFrame(secondSocket.frames[0] ?? new Uint8Array())).toMatchObject({
+    ok: true, frame: { type: "ready", version: 2 }
+  });
+  const restored = await waitForPersistentSocketText(secondSocket, "DEVSPACE_SCREEN_MARKER", "manager.restart.redraw");
+  expect(restored).toContain(`SHELL_PID=${originalPanePid}`);
+  secondSocket.receive(encodeTerminalClientFrame({ type: "resize", columns: 100, rows: 32 }));
+  await waitFor(async () => await commandOkay(fixture.engine, containerId, [
+    binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+    "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_width}x#{pane_height}"
+  ], "manager.recovered-resize.verify"), (value) => value.trim() === "100x32", "recovered attachment resize was not applied",
+  "manager.recovered-resize.confirm");
+  secondSocket.receive(encodeTerminalClientFrame({ type: "live" }));
+  secondSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from("printf 'RETURN_LIVE_NOOP_OK\\n'\r") }));
+  await waitForPersistentSocketText(secondSocket, "RETURN_LIVE_NOOP_OK", "manager.live-without-history");
+  secondSocket.receive(encodeTerminalClientFrame({ type: "history" }));
+  await waitFor(async () => await commandOkay(fixture.engine, containerId, [
+    binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+    "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_in_mode}"
+  ], "manager.history.verify"), (value) => value.trim() === "1", "browser History did not enter tmux copy mode", "manager.history.confirm");
+  secondSocket.receive(encodeTerminalClientFrame({ type: "live" }));
+  await waitFor(async () => await commandOkay(fixture.engine, containerId, [
+    binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+    "display-message", "-p", "-t", `=${initialRecord.persistentTerminal.sessionName}:0.0`, "#{pane_in_mode}"
+  ], "manager.live.verify"), (value) => value.trim() === "0", "browser Return to live did not exit tmux copy mode", "manager.live.confirm");
+  secondSocket.receive(encodeTerminalClientFrame({ type: "input", data: Buffer.from("printf 'AFTER_RESTART_INPUT_OK\\n'\r") }));
+  await waitForPersistentSocketText(secondSocket, "AFTER_RESTART_INPUT_OK", "manager.restart.keyboard-input");
+  expect(await commandOkay(fixture.engine, containerId,
+    ["/bin/sh", "-c", "kill -0 \"$1\"", "sh", String(longRunningPid)], "manager.restart.long-process-confirm"))
+    .toBe("");
+  expect((await commandOkay(fixture.engine, containerId, [
+    binding.binaryPath, "-S", binding.socketPath, "-f", binding.configPath,
+    "list-sessions", "-F", "#{session_name}"
+  ], "manager.restart.no-duplicate-session")).trim().split("\n").filter((name) => name === initialRecord.persistentTerminal.sessionName))
+    .toHaveLength(1);
+  return { manager: restarted, projectId, workspaceId, terminalId, shellPid: originalPanePid, longRunningPid,
+    previousPollExecCreates, optimizedPollExecCreates };
 }
 
 function attachmentText(attachment: TmuxAttachment): string {
@@ -687,7 +956,7 @@ afterEach(async () => {
 }, 90_000);
 
 test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined)
-  .each(testImages)("real rootless Docker preserves the tmux shell across disposable exec clients (%s)", async (imageReference) => {
+  .each(testImages)("real rootless Docker preserves persistent shells across exec and manager recovery (%s)", async (imageReference) => {
     if (dockerSocketPath === undefined || tmuxBinaryPath === undefined || tmuxTerminfoPath === undefined) {
       throw new Error("DEVSPACE_TEST_DOCKER_SOCKET_PATH and pinned tmux artifact paths are required; no Docker socket fallback is permitted.");
     }
@@ -734,6 +1003,10 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     progress.record("docker.image.verified", "info", { imageReference, imageId: image.Id, architecture: image.Architecture });
 
     const role = imageReference.endsWith("-slim") ? "slim" : "bookworm";
+    const executionUser = role === "slim" ? "0:0" : testUser;
+    const executionUid = role === "slim" ? 0 : 1000;
+    const executionGid = role === "slim" ? 0 : 1000;
+    const expectedOwner = `${executionUid}:${executionGid}`;
     const containerName = `devspace-tmux-${runId.slice(0, 8)}-${role}`;
     const labels = {
       "devspace.test": "persistent-tmux-feasibility",
@@ -742,14 +1015,14 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     };
     const containerId = await progress.run("docker.container.create", dockerOperationTimeoutMs, () => createWritableRootlessTmuxContainer(engine, containerName, {
       imageReference,
-      user: testUser,
+      user: executionUser,
       labels,
       cpuMillicores: 500,
       memoryBytes: 512 * 1024 * 1024,
       pidLimit: 64
     }));
     fixture.containerIds.add(containerId);
-    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser: testUser });
+    progress.record("docker.container.created", "info", { containerId, containerName, imageReference, executionUser });
     await progress.run("docker.container.start", dockerOperationTimeoutMs, () => engine.startContainer(containerId));
     progress.record("docker.container.started", "info", { containerId });
     const container = await progress.run("docker.container.inspect-after-start", dockerOperationTimeoutMs,
@@ -758,15 +1031,17 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       containerId, image: container.Config.Image, user: container.Config.User,
       running: container.State.Running, status: container.State.Status
     });
-    expect(container.Config.User).toBe(testUser);
+    expect(container.Config.User).toBe(executionUser);
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.execution-user.verify")).toBe(`${executionUid}\n`);
+    expect(await commandOkay(engine, containerId, ["test", "-d", "/workspace"], "container.workspace-directory.verify")).toBe("");
     expect(container.HostConfig).toMatchObject({
       Privileged: false, NetworkMode: "none", ReadonlyRootfs: false,
       NanoCpus: 500_000_000, Memory: 512 * 1024 * 1024, MemorySwap: 512 * 1024 * 1024, PidsLimit: 64,
       CapAdd: [], CapDrop: ["ALL"], Devices: [], SecurityOpt: ["no-new-privileges:true"]
     });
     expect(container.Mounts.filter((mount) => mount.Type === "bind")).toEqual([]);
-    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.identity.uid")).toBe("1000\n");
-    expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "container.identity.uid")).toBe(`${executionUid}\n`);
+    expect(await commandOkay(engine, containerId, ["id", "-g"], "container.identity.gid")).toBe(`${executionUid}\n`);
 
     const directoryName = `persistent-tmux-${runId}`;
     const artifactRoot = `/opt/${directoryName}`;
@@ -783,7 +1058,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const archivePath = path.join(archiveTemporaryRoot, "tmux-artifacts.tar");
     const archiveWriteAbort = new AbortController();
     await progress.run("artifact.archive.generate-and-write", commandTimeoutMs,
-      () => writeArtifactArchiveFile(runId, archivePath, archiveWriteAbort.signal),
+      () => writeArtifactArchiveFile(runId, archivePath, archiveWriteAbort.signal, executionUid, executionGid),
       () => archiveWriteAbort.abort(new Error("rootless-tmux-archive-generation-timeout")));
     const archiveFile = await progress.run("artifact.archive.stat", dockerOperationTimeoutMs, () => stat(archivePath));
     if (archiveFile.size < 2_200_000 || archiveFile.size > 4 * 1024 * 1024) {
@@ -796,9 +1071,10 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       () => readFile(archivePath));
     const archiveValidationAbort = new AbortController();
     const archiveValidation = await progress.run("artifact.archive.validate", commandTimeoutMs,
-      () => validateArtifactArchive(archiveBytes, runId, archiveValidationAbort.signal),
+      () => validateArtifactArchive(archiveBytes, runId, archiveValidationAbort.signal, executionUid, executionGid),
       () => archiveValidationAbort.abort(new Error("rootless-tmux-archive-validation-timeout")));
-    progress.record("artifact.archive.verified", "completed", { ...archiveValidation, archiveBytes: archiveBytes.length });
+    const archiveSha256 = createHash("sha256").update(archiveBytes).digest("hex");
+    progress.record("artifact.archive.verified", "completed", { ...archiveValidation, archiveBytes: archiveBytes.length, archiveSha256 });
 
     const upload = createReadStream(archivePath);
     upload.once("end", () => progress.record("artifact.upload.source-eof", "completed", {
@@ -827,28 +1103,28 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       containerId, archiveBytes: upload.bytesRead, sourceEnded: upload.readableEnded
     });
     progress.record("artifact.stage.completed", "completed", { containerId, destination: "/opt" });
-    expect(await commandOkay(engine, containerId, ["id", "-u"], "artifact.verify.exec-uid")).toBe("1000\n");
-    expect(await commandOkay(engine, containerId, ["id", "-g"], "artifact.verify.exec-gid")).toBe("1000\n");
+    expect(await commandOkay(engine, containerId, ["id", "-u"], "artifact.verify.exec-uid")).toBe(`${executionUid}\n`);
+    expect(await commandOkay(engine, containerId, ["id", "-g"], "artifact.verify.exec-gid")).toBe(`${executionGid}\n`);
     expect(await commandOkay(engine, containerId, ["sha256sum", "--", binaryPath], "artifact.verify.binary-sha256"))
       .toContain(tmuxBinarySha256);
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", artifactRoot], "artifact.verify.root-ownership"))
-      .toBe("700 1000:1000\n");
+      .toBe(`700 ${expectedOwner}\n`);
     expect(await commandOkay(engine, containerId, [binaryPath, "-V"], "artifact.verify.tmux-version")).toBe("tmux 3.7c\n");
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", binaryPath], "artifact.verify.binary-ownership"))
-      .toBe("755 1000:1000\n");
+      .toBe(`755 ${expectedOwner}\n`);
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", configPath], "artifact.verify.config-ownership"))
-      .toBe("600 1000:1000\n");
+      .toBe(`600 ${expectedOwner}\n`);
     for (const name of ["xterm-256color", "tmux-256color"]) {
       const entry = (await collectFiles(tmuxTerminfoPath)).find((candidate) => path.posix.basename(candidate.relativePath) === name);
       if (entry === undefined) throw new Error(`rootless-tmux-terminfo-entry-missing:${name}`);
       const stagedPath = `${terminfoPath}/${entry.relativePath}`;
       expect(await commandOkay(engine, containerId, ["test", "-s", stagedPath], `artifact.verify.terminfo.${name}.exists`)).toBe("");
       expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", stagedPath], `artifact.verify.terminfo.${name}.metadata`))
-        .toBe("644 1000:1000\n");
+        .toBe(`644 ${expectedOwner}\n`);
     }
     await commandOkay(engine, containerId, ["mkdir", "-m", "700", "--", socketDirectory], "tmux.socket-directory.create");
     expect(await commandOkay(engine, containerId, ["stat", "-c", "%a %u:%g", socketDirectory], "tmux.socket-directory.verify"))
-      .toBe("700 1000:1000\n");
+      .toBe(`700 ${expectedOwner}\n`);
 
     progress.record("tmux.session-create.started", "started", { containerId, sessionName, shell: "/bin/sh -i" });
     const creation = await containerCommand(engine, containerId, [
@@ -860,7 +1136,7 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const socketInfo = (await commandOkay(engine, containerId, ["stat", "-c", "%F %a %u:%g", socketPath],
       "tmux.socket.verify-owner-mode")).trim().split(" ");
     expect(socketInfo[0]).toBe("socket");
-    expect(socketInfo[2]).toBe("1000:1000");
+    expect(socketInfo[2]).toBe(expectedOwner);
     const socketMode = Number.parseInt(socketInfo[1] ?? "", 8);
     expect(Number.isInteger(socketMode) && (socketMode & 0o600) === 0o600 && (socketMode & 0o077) === 0).toBe(true);
 
@@ -954,10 +1230,17 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     await writeAttachment(second, "printf 'REATTACHED_INPUT_OK\\n'", "tmux.second-attachment.write-input");
     await waitForAttachmentText(second, "REATTACHED_INPUT_OK", "tmux.second-attachment.read-input");
 
+    const managerEvidence = await proveExecutionManagerRecovery(fixture, containerId, executionUid, executionGid);
+
     const stoppedAt = performance.now();
     await progress.run("docker.container.stop", dockerOperationTimeoutMs, () => engine.stopContainer(containerId));
     expect((await progress.run("docker.container.inspect-after-stop", dockerOperationTimeoutMs,
       () => engine.inspectContainer(containerId))).State.Running).toBe(false);
+    await managerEvidence.manager.stopWorkspace(managerEvidence.projectId, managerEvidence.workspaceId);
+    let stoppedManagerTerminalRejected = false;
+    try { managerEvidence.manager.reserveTerminalAttachment(managerEvidence.terminalId); }
+    catch { stoppedManagerTerminalRejected = true; }
+    expect(stoppedManagerTerminalRejected).toBe(true);
     await waitFor(async () => (await progress.run("docker.exec.second-attachment.inspect", dockerOperationTimeoutMs,
       () => engine.inspectExec(second.execId))).Running, (running) => !running,
     "rootless-tmux-attachment-remained-running-after-container-stop", "docker.container-stop.attachment-exit");
@@ -977,17 +1260,22 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
     const stopElapsedMs = Math.round(performance.now() - stoppedAt);
 
     const elapsedMs = Math.round(performance.now() - startedAt);
-    progress.record("tmux.feasibility-assertions.completed", "completed", {
+    progress.record("tmux.persistent-terminal-acceptance.completed", "completed", {
       containerId, sessionId, paneId, shellPid, firstAttachExecId: first.execId, secondAttachExecId: second.execId,
-      resize: "100x32", historyLines: 100, stopElapsedMs, elapsedMs
+      resize: "100x32", historyLines: 100, stopElapsedMs, elapsedMs,
+      persistentManagerTerminalId: managerEvidence.terminalId,
+      persistentManagerShellPid: managerEvidence.shellPid,
+      persistentManagerLongRunningPid: managerEvidence.longRunningPid,
+      previousPollExecCreates: managerEvidence.previousPollExecCreates,
+      optimizedPollExecCreates: managerEvidence.optimizedPollExecCreates
     });
     const evidence = {
       image: imageReference,
       architecture: image.Architecture,
       containerId,
-      executionUser: testUser,
+      executionUser,
       tmuxVersion: "3.7c",
-      archiveSha256: tmuxArchiveSha256,
+      archiveSha256,
       binarySha256: tmuxBinarySha256,
       sessionId,
       paneId,
@@ -995,20 +1283,27 @@ test.skipIf(dockerSocketPath === undefined || tmuxBinaryPath === undefined || tm
       creationExecId: creation.execId,
       firstAttachExecId: first.execId,
       secondAttachExecId: second.execId,
+      persistentManagerTerminalId: managerEvidence.terminalId,
+      persistentManagerShellPid: managerEvidence.shellPid,
+      persistentManagerLongRunningPid: managerEvidence.longRunningPid,
+      previousPollExecCreates: managerEvidence.previousPollExecCreates,
+      optimizedPollExecCreates: managerEvidence.optimizedPollExecCreates,
       resize: "100x32",
       historyLines: 100,
       stopElapsedMs,
       elapsedMs
     };
-    console.log(`ROOTLESS_TMUX_FEASIBILITY ${JSON.stringify(evidence)}`);
+    console.log(`ROOTLESS_PERSISTENT_TERMINAL_ACCEPTANCE ${JSON.stringify(evidence)}`);
     if (process.env.GITHUB_STEP_SUMMARY !== undefined) {
       await appendFile(process.env.GITHUB_STEP_SUMMARY, [
-        `### Rootless tmux feasibility: ${imageReference}`,
+        `### Rootless persistent terminal acceptance: ${imageReference}`,
         "",
-        `- Container: \`${containerId}\` (${testUser}, linux/${image.Architecture})`,
+        `- Container: \`${containerId}\` (${executionUser}, linux/${image.Architecture})`,
         `- Session/pane: \`${sessionId}\` / \`${paneId}\`; shell PID remained \`${shellPid}\` across execs \`${first.execId}\` and \`${second.execId}\`.`,
-        `- tmux 3.7c artifact SHA-256: \`${tmuxArchiveSha256}\` archive, \`${tmuxBinarySha256}\` binary.`,
-        `- Verified 100 history lines, input, redraw, resize to 100×32, Stop rejection in ${stopElapsedMs} ms.`,
+        `- tmux 3.7c artifact SHA-256: \`${archiveSha256}\` archive, \`${tmuxBinarySha256}\` binary.`,
+        `- Production Agent manager shell PID remained \`${managerEvidence.shellPid}\`; background PID \`${managerEvidence.longRunningPid}\` survived manager reinitialization and reattachment.`,
+        `- Warm idle poll Docker exec creations: \`${managerEvidence.previousPollExecCreates}\` on the previous \`prepare()\` + lookup path, \`${managerEvidence.optimizedPollExecCreates}\` after caching verified runtime identity.`,
+        `- Verified 100 history lines, v2-ready redraw, input, resize to 100×32, tmux History / Return to live, and Stop reattachment rejection in ${stopElapsedMs} ms.`,
         `- Probe elapsed: ${elapsedMs} ms.`,
         ""
       ].join("\n"), "utf8");

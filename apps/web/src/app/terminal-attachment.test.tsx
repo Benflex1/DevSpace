@@ -4,16 +4,20 @@
 import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
-import { installTerminalTestDom, settleReact } from "./terminal-test-dom.js";
-import { encodeTerminalAgentFrame } from "@devspace/contracts";
+import { buttonText, FakeNode, findButtons, installTerminalTestDom, settleReact } from "./terminal-test-dom.js";
+import { decodeTerminalClientFrame, encodeTerminalAgentFrame } from "@devspace/contracts";
 
-const xtermState = vi.hoisted(() => ({ writes: [] as Uint8Array[] }));
+const xtermState = vi.hoisted(() => ({ writes: [] as Uint8Array[], writeCallbacks: [] as Array<() => void>, resets: 0,
+  selection: "selected history text" }));
 
 class FakeSocket {
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
   static instances: FakeSocket[] = [];
   binaryType = "";
   readyState = 0;
   url: string;
+  sent: Uint8Array[] = [];
   onmessage: ((event: { data: ArrayBuffer }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
@@ -21,7 +25,7 @@ class FakeSocket {
     this.url = url;
     FakeSocket.instances.push(this);
   }
-  send() { /* recorded by the caller when needed */ }
+  send(data: ArrayBuffer) { this.sent.push(new Uint8Array(data)); }
   close() {
     this.readyState = 3;
     this.onclose?.({ code: 1000 });
@@ -29,6 +33,15 @@ class FakeSocket {
   emitReady() {
     this.readyState = 1;
     this.onmessage?.({ data: Uint8Array.of(0x11).buffer });
+  }
+  emitPersistentReady(attachmentId: string) {
+    this.readyState = 1;
+    const frame = encodeTerminalAgentFrame({ type: "ready", version: 2, attachmentId });
+    this.onmessage?.({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer });
+  }
+  emitClose(code: number) {
+    this.readyState = 3;
+    this.onclose?.({ code });
   }
   emitExit() {
     this.onmessage?.({ data: Uint8Array.of(0x13, 0x00).buffer });
@@ -46,7 +59,12 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon() { /* fit addon is unused */ }
     open() { /* canvas is not required */ }
     focus() { /* focus is irrelevant */ }
-    write(data: Uint8Array) { xtermState.writes.push(data); }
+    reset() { xtermState.resets += 1; }
+    getSelection() { return xtermState.selection; }
+    write(data: Uint8Array, callback?: () => void) {
+      xtermState.writes.push(data);
+      if (callback !== undefined) xtermState.writeCallbacks.push(callback);
+    }
     onData() { return { dispose() { /* unused */ } }; }
     onBinary() { return { dispose() { /* unused */ } }; }
     dispose() { /* attachment teardown */ }
@@ -70,8 +88,17 @@ afterEach(() => {
   roots.length = 0;
   FakeSocket.instances = [];
   xtermState.writes = [];
+  xtermState.writeCallbacks = [];
+  xtermState.resets = 0;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
+
+function reactProps(node: FakeNode): { onClick?: () => void } {
+  const key = Object.getOwnPropertyNames(node).find((name) => name.startsWith("__reactProps"));
+  if (key === undefined) throw new Error("React props are not attached to the terminal test node");
+  return (node as unknown as Record<string, { onClick?: () => void }>)[key]!;
+}
 
 test("parent refresh after ready does not open a second terminal socket", async () => {
   const rootElement = installTerminalTestDom(FakeSocket);
@@ -174,6 +201,99 @@ test("valid PTY output after ready reaches xterm with ANSI and screen-control by
   act(() => { socket?.emitOutput(bytes); });
 
   expect(xtermState.writes).toEqual([bytes]);
+});
+
+test("persistent ready resets xterm, resizes after the first redraw, and exposes history and copy controls", async () => {
+  const body = installTerminalTestDom(FakeSocket);
+  const clipboardWrite = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
+  const { TerminalTab } = await import("./terminal-tab.js");
+  const root = createRoot(body as never);
+  roots.push(root);
+  act(() => { root.render(createElement(TerminalTab, {
+    projectId, workspaceId,
+    terminal: { id: terminalId, processId: terminalId, title: "Terminal 1", state: "active" },
+    active: true, onRefresh: () => undefined, onTerminalStateChange: () => undefined
+  })); });
+  await settleReact();
+  const socket = FakeSocket.instances[0]!;
+  act(() => { socket.emitPersistentReady("018f1f34-7000-7000-8000-000000000099"); });
+  await settleReact();
+
+  expect(xtermState.resets).toBe(1);
+  const sentFrames = () => socket.sent.map((frame) => {
+    const decoded = decodeTerminalClientFrame(frame);
+    return decoded.ok ? decoded.frame : null;
+  });
+  expect(sentFrames()).not.toContainEqual({ type: "resize", columns: 80, rows: 24 });
+  const redraw = new TextEncoder().encode("restored tmux screen");
+  act(() => { socket.emitOutput(redraw); });
+  expect(xtermState.writes).toEqual([redraw]);
+  expect(sentFrames()).not.toContainEqual({ type: "resize", columns: 80, rows: 24 });
+  const finishRedraw = xtermState.writeCallbacks.shift();
+  expect(finishRedraw).toBeDefined();
+  act(() => { finishRedraw?.(); });
+  expect(sentFrames()).toContainEqual({ type: "resize", columns: 80, rows: 24 });
+  const buttons = findButtons(body);
+  for (const label of ["History", "Return to live", "Copy selection"]) {
+    const button = buttons.find((candidate) => buttonText(candidate) === label);
+    expect(button).toBeDefined();
+    act(() => { reactProps(button!).onClick?.(); });
+  }
+  expect(socket.sent.map((frame) => frame[0])).toEqual(expect.arrayContaining([0x02, 0x04, 0x05]));
+  await settleReact();
+  expect(clipboardWrite).toHaveBeenCalledWith("selected history text");
+});
+
+test("reconnect retries stop after the bound and expose a working manual Reconnect button", async () => {
+  const body = installTerminalTestDom(FakeSocket);
+  const fakeWindow = window as unknown as {
+    setTimeout: (callback: () => void, delayMs?: number) => number;
+    clearTimeout: (timerId: number) => void;
+  };
+  let nextTimerId = 0;
+  const timers = new Map<number, { callback: () => void; delayMs: number }>();
+  fakeWindow.setTimeout = (callback, delayMs = 0) => {
+    const timerId = ++nextTimerId;
+    timers.set(timerId, { callback, delayMs });
+    return timerId;
+  };
+  fakeWindow.clearTimeout = (timerId) => { timers.delete(timerId); };
+  const { TerminalTab } = await import("./terminal-tab.js");
+  const root = createRoot(body as never);
+  roots.push(root);
+  act(() => { root.render(createElement(TerminalTab, {
+    projectId, workspaceId,
+    terminal: { id: terminalId, processId: terminalId, title: "Terminal 1", state: "active" },
+    active: true, onRefresh: () => undefined, onTerminalStateChange: () => undefined
+  })); });
+  await settleReact();
+  const runTimer = async (delayMs?: number) => {
+    const entry = [...timers.entries()].sort((left, right) => left[1].delayMs - right[1].delayMs)
+      .find(([, timer]) => delayMs === undefined || timer.delayMs === delayMs);
+    if (entry === undefined) throw new Error("Expected terminal reconnect timer was not scheduled");
+    timers.delete(entry[0]);
+    act(() => { entry[1].callback(); });
+    await settleReact();
+  };
+  await runTimer(0);
+  FakeSocket.instances[0]!.emitReady();
+  await settleReact();
+  await runTimer(1_000);
+
+  for (let retry = 0; retry < 8; retry += 1) {
+    FakeSocket.instances.at(-1)!.emitClose(1006);
+    await settleReact();
+    await runTimer();
+  }
+  FakeSocket.instances.at(-1)!.emitClose(1006);
+  await settleReact();
+  expect(FakeSocket.instances).toHaveLength(9);
+  expect(findButtons(body).map((button) => buttonText(button))).toContain("Reconnect");
+  const reconnect = findButtons(body).find((button) => buttonText(button) === "Reconnect")!;
+  act(() => { reactProps(reconnect).onClick?.(); });
+  await settleReact();
+  expect(FakeSocket.instances).toHaveLength(10);
 });
 
 test("Native harness terminal marks attachment and first output without recording PTY bytes", async () => {

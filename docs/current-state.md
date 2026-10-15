@@ -1,13 +1,19 @@
 # Current State
 
-## Persistent terminals: design proposed
+## Persistent terminals: Slice 1 in review
 
-[ADR 017](decisions/017-persistent-workspace-terminals.md) proposes in-container tmux ownership
-of shell and Native harness PTYs, with fresh Docker exec clients after attachment loss.
-[Feasibility evidence](feasibility/persistent-terminals-2026-10-13.md) covers local shell/TUI
-continuity and a static tmux artifact; Docker restart/Stop and browser acceptance remain unverified.
-No persistent-terminal implementation is included. Current Agent restart still loses terminal
-attachment; Native orphans retain their private-home lease until exact exit or workspace Stop.
+[ADR 017](decisions/017-persistent-workspace-terminals.md) is Accepted. The Slice 1 branch adds
+container-local tmux 3.7c shells, durable terminal/session/pane identity, fresh attachment execs,
+Agent recovery, a versioned browser handshake, terminal reset/redraw, resize, tmux History controls,
+and Web reconciliation that retains disconnected terminals. New shells are capped at eight per
+workspace; legacy direct-exec terminals and Native harness execution keep their existing behavior.
+
+The existing rootless Docker acceptance workflow now exercises the production Agent manager and
+tmux runtime on `node:24-bookworm` and `node:24-bookworm-slim`, including a manager reinitialization
+against the same running container. That CI run is pending for this branch. The executor has no
+Docker daemon, so a full Agent/Web process restart and browser reload acceptance has not been run;
+the PR remains draft until that required proof is available. Native Codex continuity is deferred
+to Slice 2. Full persistent-process exit/close and Native settlement work is deferred to Slice 3.
 
 ## Test-suite audit
 
@@ -27,13 +33,15 @@ daemon, or disposable-host facility; its offline frozen dependency install stopp
 Clean-host workspace Start, terminal, task, and Stop/Start preservation acceptance therefore remain
 unverified. Do not describe the installation path as host-accepted until that run is performed.
 
-## Public-alpha acceptance gap: browser verification in CI
+## Browser and persistent-terminal acceptance
 
-Playwright's 11 browser cases are not currently executed in CI. Unit/tooling and real
-rootless Docker acceptance checks do not establish browser workflow acceptance. Before
-public-alpha acceptance, run the browser suite on disposable CI infrastructure and record
-its results. This delivery gap is separate from test deletion and fixture cleanup; no CI
-workflow changes are included in the audit PR.
+Playwright browser tests run in four CI shards. This Slice 1 branch keeps those tests on the
+legacy direct-exec fixture so they continue to cover existing Web and Agent workflows; focused
+terminal tests cover the new attachment protocol and controls. The separate rootless Docker
+workflow exercises the production tmux runtime and manager reinitialization against a live
+container. Neither test path proves the full real Agent/Web process restart and browser reload
+sequence with PID continuity. Keep the Slice 1 PR in draft until that process-level acceptance
+is run and recorded.
 
 ## Native harness slice
 
@@ -187,7 +195,9 @@ terminalized as non-retryable `GIT_MUTATION_OUTCOME_UNCERTAIN` failures and are 
 `accepted` local Git mutations remain resumable because they may not have started. A live-process
 mutation that is known to have completed but cannot settle observation or its journal remains
 recoverable, preserving mutation truthfulness until restart reconciliation. Project creation from
-scratch, persistent terminals, and later Workbench polish remain deferred product work.
+scratch and later Workbench polish remain deferred product work. Persistent ordinary shells are
+implemented in Slice 1 and in review. Native continuity is deferred to Slice 2; full persistent-
+terminal exit and close settlement is deferred to Slice 3.
 
 ## Private GitHub Repository Access status
 
