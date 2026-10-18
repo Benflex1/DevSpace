@@ -122,6 +122,10 @@ export const nativeHarnessResumeDataSchema = z.strictObject({
 });
 export const nativeHarnessInspectDataSchema = z.strictObject({
   sessionId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  harnessId: configurationKeySchema,
+  processId: uuidV7Schema.optional(),
+  processGeneration: z.number().int().positive(),
   definition: customHarnessDefinitionSchema.optional()
 });
 export const nativeHarnessLifecycleStateSchema = z.enum(["live", "stopped", "lost"]);

@@ -90,14 +90,32 @@ test("inspection reports admission in progress before the private session record
   });
   await materializationStarted;
 
-  expect(await h.runtime.capability(sessionId)).toEqual({
+  const identity = { workspaceId, harnessId: "codex", processId, processGeneration: 1 };
+  expect(await h.runtime.capability(sessionId, undefined, identity)).toEqual({
     state: "admitting", processGeneration: 1, resume: false
   });
+  await expect(h.runtime.capability(sessionId, undefined, { ...identity, processGeneration: 2 }))
+    .rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  await expect(h.runtime.capability(sessionId, undefined, { ...identity, processId: "018f0f00-0000-7000-8000-000000000099" }))
+    .rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
   expect(h.createdExecs).toHaveLength(0);
+
+  const queuedIdentity = {
+    workspaceId, harnessId: "codex", processId: "018f1f34-7000-7000-8000-000000000007", processGeneration: 1
+  };
+  const queuedStart = h.runtime.start({
+    projectId, workspaceId, sessionId: "018f1f34-7000-7000-8000-000000000006", harnessId: "codex",
+    processId: queuedIdentity.processId, terminalId: "018f1f34-7000-7000-8000-000000000008", processGeneration: 1
+  }).then(() => null, (error: unknown) => error);
+  expect(await h.runtime.capability("018f1f34-7000-7000-8000-000000000006", undefined, queuedIdentity)).toEqual({
+    state: "admitting", processGeneration: 1, resume: false
+  });
 
   releaseMaterialization();
   await start;
-  expect(await h.runtime.capability(sessionId)).toMatchObject({
+  await expect(queuedStart).resolves.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  expect(h.createdExecs).toHaveLength(1);
+  expect(await h.runtime.capability(sessionId, undefined, identity)).toMatchObject({
     state: "live", processGeneration: 1, admission: "started", resume: false
   });
 });

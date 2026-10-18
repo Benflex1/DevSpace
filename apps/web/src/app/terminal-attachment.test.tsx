@@ -113,18 +113,22 @@ test("parent refresh after ready does not open a second terminal socket", async 
         terminal: { id: terminalId, processId: terminalId, title: "Codex", state: "active" },
         active: true,
         onRefresh: () => setTick((value) => value + 1),
-        onTerminalStateChange: () => setTick((value) => value + 1)
+        onTerminalStateChange: () => setTick((value) => value + 1),
+        onAttachmentStateChange: (_id, state) => attachmentStates.push(state)
       }));
   }
+  const attachmentStates: string[] = [];
   const root = createRoot(rootElement as never);
   roots.push(root);
   act(() => { root.render(createElement(Harness)); });
   await settleReact();
   const attached = FakeSocket.instances.length;
   expect(attached).toBeGreaterThan(0);
+  expect(attachmentStates).toContain("connecting");
   act(() => { FakeSocket.instances.at(-1)?.emitReady(); });
   await settleReact(2);
   expect(FakeSocket.instances).toHaveLength(attached);
+  expect(attachmentStates).toContain("attached");
 });
 
 test("a new terminal identity opens a new socket and exit still refreshes", async () => {
