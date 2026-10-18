@@ -130,6 +130,13 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
   const customs = new Map<string, CustomHarnessDefinition>();
   const sessionsRoot = path.join(path.resolve(dependencies.stateRoot), "harness-sessions");
   const liveByWorkspace = new Map<string, string>();
+  const admissionsBySession = new Map<string, {
+    workspaceId: string;
+    harnessId: string;
+    processId: string;
+    processGeneration: number;
+    definitionDigest: string;
+  }>();
 
   const sessionPath = (sessionId: string) => path.join(sessionsRoot, `${sessionId}.json`);
 
@@ -454,105 +461,117 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
           };
         });
         if (preflight.kind === "complete") return {};
-        const { previous, definition, env } = preflight;
-        let leaseId: string | null = null;
-        let command = preflight.command;
-        let executableSource: ExecutableSource | null = null;
-        const needsDiscoveryBaseline = dedicatedHome(input.harnessId) && (previous === null || previous.nativeSessionId === null);
-        const discoveryBaseline = needsDiscoveryBaseline
-          ? await measureAdmissionPhase(timingContext, "codex-session-baseline", async () =>
-            await codexSessionIdBaseline(dependencies.home.persistentHomePath(CODEX_HARNESS_ID)))
-          : undefined;
+        const trackedAdmission = {
+          workspaceId: input.workspaceId,
+          harnessId: input.harnessId,
+          processId: input.processId,
+          processGeneration: input.processGeneration,
+          definitionDigest: authorityDigest(preflight.definition)
+        };
+        admissionsBySession.set(input.sessionId, trackedAdmission);
         try {
-          if (dedicatedHome(input.harnessId)) {
-            await measureAdmissionPhase(timingContext, "workspace-validation", async () => {
-              let slot = await dependencies.inspectSlot(input.workspaceId);
-              if (slot.state !== "present-and-exact") {
-                if (dependencies.recreateWorkspace === undefined) {
-                  throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
-                }
-                slot = await dependencies.recreateWorkspace({ workspaceId: input.workspaceId, projectId: input.projectId });
+          const { previous, definition, env } = preflight;
+          let leaseId: string | null = null;
+          let command = preflight.command;
+          let executableSource: ExecutableSource | null = null;
+          const needsDiscoveryBaseline = dedicatedHome(input.harnessId) && (previous === null || previous.nativeSessionId === null);
+          const discoveryBaseline = needsDiscoveryBaseline
+            ? await measureAdmissionPhase(timingContext, "codex-session-baseline", async () =>
+              await codexSessionIdBaseline(dependencies.home.persistentHomePath(CODEX_HARNESS_ID)))
+            : undefined;
+          try {
+            if (dedicatedHome(input.harnessId)) {
+              await measureAdmissionPhase(timingContext, "workspace-validation", async () => {
+                let slot = await dependencies.inspectSlot(input.workspaceId);
                 if (slot.state !== "present-and-exact") {
-                  throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                  if (dependencies.recreateWorkspace === undefined) {
+                    throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                  }
+                  slot = await dependencies.recreateWorkspace({ workspaceId: input.workspaceId, projectId: input.projectId });
+                  if (slot.state !== "present-and-exact") {
+                    throw new HarnessRuntimeError("HARNESS_SLOT_MOUNT_MISSING", "The workspace container does not have the harness slot.");
+                  }
                 }
+              });
+              const probed = await probeCodex({
+                ...input, measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(timingContext, phase, operation)
+              });
+              const stageAfterMaterialize = !probed.present;
+              if (probed.present) {
+                executableSource = { kind: "image-path", command: "codex", reportedVersion: probed.version };
+                command = ["codex", ...command.slice(1)];
+              } else if (dependencies.stageNativeCodex === undefined) {
+                throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available in the workspace image or as an Agent artifact.");
               }
-            });
-            const probed = await probeCodex({
-              ...input, measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(timingContext, phase, operation)
-            });
-            const stageAfterMaterialize = !probed.present;
-            if (probed.present) {
-              executableSource = { kind: "image-path", command: "codex", reportedVersion: probed.version };
-              command = ["codex", ...command.slice(1)];
-            } else if (dependencies.stageNativeCodex === undefined) {
-              throw new HarnessRuntimeError("HARNESS_EXECUTABLE_UNAVAILABLE", "Codex is not available in the workspace image or as an Agent artifact.");
+              const lease = await measureAdmissionPhase(timingContext, "harness-home-lease", async () =>
+                await dependencies.home.acquireLease({
+                  harnessId: input.harnessId, workspaceId: input.workspaceId,
+                  aiSessionId: input.sessionId, processGeneration: input.processGeneration
+                }));
+              leaseId = lease.leaseId;
+              await measureAdmissionPhase(timingContext, "harness-home-materialization", async () =>
+                await dependencies.home.materialize({
+                  workspaceId: input.workspaceId, harnessId: input.harnessId, leaseId: lease.leaseId
+                }));
+              env.CODEX_HOME = HARNESS_SLOT_ENV;
+              if (stageAfterMaterialize) {
+                const staged = await stageCodexCommand(input, command,
+                  (phase, operation) => measureAdmissionPhase(timingContext, phase, operation));
+                command = staged.command;
+                executableSource = staged.executableSource;
+              }
             }
-            const lease = await measureAdmissionPhase(timingContext, "harness-home-lease", async () =>
-              await dependencies.home.acquireLease({
-                harnessId: input.harnessId, workspaceId: input.workspaceId,
-                aiSessionId: input.sessionId, processGeneration: input.processGeneration
-              }));
-            leaseId = lease.leaseId;
-            await measureAdmissionPhase(timingContext, "harness-home-materialization", async () =>
-              await dependencies.home.materialize({
-                workspaceId: input.workspaceId, harnessId: input.harnessId, leaseId: lease.leaseId
-              }));
-            env.CODEX_HOME = HARNESS_SLOT_ENV;
-            if (stageAfterMaterialize) {
-              const staged = await stageCodexCommand(input, command,
-                (phase, operation) => measureAdmissionPhase(timingContext, phase, operation));
-              command = staged.command;
-              executableSource = staged.executableSource;
+            const admitted: SessionRecord = {
+              workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
+              nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+              ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
+              definitionDigest: authorityDigest(definition),
+              processGeneration: input.processGeneration, admission: "uncertain"
+            };
+            await saveSession(input.sessionId, admitted);
+            liveByWorkspace.set(input.workspaceId, input.sessionId);
+            await dependencies.createHarnessExec({
+              projectId: input.projectId, workspaceId: input.workspaceId,
+              processId: input.processId, terminalId: input.terminalId,
+              command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId,
+              measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(timingContext, phase, operation)
+            });
+          } catch (error) {
+            if (harnessExecutionAdmissionUncertain(error)) {
+              await saveSession(input.sessionId, {
+                workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
+                nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+                ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
+                definitionDigest: authorityDigest(definition),
+                processGeneration: input.processGeneration, admission: "uncertain"
+              });
+              liveByWorkspace.set(input.workspaceId, input.sessionId);
+              throw new HarnessRuntimeError("HARNESS_ADMISSION_UNCERTAIN", "The harness exec may have started; retry the same process.");
             }
-          }
-          const admitted: SessionRecord = {
-            workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
-            nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
-            ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
-            definitionDigest: authorityDigest(definition),
-            processGeneration: input.processGeneration, admission: "uncertain"
-          };
-          await saveSession(input.sessionId, admitted);
-          liveByWorkspace.set(input.workspaceId, input.sessionId);
-          await dependencies.createHarnessExec({
-            projectId: input.projectId, workspaceId: input.workspaceId,
-            processId: input.processId, terminalId: input.terminalId,
-            command, environment: env, sessionId: input.sessionId, processGeneration: input.processGeneration, leaseId,
-            measureAdmissionPhase: (phase, operation) => measureAdmissionPhase(timingContext, phase, operation)
-          });
-        } catch (error) {
-          if (harnessExecutionAdmissionUncertain(error)) {
-            await saveSession(input.sessionId, {
+            await restoreAfterDefinitePreStartFailure(input.sessionId, input.workspaceId, input.harnessId, leaseId, previous, {
               workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
               nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
               ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
               definitionDigest: authorityDigest(definition),
               processGeneration: input.processGeneration, admission: "uncertain"
             });
-            liveByWorkspace.set(input.workspaceId, input.sessionId);
-            throw new HarnessRuntimeError("HARNESS_ADMISSION_UNCERTAIN", "The harness exec may have started; retry the same process.");
+            throw error;
           }
-          await restoreAfterDefinitePreStartFailure(input.sessionId, input.workspaceId, input.harnessId, leaseId, previous, {
+          const settled = await loadSession(input.sessionId).catch(() => null);
+          if (settled?.state === "stopped" || settled?.state === "lost") return env;
+          await saveSession(input.sessionId, {
             workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
-            nativeSessionId: previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
-            ...(discoveryBaseline === undefined ? {} : { discoveryBaseline }),
+            nativeSessionId: settled?.nativeSessionId ?? previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
+            ...(settled?.discoveryBaseline === undefined && discoveryBaseline === undefined
+              ? {} : { discoveryBaseline: settled?.discoveryBaseline ?? discoveryBaseline! }),
             definitionDigest: authorityDigest(definition),
-            processGeneration: input.processGeneration, admission: "uncertain"
+            processGeneration: input.processGeneration, admission: "started"
           });
-          throw error;
+          liveByWorkspace.set(input.workspaceId, input.sessionId);
+          return env;
+        } finally {
+          if (admissionsBySession.get(input.sessionId) === trackedAdmission) admissionsBySession.delete(input.sessionId);
         }
-        const settled = await loadSession(input.sessionId).catch(() => null);
-        if (settled?.state === "stopped" || settled?.state === "lost") return env;
-        await saveSession(input.sessionId, {
-          workspaceId: input.workspaceId, harnessId: input.harnessId, processId: input.processId,
-          nativeSessionId: settled?.nativeSessionId ?? previous?.nativeSessionId ?? null, executableSource, state: "live", leaseId,
-          ...(settled?.discoveryBaseline === undefined && discoveryBaseline === undefined
-            ? {} : { discoveryBaseline: settled?.discoveryBaseline ?? discoveryBaseline! }),
-          definitionDigest: authorityDigest(definition),
-          processGeneration: input.processGeneration, admission: "started"
-        });
-        liveByWorkspace.set(input.workspaceId, input.sessionId);
-        return env;
       });
     },
     async settleExit(input: { sessionId: string }) {
@@ -740,6 +759,16 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       });
     },
     async capability(sessionId: string, definition?: CustomHarnessDefinition) {
+      const trackedAdmission = admissionsBySession.get(sessionId);
+      if (trackedAdmission !== undefined) {
+        if (definition !== undefined) {
+          if (definition.id !== trackedAdmission.harnessId || authorityDigest(definition) !== trackedAdmission.definitionDigest) {
+            return { state: "admitting", processGeneration: trackedAdmission.processGeneration, resume: false };
+          }
+          customs.set(definition.id, definition);
+        }
+        return { state: "admitting", processGeneration: trackedAdmission.processGeneration, resume: false };
+      }
       const record = await loadSession(sessionId);
       if (definition !== undefined) {
         if (definition.id !== record.harnessId || (record.definitionDigest !== null && authorityDigest(definition) !== record.definitionDigest)) {
@@ -758,7 +787,12 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       } catch {
         resume = false;
       }
-      return { state: record.state, processGeneration: record.processGeneration, resume };
+      return {
+        state: record.state,
+        processGeneration: record.processGeneration,
+        resume,
+        ...(record.state === "live" ? { admission: record.admission } : {})
+      };
     },
     async finalizeRecoveredLoss(identity: HarnessRecoveryIdentity) {
       return exclusive(async () => await finalizeRecoveredLoss(identity));

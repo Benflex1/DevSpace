@@ -72,6 +72,36 @@ test("codex launch env contains CODEX_HOME and not CLAUDE_CONFIG_DIR", async () 
   expect(createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon"]);
 });
 
+test("inspection reports admission in progress before the private session record or exec exists", async () => {
+  const h = await fixture();
+  let releaseMaterialization!: () => void;
+  let markMaterializationStarted!: () => void;
+  const materializationGate = new Promise<void>((resolve) => { releaseMaterialization = resolve; });
+  const materializationStarted = new Promise<void>((resolve) => { markMaterializationStarted = resolve; });
+  const materialize = h.home.materialize.bind(h.home);
+  h.home.materialize = async (input) => {
+    markMaterializationStarted();
+    await materializationGate;
+    return await materialize(input);
+  };
+
+  const start = h.runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  await materializationStarted;
+
+  expect(await h.runtime.capability(sessionId)).toEqual({
+    state: "admitting", processGeneration: 1, resume: false
+  });
+  expect(h.createdExecs).toHaveLength(0);
+
+  releaseMaterialization();
+  await start;
+  expect(await h.runtime.capability(sessionId)).toMatchObject({
+    state: "live", processGeneration: 1, admission: "started", resume: false
+  });
+});
+
 test("reports admission queue wait separately from execution with safe session correlation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-timing-"));
   roots.push(root);

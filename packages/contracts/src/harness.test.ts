@@ -13,6 +13,10 @@ import {
 test("native harness inspect response is generation-fenced and excludes private provider identity", () => {
   expect(nativeHarnessInspectResponseSchema.parse({ state: "lost", processGeneration: 2, resume: true }))
     .toEqual({ state: "lost", processGeneration: 2, resume: true });
+  expect(nativeHarnessInspectResponseSchema.parse({ state: "admitting", processGeneration: 1, resume: false }))
+    .toEqual({ state: "admitting", processGeneration: 1, resume: false });
+  expect(nativeHarnessInspectResponseSchema.parse({ state: "live", processGeneration: 1, resume: false, admission: "uncertain" }))
+    .toEqual({ state: "live", processGeneration: 1, resume: false, admission: "uncertain" });
   expect(nativeHarnessInspectResponseSchema.safeParse({ state: "orphaned", processGeneration: 2, resume: true }).success).toBe(false);
   expect(nativeHarnessInspectResponseSchema.safeParse({
     state: "lost", processGeneration: 2, resume: true, nativeSessionId: "private-provider-id"

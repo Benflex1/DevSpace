@@ -126,9 +126,14 @@ export const nativeHarnessInspectDataSchema = z.strictObject({
 });
 export const nativeHarnessLifecycleStateSchema = z.enum(["live", "stopped", "lost"]);
 export type NativeHarnessLifecycleState = z.infer<typeof nativeHarnessLifecycleStateSchema>;
+export const nativeHarnessInspectStateSchema = z.union([nativeHarnessLifecycleStateSchema, z.literal("admitting")]);
+export type NativeHarnessInspectState = z.infer<typeof nativeHarnessInspectStateSchema>;
+export const nativeHarnessAdmissionStateSchema = z.enum(["started", "uncertain"]);
+export type NativeHarnessAdmissionState = z.infer<typeof nativeHarnessAdmissionStateSchema>;
 export const nativeHarnessInspectResponseSchema = z.strictObject({
-  state: nativeHarnessLifecycleStateSchema,
+  state: nativeHarnessInspectStateSchema,
   resume: z.boolean(),
-  processGeneration: z.number().int().positive()
+  processGeneration: z.number().int().positive(),
+  admission: nativeHarnessAdmissionStateSchema.optional()
 });
 export type NativeHarnessInspectResponse = z.infer<typeof nativeHarnessInspectResponseSchema>;
