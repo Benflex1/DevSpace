@@ -22,6 +22,7 @@ afterEach(() => {
   roots.length = 0;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 function terminalIds(node: FakeNode): string[] {
@@ -122,30 +123,74 @@ test("an uncertain admission retries only the exact existing session before atta
   expect(visibleText(rootElement)).not.toContain("Admission uncertain");
 });
 
-test("an interrupted Start discovers and attaches the same creating session without another create request", async () => {
+test("an active row with uncertain Agent admission stays detached until exact reconciliation", async () => {
   const rootElement = installTerminalTestDom(class {});
   const requests: Array<{ method: string; body?: string }> = [];
-  let inspections = 0;
+  let admissionConfirmed = false;
+  let resolveRetry!: (response: Response) => void;
+  const retryResponse = new Promise<Response>((resolve) => { resolveRetry = resolve; });
   vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     requests.push({ method, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
-    if (method === "POST") return Promise.reject(new Error("connection dropped"));
+    if (method === "POST") return retryResponse;
+    return Promise.resolve(jsonResponse({ definitions: [], sessions: [session(currentSessionId, "active",
+      admissionConfirmed ? "admitted" : "uncertain")] }));
+  }));
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  const root = createRoot(rootElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact(12);
+
+  expect(terminalIds(rootElement)).toEqual([]);
+  expect(visibleText(rootElement)).toContain("Reconciling admission");
+  expect(requests.filter((request) => request.method === "POST").map((request) =>
+    JSON.parse(request.body ?? "{}") as Record<string, unknown>)).toEqual([
+    { action: "retry-native", workspaceId, sessionId: currentSessionId, processGeneration: 1 }
+  ]);
+
+  admissionConfirmed = true;
+  await act(async () => {
+    resolveRetry(jsonResponse({ sessionId: currentSessionId, terminalId: currentSessionId, workspaceId, harnessId: "codex" }));
+    await settleReact();
+  });
+  await settleReact();
+
+  expect(terminalIds(rootElement)).toEqual([currentSessionId]);
+  expect(visibleText(rootElement)).toContain("Connecting");
+  expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+});
+
+test("an interrupted Start discovers and attaches the same creating session without another create request", async () => {
+  vi.useFakeTimers();
+  const rootElement = installTerminalTestDom(class {});
+  const requests: Array<{ method: string; body?: string }> = [];
+  let inspections = 0;
+  let admissionStartedAt: number | null = null;
+  vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    requests.push({ method, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+    if (method === "POST") {
+      admissionStartedAt = Date.now();
+      return Promise.reject(new Error("connection dropped"));
+    }
     inspections += 1;
-    const sessions = inspections === 1 ? [] : inspections === 2
-      ? [session(currentSessionId, "creating", "admitting")]
-      : [session(currentSessionId, "active", "admitted")];
+    const admitted = admissionStartedAt !== null && Date.now() - admissionStartedAt >= 187_000;
+    const sessions = inspections === 1 ? [] : admitted
+      ? [session(currentSessionId, "active", "admitted")]
+      : [session(currentSessionId, "creating", "admitting")];
     return Promise.resolve(jsonResponse({ definitions: [], sessions }));
   }));
   const { HarnessSessionTab } = await import("./harness-session-tab.js");
   const root = createRoot(rootElement as never);
   roots.push(root);
   act(() => { root.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
-  await settleReact();
+  await act(async () => { for (let turn = 0; turn < 6; turn += 1) await Promise.resolve(); });
 
   const start = findButtons(rootElement).find((button) => buttonText(button) === "Start");
   expect(start).toBeDefined();
   act(() => { click(start!); });
-  await settleReact();
+  await act(async () => { for (let turn = 0; turn < 8; turn += 1) await Promise.resolve(); });
 
   expect(visibleText(rootElement)).toContain("Admission in progress");
   expect(terminalIds(rootElement)).toEqual([]);
@@ -153,10 +198,14 @@ test("an interrupted Start discovers and attaches the same creating session with
     .map((request) => JSON.parse(request.body ?? "{}") as Record<string, unknown>))
     .toEqual([{ action: "create-native", workspaceId, harnessId: "codex" }]);
 
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); });
-  await settleReact();
+  await act(async () => { await vi.advanceTimersByTimeAsync(186_000); });
+  expect(terminalIds(rootElement)).toEqual([]);
+  expect(visibleText(rootElement)).toContain("Admission in progress");
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
   expect(terminalIds(rootElement)).toEqual([currentSessionId]);
   expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  expect(inspections).toBeGreaterThan(24);
 });
 
 test("an older list response cannot replace the selected session after a newer refresh", async () => {

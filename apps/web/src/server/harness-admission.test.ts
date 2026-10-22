@@ -152,6 +152,41 @@ test("uncertain Agent admission stays creating and does not activate its termina
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "creating" });
 });
 
+test("an active Web row with uncertain Agent admission reconciles the exact generation before projection", async () => {
+  const fixture = await createReadyProject();
+  const calls: Array<Record<string, unknown>> = [];
+  let admission: "uncertain" | "started" = "uncertain";
+  const agent = {
+    startNativeHarness: async (input: Record<string, unknown>) => {
+      calls.push(input);
+      if (calls.length === 1) throw new AgentUnavailableError();
+      admission = "started";
+      return { settled: false };
+    },
+    inspectNativeHarness: async (input: Record<string, unknown>) => ({
+      state: "live" as const, processGeneration: input.processGeneration as number, admission, resume: false
+    })
+  } as unknown as FullAgentClient;
+
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(AgentUnavailableError);
+  const existing = fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]!;
+  fixture.database.activateNativeHarnessSession(existing.id);
+
+  const uncertain = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(uncertain[0]).toMatchObject({ id: existing.id, state: "active", processGeneration: 1, admissionStatus: "uncertain" });
+
+  await retryNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, existing.id, existing.processGeneration, {
+    database: fixture.database, agent
+  });
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toEqual(calls[0]);
+
+  const admitted = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(admitted[0]).toMatchObject({ id: existing.id, state: "active", admissionStatus: "admitted" });
+});
+
 test("retrying a native admission is bound to the existing session, terminal, and generation", async () => {
   const fixture = await createReadyProject();
   const calls: Array<Record<string, unknown>> = [];

@@ -12,6 +12,9 @@ test("admission progress is not presented as a running harness", () => {
   expect(nativeAiPresentation({ state: "creating", admissionStatus: "uncertain" }).status).toBe("Admission uncertain");
   expect(nativeAiPresentation({ state: "creating", admissionStatus: "unknown" }).status).toBe("Checking admission");
   expect(nativeAiPresentation({ state: "creating", admissionStatus: "uncertain" }).action).toBe("none");
+  expect(nativeAiPresentation({ state: "active", admissionStatus: "uncertain" })).toEqual({
+    action: "none", showProviderChooser: false, status: "Admission uncertain"
+  });
 });
 
 test("resume is offered only when the session can resume", () => {

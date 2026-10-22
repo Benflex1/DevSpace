@@ -4,6 +4,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
+import { encodeTerminalAgentFrame } from "@devspace/contracts";
 import { buttonText, FakeNode, findButtons, installTerminalTestDom, settleReact, visibleText } from "./terminal-test-dom.js";
 
 class FakeSocket {
@@ -16,6 +17,11 @@ class FakeSocket {
   constructor(public url: string) { FakeSocket.instances.push(this); }
   send() { /* unused */ }
   close() { this.readyState = 3; this.onclose?.({ code: 1000 }); }
+  emitReady() {
+    this.readyState = 1;
+    const frame = encodeTerminalAgentFrame({ type: "ready" });
+    this.onmessage?.({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer });
+  }
 }
 
 vi.mock("@xterm/xterm", () => ({
@@ -299,9 +305,14 @@ test("successful Start selects the returned active session and attaches its term
   expect(selector).not.toBeNull();
   expect(selector?.options?.map((option) => option.value)).toEqual([lostSessionId, createdSessionId]);
   expect(selectedOptionValue(selector!)).toBe(createdSessionId);
-  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Running");
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Connecting…");
   expect(FakeSocket.instances.at(-1)?.url).toContain(`/terminals/${createdTerminalId}/stream`);
   expect(FakeSocket.instances.at(-1)?.url).not.toContain(`/terminals/${lostTerminalId}/stream`);
+  await act(async () => {
+    FakeSocket.instances.at(-1)?.emitReady();
+    await settleReact();
+  });
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Attached");
   expect(posts).toHaveLength(1);
   expect(posts[0]?.body).toMatchObject({ action: "create-native", workspaceId, harnessId: "codex" });
 });
@@ -357,7 +368,7 @@ test("a slow Native start replaces stale lost feedback and allows refresh retry 
   });
   await settleReact(2);
 
-  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Waiting for session");
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Waiting for session projection");
   expect(buttons(body)).toContain("Retry refresh");
   expect(buttons(body)).not.toContain("Start");
   expect(FakeSocket.instances).toHaveLength(0);
@@ -366,9 +377,14 @@ test("a slow Native start replaces stale lost feedback and allows refresh retry 
   act(() => { reactClick(retry!)(); });
   await settleReact();
 
-  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Running");
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Connecting…");
   expect(selectedOptionValue(findSelectNode(body, "Native session")!)).toBe(createdSessionId);
   expect(FakeSocket.instances.at(-1)?.url).toContain(`/terminals/${createdTerminalId}/stream`);
+  await act(async () => {
+    FakeSocket.instances.at(-1)?.emitReady();
+    await settleReact();
+  });
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Attached");
   expect(posts).toHaveLength(1);
 });
 
@@ -379,10 +395,15 @@ test("a live native session shows one terminal and neither Start nor a provider 
   expect(buttons(body)).not.toContain("Start");
   expect(buttons(body)).not.toContain("Resume");
   expect(findSelect(body)).toBe(false);
-  expect(visibleText(body)).toContain("Running");
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Connecting…");
   expect(visibleText(body)).toContain("Codex");
   expect(FakeSocket.instances).toHaveLength(1);
   expect(FakeSocket.instances[0]?.url).toContain(terminalId);
+  await act(async () => {
+    FakeSocket.instances[0]?.emitReady();
+    await settleReact();
+  });
+  expect(visibleText(findClassNode(body, "native-ai-state")!)).toBe("Attached");
   const text = visibleText(body);
   expect(text).not.toContain("agent-artifact");
   expect(text).not.toContain("0.156.1");

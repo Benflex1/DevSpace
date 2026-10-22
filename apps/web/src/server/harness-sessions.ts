@@ -103,12 +103,8 @@ export async function retryNativeHarnessSession(
   if (session.processGeneration !== expectedGeneration) {
     throw new ProjectSetupConflictError("The native harness generation has changed. Refresh the session list before retrying.");
   }
-  if (session.state === "active" && session.terminalSessionId !== null && session.processId !== null) {
-    return {
-      sessionId: session.id, terminalId: session.terminalSessionId, workspaceId, harnessId: session.harnessId
-    };
-  }
-  if (session.state !== "creating" || session.terminalSessionId === null || session.processId === null) {
+  if ((session.state !== "creating" && session.state !== "active")
+    || session.terminalSessionId === null || session.processId === null) {
     throw new ProjectSetupConflictError("The native harness admission is no longer retryable.");
   }
   const definition = session.harnessId === "codex"

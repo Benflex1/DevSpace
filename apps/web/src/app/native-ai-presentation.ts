@@ -12,6 +12,9 @@ export function nativeAiPresentation(session: NativeSessionPresentation | null):
   readonly showProviderChooser: boolean;
   readonly status: string | null;
 } {
+  if (session?.state === "active" && session.admissionStatus === "uncertain") {
+    return { action: "none", showProviderChooser: false, status: "Admission uncertain" };
+  }
   if (session?.state === "active") {
     return { action: "none", showProviderChooser: false, status: "Running" };
   }

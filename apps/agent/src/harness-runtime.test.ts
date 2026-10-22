@@ -623,23 +623,47 @@ test("uncertain exec admission keeps the lease and does not destroy the home", a
   await mkdir(home.persistentHomePath("codex"), { recursive: true });
   await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
   const timings: Array<Record<string, unknown>> = [];
+  const reconciliations: Array<Record<string, unknown>> = [];
+  let execAttempts = 0;
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
-    createHarnessExec: async (input) => await input.measureAdmissionPhase("docker-exec-creation", async () => {
-      throw new TaskStartRecoveryRequiredError();
-    }),
+    createHarnessExec: async (input) => {
+      execAttempts += 1;
+      await input.measureAdmissionPhase("docker-exec-creation", async () => {
+        throw new TaskStartRecoveryRequiredError();
+      });
+    },
+    reconcileHarnessAdmission: async (input) => {
+      reconciliations.push(input);
+      return "attachable-running";
+    },
     inspectSlot: async () => ({ state: "present-and-exact" }),
     imageCodex: { present: true, version: null },
     onAdmissionTiming: (timing) => timings.push({ ...timing })
   });
-  await expect(runtime.start({
+  const startIdentity = {
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
-  })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  };
+  await expect(runtime.start(startIdentity)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
   expect(timings.find((timing) => timing.phase === "docker-exec-creation")).toMatchObject({ outcome: "uncertain" });
   expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+
+  const inspectionIdentity = { workspaceId, harnessId: "codex", processId, processGeneration: 1 };
+  expect(await runtime.capability(sessionId, undefined, inspectionIdentity)).toMatchObject({
+    state: "live", processGeneration: 1, admission: "uncertain", resume: false
+  });
+  await runtime.start(startIdentity);
+  expect(execAttempts).toBe(1);
+  expect(reconciliations).toHaveLength(1);
+  expect(reconciliations[0]).toMatchObject({
+    projectId, workspaceId, processId, terminalId, sessionId, processGeneration: 1, leaseId: expect.any(String)
+  });
+  expect(await runtime.capability(sessionId, undefined, inspectionIdentity)).toMatchObject({
+    state: "live", processGeneration: 1, admission: "started", resume: false
+  });
 });
 
 test("resume exec-create failure restores the previous session and releases the new lease", async () => {

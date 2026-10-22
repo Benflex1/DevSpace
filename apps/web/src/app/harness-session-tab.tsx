@@ -19,6 +19,7 @@ type NativeSession = {
 };
 
 type AdmissionAction = "create-native" | "resume" | "retry-native";
+const MAX_ADMISSION_POLL_ATTEMPTS = 48;
 
 function preferredInitialSession(sessions: readonly NativeSession[]): NativeSession | null {
   const priority = (session: NativeSession) => session.state === "active" ? 0
@@ -29,7 +30,7 @@ function preferredInitialSession(sessions: readonly NativeSession[]): NativeSess
 }
 
 function sessionOptionLabel(session: NativeSession): string {
-  const status = session.state === "active" ? "Running"
+  const status = session.state === "active" ? session.admissionStatus === "uncertain" ? "Admission uncertain" : "Running"
     : session.state === "creating" ? session.admissionStatus === "uncertain" ? "Admission uncertain" : "Starting"
       : session.state === "lost" ? "Connection lost"
         : session.state === "stopped" ? "Stopped" : session.state;
@@ -77,7 +78,8 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       setAttachmentState(null);
       return;
     }
-    const terminalIsOpenable = selected.state === "active" && selected.terminalSessionId !== null;
+    const terminalIsOpenable = selected.state === "active" && selected.admissionStatus !== "uncertain"
+      && selected.terminalSessionId !== null;
     setTerminal(!terminalIsOpenable ? null : {
       id: selected.terminalSessionId!,
       processId: selected.processId ?? selected.terminalSessionId!,
@@ -164,7 +166,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     }
     const current = selectedId === null ? null : nextSessions.find((item) => item.id === selectedId) ?? null;
     if (current !== null && awaitingSessionId.current === current.id) awaitingSessionId.current = null;
-    if (current?.state === "active" && current.terminalSessionId) {
+    if (current?.state === "active" && current.admissionStatus !== "uncertain" && current.terminalSessionId) {
       setTerminal((existing) => {
         const nextState = nativeHarnessTerminalState(current.state);
         if (existing?.id === current.terminalSessionId && existing.state === nextState && existing.title === current.title) {
@@ -381,7 +383,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         setPollExhaustedSessionId(null);
         return;
       }
-      if (attempt >= 24) {
+      if (attempt >= MAX_ADMISSION_POLL_ATTEMPTS) {
         setPollExhaustedSessionId(admissionPollSessionId);
         return;
       }
@@ -407,7 +409,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       attempts += 1;
       try { await refresh(); } catch { /* admission discovery remains bounded and retries the list */ }
       if (cancelled || uncertainCreateBaseline.current === null) return;
-      if (attempts >= 24) {
+      if (attempts >= MAX_ADMISSION_POLL_ATTEMPTS) {
         setDiscoveringAdmission(false);
         setMessage("The start outcome is still being checked. Refresh the session list to continue.");
         return;
@@ -423,8 +425,8 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   }, [active, discoveringAdmission, refresh]);
 
   useEffect(() => {
-    if (!active || session?.state !== "creating" || session.admissionStatus !== "uncertain"
-      || session.processGeneration === undefined) return;
+    if (!active || session === null || (session.state !== "creating" && session.state !== "active")
+      || session.admissionStatus !== "uncertain" || session.processGeneration === undefined) return;
     const retryKey = session.id + ":" + session.processGeneration;
     if (admissionRetryKeys.current.has(retryKey)) return;
     admissionRetryKeys.current.add(retryKey);
@@ -436,7 +438,8 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   }, [terminal?.id]);
 
   const basePresentation = nativeAiPresentation(session);
-  const activeStatus = attachmentState === "attached" ? "Attached"
+  const activeStatus = session?.admissionStatus === "uncertain" ? "Admission uncertain"
+    : attachmentState === "attached" ? "Attached"
     : attachmentState === "failed" ? "Connection failed"
       : attachmentState === "reconnecting" ? "Reconnecting…" : "Connecting…";
   const presentation = pending || discoveringAdmission || awaitingProjection || (refreshFailed && session === null)
@@ -482,7 +485,8 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       <span className="native-ai-spacer" />
       {presentation.action === "start" && <button type="button" disabled={pending} onClick={startHarness}>Start</button>}
       {presentation.action === "resume" && session !== null && <button type="button" disabled={pending || session.resume !== true} onClick={resumeSelectedHarness}>Resume</button>}
-      {session?.state === "creating" && session.admissionStatus === "uncertain" && session.processGeneration !== undefined
+      {session !== null && (session.state === "creating" || session.state === "active")
+        && session.admissionStatus === "uncertain" && session.processGeneration !== undefined
         && <button type="button" disabled={pending} onClick={() => {
           admissionRetryKeys.current.add(session.id + ":" + session.processGeneration);
           void post({ action: "retry-native", workspaceId, sessionId: session.id, processGeneration: session.processGeneration }).catch(() => undefined);
@@ -498,12 +502,13 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
           ? <p className="native-ai-empty" role="status">Checking for the existing native session…</p>
           : awaitingProjection
             ? <p className="native-ai-empty" role="status">Waiting for the new session projection.</p>
+          : session?.admissionStatus === "uncertain"
+            ? <p className="native-ai-empty" role="status">Checking the exact existing admission…</p>
           : session?.state === "creating"
             ? <p className="native-ai-empty" role="status">{session.admissionStatus === "preparing" ? "Preparing the harness home…"
               : session.admissionStatus === "admitting" ? "The Agent is admitting the harness…"
                 : session.admissionStatus === "admitted" ? "Waiting for the admitted session to appear…"
-                  : session.admissionStatus === "uncertain" ? "Checking the exact existing admission…"
-                    : "Checking the current admission state…"}</p>
+                  : "Checking the current admission state…"}</p>
           : terminal !== null
             ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active}
                 {...(selectedNativeSessionId === null ? {} : { nativeHarnessSessionId: selectedNativeSessionId })}
