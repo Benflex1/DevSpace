@@ -11,6 +11,7 @@ import {
   createNativeHarnessSession,
   listProjectedHarnessSessions,
   parseHarnessAction,
+  retryNativeHarnessSession,
   resumeNativeHarnessSession
 } from "../../../../../server/harness-sessions.js";
 import { readBoundedJsonBody } from "../../../../../server/request-body.js";
@@ -74,6 +75,21 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       } catch { /* diagnostics must not affect admission */ }
       return json(result);
     }
+    if (parsed.action === "retry-native") {
+      admissionOperation = "native-harness.retry";
+      admissionSessionId = parsed.sessionId;
+      admissionWorkspaceId = parsed.workspaceId;
+      const result = await retryNativeHarnessSession(projectId, actor.identity, parsed.workspaceId, parsed.sessionId,
+        parsed.processGeneration, { database, agent });
+      try {
+        harnessAdmissionLogger.info("web.harness.admission.completed", "Native harness admission reconciliation response is ready.", {
+          phase: "web-request", operationName: admissionOperation, outcome: "success", sessionId: result.sessionId,
+          terminalId: result.terminalId, workspaceId: result.workspaceId, harnessId: result.harnessId,
+          durationMs: Math.max(0, performance.now() - requestReceivedAt)
+        });
+      } catch { /* diagnostics must not affect admission */ }
+      return json(result);
+    }
     admissionOperation = "native-harness.resume";
     admissionSessionId = parsed.sessionId;
     admissionWorkspaceId = parsed.workspaceId;
@@ -106,7 +122,8 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     }
     if (error instanceof AuthenticationError) return json({ message: "Authentication is required." }, 403);
     if (error instanceof ProjectSetupConflictError) return json({ message: error.message }, 409);
-    if (error instanceof AgentResponseError) return json({ message: error.message, code: error.code }, error.code === "HARNESS_HOME_IN_USE" ? 409 : 422);
+    if (error instanceof AgentUnavailableError) return json({ message: error.message, code: error.code }, 503);
+    if (error instanceof AgentResponseError) return json({ message: error.message, code: error.code }, error.code === "HARNESS_HOME_IN_USE" ? 409 : error.retryable ? 503 : 422);
     if (error instanceof Error && error.message === "CSRF_REJECTED") return json({ message: "Request origin could not be verified." }, 403);
     return json({ message: "The harness action failed safely." }, 500);
   }

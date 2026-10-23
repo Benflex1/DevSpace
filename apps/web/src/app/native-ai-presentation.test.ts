@@ -1,10 +1,20 @@
 import { expect, test } from "vitest";
 import { nativeAiPresentation } from "./native-ai-presentation.js";
 
-test("a live native session has no creation or resume action and no provider chooser", () => {
-  for (const state of ["active", "creating"]) {
-    expect(nativeAiPresentation({ state })).toEqual({ action: "none", showProviderChooser: false, status: "Running" });
-  }
+test("an active native session has no creation or resume action and no provider chooser", () => {
+  expect(nativeAiPresentation({ state: "active" })).toEqual({ action: "none", showProviderChooser: false, status: "Running" });
+});
+
+test("admission progress is not presented as a running harness", () => {
+  expect(nativeAiPresentation({ state: "creating", admissionStatus: "preparing" }).status).toBe("Preparing harness home…");
+  expect(nativeAiPresentation({ state: "creating", admissionStatus: "admitting" }).status).toBe("Admission in progress");
+  expect(nativeAiPresentation({ state: "creating", admissionStatus: "admitted" }).status).toBe("Waiting for session projection");
+  expect(nativeAiPresentation({ state: "creating", admissionStatus: "uncertain" }).status).toBe("Admission uncertain");
+  expect(nativeAiPresentation({ state: "creating", admissionStatus: "unknown" }).status).toBe("Checking admission");
+  expect(nativeAiPresentation({ state: "creating", admissionStatus: "uncertain" }).action).toBe("none");
+  expect(nativeAiPresentation({ state: "active", admissionStatus: "uncertain" })).toEqual({
+    action: "none", showProviderChooser: false, status: "Admission uncertain"
+  });
 });
 
 test("resume is offered only when the session can resume", () => {

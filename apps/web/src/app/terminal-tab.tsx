@@ -6,8 +6,10 @@ import { useEffect, useRef, useState } from "react";
 import { TERMINAL_SUBPROTOCOL, decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { isTerminalAttachableState, isTerminalOpenableState, reconcileTerminalState, terminalSocketCloseAction, terminalStateMessage, terminalUiState, type TerminalUiState } from "./terminal-lifecycle.js";
 export type TerminalView = { id: string; processId: string; title: string; state: string };
+export type TerminalAttachmentState = "connecting" | "attached" | "reconnecting" | "failed";
 
-export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHarnessSessionId, onRefresh, onTerminalStateChange }: {
+export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHarnessSessionId, onRefresh, onTerminalStateChange,
+  onAttachmentStateChange }: {
   projectId: string;
   workspaceId: string;
   terminal: TerminalView;
@@ -15,6 +17,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
   nativeHarnessSessionId?: string;
   onRefresh: () => void;
   onTerminalStateChange: (terminalId: string, state: string) => void;
+  onAttachmentStateChange?: (terminalId: string, state: TerminalAttachmentState) => void;
 }) {
   const [state, setState] = useState<TerminalUiState>(() => terminalUiState(terminal.state));
   const [message, setMessage] = useState("");
@@ -37,8 +40,10 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
   const persistentControl = useRef<((type: "history" | "live") => void) | null>(null);
   const onRefreshRef = useRef(onRefresh);
   const onTerminalStateChangeRef = useRef(onTerminalStateChange);
+  const onAttachmentStateChangeRef = useRef(onAttachmentStateChange);
   onRefreshRef.current = onRefresh;
   onTerminalStateChangeRef.current = onTerminalStateChange;
+  onAttachmentStateChangeRef.current = onAttachmentStateChange;
   const updateState = (next: TerminalUiState) => {
     setState(next);
   };
@@ -98,6 +103,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
         return;
       }
       updateState("connecting");
+      onAttachmentStateChangeRef.current?.(terminal.id, "connecting");
       setMessage("");
       const terminalInstance = new Terminal({ cursorBlink: true, convertEol: true, fontSize: 14, screenReaderMode: true,
         theme: { background: "#101418", foreground: "#e7eef5" } });
@@ -157,6 +163,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
       window.addEventListener("resize", scheduleResize);
       const connectSocket = () => {
         if (cancelled || terminalEnded) return;
+        onAttachmentStateChangeRef.current?.(terminal.id, reconnectAttempts > 0 ? "reconnecting" : "connecting");
         if (!nativeAttachStarted) {
           nativeAttachStarted = true;
           markNativeHarness("devspace.native-harness.terminal-attach-started");
@@ -191,6 +198,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
             }
             updateState("active");
             onTerminalStateChangeRef.current(terminal.id, "active");
+            onAttachmentStateChangeRef.current?.(terminal.id, "attached");
             requestRefresh();
             if (isPersistent) {
               lastColumns = terminalInstance.cols;
@@ -220,6 +228,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
             attachmentConflict = true;
             setManualReconnectAvailable(true);
             updateState("disconnected");
+            onAttachmentStateChangeRef.current?.(terminal.id, "failed");
             setMessage("This terminal is already attached in another browser tab. Close that tab, then reconnect here.");
             webSocket.close(1000, "Terminal already attached.");
             return;
@@ -255,11 +264,13 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
           reconnectAttempts += 1;
           if (reconnectAttempts > 8) {
             updateState("disconnected");
+            onAttachmentStateChangeRef.current?.(terminal.id, "failed");
             setManualReconnectAvailable(true);
             setMessage("Automatic reconnect stopped. You can try again when the Agent is available.");
             requestRefresh();
             return;
           }
+          onAttachmentStateChangeRef.current?.(terminal.id, "reconnecting");
           reconnectTimer = window.setTimeout(connectSocket, Math.min(150 * (2 ** (reconnectAttempts - 1)), 2_000));
         };
         webSocket.onerror = () => undefined;
@@ -271,6 +282,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
         setManualReconnectAvailable(false);
         setMessage("");
         updateState("connecting");
+        onAttachmentStateChangeRef.current?.(terminal.id, "connecting");
         connectSocket();
       };
       connectSocket();

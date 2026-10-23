@@ -6,7 +6,9 @@ import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
-import { createNativeHarnessSession, listProjectedHarnessSessions, resumeNativeHarnessSession } from "./harness-sessions.js";
+import {
+  createNativeHarnessSession, listProjectedHarnessSessions, resumeNativeHarnessSession, retryNativeHarnessSession
+} from "./harness-sessions.js";
 import { saveCustomHarnessDefinition } from "./harness-definitions.js";
 import { mutatePrimaryWorkspaceRuntime } from "./workspace-runtime.js";
 import { workspaceInspectionDataSchema } from "@devspace/contracts";
@@ -97,6 +99,127 @@ test("a lost agent response retries the same creating harness and a definite rej
     agent: { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient
   });
   expect(again.sessionId).not.toBe(other.database.listNativeHarnessSessions(other.workspaceId).find((row) => row.state === "failed")?.id);
+});
+
+test("Agent inspection projects admission progress and a matching started generation", async () => {
+  const fixture = await createReadyProject();
+  const inspectionCalls: Array<Record<string, unknown>> = [];
+  const agent = {
+    startNativeHarness: async () => { throw new AgentUnavailableError(); },
+    inspectNativeHarness: async (input: Record<string, unknown>) => {
+      inspectionCalls.push(input);
+      return { state: "admitting" as const, processGeneration: 1, resume: false };
+    }
+  } as unknown as FullAgentClient;
+
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(AgentUnavailableError);
+  const creating = fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]!;
+  const duringAdmission = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+
+  expect(inspectionCalls[0]).toMatchObject({
+    sessionId: creating.id, workspaceId: fixture.workspaceId, harnessId: "codex",
+    processId: creating.processId, processGeneration: 1
+  });
+  expect(duringAdmission[0]).toMatchObject({ id: creating.id, state: "creating", admissionStatus: "admitting", resume: false });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "creating" });
+
+  const admittedAgent = {
+    inspectNativeHarness: async (input: Record<string, unknown>) => ({
+      state: "live" as const, processGeneration: input.processGeneration as number, admission: "started" as const, resume: false
+    })
+  } as unknown as Pick<FullAgentClient, "inspectNativeHarness">;
+  const admitted = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent: admittedAgent });
+  expect(admitted[0]).toMatchObject({ id: creating.id, state: "active", admissionStatus: "admitted" });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "active" });
+});
+
+test("uncertain Agent admission stays creating and does not activate its terminal", async () => {
+  const fixture = await createReadyProject();
+  const agent = {
+    startNativeHarness: async () => { throw new AgentUnavailableError(); },
+    inspectNativeHarness: async (input: Record<string, unknown>) => ({
+      state: "live" as const, processGeneration: input.processGeneration as number, admission: "uncertain" as const, resume: false
+    })
+  } as unknown as FullAgentClient;
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(AgentUnavailableError);
+
+  const projected = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(projected[0]).toMatchObject({ state: "creating", admissionStatus: "uncertain", resume: false });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "creating" });
+});
+
+test("an active Web row with uncertain Agent admission reconciles the exact generation before projection", async () => {
+  const fixture = await createReadyProject();
+  const calls: Array<Record<string, unknown>> = [];
+  let admission: "uncertain" | "started" = "uncertain";
+  const agent = {
+    startNativeHarness: async (input: Record<string, unknown>) => {
+      calls.push(input);
+      if (calls.length === 1) throw new AgentUnavailableError();
+      admission = "started";
+      return { settled: false };
+    },
+    inspectNativeHarness: async (input: Record<string, unknown>) => ({
+      state: "live" as const, processGeneration: input.processGeneration as number, admission, resume: false
+    })
+  } as unknown as FullAgentClient;
+
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(AgentUnavailableError);
+  const existing = fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]!;
+  fixture.database.activateNativeHarnessSession(existing.id);
+
+  const uncertain = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(uncertain[0]).toMatchObject({ id: existing.id, state: "active", processGeneration: 1, admissionStatus: "uncertain" });
+
+  await retryNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, existing.id, existing.processGeneration, {
+    database: fixture.database, agent
+  });
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toEqual(calls[0]);
+
+  const admitted = await listProjectedHarnessSessions(fixture.workspaceId, { database: fixture.database, agent });
+  expect(admitted[0]).toMatchObject({ id: existing.id, state: "active", admissionStatus: "admitted" });
+});
+
+test("retrying a native admission is bound to the existing session, terminal, and generation", async () => {
+  const fixture = await createReadyProject();
+  const calls: Array<Record<string, unknown>> = [];
+  const agent = {
+    startNativeHarness: async (input: Record<string, unknown>) => {
+      calls.push(input);
+      if (calls.length === 1) throw new AgentUnavailableError();
+      return { settled: false };
+    }
+  } as unknown as FullAgentClient;
+  await expect(createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(AgentUnavailableError);
+  const existing = fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]!;
+
+  const retried = await retryNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, existing.id, existing.processGeneration, {
+    database: fixture.database, agent
+  });
+
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toEqual(calls[0]);
+  expect(retried).toMatchObject({ sessionId: existing.id, terminalId: existing.terminalSessionId, workspaceId: fixture.workspaceId });
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)).toHaveLength(1);
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({
+    id: existing.id, state: "active", processGeneration: 1, terminalSessionId: existing.terminalSessionId
+  });
+  await expect(retryNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, existing.id, 2, {
+    database: fixture.database, agent
+  })).rejects.toBeInstanceOf(ProjectSetupConflictError);
+  await expect(retryNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId,
+    "018f0f00-0000-7000-8000-000000000099", 1, { database: fixture.database, agent }))
+    .rejects.toBeInstanceOf(ProjectSetupConflictError);
+  expect(calls).toHaveLength(2);
 });
 
 test("an uncertain lost PTY admission stays creating until Agent projection marks it lost", async () => {

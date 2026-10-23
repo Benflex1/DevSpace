@@ -536,18 +536,21 @@ export function createAgentClient(socketPath: string, options: {
       definition?: unknown;
     }): Promise<{ settled: boolean }> => callHarness("/v1/harness-sessions/resume", data),
     inspectNativeHarness: async (data: {
-      sessionId: string; definition?: unknown;
+      sessionId: string; workspaceId: string; harnessId: string; processId?: string; processGeneration: number; definition?: unknown;
     }): Promise<NativeHarnessInspectResponse> => {
       const body = await callHarness("/v1/harness-sessions/inspect", data);
       return nativeHarnessInspectResponseSchema.parse({
         state: body.state,
         resume: body.resume,
-        processGeneration: body.processGeneration
+        processGeneration: body.processGeneration,
+        ...(body.admission === undefined ? {} : { admission: body.admission })
       });
     }
   };
 
-  async function callHarness(path: string, data: unknown): Promise<{ settled: boolean; state?: string; resume?: boolean; processGeneration?: number }> {
+  async function callHarness(path: string, data: unknown): Promise<{
+    settled: boolean; state?: string; resume?: boolean; processGeneration?: number; admission?: string;
+  }> {
     const requestId = uuidv7();
     const body = JSON.stringify({ data });
     const requestStartedAt = performance.now();
@@ -557,6 +560,7 @@ export function createAgentClient(socketPath: string, options: {
     const resourceFields = {
       ...(typeof resource.sessionId === "string" ? { sessionId: resource.sessionId } : {}),
       ...(typeof resource.workspaceId === "string" ? { workspaceId: resource.workspaceId } : {}),
+      ...(typeof resource.processId === "string" ? { processId: resource.processId } : {}),
       ...(typeof resource.terminalId === "string" ? { terminalId: resource.terminalId } : {}),
       ...(typeof resource.harnessId === "string" ? { harnessId: resource.harnessId } : {}),
       ...(typeof resource.processGeneration === "number" ? { processGeneration: resource.processGeneration } : {})
@@ -598,13 +602,16 @@ export function createAgentClient(socketPath: string, options: {
             return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId));
           }
           if (status === 200) {
-            const data = (parsed as { data?: { settled?: boolean; state?: string; resume?: boolean; processGeneration?: number } }).data;
+            const data = (parsed as { data?: {
+              settled?: boolean; state?: string; resume?: boolean; processGeneration?: number; admission?: string;
+            } }).data;
             logOutcome("success", status);
             return resolve({
               settled: data?.settled === true,
               ...(typeof data?.state === "string" ? { state: data.state } : {}),
               ...(typeof data?.resume === "boolean" ? { resume: data.resume } : {}),
-              ...(typeof data?.processGeneration === "number" ? { processGeneration: data.processGeneration } : {})
+              ...(typeof data?.processGeneration === "number" ? { processGeneration: data.processGeneration } : {}),
+              ...(typeof data?.admission === "string" ? { admission: data.admission } : {})
             });
           }
           const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };

@@ -72,6 +72,54 @@ test("codex launch env contains CODEX_HOME and not CLAUDE_CONFIG_DIR", async () 
   expect(createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon"]);
 });
 
+test("inspection reports admission in progress before the private session record or exec exists", async () => {
+  const h = await fixture();
+  let releaseMaterialization!: () => void;
+  let markMaterializationStarted!: () => void;
+  const materializationGate = new Promise<void>((resolve) => { releaseMaterialization = resolve; });
+  const materializationStarted = new Promise<void>((resolve) => { markMaterializationStarted = resolve; });
+  const materialize = h.home.materialize.bind(h.home);
+  h.home.materialize = async (input) => {
+    markMaterializationStarted();
+    await materializationGate;
+    return await materialize(input);
+  };
+
+  const start = h.runtime.start({
+    projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
+  });
+  await materializationStarted;
+
+  const identity = { workspaceId, harnessId: "codex", processId, processGeneration: 1 };
+  expect(await h.runtime.capability(sessionId, undefined, identity)).toEqual({
+    state: "admitting", processGeneration: 1, resume: false
+  });
+  await expect(h.runtime.capability(sessionId, undefined, { ...identity, processGeneration: 2 }))
+    .rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  await expect(h.runtime.capability(sessionId, undefined, { ...identity, processId: "018f0f00-0000-7000-8000-000000000099" }))
+    .rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  expect(h.createdExecs).toHaveLength(0);
+
+  const queuedIdentity = {
+    workspaceId, harnessId: "codex", processId: "018f1f34-7000-7000-8000-000000000007", processGeneration: 1
+  };
+  const queuedStart = h.runtime.start({
+    projectId, workspaceId, sessionId: "018f1f34-7000-7000-8000-000000000006", harnessId: "codex",
+    processId: queuedIdentity.processId, terminalId: "018f1f34-7000-7000-8000-000000000008", processGeneration: 1
+  }).then(() => null, (error: unknown) => error);
+  expect(await h.runtime.capability("018f1f34-7000-7000-8000-000000000006", undefined, queuedIdentity)).toEqual({
+    state: "admitting", processGeneration: 1, resume: false
+  });
+
+  releaseMaterialization();
+  await start;
+  await expect(queuedStart).resolves.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  expect(h.createdExecs).toHaveLength(1);
+  expect(await h.runtime.capability(sessionId, undefined, identity)).toMatchObject({
+    state: "live", processGeneration: 1, admission: "started", resume: false
+  });
+});
+
 test("reports admission queue wait separately from execution with safe session correlation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-timing-"));
   roots.push(root);
@@ -575,23 +623,47 @@ test("uncertain exec admission keeps the lease and does not destroy the home", a
   await mkdir(home.persistentHomePath("codex"), { recursive: true });
   await writeFile(path.join(home.persistentHomePath("codex"), "auth.json"), "keep-me");
   const timings: Array<Record<string, unknown>> = [];
+  const reconciliations: Array<Record<string, unknown>> = [];
+  let execAttempts = 0;
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
-    createHarnessExec: async (input) => await input.measureAdmissionPhase("docker-exec-creation", async () => {
-      throw new TaskStartRecoveryRequiredError();
-    }),
+    createHarnessExec: async (input) => {
+      execAttempts += 1;
+      await input.measureAdmissionPhase("docker-exec-creation", async () => {
+        throw new TaskStartRecoveryRequiredError();
+      });
+    },
+    reconcileHarnessAdmission: async (input) => {
+      reconciliations.push(input);
+      return "attachable-running";
+    },
     inspectSlot: async () => ({ state: "present-and-exact" }),
     imageCodex: { present: true, version: null },
     onAdmissionTiming: (timing) => timings.push({ ...timing })
   });
-  await expect(runtime.start({
+  const startIdentity = {
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
-  })).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
+  };
+  await expect(runtime.start(startIdentity)).rejects.toMatchObject({ code: "HARNESS_ADMISSION_UNCERTAIN" });
   expect(timings.find((timing) => timing.phase === "docker-exec-creation")).toMatchObject({ outcome: "uncertain" });
   expect(await readFile(path.join(home.persistentHomePath("codex"), "auth.json"), "utf8")).toBe("keep-me");
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+
+  const inspectionIdentity = { workspaceId, harnessId: "codex", processId, processGeneration: 1 };
+  expect(await runtime.capability(sessionId, undefined, inspectionIdentity)).toMatchObject({
+    state: "live", processGeneration: 1, admission: "uncertain", resume: false
+  });
+  await runtime.start(startIdentity);
+  expect(execAttempts).toBe(1);
+  expect(reconciliations).toHaveLength(1);
+  expect(reconciliations[0]).toMatchObject({
+    projectId, workspaceId, processId, terminalId, sessionId, processGeneration: 1, leaseId: expect.any(String)
+  });
+  expect(await runtime.capability(sessionId, undefined, inspectionIdentity)).toMatchObject({
+    state: "live", processGeneration: 1, admission: "started", resume: false
+  });
 });
 
 test("resume exec-create failure restores the previous session and releases the new lease", async () => {

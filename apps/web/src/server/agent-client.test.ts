@@ -579,16 +579,23 @@ test("constructs protocol headers and parses valid success envelopes", async () 
 test("native harness inspection returns only bounded lifecycle state, capability, and generation", async () => {
   const service = await listen((request, response) => {
     expect(request.url).toBe("/v1/harness-sessions/inspect");
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({
-      meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp },
-      data: { state: "lost", resume: true, processGeneration: 2, nativeSessionId: "private-provider-id" }
-    }));
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual({ data: {
+        sessionId: id, workspaceId: id, harnessId: "codex", processId: id, processGeneration: 2
+      } });
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        meta: { protocolVersion: 1, requestId: id, respondedAt: timestamp },
+        data: { state: "live", resume: false, processGeneration: 2, admission: "uncertain", nativeSessionId: "private-provider-id" }
+      }));
+    });
   });
   try {
     await expect(createAgentClient(service.socketPath, { createId: () => id, now: () => new Date(timestamp) })
-      .inspectNativeHarness({ sessionId: id }))
-      .resolves.toEqual({ state: "lost", resume: true, processGeneration: 2 });
+      .inspectNativeHarness({ sessionId: id, workspaceId: id, harnessId: "codex", processId: id, processGeneration: 2 }))
+      .resolves.toEqual({ state: "live", resume: false, processGeneration: 2, admission: "uncertain" });
   } finally { await service.close(); }
 });
 

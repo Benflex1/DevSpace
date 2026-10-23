@@ -1,8 +1,10 @@
 import { afterEach, expect, test, vi } from "vitest";
+import { AgentUnavailableError } from "../../../../../server/agent-client.js";
 
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   resume: vi.fn(),
+  retry: vi.fn(),
   save: vi.fn(),
   list: vi.fn(),
   listDefinitions: vi.fn()
@@ -13,6 +15,7 @@ vi.mock("../../../../../server/harness-sessions.js", async (importOriginal) => {
     ...original,
     createNativeHarnessSession: mocks.create,
     resumeNativeHarnessSession: mocks.resume,
+    retryNativeHarnessSession: mocks.retry,
     listProjectedHarnessSessions: mocks.list
   };
 });
@@ -73,6 +76,7 @@ test("native harness mutations fail closed on the wrong origin", async () => {
   const bodies = [
     { action: "create-native", workspaceId, harnessId: "codex" },
     { action: "resume", workspaceId, sessionId },
+    { action: "retry-native", workspaceId, sessionId, processGeneration: 1 },
     { action: "save-definition", definition }
   ];
   for (const body of bodies) {
@@ -81,6 +85,7 @@ test("native harness mutations fail closed on the wrong origin", async () => {
   }
   expect(mocks.create).not.toHaveBeenCalled();
   expect(mocks.resume).not.toHaveBeenCalled();
+  expect(mocks.retry).not.toHaveBeenCalled();
   expect(mocks.save).not.toHaveBeenCalled();
 });
 
@@ -89,13 +94,17 @@ test("native harness mutations succeed with the app origin and CSRF marker", asy
   const admissionLines: string[] = [];
   vi.spyOn(console, "log").mockImplementation((line) => { admissionLines.push(String(line)); });
   mocks.create.mockResolvedValue({ sessionId, terminalId: sessionId, workspaceId, harnessId: "codex" });
+  mocks.retry.mockResolvedValue({ sessionId, terminalId: sessionId, workspaceId, harnessId: "codex" });
   mocks.resume.mockResolvedValue({ sessionId, terminalId: sessionId, workspaceId, harnessId: "codex" });
   mocks.save.mockReturnValue(definition);
   expect((await POST(request({ action: "create-native", workspaceId, harnessId: "codex" }), context)).status).toBe(200);
   expect((await POST(request({ action: "resume", workspaceId, sessionId }), context)).status).toBe(200);
+  expect((await POST(request({ action: "retry-native", workspaceId, sessionId, processGeneration: 1 }), context)).status).toBe(200);
   expect((await POST(request({ action: "save-definition", definition }), context)).status).toBe(200);
   expect(mocks.create).toHaveBeenCalledOnce();
   expect(mocks.resume).toHaveBeenCalledOnce();
+  expect(mocks.retry).toHaveBeenCalledOnce();
+  expect(mocks.retry).toHaveBeenCalledWith(projectId, expect.any(String), workspaceId, sessionId, 1, expect.any(Object));
   expect(mocks.save).toHaveBeenCalledWith({}, definition);
   const admissionRecords = admissionLines.map((line) => JSON.parse(line) as Record<string, unknown>);
   expect(admissionRecords).toEqual(expect.arrayContaining([
@@ -113,4 +122,12 @@ test("native harness mutations succeed with the app origin and CSRF marker", asy
       expect(durationMs).toBeGreaterThanOrEqual(0);
     }
   }
+});
+
+test("an unavailable Agent response stays retryable instead of becoming an internal server error", async () => {
+  configure();
+  mocks.create.mockRejectedValue(new AgentUnavailableError());
+  const response = await POST(request({ action: "create-native", workspaceId, harnessId: "codex" }), context);
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: "AGENT_UNAVAILABLE" });
 });

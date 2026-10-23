@@ -864,9 +864,15 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       try {
         if (url.pathname.endsWith("/inspect")) {
           const data = nativeHarnessInspectDataSchema.parse(envelope.data.data);
+          const identity = {
+            workspaceId: data.workspaceId,
+            harnessId: data.harnessId,
+            ...(data.processId === undefined ? {} : { processId: data.processId }),
+            processGeneration: data.processGeneration
+          };
           const capability = data.definition === undefined
-            ? await harnessRuntime.capability(data.sessionId)
-            : await harnessRuntime.capability(data.sessionId, data.definition);
+            ? await harnessRuntime.capability(data.sessionId, undefined, identity)
+            : await harnessRuntime.capability(data.sessionId, data.definition, identity);
           return sendJson(response, 200, { meta: meta(requestId, now), data: nativeHarnessInspectResponseSchema.parse(capability) });
         }
         if (url.pathname.endsWith("/start")) {

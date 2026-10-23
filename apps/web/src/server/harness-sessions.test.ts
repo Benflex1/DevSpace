@@ -9,6 +9,9 @@ test("accepts create-native and resume with DevSpace ids only", () => {
     .toEqual({ action: "create-native", workspaceId, harnessId: "codex" });
   expect(parseHarnessAction({ action: "resume", workspaceId, sessionId }))
     .toEqual({ action: "resume", workspaceId, sessionId });
+  expect(parseHarnessAction({ action: "retry-native", workspaceId, sessionId, processGeneration: 1 }))
+    .toEqual({ action: "retry-native", workspaceId, sessionId, processGeneration: 1 });
+  expect(parseHarnessAction({ action: "retry-native", workspaceId, sessionId, processGeneration: 0 })).toBeNull();
 });
 
 test("rejects native session ids, host paths, env, and shell commands", () => {
@@ -16,4 +19,5 @@ test("rejects native session ids, host paths, env, and shell commands", () => {
   expect(parseHarnessAction({ action: "resume", workspaceId, sessionId, command: "codex resume" })).toBeNull();
   expect(parseHarnessAction({ action: "create-native", workspaceId, harnessId: "codex", env: { CODEX_HOME: "/tmp" } })).toBeNull();
   expect(parseHarnessAction({ action: "create-native", workspaceId, harnessId: "codex", hostPath: "/root" })).toBeNull();
+  expect(parseHarnessAction({ action: "retry-native", workspaceId, sessionId, processId: "arbitrary" })).toBeNull();
 });

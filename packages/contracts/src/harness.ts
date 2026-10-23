@@ -122,13 +122,22 @@ export const nativeHarnessResumeDataSchema = z.strictObject({
 });
 export const nativeHarnessInspectDataSchema = z.strictObject({
   sessionId: uuidV7Schema,
+  workspaceId: uuidV7Schema,
+  harnessId: configurationKeySchema,
+  processId: uuidV7Schema.optional(),
+  processGeneration: z.number().int().positive(),
   definition: customHarnessDefinitionSchema.optional()
 });
 export const nativeHarnessLifecycleStateSchema = z.enum(["live", "stopped", "lost"]);
 export type NativeHarnessLifecycleState = z.infer<typeof nativeHarnessLifecycleStateSchema>;
+export const nativeHarnessInspectStateSchema = z.union([nativeHarnessLifecycleStateSchema, z.literal("admitting")]);
+export type NativeHarnessInspectState = z.infer<typeof nativeHarnessInspectStateSchema>;
+export const nativeHarnessAdmissionStateSchema = z.enum(["started", "uncertain"]);
+export type NativeHarnessAdmissionState = z.infer<typeof nativeHarnessAdmissionStateSchema>;
 export const nativeHarnessInspectResponseSchema = z.strictObject({
-  state: nativeHarnessLifecycleStateSchema,
+  state: nativeHarnessInspectStateSchema,
   resume: z.boolean(),
-  processGeneration: z.number().int().positive()
+  processGeneration: z.number().int().positive(),
+  admission: nativeHarnessAdmissionStateSchema.optional()
 });
 export type NativeHarnessInspectResponse = z.infer<typeof nativeHarnessInspectResponseSchema>;

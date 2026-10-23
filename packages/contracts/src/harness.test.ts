@@ -7,12 +7,32 @@ import {
   assertNativeSessionId,
   resumeCapability,
   customHarnessDefinitionSchema,
+  nativeHarnessInspectDataSchema,
   nativeHarnessInspectResponseSchema
 } from "./harness.js";
+
+test("native harness inspect requests carry the exact DevSpace session generation", () => {
+  const input = {
+    sessionId: "018f1f34-7000-7000-8000-000000000003",
+    workspaceId: "018f1f34-7000-7000-8000-000000000002",
+    harnessId: "codex",
+    processId: "018f1f34-7000-7000-8000-000000000004",
+    processGeneration: 1
+  };
+  expect(nativeHarnessInspectDataSchema.parse(input)).toEqual(input);
+  expect(nativeHarnessInspectDataSchema.parse({
+    sessionId: input.sessionId, workspaceId: input.workspaceId, harnessId: input.harnessId, processGeneration: 1
+  })).toEqual({ sessionId: input.sessionId, workspaceId: input.workspaceId, harnessId: input.harnessId, processGeneration: 1 });
+  expect(nativeHarnessInspectDataSchema.safeParse({ sessionId: input.sessionId }).success).toBe(false);
+});
 
 test("native harness inspect response is generation-fenced and excludes private provider identity", () => {
   expect(nativeHarnessInspectResponseSchema.parse({ state: "lost", processGeneration: 2, resume: true }))
     .toEqual({ state: "lost", processGeneration: 2, resume: true });
+  expect(nativeHarnessInspectResponseSchema.parse({ state: "admitting", processGeneration: 1, resume: false }))
+    .toEqual({ state: "admitting", processGeneration: 1, resume: false });
+  expect(nativeHarnessInspectResponseSchema.parse({ state: "live", processGeneration: 1, resume: false, admission: "uncertain" }))
+    .toEqual({ state: "live", processGeneration: 1, resume: false, admission: "uncertain" });
   expect(nativeHarnessInspectResponseSchema.safeParse({ state: "orphaned", processGeneration: 2, resume: true }).success).toBe(false);
   expect(nativeHarnessInspectResponseSchema.safeParse({
     state: "lost", processGeneration: 2, resume: true, nativeSessionId: "private-provider-id"
