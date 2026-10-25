@@ -1,0 +1,74 @@
+/*
+ * DevSpace UI v2 design tokens, extracted from the reference screens in this folder.
+ * Slice 1 copies this into apps/web/src/ui/tokens.css. Components read tokens only;
+ * no raw hex values outside this file.
+ */
+:root {
+  /* Surfaces, darkest to lightest */
+  --ds-bg-terminal: #050506;   /* terminal panes, modal backdrop */
+  --ds-bg-app: #09090B;        /* page */
+  --ds-bg-chrome: #0C0C0E;     /* sidebar, rail */
+  --ds-bg-panel: #0B0B0D;      /* side panel, secondary columns */
+  --ds-bg-raised: #111113;     /* composer, cards, dialogs */
+  --ds-bg-hover: #18181B;      /* hover, selected row, user bubble */
+  --ds-bg-active: #232327;     /* selected segment */
+
+  /* Lines */
+  --ds-line-subtle: #1A1A1E;   /* panel dividers */
+  --ds-line: #1F1F23;          /* card borders */
+  --ds-line-strong: #26262B;   /* buttons, inputs */
+
+  /* Text */
+  --ds-text: #EDEDEF;
+  --ds-text-strong: #F4F4F5;
+  --ds-text-2: #A1A1AA;        /* secondary */
+  --ds-text-3: #71717A;        /* meta, captions */
+  --ds-text-4: #52525B;        /* timestamps, disabled-looking hints */
+
+  /* Primary action: one per view */
+  --ds-primary-bg: #F4F4F5;
+  --ds-primary-fg: #09090B;
+
+  /* State colours: always paired with a glyph shape, never colour alone */
+  --ds-needs-you: #F2B65A;
+  --ds-needs-you-text: #C9A15A;
+  --ds-needs-you-bg: #14120E;
+  --ds-needs-you-line: #3F321B;
+  --ds-working: #6EA8FE;
+  --ds-healthy: #5BD48A;
+  --ds-degraded: #FB923C;
+  --ds-degraded-bg: #14100C;
+  --ds-degraded-line: #3D2A18;
+  --ds-failed: #F87171;
+  --ds-failed-bg: #160E0E;
+  --ds-failed-line: #4A2222;
+  --ds-link: #8AB4FF;
+
+  /* Diff */
+  --ds-diff-add: #4ADE80;
+  --ds-diff-add-bg: rgba(74, 222, 128, .07);
+  --ds-diff-del: #F87171;
+  --ds-diff-del-bg: rgba(248, 113, 113, .08);
+  --ds-diff-comment-bg: rgba(138, 180, 255, .10);
+
+  /* Type */
+  --ds-font: Geist, Inter, system-ui, sans-serif;
+  --ds-font-mono: 'Geist Mono', ui-monospace, monospace;
+  --ds-text-xs: 11.5px;   /* section labels, timestamps */
+  --ds-text-sm: 12.5px;   /* meta, buttons */
+  --ds-text-md: 13px;     /* UI default */
+  --ds-text-lg: 14.5px;   /* assistant prose */
+  --ds-text-title: 22px;  /* page titles */
+
+  /* Shape and spacing */
+  --ds-radius-sm: 7px;    /* segments, small buttons */
+  --ds-radius: 8px;       /* buttons, rows */
+  --ds-radius-md: 12px;   /* cards, panes */
+  --ds-radius-lg: 16px;   /* composer, dialogs, user bubble */
+  --ds-header-h: 52px;
+  --ds-statusbar-h: 30px;
+  --ds-sidebar-w: 260px;
+  --ds-rail-w: 56px;
+  --ds-thread-max: 680px;
+  --ds-control-h: 30px;
+}

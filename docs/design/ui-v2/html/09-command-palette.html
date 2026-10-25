@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Command palette</title>
+<style>
+@font-face{font-family:Geist;src:url(../fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url(../fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900}
+</style>
+</head>
+<body>
+
+
+
+<style>
+body{margin:0;background:#050506;color:#EDEDEF;font-family:Geist,Inter,system-ui,sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.t3{color:#71717A}
+.gh{font-size:11.5px;color:#71717A;padding:10px 12px 4px}
+.o{display:flex;align-items:center;gap:12px;height:36px;padding:0 12px;border-radius:9px;font-size:13.5px}
+.k{margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:#52525B}
+</style>
+
+<div style="width: 760px; height: 560px; box-sizing: border-box; display: flex; justify-content: center; padding-top: 48px">
+<div role="dialog" aria-label="Search and commands" style="width: 580px; height: max-content; background: #111113; border: 1px solid #26262B; border-radius: 16px; box-shadow: 0 24px 64px rgba(0,0,0,.55); overflow: hidden">
+<div style="display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 52px; border-bottom: 1px solid #1F1F23">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#71717A" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m20 20-4-4"></path></svg>
+<label for="q" style="position: absolute; left: -9999px">Search</label>
+<input id="q" value="pre" style="flex: 1; background: transparent; border: 0; color: #F4F4F5; font: inherit; font-size: 15px; outline: none">
+<span class="k" style="border: 1px solid #26262B; border-radius: 5px; padding: 1px 6px">esc</span>
+</div>
+<div style="padding: 6px">
+<div class="gh">Sessions</div>
+<a href="03-session-terminal.html" class="o" style="background: #1F1F23"><svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg><span>Persist <b style="font-weight: 600">pre</b>view tab state</span><span class="t3" style="font-size: 12px">devspace</span><span class="k">⏎</span></a>
+<div class="gh">Actions</div>
+<a href="#" class="o"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M3 9h18"></path></svg>Open <b style="font-weight: 600">pre</b>view web</a>
+<a href="#" class="o"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M3 9h18"></path></svg>Add a <b style="font-weight: 600">pre</b>view<span class="t3" style="font-size: 12px">Project Options</span></a>
+<a href="#" class="o"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7 5 5-5 5M12 17h7"></path></svg>Switch to terminal view<span class="k">Ctrl `</span></a>
+<div class="gh">Files</div>
+<a href="05-files-expanded.html" class="o"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3.5H7.5a1.5 1.5 0 0 0-1.5 1.5v14a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 18 19V7.5z"></path><path d="M14 3.5v4h4"></path></svg><span class="mono" style="font-size: 12.5px"><b style="font-weight: 600">pre</b>view-tab.tsx</span><span class="t3 mono" style="font-size: 11.5px">apps/web/src/app</span></a>
+<a href="05-files-expanded.html" class="o"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3.5H7.5a1.5 1.5 0 0 0-1.5 1.5v14a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 18 19V7.5z"></path><path d="M14 3.5v4h4"></path></svg><span class="mono" style="font-size: 12.5px"><b style="font-weight: 600">pre</b>view-liveness.ts</span><span class="t3 mono" style="font-size: 11.5px">apps/web/src/app</span></a>
+</div>
+</div>
+</div>
+
+</body>
+</html>

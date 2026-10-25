@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevSpace inbox</title>
+<style>
+@font-face{font-family:Geist;src:url(../fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url(../fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900}
+</style>
+</head>
+<body>
+
+
+
+<style>
+body{margin:0;background:#09090B;color:#EDEDEF;font-family:Geist,Inter,system-ui,sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.t2{color:#A1A1AA}.t3{color:#71717A}
+.btn{height:30px;padding:0 12px;border-radius:8px;background:#18181B;border:1px solid #26262B;color:#EDEDEF;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.btn-g{background:transparent;border-color:transparent;color:#A1A1AA}
+.btn-p{background:#F4F4F5;color:#09090B;border-color:#F4F4F5}
+.gh{font-size:12px;color:#71717A;padding:0 14px 8px}
+.it{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px}
+</style>
+
+<div style="min-height: 900px; height: 100vh; display: flex">
+
+
+
+
+
+<nav aria-label="Sessions" style="width: 260px; min-height: 900px; height: 100%; box-sizing: border-box; background: #0C0C0E; border-right: 1px solid #1A1A1E; display: flex; flex-direction: column; font-family: Geist, Inter, system-ui, sans-serif; color: #EDEDEF; font-size: 13px; line-height: 1.45">
+<div style="display: flex; align-items: center; gap: 4px; padding: 14px 10px 12px 16px">
+<div style="width: 20px; height: 20px; border-radius: 6px; background: #EDEDEF; display: flex; align-items: center; justify-content: center; margin-right: 6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#09090B" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 8 4 4-4 4M13 16h5"></path></svg></div>
+<span style="font-weight: 600; font-size: 14px; letter-spacing: -0.01em">DevSpace</span>
+<a href="09-command-palette.html" aria-label="Search and commands" title="Search and commands (Ctrl K)" style="margin-left: auto; width: 28px; height: 28px; color: #71717A; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m20 20-4-4"></path></svg></a>
+<a href="08-new-session.html" aria-label="New session" style="width: 28px; height: 28px; color: #71717A; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<div style="padding: 0 8px">
+<a href="01-inbox.html" style="display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px; border-radius: 8px; color: #D4D4D8; text-decoration: none; background: #18181B"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13h4.5l1.5 3h6l1.5-3H21"></path><path d="M5.5 5h13L21 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5V13z"></path></svg>Inbox<span style="margin-left: auto; font-size: 12px; color: #F2B65A; font-weight: 500">3</span></a>
+</div>
+<div style="flex: 1; overflow: hidden; padding: 4px 8px 8px; display: flex; flex-direction: column; gap: 1px">
+<div style="font-size: 11.5px; color: #71717A; padding: 16px 8px 6px">Needs you</div>
+<a href="02-session-chat.html" style="display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border-radius: 8px; text-decoration: none; color: inherit; background: transparent">
+<div style="display: flex; align-items: center; gap: 8px"><svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg><span style="font-weight: 500; color: #F4F4F5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Add retry with backoff</span><span style="margin-left: auto; font-size: 11.5px; color: #52525B">3m</span></div>
+<div style="font-size: 12px; color: #71717A; padding-left: 21px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">jarvis · <span style="color: #C9A15A">wants to run a command</span></div>
+</a>
+<a href="03-session-terminal.html" style="display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border-radius: 8px; text-decoration: none; color: inherit; background: transparent">
+<div style="display: flex; align-items: center; gap: 8px"><svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg><span style="font-weight: 500; color: #F4F4F5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Persist preview tab state</span><span style="margin-left: auto; font-size: 11.5px; color: #52525B">1m</span></div>
+<div style="font-size: 12px; color: #71717A; padding-left: 21px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">devspace · <span style="color: #C9A15A">wants to run a command</span></div>
+</a>
+<a href="#" style="display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border-radius: 8px; text-decoration: none; color: inherit">
+<div style="display: flex; align-items: center; gap: 8px"><svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg><span style="font-weight: 500; color: #F4F4F5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Quantization defaults</span><span style="margin-left: auto; font-size: 11.5px; color: #52525B">9m</span></div>
+<div style="font-size: 12px; color: #71717A; padding-left: 21px">forge · <span style="color: #C9A15A">asked a question</span></div>
+</a>
+<div style="font-size: 11.5px; color: #71717A; padding: 16px 8px 6px">Working</div>
+<a href="#" style="display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border-radius: 8px; text-decoration: none; color: inherit">
+<div style="display: flex; align-items: center; gap: 8px"><svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="#6EA8FE" fill-opacity=".18"></circle><circle cx="7" cy="7" r="3" fill="#6EA8FE"></circle></svg><span style="font-weight: 500; color: #F4F4F5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Package for the AUR</span><span style="margin-left: auto; font-size: 11.5px; color: #52525B">now</span></div>
+<div style="font-size: 12px; color: #71717A; padding-left: 21px">routedoctor · running tests</div>
+</a>
+<div style="font-size: 11.5px; color: #71717A; padding: 16px 8px 6px">Ready to review</div>
+<a href="#" style="display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border-radius: 8px; text-decoration: none; color: inherit">
+<div style="display: flex; align-items: center; gap: 8px"><svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#5BD48A" stroke-width="1.4"></circle><path d="m4.6 7.1 1.6 1.6 3.2-3.3" fill="none" stroke="#5BD48A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg><span style="font-weight: 500; color: #F4F4F5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Import exercise images</span><span style="margin-left: auto; font-size: 11.5px; color: #52525B">22m</span></div>
+<div style="font-size: 12px; color: #71717A; padding-left: 21px">lifts · 6 files changed</div>
+</a>
+<button style="margin-top: 12px; display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border: 0; background: transparent; color: #52525B; font: inherit; font-size: 12px; cursor: pointer"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>Earlier · 14</button>
+</div>
+<div style="display: flex; align-items: center; padding: 8px 10px; border-top: 1px solid #1A1A1E">
+<button aria-label="Settings" style="width: 28px; height: 28px; border: 0; background: transparent; color: #52525B; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"></path></svg></button>
+</div>
+</nav>
+
+<main style="flex: 1; min-width: 0; overflow: hidden; padding: 48px 32px">
+<div style="max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 32px">
+<h1 style="margin: 0 0 -8px 14px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em">Inbox</h1>
+<section>
+<div class="gh">Needs you</div>
+<div class="it" style="background: #111113; border: 1px solid #26262B; flex-direction: column; align-items: stretch; gap: 12px; padding: 14px 16px">
+<div style="display: flex; align-items: center; gap: 12px">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg>
+<div style="flex: 1; min-width: 0"><div style="font-weight: 500; font-size: 14px">Run a command <span class="t3" style="font-weight: 400">· can write files</span></div><div class="t3" style="font-size: 12.5px">jarvis · Add retry with backoff</div></div>
+<span class="t3" style="font-size: 12px">3m</span>
+</div>
+<div class="mono" style="margin-left: 26px; background: #0B0B0C; border-radius: 8px; padding: 9px 12px; font-size: 12.5px">pnpm test --filter router</div>
+<div style="display: flex; gap: 6px; justify-content: flex-end"><a href="02-session-chat.html" class="btn btn-g" style="margin-right: auto; margin-left: 18px">Open session</a><button class="btn btn-g">Deny</button><button class="btn">Allow for session</button><button class="btn btn-p">Approve</button></div>
+</div>
+<a href="03-session-terminal.html" class="it">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg>
+<div style="flex: 1; min-width: 0"><div style="font-weight: 500; font-size: 14px">Run <span class="mono" style="font-size: 13px">pnpm test:e2e --grep preview</span></div><div class="t3" style="font-size: 12.5px">devspace · Persist preview tab state · Claude Code</div></div>
+<span class="t3" style="font-size: 12px">1m</span>
+</a>
+<a href="#" class="it">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#F2B65A" stroke-opacity=".35" stroke-width="2"></circle><circle cx="7" cy="7" r="3" fill="#F2B65A"></circle></svg>
+<div style="flex: 1; min-width: 0"><div style="font-weight: 500; font-size: 14px">Which quantization should new workers default to?</div><div class="t3" style="font-size: 12.5px">forge · Quantization defaults</div></div>
+<span class="t3" style="font-size: 12px">9m</span>
+</a>
+</section>
+<section>
+<div class="gh">Ready to review</div>
+<a href="#" class="it">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.6" fill="none" stroke="#5BD48A" stroke-width="1.4"></circle><path d="m4.6 7.1 1.6 1.6 3.2-3.3" fill="none" stroke="#5BD48A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+<div style="flex: 1; min-width: 0"><div style="font-weight: 500; font-size: 14px">Import exercise images</div><div class="t3" style="font-size: 12.5px">lifts · 6 files changed</div></div>
+<span class="t3" style="font-size: 12px">22m</span>
+</a>
+</section>
+<section>
+<div class="gh">Problems</div>
+<a href="06-workspace.html" class="it">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="6" fill="#F87171" fill-opacity=".16"></circle><path d="m4.9 4.9 4.2 4.2M9.1 4.9 4.9 9.1" stroke="#F87171" stroke-width="1.5" stroke-linecap="round"></path></svg>
+<div style="flex: 1; min-width: 0"><div style="font-weight: 500; font-size: 14px">Task test failed</div><div class="t3" style="font-size: 12.5px">jarvis · 3 of 18 tests</div></div>
+<span class="btn">Re-run</span>
+</a>
+<a href="06-workspace.html" class="it">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex: none"><circle cx="7" cy="7" r="5.4" fill="none" stroke="#FB923C" stroke-width="1.4" stroke-dasharray="2.2 2"></circle></svg>
+<div style="flex: 1; min-width: 0"><div style="font-weight: 500; font-size: 14px">Terminal vite lost</div><div class="t3" style="font-size: 12.5px">devspace · after Agent restart</div></div>
+<span class="btn">Restart workspace</span>
+</a>
+</section>
+</div>
+</main>
+</div>
+
+</body>
+</html>

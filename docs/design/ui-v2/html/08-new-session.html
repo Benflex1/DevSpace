@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New session</title>
+<style>
+@font-face{font-family:Geist;src:url(../fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url(../fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900}
+</style>
+</head>
+<body>
+
+
+
+<style>
+body{margin:0;background:#050506;color:#EDEDEF;font-family:Geist,Inter,system-ui,sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.t3{color:#71717A}
+.btn{height:32px;padding:0 14px;border-radius:8px;background:#18181B;border:1px solid #26262B;color:#EDEDEF;font:inherit;font-size:13px;font-weight:500;cursor:pointer}
+.btn-p{background:#F4F4F5;color:#09090B;border-color:#F4F4F5}
+.ag{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;border:1px solid transparent;cursor:pointer}
+.ag input{accent-color:#F4F4F5;margin:0}
+.lbl{font-size:12px;color:#A1A1AA;font-weight:500}
+.grp{display:inline-flex;background:#0B0B0C;border:1px solid #1F1F23;border-radius:9px;padding:2px;gap:2px}
+.seg{height:28px;padding:0 14px;border-radius:7px;display:inline-flex;align-items:center;color:#A1A1AA;font-size:12.5px}
+</style>
+
+<div style="width: 760px; height: 640px; box-sizing: border-box; display: flex; align-items: center; justify-content: center">
+<div role="dialog" aria-labelledby="ns-title" style="width: 520px; background: #111113; border: 1px solid #26262B; border-radius: 16px; box-shadow: 0 24px 64px rgba(0,0,0,.55); display: flex; flex-direction: column">
+<div style="padding: 18px 20px 6px"><h1 id="ns-title" style="margin: 0; font-size: 16px; font-weight: 600">New session</h1><div class="t3" style="font-size: 12.5px; margin-top: 2px">jarvis · main</div></div>
+<fieldset style="border: 0; margin: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px">
+<legend class="lbl" style="padding: 0 8px 6px">Agent</legend>
+<label class="ag"><input type="radio" name="agent"><span style="font-weight: 500">Codex</span><span class="t3" style="margin-left: auto; font-size: 12px">chat and terminal</span></label>
+<label class="ag" style="background: #18181B; border-color: #2A2A30"><input type="radio" name="agent" checked><span style="font-weight: 500">Claude Code</span><span class="t3" style="margin-left: auto; font-size: 12px">terminal · approvals in inbox</span></label>
+<label class="ag"><input type="radio" name="agent"><span style="font-weight: 500">Cline</span><span class="t3" style="margin-left: auto; font-size: 12px">terminal</span></label>
+<label class="ag"><input type="radio" name="agent"><span style="font-weight: 500">Command Code</span><span class="t3" style="margin-left: auto; font-size: 12px">terminal</span></label>
+<a href="#" style="display: flex; align-items: center; gap: 10px; padding: 9px 12px; color: #A1A1AA; font-size: 12.5px; text-decoration: none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add a CLI agent</a>
+</fieldset>
+<div style="padding: 4px 20px 18px; display: flex; align-items: center; gap: 12px">
+<span class="lbl">Open in</span>
+<div class="grp" role="group" aria-label="Open in"><a href="#" class="seg" style="background: #232327; color: #F4F4F5">Terminal</a><a href="#" class="seg">Chat</a></div>
+<span class="t3" style="font-size: 12px; margin-left: auto">Switch anytime</span>
+</div>
+<div style="padding: 14px 20px; border-top: 1px solid #1F1F23; display: flex; justify-content: flex-end; gap: 8px"><button class="btn" style="background: transparent; border-color: transparent; color: #A1A1AA">Cancel</button><button class="btn btn-p">Start session</button></div>
+</div>
+</div>
+
+</body>
+</html>

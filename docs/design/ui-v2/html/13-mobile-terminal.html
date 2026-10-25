@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile terminal session</title>
+<style>
+@font-face{font-family:Geist;src:url(../fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url(../fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900}
+</style>
+</head>
+<body>
+
+
+
+<style>
+body{margin:0;background:#09090B;color:#EDEDEF;font-family:Geist,Inter,system-ui,sans-serif;font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+a{color:#A1A1AA;text-decoration:none}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.t3{color:#71717A}
+.k{flex:1;height:38px;border-radius:9px;background:#18181B;border:1px solid #232327;color:#D4D4D8;font-family:'Geist Mono',monospace;font-size:12px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.big{font:inherit;font-size:15px;font-weight:500;height:46px;border-radius:12px;border:1px solid #2A2A30;background:#18181B;color:#EDEDEF;cursor:pointer;flex:1}
+.g{color:#5BD48A}.d{color:#52525B}
+</style>
+
+<div style="width: 390px; height: 844px; box-sizing: border-box; display: flex; flex-direction: column; padding: 0 12px 22px">
+<header style="display: flex; align-items: center; gap: 8px; padding: 12px 4px 10px">
+<a href="11-mobile-inbox.html" aria-label="Back" style="width: 44px; height: 44px; display: inline-flex; align-items: center; margin-left: -10px; justify-content: center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m15 6-6 6 6 6"></path></svg></a>
+<div style="min-width: 0"><div style="font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Persist preview tab state</div><div class="t3" style="font-size: 12px">devspace · Claude Code</div></div>
+</header>
+<div class="mono" style="flex: 1; background: #050506; border: 1px solid #1A1A1E; border-radius: 14px; padding: 12px; font-size: 11.5px; line-height: 1.6; color: #D4D4D8; white-space: pre-wrap; overflow: hidden"><span class="g">●</span> Update(project-workbench.tsx)
+  <span class="d">⎿  14 additions, 3 removals</span>
+<span class="g">●</span> Update(preview-tab.tsx)
+  <span class="d">⎿  5 additions, 2 removals</span>
+
+<span style="color: #F2B65A">●</span> Bash(pnpm test:e2e --grep preview)
+
+  Do you want to proceed?
+  <span style="color: #8AB4FF">❯ 1. Yes</span>
+    2. Yes, and don't ask again
+    3. No, and tell Claude what to do</div>
+<div style="margin-top: 10px; background: #14120E; border: 1px solid #3F321B; border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+<div style="font-size: 13.5px"><span style="font-weight: 500">Run</span> <span class="mono" style="font-size: 12.5px">pnpm test:e2e --grep preview</span></div>
+<div style="display: flex; gap: 8px"><button class="big" style="flex: 0 0 auto; padding: 0 16px; background: transparent; border-color: transparent; color: #A1A1AA">Deny</button><button class="big" style="background: #F4F4F5; color: #09090B; border-color: #F4F4F5">Approve</button></div>
+</div>
+<div style="margin-top: 10px; display: flex; gap: 6px"><button class="k">esc</button><button class="k">tab</button><button class="k" aria-label="Up">↑</button><button class="k" aria-label="Down">↓</button><button class="k">^C</button><button class="k" aria-label="Enter">⏎</button></div>
+<div style="margin-top: 8px; display: flex; align-items: center; gap: 8px; background: #111113; border: 1px solid #232327; border-radius: 14px; padding: 6px 6px 6px 14px">
+<label for="send" style="position: absolute; left: -9999px">Type into terminal</label>
+<input id="send" placeholder="Type into terminal" style="flex: 1; background: transparent; border: 0; color: #F4F4F5; font: inherit; font-size: 15px; outline: none; min-height: 32px">
+<button aria-label="Send" style="width: 34px; height: 34px; border-radius: 50%; border: 0; background: #F4F4F5; color: #09090B; display: inline-flex; align-items: center; justify-content: center; cursor: pointer"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"></path></svg></button>
+</div>
+</div>
+
+</body>
+</html>
