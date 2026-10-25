@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile approval</title>
+<style>
+@font-face{font-family:Geist;src:url(../fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url(../fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900}
+</style>
+</head>
+<body>
+
+
+
+<style>
+body{margin:0;background:#09090B;color:#EDEDEF;font-family:Geist,Inter,system-ui,sans-serif;font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+a{color:#8AB4FF;text-decoration:none}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.t2{color:#A1A1AA}.t3{color:#71717A}
+.big{font:inherit;font-size:15px;font-weight:500;width:100%;height:50px;border-radius:14px;border:1px solid #2A2A30;background:#18181B;color:#EDEDEF;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.lbl{font-size:12.5px;color:#71717A}
+</style>
+
+<div style="width: 390px; height: 844px; box-sizing: border-box; display: flex; flex-direction: column; padding: 0 18px 26px">
+<header style="display: flex; align-items: center; gap: 10px; padding: 14px 0 8px">
+<a href="11-mobile-inbox.html" style="display: inline-flex; align-items: center; gap: 4px; min-height: 44px; color: #A1A1AA"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m15 6-6 6 6 6"></path></svg>Inbox</a>
+<span class="t3" style="margin-left: auto; font-size: 13px">1 of 3</span>
+</header>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 13px" class="t3"><span style="width: 18px; height: 18px; border-radius: 5px; background: #3B2A55; color: #D9C2FF; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center">J</span>jarvis · Add retry with backoff</div>
+<div style="display: flex; align-items: center; gap: 10px; margin: 14px 0 16px">
+<div style="width: 38px; height: 38px; border-radius: 11px; background: #2A2112; display: flex; align-items: center; justify-content: center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F2B65A" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v6c0 4.2 3 7.2 7 9 4-1.8 7-4.8 7-9V6z"></path></svg></div>
+<div><h1 style="margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em">Run this command?</h1><div class="t3" style="font-size: 13px">Codex · turn 4 · waiting 3m</div></div>
+</div>
+<div class="mono" style="background: #0F0F11; border: 1px solid #232327; border-radius: 14px; padding: 14px; font-size: 13.5px; display: flex; flex-direction: column; gap: 8px"><div><span class="t3">$ </span>pnpm test --filter router</div><div style="display: flex; gap: 6px"><span style="font-family: Geist, sans-serif; font-size: 12px; color: #F2B65A; background: #2A2112; border: 1px solid #4A3A1C; border-radius: 6px; padding: 1px 7px">write</span><span style="font-size: 12px; color: #A1A1AA; background: #18181B; border: 1px solid #232327; border-radius: 6px; padding: 1px 7px">packages/tools</span></div></div>
+<div class="lbl" style="margin-top: 22px">Agent's last message</div>
+<p style="margin: 6px 0 0; color: #D4D4D8; font-size: 15px; line-height: 1.55">I'll exclude 4xx except 429 from the retry predicate, then run the router tests.</p>
+<div class="lbl" style="margin-top: 20px">Changed this turn</div>
+<div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap"><span class="mono" style="font-size: 12.5px; background: #141416; border: 1px solid #232327; border-radius: 7px; padding: 3px 8px"><span style="color: #8AB4FF">M</span> retry.ts <span style="color: #4ADE80">+6</span> <span style="color: #F87171">−2</span></span></div>
+<div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px">
+<button class="big" style="background: #F4F4F5; color: #09090B; border-color: #F4F4F5">Approve</button>
+<button class="big">Allow for this session</button>
+<button class="big" style="background: transparent; border-color: transparent; color: #F87171">Deny</button>
+</div>
+</div>
+
+</body>
+</html>

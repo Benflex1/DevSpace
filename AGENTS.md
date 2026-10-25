@@ -14,6 +14,7 @@
 - Update `docs/current-state.md` at significant checkpoints, milestone boundaries, or when the
   next developer would otherwise receive materially incorrect information.
 - For documentation conflicts, use the single authority order in `docs/README.md`.
+- UI work follows `docs/specs/ui-v2.md`; visual reference is in `docs/design/ui-v2/`.
 
 ## Beta delivery rule
 

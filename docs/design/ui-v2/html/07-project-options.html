@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Options</title>
+<style>
+@font-face{font-family:Geist;src:url(../fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900}
+@font-face{font-family:'Geist Mono';src:url(../fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900}
+</style>
+</head>
+<body>
+
+
+
+<style>
+body{margin:0;background:#09090B;color:#EDEDEF;font-family:Geist,Inter,system-ui,sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:#8AB4FF;text-decoration:none}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.t2{color:#A1A1AA}.t3{color:#71717A}
+.btn{height:30px;padding:0 12px;border-radius:8px;background:#18181B;border:1px solid #2A2A30;color:#EDEDEF;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.btn-p{background:#F4F4F5;color:#09090B;border-color:#F4F4F5}
+.nv{display:flex;align-items:center;gap:10px;height:32px;padding:0 10px;border-radius:8px;color:#A1A1AA}
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:12px;color:#A1A1AA;font-weight:500}
+.in{font:inherit;font-size:13px;background:#0B0B0C;color:#F4F4F5;border:1px solid #26262B;border-radius:8px;padding:0 10px;height:34px;box-sizing:border-box;outline:none}
+.hint{font-size:12px;color:#71717A}
+.card{background:#0F0F11;border:1px solid #1F1F23;border-radius:14px}
+</style>
+
+<div style="min-height: 900px; height: 100vh; display: flex">
+
+
+
+
+
+<nav aria-label="Sessions" style="width: 56px; min-height: 900px; height: 100%; box-sizing: border-box; background: #0C0C0E; border-right: 1px solid #1A1A1E; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 0 10px; font-family: Geist, Inter, system-ui, sans-serif; color: #EDEDEF">
+<div style="width: 24px; height: 24px; border-radius: 7px; background: #EDEDEF; display: flex; align-items: center; justify-content: center; margin-bottom: 10px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#09090B" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 8 4 4-4 4M13 16h5"></path></svg></div>
+<a href="01-inbox.html" aria-label="Inbox, 3 need you" title="Inbox" style="position: relative; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; color: #A1A1AA"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13h4.5l1.5 3h6l1.5-3H21"></path><path d="M5.5 5h13L21 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5V13z"></path></svg><span style="position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: #F2B65A; box-shadow: 0 0 0 2px #0C0C0E"></span></a>
+<a href="09-command-palette.html" aria-label="Search and commands" title="Search (Ctrl K)" style="width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; color: #A1A1AA"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m20 20-4-4"></path></svg></a>
+<div style="width: 20px; height: 1px; background: #1C1C20; margin: 8px 0"></div>
+<a href="02-session-chat.html" aria-label="Add retry with backoff, needs you" title="jarvis · Add retry with backoff" style="position: relative; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: #18181B"><span style="width: 24px; height: 24px; border-radius: 7px; background: #2A2140; color: #D9C2FF; font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">J</span><span style="position: absolute; bottom: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: #F2B65A; box-shadow: 0 0 0 2px #0C0C0E"></span></a>
+<a href="03-session-terminal.html" aria-label="Persist preview tab state, needs you" title="devspace · Persist preview tab state" style="position: relative; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: transparent"><span style="width: 24px; height: 24px; border-radius: 7px; background: #1A2640; color: #BFD5FF; font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">D</span><span style="position: absolute; bottom: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: #F2B65A; box-shadow: 0 0 0 2px #0C0C0E"></span></a>
+<a href="#" aria-label="Quantization defaults, needs you" title="forge · Quantization defaults" style="position: relative; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center"><span style="width: 24px; height: 24px; border-radius: 7px; background: #183128; color: #A7F3D0; font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">F</span><span style="position: absolute; bottom: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: #F2B65A; box-shadow: 0 0 0 2px #0C0C0E"></span></a>
+<a href="#" aria-label="Package for the AUR, working" title="routedoctor · Package for the AUR" style="position: relative; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center"><span style="width: 24px; height: 24px; border-radius: 7px; background: #33261A; color: #FCD9B0; font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">R</span><span style="position: absolute; bottom: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: #6EA8FE; box-shadow: 0 0 0 2px #0C0C0E"></span></a>
+<a href="#" aria-label="Import exercise images, ready to review" title="lifts · Import exercise images" style="position: relative; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center"><span style="width: 24px; height: 24px; border-radius: 7px; background: #351B26; color: #FBC4D6; font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">L</span><span style="position: absolute; bottom: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: #5BD48A; box-shadow: 0 0 0 2px #0C0C0E"></span></a>
+<a href="08-new-session.html" aria-label="New session" title="New session" style="width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; color: #52525B; margin-top: 4px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+<a href="#" aria-label="Settings" title="Settings" style="margin-top: auto; width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; color: #52525B"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"></path></svg></a>
+</nav>
+
+<div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+<header style="height: 52px; display: flex; align-items: center; gap: 8px; padding: 0 14px 0 20px; flex: none">
+<a href="02-session-chat.html" class="t3">jarvis</a><span style="color: #3F3F46">/</span>
+<h1 style="margin: 0; font-size: 13.5px; font-weight: 500">Project Options</h1>
+<span style="font-size: 12px; color: #C9A15A; margin-left: 4px">Unapplied draft · 3 changes since rev 11</span>
+<button aria-label="More: view JSON, discard draft" style="margin-left: auto; width: 30px; height: 30px; border: 0; background: transparent; color: #71717A; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+<div style="display: flex; flex: 1; min-height: 0">
+<nav aria-label="Sections" style="flex: 0 0 220px; padding: 16px 10px; border-right: 1px solid #1C1C20; display: flex; flex-direction: column; gap: 2px; background: #0B0B0D">
+<a href="#" class="nv"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"></rect><rect x="4" y="13" width="16" height="7" rx="1.5"></rect></svg>Environment</a>
+<a href="#" class="nv"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10M4 6h2M4 12h2M4 18h2"></path></svg>Tasks<span style="margin-left: auto; width: 6px; height: 6px; border-radius: 50%; background: #F2B65A"></span></a>
+<a href="#" class="nv" style="background: #18181B; color: #F4F4F5"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M3 9h18"></path></svg>Previews<span style="margin-left: auto; width: 6px; height: 6px; border-radius: 50%; background: #F2B65A"></span></a>
+<a href="#" class="nv"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 13.9 8 18.5 10 13.9 12 12 16.5 10.1 12 5.5 10 10.1 8z"></path></svg>AI profile</a>
+<a href="#" class="nv"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M5 20V10M12 20V4M19 20v-7"></path></svg>Resources</a>
+<div style="font-size: 11.5px; color: #52525B; padding: 18px 10px 6px">Not supported by the runtime yet</div>
+<span class="nv" style="color: #52525B">Services</span>
+<span class="nv" style="color: #52525B">Volumes</span>
+<span class="nv" style="color: #52525B">Setup steps</span>
+</nav>
+<main style="flex: 1; min-width: 0; padding: 24px 32px; display: flex; flex-direction: column; gap: 14px; overflow: hidden">
+<div style="display: flex; align-items: center"><div><h2 style="margin: 0; font-size: 16px; font-weight: 600">Previews</h2><p class="hint" style="margin: 2px 0 0">Expose a port through the preview gateway.</p></div><button class="btn" style="margin-left: auto"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add preview</button></div>
+<div class="card" style="display: flex; align-items: center; gap: 12px; padding: 12px 16px">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="3.6" fill="#5BD48A"></circle></svg>
+<span class="mono" style="font-weight: 500">web</span><span class="t3">task dev · :5173</span>
+<span class="mono t3" style="margin-left: auto; font-size: 12px">jarvis-preview.benflex.dev</span>
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#71717A" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>
+</div>
+<div class="card" style="padding: 18px; display: flex; flex-direction: column; gap: 16px; border-color: #2B3850">
+<div style="display: flex; align-items: center; gap: 10px"><span class="mono" style="font-weight: 500">api</span><span style="font-size: 11px; color: #4ADE80; background: #0F2418; border: 1px solid #1D4A30; border-radius: 5px; padding: 0 6px">new</span></div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 18px">
+<div class="field"><label for="pk">Key</label><input id="pk" class="in mono" value="api"></div>
+<div class="field"><label for="pn">Display name</label><input id="pn" class="in" value="API"></div>
+<div class="field"><label for="pt">Target</label><select id="pt" class="in"><option>Task · api</option></select></div>
+<div class="field"><label for="pp">Container port</label><input id="pp" class="in mono" value="8080" style="border-color: #7F2F2F; box-shadow: 0 0 0 3px rgba(248,113,113,.12)"><span style="font-size: 12px; color: #F87171">8080 isn't declared under Environment → Ports. <a href="#">Add it</a></span></div>
+<div class="field"><label for="ph">Hostname</label><div style="display: flex; align-items: center; background: #0B0B0C; border: 1px solid #26262B; border-radius: 8px; height: 34px; padding-left: 10px"><input id="ph" class="mono" value="jarvis-api" style="font: inherit; font-family: 'Geist Mono', monospace; font-size: 13px; background: transparent; border: 0; color: #F4F4F5; outline: none; width: 110px"><span class="mono t3" style="font-size: 12.5px">-preview.benflex.dev</span></div></div>
+<div class="field"><label for="hp">Health check</label><div style="display: flex; gap: 8px"><input id="hp" class="in mono" value="/healthz" style="flex: 1; min-width: 0"><input aria-label="Expected status" class="in mono" value="200" style="width: 70px"></div></div>
+</div>
+</div>
+</main>
+<aside aria-label="Apply" style="flex: 0 0 360px; border-left: 1px solid #1C1C20; background: #0B0B0D; padding: 20px; display: flex; flex-direction: column; gap: 16px">
+<div style="font-weight: 600">Apply as rev 12</div>
+<div class="card mono" style="padding: 12px 14px; font-size: 12px; display: flex; flex-direction: column; gap: 6px; background: #0B0B0C">
+<div><span style="color: #4ADE80">+</span> preview <span style="color: #F4F4F5">api</span> :8080</div>
+<div><span style="color: #8AB4FF">~</span> task <span style="color: #F4F4F5">test</span> args</div>
+<div><span style="color: #8AB4FF">~</span> task <span style="color: #F4F4F5">dev</span> env NODE_OPTIONS</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<span class="t3" style="font-size: 12px">What happens</span>
+<div style="display: flex; gap: 10px; font-size: 12.5px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F2B65A" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" style="flex: none; margin-top: 2px"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"></path></svg><span>Runtime plan changes. Applies on the next rebuild — rebuild policy is manual.</span></div>
+<div style="display: flex; gap: 10px; font-size: 12.5px" class="t2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" style="flex: none; margin-top: 2px"><path d="M10 6h10M10 12h10M10 18h10M4 6h2M4 12h2M4 18h2"></path></svg><span>Task <span class="mono">dev</span> keeps its old environment until restarted.</span></div>
+<div style="display: flex; gap: 10px; font-size: 12.5px" class="t2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; margin-top: 2px"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M3 9h18"></path></svg><span>Preview <span class="mono">web</span> keeps its hostname.</span></div>
+</div>
+<div style="display: flex; align-items: center; gap: 8px; background: #160E0E; border: 1px solid #4A2222; border-radius: 9px; padding: 8px 10px; font-size: 12.5px; color: #F87171"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="#F87171" fill-opacity=".16"></circle><path d="m4.9 4.9 4.2 4.2M9.1 4.9 4.9 9.1" stroke="#F87171" stroke-width="1.5" stroke-linecap="round"></path></svg>Fix 1 field to apply</div>
+<div style="margin-top: auto; display: flex; gap: 6px"><button class="btn" style="flex: 1; justify-content: center">Apply</button><button class="btn btn-p" style="flex: 1; justify-content: center">Apply and rebuild</button></div>
+</aside>
+</div>
+</div>
+</div>
+
+</body>
+</html>
