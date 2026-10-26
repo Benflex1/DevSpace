@@ -1529,7 +1529,8 @@ export class ManagedWorkspaces {
       if (raw.workspaceId !== workspaceId || raw.projectId !== projectId || raw.version !== 2) continue;
       const workspace = await this.loadWorkspaceOwnership(projectId, workspaceId);
       if (workspace.version !== 2) continue;
-      await this.git(["-C", workspace.worktreePath, "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
+      // Both paths were identity-validated above. Permit file transport for this local ref sync only.
+      await this.git(["-C", workspace.worktreePath, "-c", "protocol.file.allow=always", "fetch", "--no-tags", "--no-write-fetch-head", store.repositoryPath,
         "+refs/remotes/origin/*:refs/remotes/origin/*"]);
     }
   }
