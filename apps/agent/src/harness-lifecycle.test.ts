@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, expect, test } from "vitest";
-import { encodeTerminalClientFrame } from "@devspace/contracts";
+import { decodeTerminalAgentFrame, encodeTerminalClientFrame } from "@devspace/contracts";
 import { DockerEngineError } from "./docker-runtime.js";
 import { ExecutionManager, type HarnessRecoveryIdentity } from "./execution-manager.js";
 import { createHarnessHomeStore } from "./harness-home.js";
@@ -37,6 +37,17 @@ function context(containerId = "container-owned"): WorkspaceExecutionContext {
   } as unknown as WorkspaceExecutionContext;
 }
 
+function legacyDirectExecManager(root: string, engine: unknown, options: {
+  readonly managed?: unknown;
+  readonly writer?: ConstructorParameters<typeof ExecutionManager>[3];
+  readonly now?: ConstructorParameters<typeof ExecutionManager>[4];
+  readonly hooks?: ConstructorParameters<typeof ExecutionManager>[5];
+  readonly persistentTmux?: ConstructorParameters<typeof ExecutionManager>[6];
+} = {}): ExecutionManager {
+  return new ExecutionManager(root, (options.managed ?? { executionContext: async () => context() }) as never,
+    engine as never, options.writer, options.now, options.hooks, options.persistentTmux, "persistent", "legacy-direct-exec");
+}
+
 async function legacyHarnessFixture(label: string) {
   const root = await mkdtemp(path.join(tmpdir(), `devspace-harness-legacy-${label}-`));
   roots.push(root);
@@ -48,7 +59,7 @@ async function legacyHarnessFixture(label: string) {
     inspectExec: async () => ({ ID: "exec-live", Running: true, ExitCode: null, ContainerID: "container-owned" }),
     inspectContainer: async () => ({ Id: "container-owned" })
   };
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never);
+  const manager = legacyDirectExecManager(root, engine);
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -122,7 +133,155 @@ class HarnessTerminalSocket extends EventEmitter {
     this.readyState = this.CLOSED;
     queueMicrotask(() => this.emit("close"));
   }
+  input(frame: ReturnType<typeof encodeTerminalClientFrame>): void { this.emit("message", Buffer.from(frame), true); }
 }
+
+test("Native tmux recovery keeps the same generation and lease, reattaches with history controls, then settles on pane exit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-native-tmux-recovery-"));
+  roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const home = createHarnessHomeStore(root);
+  const runtimeState = { identity: null as import("./persistent-terminal-runtime.js").PersistentTerminalOwnership | null,
+    sessionName: null as string | null, started: false, paneDead: false, sessionsCreated: 0, attachments: 0, detached: 0,
+    historyCalls: 0, liveCalls: 0, environmentClears: [] as string[], environmentForwarding: [] as string[][],
+    input: [] as Buffer[] };
+  const binding = {
+    containerId: "container-owned", uid: 1000, gid: 1000, artifactRoot: "/opt/devspace-test",
+    binaryPath: "/opt/devspace-test/tmux", configPath: "/opt/devspace-test/tmux.conf",
+    terminfoPath: "/opt/devspace-test/terminfo", socketDirectory: "/tmp/devspace-persistent-tmux-1000",
+    socketPath: "/tmp/devspace-persistent-tmux-1000/server.sock", environment: { TERM: "xterm-256color", TMUX: "", TMUX_PANE: "" }
+  };
+  const persistentTmux = {
+    prepare: async () => binding,
+    createSessionExec: async (_binding: unknown, identity: import("./persistent-terminal-runtime.js").PersistentTerminalOwnership,
+      sessionName: string, launch?: { readonly command: readonly string[]; readonly environment?: Readonly<Record<string, string>> }) => {
+      runtimeState.identity = identity;
+      runtimeState.sessionName = sessionName;
+      runtimeState.sessionsCreated += 1;
+      if (launch !== undefined) runtimeState.environmentForwarding.push(Object.keys(launch.environment ?? {}));
+      return `native-tmux-create-${runtimeState.sessionsCreated}`;
+    },
+    inspectExec: async (_binding: unknown, _execId: string) => ({ running: false, exitCode: null }),
+    startCreatedExec: async (execId: string) => {
+      runtimeState.started = true;
+      return { execId, exitCode: 0, stdout: "", stderr: "" };
+    },
+    lookupSession: async (_binding: unknown, identity: import("./persistent-terminal-runtime.js").PersistentTerminalOwnership,
+      sessionName: string, sessionId: string | null, paneId: string | null) => {
+      if (!runtimeState.started || runtimeState.sessionName !== sessionName || runtimeState.identity === null
+        || identity.harnessSessionId !== runtimeState.identity.harnessSessionId
+        || identity.harnessGeneration !== runtimeState.identity.harnessGeneration
+        || identity.harnessLeaseId !== runtimeState.identity.harnessLeaseId
+        || identity.containerId !== runtimeState.identity.containerId
+        || (sessionId !== null && sessionId !== "$41") || (paneId !== null && paneId !== "%0")) return null;
+      return { sessionName, sessionId: "$41", paneId: "%0", panePid: 24680,
+        paneDead: runtimeState.paneDead, paneDeadStatus: runtimeState.paneDead ? 0 : null };
+    },
+    createAttachment: async () => {
+      runtimeState.attachments += 1;
+      const stream = new PassThrough();
+      const originalWrite = stream.write.bind(stream);
+      stream.write = ((chunk: Uint8Array | string) => {
+        runtimeState.input.push(Buffer.from(chunk));
+        return originalWrite(chunk);
+      }) as typeof stream.write;
+      stream.push(Buffer.from("CURRENT_NATIVE_SCREEN"));
+      return { execId: `native-attach-${runtimeState.attachments}`, clientPid: 5500 + runtimeState.attachments,
+        clientName: `/dev/pts/${runtimeState.attachments}`, stream };
+    },
+    detachClient: async () => { runtimeState.detached += 1; }, resizeAttachment: async () => {},
+    history: async () => { runtimeState.historyCalls += 1; }, live: async () => { runtimeState.liveCalls += 1; },
+    clearSessionEnvironment: async (_binding: unknown, _identity: unknown, _sessionName: string, names: readonly string[]) => {
+      runtimeState.environmentClears.push(...names);
+      runtimeState.environmentForwarding.push([]);
+    },
+    configureSessionEnvironmentForwarding: async (_binding: unknown, names: readonly string[]) => {
+      runtimeState.environmentForwarding.push([...names]);
+      return true;
+    }
+  } as unknown as PersistentTmuxRuntime;
+  const engine = {
+    inspectContainer: async (containerId: string) => ({ Id: containerId, State: { Running: true, Status: "running" } })
+  };
+  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
+    undefined, undefined, {}, persistentTmux);
+  const harness = createHarnessRuntime({ home, stateRoot: root,
+    createHarnessExec: async (input) => await manager.createHarness(input),
+    reconcileHarnessAdmission: async (input) => await manager.reconcileHarnessAdmission(input),
+    inspectSlot: async () => ({ state: "present-and-exact" }), imageCodex: { present: true, version: "0.163.0" } });
+  await manager.initialize();
+  await harness.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  expect(runtimeState.sessionsCreated).toBe(1);
+  expect(runtimeState.environmentForwarding).toEqual([["CODEX_HOME"], []]);
+  expect(await home.hasActiveWorkspaceLease?.(workspaceId)).toBe(true);
+
+  const processRecordPath = path.join(root, "ownership", "executions", `${processId}.json`);
+  const beforeRestart = JSON.parse(await readFile(processRecordPath, "utf8")) as Record<string, unknown>;
+  expect(beforeRestart).toMatchObject({ processId, harnessSessionId: sessionId, harnessGeneration: 1,
+    terminalBackend: "tmux", observedState: "running" });
+  expect((beforeRestart.persistentTerminal as Record<string, unknown>).panePid).toBe(24680);
+  await manager.shutdownTransports();
+
+  let recoveredHarness = undefined as unknown as ReturnType<typeof createHarnessRuntime>;
+  const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
+    undefined, undefined, {
+      onHarnessSettled: async (event) => await recoveredHarness.settleByProcess(event.processId),
+      onHarnessRecovered: async (identity) => await recoveredHarness.finalizeRecoveredLoss(identity)
+    }, persistentTmux);
+  recoveredHarness = createHarnessRuntime({ home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("restart-must-not-create-a-native-process"); },
+    reconcileHarnessAdmission: async (input) => await restarted.reconcileHarnessAdmission(input),
+    observeHarnessRecovery: () => restarted.harnessRecoveryReports(),
+    inspectSlot: async () => ({ state: "present-and-exact" }), imageCodex: { present: true, version: "0.163.0" } });
+  await restarted.initialize();
+  await recoveredHarness.recoverAfterAgentRestart();
+  expect(restarted.harnessRecoveryReports()).toEqual([expect.objectContaining({
+    processId, workspaceId, sessionId, processGeneration: 1, leaseId: runtimeState.identity?.harnessLeaseId,
+    observation: "running", reattachable: true
+  })]);
+  expect(await recoveredHarness.capability(sessionId, undefined, { workspaceId, harnessId: "codex", processId, processGeneration: 1 }))
+    .toMatchObject({ state: "live", admission: "started", processGeneration: 1 });
+  expect(runtimeState.sessionsCreated).toBe(1);
+  const afterRestart = JSON.parse(await readFile(processRecordPath, "utf8")) as Record<string, unknown>;
+  expect((afterRestart.persistentTerminal as Record<string, unknown>).panePid).toBe(24680);
+
+  const firstSocket = new HarnessTerminalSocket();
+  await restarted.reserveTerminalAttachment(terminalId).attach(firstSocket as never);
+  expect(firstSocket.frames.map((frame) => decodeTerminalAgentFrame(frame)).some((frame) => frame.ok
+    && frame.frame.type === "output" && Buffer.from(frame.frame.data).toString().includes("CURRENT_NATIVE_SCREEN"))).toBe(true);
+  expect(() => restarted.reserveTerminalAttachment(terminalId)).toThrow("cannot accept another attachment");
+  firstSocket.input(encodeTerminalClientFrame({ type: "history" }));
+  firstSocket.input(encodeTerminalClientFrame({ type: "live" }));
+  firstSocket.input(encodeTerminalClientFrame({ type: "input", data: Buffer.from("continued after reconnect") }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(runtimeState.historyCalls).toBe(1);
+  expect(runtimeState.liveCalls).toBe(1);
+  expect(Buffer.concat(runtimeState.input).toString()).toContain("continued after reconnect");
+  firstSocket.terminate();
+  await waitForTerminalDetachment(restarted, terminalId);
+  expect(await home.hasActiveWorkspaceLease?.(workspaceId)).toBe(true);
+
+  const secondSocket = new HarnessTerminalSocket();
+  await restarted.reserveTerminalAttachment(terminalId).attach(secondSocket as never);
+  secondSocket.input(encodeTerminalClientFrame({ type: "input", data: Buffer.from("still same Codex PID") }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(runtimeState.attachments).toBe(2);
+  expect(runtimeState.sessionsCreated).toBe(1);
+  expect(runtimeState.environmentForwarding[0]).toEqual(["CODEX_HOME"]);
+  expect(runtimeState.environmentForwarding.slice(1).every((names) => names.length === 0)).toBe(true);
+  expect(runtimeState.identity?.harnessSessionId).toBe(sessionId);
+  expect(runtimeState.identity?.harnessGeneration).toBe(1);
+  expect(Buffer.concat(runtimeState.input).toString()).toContain("still same Codex PID");
+
+  runtimeState.paneDead = true;
+  await restarted.inspect(projectId, workspaceId, processId);
+  await waitFor(async () => (await recoveredHarness.publicSnapshot(sessionId)).state === "stopped");
+  expect(await home.hasActiveWorkspaceLease?.(workspaceId)).toBe(false);
+  expect(runtimeState.environmentClears.length).toBeGreaterThanOrEqual(3);
+  expect(runtimeState.environmentClears.every((name) => name === "CODEX_HOME")).toBe(true);
+  secondSocket.terminate();
+  await waitFor(async () => runtimeState.detached === 2);
+});
 
 async function nativeAdmissionFixture(engine: object, onSettled?: () => void | Promise<void>) {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-admission-fixture-"));
@@ -151,8 +310,7 @@ async function nativeAdmissionFixture(engine: object, onSettled?: () => void | P
     write: (filePath: string, value: unknown) => track(() => durableJsonWriter.write(filePath, value))
   };
   let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
-    writer, undefined, {
+  const manager = legacyDirectExecManager(root, engine, { writer, hooks: {
       onHarnessRecovered: async (identity) => {
         await track(() => runtime.finalizeRecoveredLoss(identity));
       },
@@ -162,7 +320,7 @@ async function nativeAdmissionFixture(engine: object, onSettled?: () => void | P
           await runtime.settleByProcess(event.processId);
         });
       }
-    });
+    } });
   runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -231,13 +389,12 @@ test("harness exec exit settles once while a persistent shell exit does not", as
   } as unknown as PersistentTmuxRuntime;
   const hooks: string[] = [];
   let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
-    undefined, () => new Date("2026-09-24T00:00:00.000Z"), {
+  const manager = legacyDirectExecManager(root, engine, { now: () => new Date("2026-09-24T00:00:00.000Z"), hooks: {
     onHarnessSettled: async (event) => {
       hooks.push(event.processId);
       await runtime.settleByProcess(event.processId);
     }
-  }, persistentTmux);
+  }, persistentTmux });
   runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -297,11 +454,10 @@ test("same-Agent retry does not report uncertain harness admission active when i
     inspectContainer: async () => ({ Id: "container-owned", State: { Running: containerRunning, Status: containerRunning ? "running" : "exited" } })
   };
   let runtime: ReturnType<typeof createHarnessRuntime> = undefined!;
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
-    undefined, undefined, {
+  const manager = legacyDirectExecManager(root, engine, { hooks: {
       onHarnessRecovered: async (identity) => { await runtime.finalizeRecoveredLoss(identity); },
       onHarnessSettled: async (event) => { await runtime.settleByProcess(event.processId); }
-    });
+    } });
   runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -568,7 +724,7 @@ test("restart recovers a durable exec exit whose clean-settlement hook was inter
     inspectExec: async () => ({ ID: "exec-exited", Running: false, ExitCode: 0, ContainerID: "container-owned" }),
     inspectContainer: async () => ({ Id: "container-owned", State: { Running: true, Status: "running" } })
   };
-  const first = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never);
+  const first = legacyDirectExecManager(root, engine);
   const interruptedRuntime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await first.createHarness(input); },
@@ -583,8 +739,7 @@ test("restart recovers a durable exec exit whose clean-settlement hook was inter
   const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
 
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
-  const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never,
-    undefined, () => new Date("2026-09-24T00:00:00.000Z"), hooks);
+  const restarted = legacyDirectExecManager(root, engine, { now: () => new Date("2026-09-24T00:00:00.000Z"), hooks });
   const recovered = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
@@ -617,7 +772,7 @@ test("a still-running harness exec survives Agent restart until it exits", async
     inspectExec: async () => ({ ID: "exec-live", Running: running, ExitCode: running ? null : 0, ContainerID: "container-owned" }),
     inspectContainer: async () => ({ Id: "container-owned" })
   };
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"));
+  const manager = legacyDirectExecManager(root, engine, { now: () => new Date("2026-09-24T00:00:00.000Z") });
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -632,7 +787,7 @@ test("a still-running harness exec survives Agent restart until it exits", async
   const nativeId = "018f1f34-7000-7000-8000-000000000233";
   const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
-  const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"), hooks);
+  const restarted = legacyDirectExecManager(root, engine, { now: () => new Date("2026-09-24T00:00:00.000Z"), hooks });
   const recovered = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
@@ -700,7 +855,7 @@ test.each(["stopped", "stopped-with-stale-exec", "removed"] as const)("workspace
       return { Id: "container-owned", State: { Running: !containerStopped, Status: containerStopped ? "exited" : "running" } };
     }
   };
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never);
+  const manager = legacyDirectExecManager(root, engine);
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -716,7 +871,7 @@ test.each(["stopped", "stopped-with-stale-exec", "removed"] as const)("workspace
   inspectedContainer = "foreign-container";
   containerMissing = true;
   const foreignHooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
-  const foreign = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"), foreignHooks);
+  const foreign = legacyDirectExecManager(root, engine, { now: () => new Date("2026-09-24T00:00:00.000Z"), hooks: foreignHooks });
   const foreignRuntime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
@@ -734,7 +889,7 @@ test.each(["stopped", "stopped-with-stale-exec", "removed"] as const)("workspace
   containerStopped = workspaceState !== "removed";
   containerMissing = workspaceState === "removed";
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
-  const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"), hooks);
+  const restarted = legacyDirectExecManager(root, engine, { now: () => new Date("2026-09-24T00:00:00.000Z"), hooks });
   const recovered = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
@@ -771,7 +926,7 @@ test("workspace replacement alone does not prove the old harness container is go
     },
     inspectContainer: async (containerId: string) => ({ Id: containerId })
   };
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never);
+  const manager = legacyDirectExecManager(root, engine);
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -786,8 +941,8 @@ test("workspace replacement alone does not prove the old harness container is go
 
   execMissing = true;
   const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
-  const replaced = new ExecutionManager(root, { executionContext: async () => context("replacement-container") } as never,
-    engine as never, undefined, () => new Date("2026-09-24T00:00:00.000Z"), hooks);
+  const replaced = legacyDirectExecManager(root, engine, { managed: { executionContext: async () => context("replacement-container") },
+    now: () => new Date("2026-09-24T00:00:00.000Z"), hooks });
   const recovered = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
@@ -818,7 +973,7 @@ test("a pre-fix terminal record is adopted when the harness session and lease ag
     inspectExec: async () => ({ ID: "exec-live", Running: true, ExitCode: null, ContainerID: "container-owned" }),
     inspectContainer: async () => ({ Id: "container-owned" })
   };
-  const manager = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never);
+  const manager = legacyDirectExecManager(root, engine);
   const runtime = createHarnessRuntime({
     home, stateRoot: root,
     createHarnessExec: async (input) => { await manager.createHarness(input); },
@@ -834,7 +989,7 @@ test("a pre-fix terminal record is adopted when the harness session and lease ag
   delete stored.harnessGeneration;
   delete stored.harnessLeaseId;
   await writeFile(recordPath, JSON.stringify(stored));
-  const restarted = new ExecutionManager(root, { executionContext: async () => context() } as never, engine as never);
+  const restarted = legacyDirectExecManager(root, engine);
   await restarted.initialize();
   const upgraded = JSON.parse(await readFile(recordPath, "utf8")) as {
     executionRole?: string; harnessSessionId?: string; harnessGeneration?: number; harnessLeaseId?: string | null
@@ -889,12 +1044,11 @@ test.each(["workspace", "process", "generation", "slot", "multiple", "missing-ex
       await writeFile(fixture.slotMetaPath, JSON.stringify(meta));
     }
 
-    const restarted = new ExecutionManager(fixture.root, { executionContext: async () => context() } as never,
-      {
+    const restarted = legacyDirectExecManager(fixture.root, {
         createExec: async () => "unused",
         inspectExec: async () => ({ ID: "exec-live", Running: true, ExitCode: null, ContainerID: "container-owned" }),
         inspectContainer: async () => ({ Id: "container-owned" })
-      } as never);
+      });
     await restarted.initialize();
     expect(restarted.harnessRecoveryReports()).toEqual([]);
     const upgraded = JSON.parse(await readFile(fixture.recordPath, "utf8")) as { executionRole?: string };

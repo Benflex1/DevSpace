@@ -59,6 +59,8 @@ const persistentTerminalRecordSchema = z.strictObject({
   gid: z.number().int().nonnegative(),
   socketPath: z.string().min(1),
   ownershipMarker: z.string().regex(/^[0-9a-f]{64}$/u),
+  sessionEnvironmentKeys: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u)).max(256).optional(),
+  sessionEnvironmentCleanupPending: z.boolean().optional(),
   admissionPhase: z.enum(["reserved", "exec-created", "start-intent", "uncertain", "created"]),
   createExecId: z.string().min(1).nullable(),
   columns: z.number().int().min(1).max(PERSISTENT_TMUX_MAX_COLUMNS),
@@ -116,6 +118,7 @@ export type HarnessRecoveryReport = {
   readonly processGeneration: number | null;
   readonly leaseId: string | null;
   readonly observation: HarnessProcessObservation;
+  readonly reattachable?: boolean;
 };
 
 const legacyHarnessSessionSchema = z.object({
@@ -182,6 +185,7 @@ type LiveExecution = {
   persistentAttachmentFinalize: (() => Promise<void>) | null;
   persistentOutputQueue: Buffer[];
   persistentOutputQueueBytes: number;
+  persistentSessionAbsent?: boolean;
   persistentMonitorActive?: boolean;
   persistentMonitorEligible?: boolean;
   persistentMonitorFailures?: number;
@@ -227,7 +231,7 @@ export function isSuccessfulTaskExitCode(successExitCodes: readonly number[], ex
 }
 
 export function harnessExecutionAdmissionUncertain(error: unknown): boolean {
-  return error instanceof TaskStartRecoveryRequiredError;
+  return error instanceof TaskStartRecoveryRequiredError || error instanceof PersistentTerminalAdmissionUncertainError;
 }
 
 export class TaskStartRecoveryRequiredError extends Error {
@@ -309,6 +313,7 @@ export class ExecutionManager {
   private readonly harnessProcessIds = new Set<string>();
   private readonly settledHarnessProcessIds = new Set<string>();
   private readonly terminalAdmissionMode: "persistent" | "legacy-direct-exec";
+  private readonly nativeHarnessAdmissionMode: "persistent" | "legacy-direct-exec";
 
   constructor(
     stateRoot: string,
@@ -323,12 +328,14 @@ export class ExecutionManager {
       readonly onPersistentTerminalAttachmentFailure?: (event: PersistentTerminalAttachmentFailureDiagnostic) => void;
     } = {},
     persistentTmux?: PersistentTmuxRuntime,
-    terminalAdmissionMode: "persistent" | "legacy-direct-exec" = "persistent"
+    terminalAdmissionMode: "persistent" | "legacy-direct-exec" = "persistent",
+    nativeHarnessAdmissionMode: "persistent" | "legacy-direct-exec" = "persistent"
   ) {
     this.recordsRoot = path.join(path.resolve(stateRoot), "ownership", "executions");
     this.stateRoot = path.resolve(stateRoot);
     this.persistentTmux = persistentTmux ?? new PersistentTmuxRuntime(engine);
     this.terminalAdmissionMode = terminalAdmissionMode;
+    this.nativeHarnessAdmissionMode = nativeHarnessAdmissionMode;
   }
 
   harnessRecoveryReports(): readonly HarnessRecoveryReport[] {
@@ -374,7 +381,8 @@ export class ExecutionManager {
         if (record.desiredState === "running" && ["creating", "active", "disconnected"].includes(record.terminalState ?? "")) {
           const recovered = await this.reconcilePersistentTerminal(live).catch(() => false);
           const phase = live.record.persistentTerminal?.admissionPhase;
-          if (!recovered && (phase === "reserved" || phase === "exec-created")) {
+          if (!recovered && (phase === "reserved" || phase === "exec-created")
+            && (record.executionRole !== "harness" || phase === "exec-created")) {
             try {
               const context = await this.managed.executionContext(record.projectId, record.workspaceId);
               this.assertContext(record, context);
@@ -384,6 +392,19 @@ export class ExecutionManager {
               await this.startPersistentSession(live, binding);
             } catch { /* retain or persist the precise uncertain phase for a later retry */ }
           }
+          if (!recovered && record.executionRole === "harness" && phase === "reserved"
+            && live.persistentSessionAbsent === true) {
+            await this.cleanupHarnessSessionEnvironment(live, true).catch(() => undefined);
+            live.record = { ...live.record, desiredState: "stopped", observedState: "lost", terminalState: "lost",
+              finishedAt: null };
+            await this.persist(live);
+            await this.notifyHarnessRecovered(live).catch(() => undefined);
+          }
+          this.reportPersistentHarnessRecovery(live, recovered);
+        } else if (record.executionRole === "harness" && ["exited", "failed", "killed"].includes(record.observedState)
+          && await this.privateHarnessSettlementPending(record)) {
+          await this.notifyHarnessSettled(live).catch(() => undefined);
+          this.reportPersistentHarnessRecovery(live, false);
         }
         if (live.record.desiredState === "running"
           && (live.record.observedState === "running" || live.persistentMonitorEligible === true)) {
@@ -579,8 +600,24 @@ export class ExecutionManager {
     return {
       projectId: record.projectId, workspaceId: record.workspaceId, terminalId: record.terminalId!,
       processId: record.processId, containerId: record.containerId, generation: record.generation,
-      revisionId: record.revisionId, revisionHash: record.revisionHash, runtimePlanHash: record.runtimePlanHash
+      revisionId: record.revisionId, revisionHash: record.revisionHash, runtimePlanHash: record.runtimePlanHash,
+      ...(record.executionRole !== "harness" || record.harnessSessionId === null ? {} : {
+        harnessSessionId: record.harnessSessionId,
+        harnessGeneration: record.harnessGeneration!,
+        harnessLeaseId: record.harnessLeaseId
+      })
     };
+  }
+
+  private reportPersistentHarnessRecovery(live: LiveExecution, reattached: boolean): void {
+    const record = live.record;
+    if (record.executionRole !== "harness" || record.harnessSessionId === null || record.harnessGeneration === null) return;
+    const observation: HarnessProcessObservation = reattached ? "running"
+      : record.observedState === "exited" || record.observedState === "failed" ? "terminated"
+        : record.observedState === "killed" ? "definitely-gone" : "unproven";
+    this.recoveryReports.push({ processId: record.processId, workspaceId: record.workspaceId,
+      sessionId: record.harnessSessionId, processGeneration: record.harnessGeneration,
+      leaseId: record.harnessLeaseId, observation, ...(reattached ? { reattachable: true } : {}) });
   }
 
   private reconcilePersistentTerminal(live: LiveExecution): Promise<boolean> {
@@ -600,6 +637,7 @@ export class ExecutionManager {
     const persistent = live.record.persistentTerminal;
     if (live.record.terminalBackend !== "tmux" || persistent === undefined || live.record.terminalId === null) return false;
     live.persistentMonitorEligible = false;
+    live.persistentSessionAbsent = false;
     if (live.persistentWorkspaceStopped === true || live.record.desiredState !== "running"
       || ["killed", "failed", "exited"].includes(live.record.observedState)) return false;
     live.persistentReconciliationFailureCategory = null;
@@ -627,6 +665,7 @@ export class ExecutionManager {
           exitCode: null, finishedAt: this.now().toISOString() };
         live.persistentReconciliationFailureCategory = "state-conflict";
         await this.persistIfChanged(live, previousRecord);
+        await this.notifyHarnessRecovered(live).catch(() => undefined);
         return false;
       }
       const binding = live.persistentBinding ?? await this.persistentTmux.prepare(live.record.containerId);
@@ -636,6 +675,7 @@ export class ExecutionManager {
       const observation = await this.persistentTmux.lookupSession(binding, this.persistentOwnership(live.record),
         persistent.sessionName, persistent.sessionId, persistent.paneId);
       if (observation === null) {
+        live.persistentSessionAbsent = true;
         if (persistent.admissionPhase !== "reserved" && persistent.admissionPhase !== "exec-created") {
           live.record = { ...live.record, creationPhase: "start-intent", observedState: "starting", terminalState: "disconnected",
             persistentTerminal: { ...persistent, admissionPhase: "uncertain" } };
@@ -654,7 +694,11 @@ export class ExecutionManager {
       if (observation.paneDead) {
         live.record = { ...live.record, creationPhase: "started", desiredState: "stopped", observedState: "exited", terminalState: "closed",
           exitCode: observation.paneDeadStatus, startedAt: live.record.startedAt ?? this.now().toISOString(),
-          finishedAt: this.now().toISOString(), persistentTerminal: nextPersistent };
+          finishedAt: this.now().toISOString(), persistentTerminal: {
+            ...nextPersistent,
+            ...(live.record.executionRole === "harness" && (persistent.sessionEnvironmentKeys?.length ?? 0) > 0
+              ? { sessionEnvironmentCleanupPending: true } : {})
+          } };
         live.persistentMonitorEligible = false;
         live.persistentReconciliationFailureCategory = "state-conflict";
       } else {
@@ -666,8 +710,14 @@ export class ExecutionManager {
         live.persistentReconciliationFailureCategory = null;
       }
       await this.persistIfChanged(live, previousRecord);
+      if (observation.paneDead) await this.notifyHarnessSettled(live).catch(() => undefined);
+      else if (live.record.executionRole === "harness" && (persistent.sessionEnvironmentKeys?.length ?? 0) > 0
+        && !await this.cleanupHarnessSessionEnvironment(live, true)) {
+        throw new Error("persistent-tmux-session-environment-cleanup-unproven");
+      }
       return !observation.paneDead;
     } catch (error) {
+      live.persistentSessionAbsent = false;
       // A mismatch, unavailable Agent/engine response, or owner marker that
       // cannot be proved leaves the original identity uncertain. Never launch
       // a replacement shell while resolving that evidence.
@@ -700,12 +750,25 @@ export class ExecutionManager {
       && live.record.terminalState === "closed";
   }
 
-  private async startPersistentSession(live: LiveExecution, binding: PersistentTmuxBinding): Promise<void> {
+  private async startPersistentSession(live: LiveExecution, binding: PersistentTmuxBinding,
+    launch?: Parameters<PersistentTmuxRuntime["createSessionExec"]>[3]): Promise<void> {
+    const persistent = live.record.persistentTerminal;
+    if (persistent === undefined || live.record.terminalId === null) throw new Error("persistent-terminal-record-missing");
+    const environmentNames = launch === undefined
+      ? persistent.sessionEnvironmentKeys ?? [] : Object.keys(launch.environment ?? {});
+    if (launch === undefined && persistent.admissionPhase === "exec-created" && environmentNames.length > 0) {
+      await this.persistentTmux.configureSessionEnvironmentForwarding(binding, environmentNames);
+    }
+    await this.startPersistentSessionWithEnvironment(live, binding, launch);
+  }
+
+  private async startPersistentSessionWithEnvironment(live: LiveExecution, binding: PersistentTmuxBinding,
+    launch?: Parameters<PersistentTmuxRuntime["createSessionExec"]>[3]): Promise<void> {
     let persistent = live.record.persistentTerminal;
     if (persistent === undefined || live.record.terminalId === null) throw new Error("persistent-terminal-record-missing");
     const ownership = this.persistentOwnership(live.record);
     if (persistent.admissionPhase === "reserved") {
-      const createExecId = await this.persistentTmux.createSessionExec(binding, ownership, persistent.sessionName);
+      const createExecId = await this.persistentTmux.createSessionExec(binding, ownership, persistent.sessionName, launch);
       persistent = { ...persistent, admissionPhase: "exec-created", createExecId };
       live.record = { ...live.record, creationPhase: "exec-created", persistentTerminal: persistent, observedState: "starting" };
       await this.persist(live);
@@ -1059,6 +1122,7 @@ export class ExecutionManager {
     // A restart loss stays lost. Clean PTY exit is the only path that settles stopped.
     if (live.record.terminalState === "lost") return;
     if (!["exited", "failed", "killed"].includes(live.record.observedState)) return;
+    if (!await this.cleanupHarnessSessionEnvironment(live)) return;
     if (this.settledHarnessProcessIds.has(live.record.processId)) return;
     this.settledHarnessProcessIds.add(live.record.processId);
     try {
@@ -1072,6 +1136,40 @@ export class ExecutionManager {
       this.settledHarnessProcessIds.delete(live.record.processId);
       throw new Error("harness-settlement-failed");
     }
+  }
+
+  private async cleanupHarnessSessionEnvironment(live: LiveExecution, allowRunningPane = false): Promise<boolean> {
+    const persistent = live.record.persistentTerminal;
+    const environmentNames = persistent?.sessionEnvironmentKeys ?? [];
+    if (live.record.executionRole !== "harness" || persistent === undefined || environmentNames.length === 0
+      || persistent.sessionEnvironmentCleanupPending !== true && !allowRunningPane) return true;
+    const context = await this.managed.executionContext(live.record.projectId, live.record.workspaceId);
+    this.assertContext(live.record, context);
+    const container = await this.engine.inspectContainer(live.record.containerId);
+    if (container.Id !== live.record.containerId) throw new Error("persistent-terminal-container-identity-mismatch");
+    if (container.State.Running !== true) {
+      live.record = { ...live.record, persistentTerminal: { ...persistent, sessionEnvironmentCleanupPending: false } };
+      await this.persist(live);
+      return true;
+    }
+    const binding = live.persistentBinding ?? await this.persistentTmux.prepare(live.record.containerId);
+    this.assertPersistentBinding(live, binding);
+    live.persistentBinding = binding;
+    const observation = await this.persistentTmux.lookupSession(binding, this.persistentOwnership(live.record),
+      persistent.sessionName, persistent.sessionId, persistent.paneId);
+    if (observation === null) {
+      await this.persistentTmux.clearSessionEnvironment(binding, this.persistentOwnership(live.record),
+        persistent.sessionName, environmentNames, false);
+      live.record = { ...live.record, persistentTerminal: { ...persistent, sessionEnvironmentCleanupPending: false } };
+      await this.persist(live);
+      return true;
+    }
+    if (!observation.paneDead && !allowRunningPane) return false;
+    await this.persistentTmux.clearSessionEnvironment(binding, this.persistentOwnership(live.record),
+      persistent.sessionName, environmentNames, true);
+    live.record = { ...live.record, persistentTerminal: { ...persistent, sessionEnvironmentCleanupPending: false } };
+    await this.persist(live);
+    return true;
   }
 
   private activeTask(taskKey: string, workspaceId: string): LiveExecution[] {
@@ -1174,6 +1272,17 @@ export class ExecutionManager {
     }
   }
 
+  private assertNativeEnvironmentCleanupComplete(workspaceId: string): void {
+    const pending = [...this.executions.values()].find((live) => live.record.workspaceId === workspaceId
+      && live.record.executionRole === "harness" && live.record.terminalBackend === "tmux"
+      && live.record.persistentTerminal?.sessionEnvironmentCleanupPending === true);
+    if (pending !== undefined) {
+      throw failure("RESOURCE_STATE_CONFLICT", "A Native session still has private environment cleanup pending.", {
+        resource: { type: "process", id: pending.record.processId }, action: "create"
+      });
+    }
+  }
+
   private async admitLegacyDirectTerminal(input: TerminalIdentityData): Promise<void> {
     const existing = [...this.executions.values()].find((candidate) => candidate.record.terminalId === input.terminalId);
     if (existing !== undefined) {
@@ -1225,6 +1334,7 @@ export class ExecutionManager {
       throw new PersistentTerminalAdmissionUncertainError();
     }
 
+    this.assertNativeEnvironmentCleanupComplete(input.workspaceId);
     const context = await this.managed.executionContext(input.projectId, input.workspaceId);
     const containerId = context.ownership.developmentContainer.id;
     const binding = await this.persistentTmux.prepare(containerId);
@@ -1316,20 +1426,112 @@ export class ExecutionManager {
     }
     const measureAdmissionPhase: HarnessAdmissionPhaseRunner = input.measureAdmissionPhase
       ?? ((_phase, operation) => operation());
-    const context = await measureAdmissionPhase("workspace-runtime-validation", async () =>
-      await this.managed.executionContext(input.projectId, input.workspaceId));
-    const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId);
-    if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
-      resource: { type: "terminal", id: input.terminalId }, action: "create"
+    if (this.nativeHarnessAdmissionMode === "legacy-direct-exec") {
+      const context = await measureAdmissionPhase("workspace-runtime-validation", async () =>
+        await this.managed.executionContext(input.projectId, input.workspaceId));
+      const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId);
+      if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The terminal identity is already in use.", {
+        resource: { type: "terminal", id: input.terminalId }, action: "create"
+      });
+      this.harnessProcessIds.add(input.processId);
+      await measureAdmissionPhase("docker-exec-creation", async () => await this.createExec(context, {
+        kind: "terminal", executionRole: "harness", harnessSessionId, harnessGeneration: input.processGeneration,
+        harnessLeaseId: input.leaseId,
+        processId: input.processId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
+        successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
+        environment: { TERM: "xterm-256color", ...input.environment }, attachStdin: true, tty: true, operationId: null
+      }));
+      return;
+    }
+    await this.serializeWorkspaceAdmission(input.workspaceId, async () => {
+      const context = await measureAdmissionPhase("workspace-runtime-validation", async () =>
+        await this.managed.executionContext(input.projectId, input.workspaceId));
+      const existing = [...this.executions.values()].find((live) => live.record.terminalId === input.terminalId
+        || live.record.processId === input.processId);
+      if (existing !== undefined) throw failure("RESOURCE_STATE_CONFLICT", "The Native process identity is already in use.", {
+        resource: { type: "process", id: input.processId }, action: "create"
+      });
+      this.assertNativeEnvironmentCleanupComplete(input.workspaceId);
+      const containerId = context.ownership.developmentContainer.id;
+      const binding = await this.persistentTmux.prepare(containerId);
+      const sessionName = persistentTmuxSessionName(input.terminalId);
+      const ownership: PersistentTerminalOwnership = {
+        projectId: context.projectId, workspaceId: context.workspaceId, terminalId: input.terminalId,
+        processId: input.processId, containerId, generation: context.generation,
+        revisionId: context.revisionId, revisionHash: context.revisionHash, runtimePlanHash: context.runtimePlanHash,
+        harnessSessionId, harnessGeneration: input.processGeneration, harnessLeaseId: input.leaseId
+      };
+      const live: LiveExecution = {
+        record: {
+          version: 1, kind: "terminal", executionRole: "harness", harnessSessionId,
+          harnessGeneration: input.processGeneration, harnessLeaseId: input.leaseId,
+          projectId: context.projectId, workspaceId: context.workspaceId, processId: input.processId,
+          terminalId: input.terminalId, taskRunId: null, taskKey: null, successExitCodes: [0],
+          revisionId: context.revisionId, revisionHash: context.revisionHash, runtimePlanHash: context.runtimePlanHash,
+          generation: context.generation, containerId, execId: null, terminalBackend: "tmux", operationId: null,
+          creationPhase: "reserved", desiredState: "running", observedState: "queued", terminalState: "creating",
+          exitCode: null, startedAt: null, finishedAt: null,
+          persistentTerminal: {
+            backendVersion: PERSISTENT_TERMINAL_BACKEND_VERSION, sessionName, sessionId: null, paneId: null,
+            panePid: null, uid: binding.uid, gid: binding.gid, socketPath: binding.socketPath,
+            ownershipMarker: persistentTerminalOwnershipMarker(ownership), admissionPhase: "reserved",
+            createExecId: null, columns: 80, rows: 24,
+            sessionEnvironmentKeys: Object.keys(input.environment).filter((key) => key !== "DEVSPACE_TERMINAL_OWNER"),
+            sessionEnvironmentCleanupPending: Object.keys(input.environment).some((key) => key !== "DEVSPACE_TERMINAL_OWNER")
+          }
+        },
+        stream: null, attachment: null, attachmentReserved: false, attachmentCleanup: null,
+        replay: Buffer.alloc(0), resizeFailureReported: false, terminalReplayExpiresAt: null,
+        terminalReplayClaimed: false, terminalReplayTimer: null, terminalReplayComplete: true,
+        terminalReplayWaiters: new Set(), persistentBinding: binding, persistentAttachmentExecId: null,
+        persistentAttachmentClientPid: null, persistentAttachmentClientName: null, persistentAttachmentFinalize: null,
+        persistentOutputQueue: [], persistentOutputQueueBytes: 0
+      };
+      const activeInWorkspace = [...this.executions.values()].filter((candidate) =>
+        candidate.record.workspaceId === input.workspaceId && candidate.record.terminalBackend === "tmux"
+        && candidate.record.desiredState === "running"
+        && !["closed", "failed", "lost"].includes(candidate.record.terminalState ?? "")
+      ).length;
+      if (activeInWorkspace >= PERSISTENT_TERMINALS_PER_WORKSPACE_LIMIT) {
+        throw failure("RESOURCE_STATE_CONFLICT", "This workspace already has the maximum number of persistent terminals.", {
+          resource: { type: "terminal", id: input.terminalId }, action: "create",
+          maximum: PERSISTENT_TERMINALS_PER_WORKSPACE_LIMIT
+        });
+      }
+      await this.persist(live);
+      this.executions.set(input.processId, live);
+      this.harnessProcessIds.add(input.processId);
+      try {
+        await measureAdmissionPhase("docker-exec-creation", async () =>
+          await this.startPersistentSession(live, binding, { command: input.command, environment: input.environment }));
+        if (live.record.persistentTerminal?.admissionPhase === "created" && live.record.observedState === "running") {
+          this.monitorPersistentTerminal(live);
+          return;
+        }
+        if (this.persistentPaneHasExited(live)) return;
+        throw new PersistentTerminalAdmissionUncertainError();
+      } catch (error) {
+        const admission = live.record.persistentTerminal?.admissionPhase;
+        if (admission === "start-intent" || admission === "uncertain") {
+          throw new PersistentTerminalAdmissionUncertainError();
+        }
+        if (admission === "reserved" || admission === "exec-created") {
+          live.record = { ...live.record, desiredState: "stopped", observedState: "failed", terminalState: "failed",
+            finishedAt: this.now().toISOString() };
+          await this.persist(live).catch(() => undefined);
+          try {
+            await this.persistentTmux.clearSessionEnvironment(binding, ownership, sessionName,
+              live.record.persistentTerminal?.sessionEnvironmentKeys ?? [], false);
+            if (live.record.persistentTerminal !== undefined) {
+              live.record = { ...live.record, persistentTerminal: { ...live.record.persistentTerminal,
+                sessionEnvironmentCleanupPending: false } };
+              await this.persist(live).catch(() => undefined);
+            }
+          } catch { /* keep workspace admission fenced until cleanup can be retried */ }
+        }
+        throw error;
+      }
     });
-    this.harnessProcessIds.add(input.processId);
-    await measureAdmissionPhase("docker-exec-creation", async () => await this.createExec(context, {
-      kind: "terminal", executionRole: "harness", harnessSessionId, harnessGeneration: input.processGeneration,
-      harnessLeaseId: input.leaseId,
-      processId: input.processId, terminalId: input.terminalId, taskRunId: null, taskKey: null,
-      successExitCodes: [0], command: [...input.command], workingDirectory: "/workspace",
-      environment: { TERM: "xterm-256color", ...input.environment }, attachStdin: true, tty: true, operationId: null
-    }));
   }
 
   async reconcileHarnessAdmission(input: HarnessAdmissionIdentity): Promise<HarnessAdmissionReconciliation> {
@@ -1342,7 +1544,8 @@ export class ExecutionManager {
       || record.projectId !== input.projectId || record.workspaceId !== input.workspaceId
       || record.processId !== input.processId || record.terminalId !== input.terminalId
       || record.harnessSessionId !== input.sessionId || record.harnessGeneration !== input.processGeneration
-      || record.harnessLeaseId !== input.leaseId || record.execId === null) {
+      || record.harnessLeaseId !== input.leaseId
+      || record.terminalBackend !== "tmux" && record.execId === null) {
       throw failure("PROCESS_IDENTITY_MISMATCH", "The retained process does not match this exact harness admission.", {
         processId: input.processId
       });
@@ -1355,6 +1558,18 @@ export class ExecutionManager {
       return "uncertain";
     }
     this.assertContext(record, context);
+
+    if (record.terminalBackend === "tmux" && record.persistentTerminal !== undefined) {
+      const reattached = await this.reconcilePersistentTerminal(live);
+      if (reattached) {
+        this.monitorPersistentTerminal(live);
+        return "attachable-running";
+      }
+      if (this.persistentPaneHasExited(live)) return "settled";
+      if (live.record.observedState === "killed" && live.record.terminalState === "lost") return "settled";
+      return "uncertain";
+    }
+    if (record.execId === null) return "uncertain";
 
     let inspection: Awaited<ReturnType<DockerEngineClient["inspectExec"]>>;
     try { inspection = await this.engine.inspectExec(record.execId); }

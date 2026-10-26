@@ -42,6 +42,14 @@ export type PersistentTerminalOwnership = {
   readonly revisionId: string;
   readonly revisionHash: string;
   readonly runtimePlanHash: string;
+  readonly harnessSessionId?: string;
+  readonly harnessGeneration?: number;
+  readonly harnessLeaseId?: string | null;
+};
+
+export type PersistentTerminalLaunch = {
+  readonly command: readonly string[];
+  readonly environment?: Readonly<Record<string, string>>;
 };
 
 export type TmuxPaneObservation = {
@@ -130,6 +138,11 @@ function appendArchiveEntry(pack: tar.Pack, header: tar.Header, bytes?: Buffer):
   });
 }
 
+function nativeBootstrapSessionName(sessionName: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(sessionName)) throw new Error("persistent-terminal-session-name-invalid");
+  return `bootstrap-${sessionName}`;
+}
+
 export async function buildPersistentTmuxArchive(uid: number, gid: number): Promise<Readable> {
   if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
     throw new Error("persistent-tmux-execution-identity-invalid");
@@ -186,9 +199,27 @@ export function persistentTmuxSessionName(terminalId: string): string {
 }
 
 export function persistentTerminalOwnershipMarker(identity: PersistentTerminalOwnership): string {
-  const stableIdentity = [identity.projectId, identity.workspaceId, identity.terminalId, identity.processId,
+  const stableIdentity: unknown[] = [identity.projectId, identity.workspaceId, identity.terminalId, identity.processId,
     identity.containerId, identity.generation, identity.revisionId, identity.revisionHash, identity.runtimePlanHash];
+  if (identity.harnessSessionId !== undefined) {
+    stableIdentity.push(identity.harnessSessionId, identity.harnessGeneration ?? null, identity.harnessLeaseId ?? null);
+  }
   return createHash("sha256").update(JSON.stringify(stableIdentity)).digest("hex");
+}
+
+function sessionEnvironmentNames(environment: Readonly<Record<string, string>> | undefined): string[] {
+  if (environment === undefined) return [];
+  const entries = Object.entries(environment).sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length > 256) throw new Error("persistent-terminal-session-environment-invalid");
+  const names: string[] = [];
+  for (const [name, value] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || name === "DEVSPACE_TERMINAL_OWNER"
+      || typeof value !== "string" || value.includes("\0")) {
+      throw new Error("persistent-terminal-session-environment-invalid");
+    }
+    names.push(name);
+  }
+  return names;
 }
 
 export function parseTmuxPaneObservation(output: string): TmuxPaneObservation | null {
@@ -396,7 +427,8 @@ export class PersistentTmuxRuntime {
     if (hashes.length !== expected.length || hashes.some((match, index) => match?.[1] !== expected[index]?.[0]
       || match?.[2] !== expected[index]?.[1])) return false;
     const metadata = await this.commandResult(binding, ["stat", "-c", "%a %u:%g", binding.artifactRoot,
-      binding.binaryPath, binding.configPath, `${binding.terminfoPath}/x/xterm-256color`, `${binding.terminfoPath}/t/tmux-256color`]);
+      binding.binaryPath, binding.configPath, `${binding.terminfoPath}/x/xterm-256color`, `${binding.terminfoPath}/t/tmux-256color`
+    ]);
     const lines = metadata.stdout.trim().split("\n");
     if (metadata.exitCode !== 0 || lines.length !== 5) return false;
     const expectedModes = ["555", "555", "400", "444", "444"];
@@ -421,24 +453,42 @@ export class PersistentTmuxRuntime {
   newSessionCommand(
     binding: PersistentTmuxBinding,
     identity: PersistentTerminalOwnership,
-    sessionName: string
+    sessionName: string,
+    launch?: PersistentTerminalLaunch
   ): string[] {
     return this.tmuxCommand(binding, [
       "new-session", "-d", "-s", sessionName,
       "-x", String(PERSISTENT_TMUX_INITIAL_COLUMNS), "-y", String(PERSISTENT_TMUX_INITIAL_ROWS),
       "-c", "/workspace", "-e", `DEVSPACE_TERMINAL_OWNER=${persistentTerminalOwnershipMarker(identity)}`,
-      "--", "/bin/sh", "-i"
+      "--", ...(launch === undefined ? ["/bin/sh", "-i"] : [...launch.command])
     ]);
   }
 
   async createSessionExec(
     binding: PersistentTmuxBinding,
     identity: PersistentTerminalOwnership,
-    sessionName: string
+    sessionName: string,
+    launch?: PersistentTerminalLaunch
   ): Promise<string> {
+    const environment = { ...binding.environment, ...(launch?.environment ?? {}) };
+    const environmentNames = launch === undefined ? [] : sessionEnvironmentNames(launch.environment);
+    if (environmentNames.length > 0 && !await this.configureSessionEnvironmentForwarding(binding, environmentNames)) {
+      // A new tmux server inherits the environment of the client that starts
+      // it. Start it from the clean runtime environment before any Native
+      // credentials are sent, then deliver those values only to the session.
+      const bootstrapName = nativeBootstrapSessionName(sessionName);
+      const bootstrap = await this.commandResult(binding, this.newSessionCommand(binding, identity, bootstrapName));
+      if (bootstrap.exitCode !== 0) throw new Error("persistent-tmux-clean-bootstrap-failed");
+      if (await this.lookupSession(binding, identity, bootstrapName, null, null) === null) {
+        throw new PersistentTmuxIdentityMismatchError("persistent-tmux-clean-bootstrap-identity-unverified");
+      }
+      if (!await this.configureSessionEnvironmentForwarding(binding, environmentNames)) {
+        throw new Error("persistent-tmux-clean-bootstrap-unverified");
+      }
+    }
     return await this.engine.createExec(binding.containerId, {
-      command: this.newSessionCommand(binding, identity, sessionName),
-      workingDirectory: "/", environment: binding.environment, attachStdin: false, tty: false
+      command: this.newSessionCommand(binding, identity, sessionName, launch),
+      workingDirectory: "/", environment, attachStdin: false, tty: false
     });
   }
 
@@ -502,6 +552,76 @@ export class PersistentTmuxRuntime {
       throw new PersistentTmuxIdentityMismatchError("persistent-tmux-session-owner-mismatch");
     }
     return observation;
+  }
+
+  async clearSessionEnvironment(
+    binding: PersistentTmuxBinding,
+    identity: PersistentTerminalOwnership,
+    sessionName: string,
+    variableNames: readonly string[],
+    sessionExists = true
+  ): Promise<void> {
+    const socket = await this.commandResult(binding, ["test", "-S", binding.socketPath]);
+    if (socket.exitCode === 1) return;
+    if (socket.exitCode !== 0) throw new Error("persistent-tmux-session-environment-cleanup-failed");
+    const metadata = await this.commandResult(binding, ["stat", "-c", "%F %a %u:%g", binding.socketPath]);
+    if (metadata.exitCode !== 0 || !isOwnedSecurePersistentTmuxSocketMetadata(metadata.stdout, binding.uid, binding.gid)) {
+      throw new PersistentTmuxIdentityMismatchError("persistent-tmux-socket-ownership-invalid");
+    }
+    for (const name of variableNames) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || name === "DEVSPACE_TERMINAL_OWNER") {
+        throw new Error("persistent-terminal-session-environment-invalid");
+      }
+      if (sessionExists) {
+        const clearedSession = await this.commandResult(binding, this.tmuxCommand(binding,
+          ["set-environment", "-u", "-t", `=${sessionName}`, name]));
+        if (clearedSession.exitCode !== 0) throw new Error("persistent-tmux-session-environment-cleanup-failed");
+      }
+      const clearedGlobal = await this.commandResult(binding, this.tmuxCommand(binding,
+        ["set-environment", "-g", "-u", name]));
+      if (clearedGlobal.exitCode !== 0) throw new Error("persistent-tmux-session-environment-cleanup-failed");
+    }
+    const reset = await this.commandResult(binding, this.tmuxCommand(binding,
+      ["set-option", "-g", "update-environment", ""]));
+    if (reset.exitCode !== 0) throw new Error("persistent-tmux-session-environment-cleanup-failed");
+    const bootstrapName = nativeBootstrapSessionName(sessionName);
+    const bootstrap = await this.lookupSession(binding, identity, bootstrapName, null, null);
+    if (bootstrap !== null) {
+      const removed = await this.commandResult(binding, this.tmuxCommand(binding,
+        ["kill-session", "-t", `=${bootstrapName}`]));
+      if (removed.exitCode !== 0) throw new Error("persistent-tmux-session-environment-cleanup-failed");
+    }
+  }
+
+  async configureSessionEnvironmentForwarding(binding: PersistentTmuxBinding, variableNames: readonly string[]): Promise<boolean> {
+    const names = [...new Set(variableNames)].sort();
+    if (names.length > 256 || names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)
+      || name === "DEVSPACE_TERMINAL_OWNER")) {
+      throw new Error("persistent-terminal-session-environment-invalid");
+    }
+    const socket = await this.commandResult(binding, ["test", "-S", binding.socketPath]);
+    if (socket.exitCode === 1) return false;
+    if (socket.exitCode !== 0) throw new Error("persistent-tmux-session-environment-forwarding-failed");
+    const metadata = await this.commandResult(binding, ["stat", "-c", "%F %a %u:%g", binding.socketPath]);
+    if (metadata.exitCode !== 0 || !isOwnedSecurePersistentTmuxSocketMetadata(metadata.stdout, binding.uid, binding.gid)) {
+      throw new PersistentTmuxIdentityMismatchError("persistent-tmux-socket-ownership-invalid");
+    }
+    await this.setSessionEnvironmentForwarding(binding, names);
+    return true;
+  }
+
+  async setSessionEnvironmentForwarding(
+    binding: PersistentTmuxBinding,
+    variableNames: readonly string[]
+  ): Promise<void> {
+    const names = [...new Set(variableNames)].sort();
+    if (names.length > 256 || names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)
+      || name === "DEVSPACE_TERMINAL_OWNER")) {
+      throw new Error("persistent-terminal-session-environment-invalid");
+    }
+    const configured = await this.commandResult(binding, this.tmuxCommand(binding,
+      ["set-option", "-g", "update-environment", names.join(" ")]));
+    if (configured.exitCode !== 0) throw new Error("persistent-tmux-session-environment-forwarding-failed");
   }
 
   async createAttachment(

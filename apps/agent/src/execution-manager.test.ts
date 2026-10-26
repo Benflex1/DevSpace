@@ -21,13 +21,17 @@ const roots: string[] = [];
 
 type FakePersistentRuntime = Pick<PersistentTmuxRuntime,
   "prepare" | "createSessionExec" | "startCreatedExec" | "inspectExec" | "lookupSession" | "createAttachment"
-  | "detachClient" | "resizeAttachment" | "history" | "live">;
+  | "detachClient" | "resizeAttachment" | "history" | "live" | "clearSessionEnvironment"
+  | "configureSessionEnvironmentForwarding">;
 
 function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> = {}) {
   const sessions = new Map<string, { readonly identity: PersistentTerminalOwnership; readonly sessionName: string }>();
   const deadSessions = new Set<string>();
+  const createdSessions: Array<{ readonly identity: PersistentTerminalOwnership; readonly sessionName: string;
+    readonly launch?: Parameters<PersistentTmuxRuntime["createSessionExec"]>[3] }> = [];
+  const environmentForwarding: string[][] = [];
   const counts = { prepares: 0, lookups: 0, sessionsCreated: 0, attachmentsCreated: 0, detaches: 0,
-    resizes: 0, history: 0, live: 0 };
+    resizes: 0, history: 0, live: 0, environmentClears: 0 };
   const detachedClients: Array<{ readonly sessionName: string; readonly clientPid: number; readonly clientName: string }> = [];
   const runtime = {
     prepare: async (containerId: string): Promise<PersistentTmuxBinding> => {
@@ -39,9 +43,12 @@ function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> =
         environment: { TMUX: "", TMUX_PANE: "" }
       };
     },
-    createSessionExec: async (_binding: PersistentTmuxBinding, identity: PersistentTerminalOwnership, sessionName: string) => {
+    createSessionExec: async (_binding: PersistentTmuxBinding, identity: PersistentTerminalOwnership, sessionName: string,
+      launch?: Parameters<PersistentTmuxRuntime["createSessionExec"]>[3]) => {
       counts.sessionsCreated += 1;
       sessions.set(sessionName, { identity, sessionName });
+      if (launch !== undefined) environmentForwarding.push(Object.keys(launch.environment ?? {}));
+      createdSessions.push({ identity, sessionName, ...(launch === undefined ? {} : { launch }) });
       return `tmux-create-${counts.sessionsCreated}`;
     },
     startCreatedExec: async (execId: string) => ({ execId, exitCode: 0, stdout: "", stderr: "" }),
@@ -68,10 +75,15 @@ function createFakePersistentRuntime(overrides: Partial<FakePersistentRuntime> =
     resizeAttachment: async () => { counts.resizes += 1; },
     history: async () => { counts.history += 1; },
     live: async () => { counts.live += 1; },
+    clearSessionEnvironment: async () => { counts.environmentClears += 1; environmentForwarding.push([]); },
+    configureSessionEnvironmentForwarding: async (_binding: PersistentTmuxBinding, names: readonly string[]) => {
+      environmentForwarding.push([...names]);
+      return true;
+    },
     ...overrides
   };
-  return { runtime: runtime as unknown as PersistentTmuxRuntime, sessions, counts, detachedClients,
-    markPaneDead: (sessionName: string) => deadSessions.add(sessionName) };
+  return { runtime: runtime as unknown as PersistentTmuxRuntime, sessions, counts, detachedClients, createdSessions,
+    environmentForwarding, markPaneDead: (sessionName: string) => deadSessions.add(sessionName) };
 }
 
 function createExecutionManager(
@@ -1471,7 +1483,7 @@ test("persistent attachment failure reports only a bounded private phase and cat
   expect(tmux.counts.sessionsCreated).toBe(1);
 });
 
-test("createHarness execs structured argv with CODEX_HOME only on that exec", async () => {
+test("createHarness admits an identity-bound Native tmux pane without persisting its credentials", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-exec-")); roots.push(root);
   await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
   const context = {
@@ -1481,7 +1493,6 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
   } as unknown as WorkspaceExecutionContext;
   const created: Array<{ command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
     consoleSize?: { columns: number; rows: number } }> = [];
-  let identityAtStart: Record<string, unknown> | null = null;
   const engine = {
     createExec: async (_containerId: string, input: {
       command: readonly string[]; environment: Record<string, string>; workingDirectory: string; tty: boolean;
@@ -1490,40 +1501,85 @@ test("createHarness execs structured argv with CODEX_HOME only on that exec", as
       created.push(input);
       return `exec-${created.length}`;
     },
-    startExecAttached: async (execId: string) => {
-      if (execId === "exec-1") {
-        identityAtStart = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${harnessTerminalId}.json`), "utf8")) as Record<string, unknown>;
-      }
-      return new PassThrough();
-    },
-    inspectExec: async (execId: string) => ({ ID: execId, Running: true, ExitCode: 0, ContainerID: "container-owned" })
+    startExecAttached: async () => new PassThrough(),
+    inspectExec: async (execId: string) => ({ ID: execId, Running: false, ExitCode: 0, ContainerID: "container-owned" })
   } as never;
-  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine);
+  const tmux = createFakePersistentRuntime();
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, engine,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
   await manager.initialize();
   const harnessTerminalId = "018f0f00-0000-7000-8000-0000000000aa";
   await manager.createHarness({
     projectId: id, workspaceId, processId: harnessTerminalId, terminalId: harnessTerminalId,
     command: ["codex", "resume", "thread-1"],
-    environment: { CODEX_HOME: "/opt/devspace/harness-home" },
+    environment: { CODEX_HOME: "/opt/devspace/harness-home", PROVIDER_KEY: "credential-sentinel" },
     sessionId: "018f0f00-0000-7000-8000-0000000000ab", processGeneration: 7, leaseId: "lease-test"
   });
-  expect(identityAtStart).toMatchObject({
+  const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${harnessTerminalId}.json`), "utf8")) as Record<string, unknown>;
+  expect(record).toMatchObject({
     kind: "terminal", executionRole: "harness", harnessSessionId: "018f0f00-0000-7000-8000-0000000000ab",
-    harnessGeneration: 7, harnessLeaseId: "lease-test", creationPhase: "start-intent"
+    harnessGeneration: 7, harnessLeaseId: "lease-test", creationPhase: "started", terminalBackend: "tmux",
+    observedState: "running"
   });
-  expect(created[0]).toMatchObject({
-    command: ["codex", "resume", "thread-1"],
-    workingDirectory: "/workspace",
-    tty: true,
-    consoleSize: { columns: 80, rows: 24 },
-    environment: { TERM: "xterm-256color", CODEX_HOME: "/opt/devspace/harness-home" }
+  expect(record.persistentTerminal).toMatchObject({ sessionName: `ds-${harnessTerminalId}`, panePid: 4321 });
+  expect(JSON.stringify(record)).not.toContain("credential-sentinel");
+  expect(tmux.createdSessions).toHaveLength(1);
+  expect(tmux.createdSessions[0]).toMatchObject({
+    sessionName: `ds-${harnessTerminalId}`,
+    identity: { projectId: id, workspaceId, terminalId: harnessTerminalId, processId: harnessTerminalId,
+      harnessSessionId: "018f0f00-0000-7000-8000-0000000000ab", harnessGeneration: 7, harnessLeaseId: "lease-test" },
+    launch: {
+      command: ["codex", "resume", "thread-1"],
+      environment: { CODEX_HOME: "/opt/devspace/harness-home", PROVIDER_KEY: "credential-sentinel" }
+    }
   });
+  expect(tmux.counts.sessionsCreated).toBe(1);
+  expect(tmux.environmentForwarding).toEqual([["CODEX_HOME", "PROVIDER_KEY"], []]);
   await manager.createTerminal({ projectId: id, workspaceId, terminalId });
   const terminalRecord = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${terminalId}.json`), "utf8")) as Record<string, unknown>;
   expect(terminalRecord.executionRole).toBe("terminal");
   expect(terminalRecord.harnessSessionId).toBeNull();
   expect(terminalRecord.terminalBackend).toBe("tmux");
-  expect(created).toHaveLength(1);
+  expect(created).toHaveLength(0);
+  expect(tmux.counts.sessionsCreated).toBe(2);
+  expect(tmux.environmentForwarding).toEqual([["CODEX_HOME", "PROVIDER_KEY"], []]);
+});
+
+test("pending Native tmux environment cleanup fences new workspace sessions", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-env-cleanup-fence-")); roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const context = {
+    projectId: id, workspaceId, revisionId: id, revisionHash: `sha256-jcs-v1:${"a".repeat(64)}`,
+    runtimePlanHash: `sha256-jcs-v1:${"b".repeat(64)}`, generation: 1,
+    ownership: { developmentContainer: { id: "container-owned" } }, options: { tasks: [] }
+  } as unknown as WorkspaceExecutionContext;
+  let clearAttempts = 0;
+  const tmux = createFakePersistentRuntime({
+    clearSessionEnvironment: async () => { clearAttempts += 1; throw new Error("cleanup-unavailable"); }
+  });
+  const manager = createExecutionManager(root, { executionContext: async () => context } as never, {} as never,
+    durableJsonWriter, undefined, undefined, tmux.runtime);
+  await manager.initialize();
+  const harnessId = "018f0f00-0000-7000-8000-0000000000ac";
+  await expect(manager.createHarness({
+    projectId: id, workspaceId, processId: harnessId, terminalId: harnessId,
+    command: ["codex"], environment: { PROVIDER_KEY: "credential-sentinel" },
+    sessionId: "018f0f00-0000-7000-8000-0000000000ad", processGeneration: 1, leaseId: "lease-test"
+  })).rejects.toThrow("still being reconciled");
+
+  const record = JSON.parse(await readFile(path.join(root, "ownership", "executions", `${harnessId}.json`), "utf8")) as Record<string, unknown>;
+  expect(record.persistentTerminal).toMatchObject({ sessionEnvironmentKeys: ["PROVIDER_KEY"],
+    sessionEnvironmentCleanupPending: true });
+  expect(JSON.stringify(record)).not.toContain("credential-sentinel");
+  expect(clearAttempts).toBeGreaterThan(0);
+  await expect(manager.createTerminal({ projectId: id, workspaceId, terminalId }))
+    .rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+  await expect(manager.createHarness({
+    projectId: id, workspaceId, processId: "018f0f00-0000-7000-8000-0000000000ae",
+    terminalId: "018f0f00-0000-7000-8000-0000000000ae", command: ["codex"], environment: {},
+    sessionId: "018f0f00-0000-7000-8000-0000000000af", processGeneration: 1, leaseId: "another-lease"
+  })).rejects.toMatchObject({ failure: { code: "RESOURCE_STATE_CONFLICT" } });
+  expect(tmux.counts.sessionsCreated).toBe(1);
 });
 
 test("ordinary task execs stay non-TTY while interactive terminals receive initial PTY geometry", async () => {

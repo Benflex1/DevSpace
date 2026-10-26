@@ -7,8 +7,10 @@ import { afterEach, expect, test, vi } from "vitest";
 import { buttonText, click, FakeNode, findButtons, installTerminalTestDom, settleReact, visibleText } from "./terminal-test-dom.js";
 
 vi.mock("./terminal-tab.js", () => ({
-  TerminalTab: ({ terminal, onRefresh }: { terminal: { id: string }; onRefresh: () => void }) => createElement("div",
-    { "data-terminal-id": terminal.id }, createElement("button", { onClick: onRefresh }, "Refresh projection"), "attached")
+  TerminalTab: ({ terminal, onRefresh, nativeHarnessSessionId }: {
+    terminal: { id: string }; onRefresh: () => void; nativeHarnessSessionId?: string;
+  }) => createElement("div", { "data-terminal-id": terminal.id, "data-native-session-id": nativeHarnessSessionId },
+    createElement("button", { onClick: onRefresh }, "Refresh projection"), "attached")
 }));
 
 const projectId = "018f1f34-7000-7000-8000-000000000001";
@@ -29,6 +31,12 @@ function terminalIds(node: FakeNode): string[] {
   const terminalId = node.attributes["data-terminal-id"];
   const ids = terminalId === undefined ? [] : [terminalId];
   return ids.concat(node.children.flatMap(terminalIds));
+}
+
+function nativeSessionIds(node: FakeNode): string[] {
+  const sessionId = node.attributes["data-native-session-id"];
+  const ids = sessionId === undefined ? [] : [sessionId];
+  return ids.concat(node.children.flatMap(nativeSessionIds));
 }
 
 function findSessionSelector(node: FakeNode): FakeNode | undefined {
@@ -96,6 +104,41 @@ test("refresh reconciles an in-progress admission without selecting an older los
   expect(terminalIds(rootElement)).toEqual([currentSessionId]);
   expect(requests.every((request) => request.method === "GET")).toBe(true);
   expect(visibleText(rootElement)).toContain("Connecting");
+});
+
+test("Native reload and navigation reselect the same live terminal without another session create", async () => {
+  const firstElement = installTerminalTestDom(class {});
+  const requests: Array<{ readonly method: string; readonly url: string }> = [];
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    requests.push({ method, url: requestUrl(input) });
+    return Promise.resolve(jsonResponse({ definitions: [], sessions: [session(currentSessionId, "active", "admitted")] }));
+  }));
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  let firstRoot = createRoot(firstElement as never);
+  roots.push(firstRoot);
+  act(() => { firstRoot.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+  expect(terminalIds(firstElement)).toEqual([currentSessionId]);
+  expect(nativeSessionIds(firstElement)).toEqual([currentSessionId]);
+
+  act(() => { firstRoot.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: false })); });
+  await settleReact();
+  act(() => { firstRoot.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+  firstRoot.unmount();
+  roots.splice(roots.indexOf(firstRoot), 1);
+
+  const reloadElement = firstElement.ownerDocument!.createElement("div");
+  firstRoot = createRoot(reloadElement as never);
+  roots.push(firstRoot);
+  act(() => { firstRoot.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+
+  expect(terminalIds(reloadElement)).toEqual([currentSessionId]);
+  expect(nativeSessionIds(reloadElement)).toEqual([currentSessionId]);
+  expect(requests.every((request) => request.method === "GET")).toBe(true);
+  expect(requests.filter((request) => request.url.includes("/harness")).length).toBeGreaterThanOrEqual(3);
 });
 
 test("an uncertain admission retries only the exact existing session before attaching", async () => {
