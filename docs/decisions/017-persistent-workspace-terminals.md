@@ -70,13 +70,19 @@ continues until exited. Only newly admitted persistent terminals get this contra
 
 **Transport and input owner.** Use the existing Engine Unix socket operations: exec create
 with structured `Cmd`, attached TTY start, resize and inspect; fixed non-TTY tmux queries supply
-pane observations. Launch argv directly through tmux; its single-command-argument form invokes
-a shell, so use a tiny packaged `exec-argv` launcher to preserve even zero-argument harness argv
-without shell evaluation. It immediately execs the approved program; it is not a daemon or a
-browser-accessible command service. Bootstrap the shared server
-from a controlled container baseline before adding harness variables: tmux inherits its creator's
-environment globally. Supply `CODEX_HOME` and custom harness variables only to their intended
-session. Disable attach-time environment updates; attaching must not change provider environment.
+pane observations. Pass Native launch argv as structured arguments to `new-session`; do not
+interpolate command strings. Regression coverage verifies shell metacharacters remain literal.
+Bootstrap the shared server from a controlled container baseline. Tmux inherits its creator's
+environment, so the static config disables attach-time environment updates. During Native session
+creation, temporarily allow only the exact Native environment variable names; pass their values
+through Docker Exec environment, never command argv. Clear those names from the exact session and
+global tmux environment and reset the update list after proving the pane. A first server uses a
+temporary identity-bound bootstrap pane created with only the clean runtime environment; Native
+credentials are sent only after that server is verified. Remove the bootstrap pane after the Native
+pane is proven. This keeps credentials out of the long-lived tmux server process environment.
+Persist the names and cleanup-pending state, never values. If cleanup cannot be proved, retain that
+state and fence new workspace session admission until cleanup succeeds. Attaching must not change
+provider environment.
 
 Keep one Agent attachment reservation before upgrade. A second browser gets a clear
 “already attached” state; it does not steal input or retry indefinitely. The Web relay maps Agent
@@ -161,9 +167,19 @@ practical browser acceptance. The t3code comparison is recorded in the feasibili
 [Feasibility report](../feasibility/persistent-terminals-2026-10-13.md): local tmux 3.4 and the
 static 3.7c artifact preserved shell/TUI PIDs, redraw, cursor, resize, input and history through
 client loss. PR #75 passed its rootless Docker feasibility gate for both target Debian images.
-Slice 1 implements ordinary shells and extends that existing Docker acceptance test through the
-production Agent manager across manager reinitialization. Full Agent/Web process restart and
-browser acceptance remain unverified delivery gates. Main risks are image/UID/terminfo coverage
+Persistent-terminal Slice 1 merged in PR #76. Slice 2 reuses the same runtime for Native harness
+generations, binds the tmux marker to Native session/generation/lease identity, and keeps Codex
+output inline with `--no-alt-screen` so the bounded tmux history can retain conversation lines.
+Its focused Agent and Web tests cover exact reattachment, single-pane ownership, redraw, history
+controls, continued input, private-home lease retention, and pane-exit settlement.
+
+The 2026-10-26 local behavior gate used the actual Codex CLI 0.163.0 against an isolated synthetic
+Responses endpoint, without provider credentials. The default Codex TUI entered the alternate
+screen. With `--no-alt-screen`, earlier long-turn markers remained in tmux pane history, the same
+Codex PID survived tmux client detach/reattach and resize, and the current screen redrew. This
+establishes technical feasibility only. Authenticated real-provider and DevSpace browser
+F5/navigation acceptance remain pending; until those pass, this ADR does not claim that earlier
+Codex messages are reliably reachable after refresh. Main risks are image/UID/terminfo coverage
 and TUI key/display compatibility. Tmux server/container death loses live state; persistence
 covers Web/Agent/browser loss while the container keeps running. Rare ambiguous admission and
 hostile same-container mutation keep conservative recovery; perfect crash recovery, multi-owner
@@ -186,5 +202,6 @@ fencing and full browser history serialization are deferred.
    and safe home settlement; Start must not silently resurrect them.
 
 Each slice is separately reviewable. Slice 1 implements persistent ordinary shells and browser
-recovery. Native continuity and full exit/close settlement remain deferred to Slices 2 and 3.
-The required full Agent/Web restart acceptance remains a delivery gate for the Slice 1 PR.
+recovery; Slice 2 implements persistent Native process continuity. Full workspace Stop/Start and
+close settlement remain Slice 3 work. Real-provider and real-browser acceptance for Native history
+remain explicit delivery evidence and must not be inferred from process continuity alone.

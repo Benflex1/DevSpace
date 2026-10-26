@@ -196,8 +196,13 @@ terminalized as non-retryable `GIT_MUTATION_OUTCOME_UNCERTAIN` failures and are 
 mutation that is known to have completed but cannot settle observation or its journal remains
 recoverable, preserving mutation truthfulness until restart reconciliation. Project creation from
 scratch and later Workbench polish remain deferred product work. Persistent ordinary shells are
-implemented in Slice 1 and in review. Native continuity is deferred to Slice 2; full persistent-
-terminal exit and close settlement is deferred to Slice 3.
+implemented in Slice 1. Native continuity Slice 2 is implemented in the current review branch:
+new Native harness generations use the existing tmux runtime, retain the exact session/process/
+lease identity across Agent recovery, and launch Codex with inline terminal output for bounded
+history. Focused Agent and Web tests pass for reattachment and history controls. Acceptance with
+authenticated Codex and the real DevSpace browser after F5/navigation is still pending; earlier
+conversation reachability after refresh is not yet claimed as fixed. Full workspace Stop/Start and
+close settlement remain Slice 3 work.
 
 ## Private GitHub Repository Access status
 
