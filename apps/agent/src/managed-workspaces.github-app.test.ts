@@ -375,11 +375,28 @@ test("composes a private fetch through the real transaction and reports success 
     .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
 });
 
-test("keeps a real successful Fetch recoverable when final ownership validation fails", async () => {
+test("recovers a durable private Fetch and syncs remote refs without disturbing an existing workspace", async () => {
   const calls: GithubHttpRequest[] = [];
   const h = await createHarness((roots) => createRealAuthority(roots, calls));
-  await h.managed.createManagedStore({ projectId, source: sourceLocator }, "018f0f00-0000-7000-8000-000000000114");
+  await prepareWorkspace(h);
   calls.splice(0);
+
+  const worktree = h.managed.worktreePath(workspaceId);
+  await expect(readFile(path.join(worktree, ".git"), "utf8")).resolves.toBe("gitdir: .devspace-git\n");
+  await expect(exec("/usr/bin/git", ["-C", worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    .resolves.toMatchObject({ stdout: `${worktree}/.devspace-git\n` });
+  const initialWorkspaceRemoteCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "refs/remotes/origin/main"])).stdout.trim();
+  await writeFile(path.join(worktree, "local-commit.txt"), "unpublished workspace commit\n", "utf8");
+  await exec("/usr/bin/git", ["-C", worktree, "add", "local-commit.txt"]);
+  await exec("/usr/bin/git", ["-C", worktree, "commit", "-m", "Unpublished workspace commit"]);
+  const localCommit = (await exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+  const branchBefore = (await exec("/usr/bin/git", ["-C", worktree, "symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
+  expect(branchBefore).toBe(pushBranch);
+  await writeFile(path.join(worktree, "staged.txt"), "staged value\n", "utf8");
+  await exec("/usr/bin/git", ["-C", worktree, "add", "staged.txt"]);
+  await writeFile(path.join(worktree, "staged.txt"), "staged and unstaged value\n", "utf8");
+  await writeFile(path.join(worktree, "untracked.txt"), "untracked workspace content\n", "utf8");
+  const dirtyStatusBefore = (await exec("/usr/bin/git", ["-C", worktree, "status", "--porcelain=v1", "--untracked-files=all"])).stdout;
 
   await writeFile(path.join(h.source, "README.md"), "post-validation-failure\n", "utf8");
   await exec("/usr/bin/git", ["-C", h.source, "add", "README.md"]);
@@ -417,8 +434,67 @@ test("keeps a real successful Fetch recoverable when final ownership validation 
   expect(fetchOwnershipLoads).toBe(2);
   await expect(exec("/usr/bin/git", ["--git-dir", h.managed.repositoryPath(projectId), "rev-parse", "refs/remotes/origin/main"]))
     .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+  await expect(exec("/usr/bin/git", ["-C", worktree, "rev-parse", "refs/remotes/origin/main"]))
+    .resolves.toMatchObject({ stdout: `${initialWorkspaceRemoteCommit}\n` });
   expect((await readFile(path.join(h.managed.repositoryPath(projectId), "FETCH_HEAD"))).byteLength).toBeGreaterThan(0);
-  expect(calls.filter((request) => request.method === "DELETE" && request.path === "/installation/token")).toHaveLength(1);
+
+  await h.managed.shutdown();
+  const workspaceSyncInvocations: ReturnType<typeof protectedGitInvocation>[] = [];
+  const protectedRetryGit: GitRunner = async (args) => {
+    const isFixtureOriginFetch = args.includes("fetch") && args.includes("origin");
+    const isWorkspaceRemoteRefSync = args.includes("fetch") && args.includes("--no-write-fetch-head")
+      && args.some((argument) => argument.startsWith("+refs/remotes/origin/*:"));
+    // The fixture rewrites the authenticated HTTPS origin to a local source repository. Keep this
+    // allowance on that one command; the workspace-to-Agent-store sync gets no runner-side override.
+    const invocation = protectedGitInvocation([
+      "-c", `url.${h.source}.insteadOf=${sourceUrl}`,
+      ...(isFixtureOriginFetch ? ["-c", "protocol.file.allow=always"] : []),
+      ...args
+    ]);
+    if (isWorkspaceRemoteRefSync) workspaceSyncInvocations.push(invocation);
+    const result = await exec("/usr/bin/git", invocation.args, { env: invocation.env });
+    return { stdout: String(result.stdout), stderr: String(result.stderr) };
+  };
+  const resumedManaged = new ManagedWorkspaces(h.roots, protectedRetryGit, undefined, undefined, undefined, undefined, undefined, undefined, h.broker);
+  resumedManaged.setGithubAuthority(h.authority);
+  await resumedManaged.initialize();
+  managedInstances.push(resumedManaged);
+
+  const resumedJournal = new OperationJournal(journalRoot, () => new Date("2026-08-04T12:00:00.000Z"));
+  await resumedJournal.initialize();
+  expect(resumedJournal.get(operationId)).toMatchObject({ state: "running", failure: null });
+  const resumedEvents = new AgentEventLog("018f0f00-0000-7000-8000-000000000120", () => new Date("2026-08-04T12:00:00.000Z"));
+  const succeeded = vi.spyOn(resumedEvents, "succeeded");
+  const resumedExecutor = new OperationExecutor(resumedJournal, resumedManaged, resumedEvents);
+  await resumedExecutor.initialize();
+  resumedExecutor.resumeAccepted();
+  await resumedExecutor.drain();
+
+  expect(resumedJournal.get(operationId)).toMatchObject({ state: "succeeded", failure: null });
+  expect(succeeded).toHaveBeenCalled();
+  expect(workspaceSyncInvocations).toHaveLength(1);
+  expect(workspaceSyncInvocations[0]?.args).toContain("protocol.allow=never");
+  expect(workspaceSyncInvocations[0]?.args).toContain("protocol.file.allow=always");
+  expect(workspaceSyncInvocations[0]?.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+  expect(workspaceSyncInvocations[0]?.env.GIT_CONFIG_COUNT).toBe("0");
+  expect(JSON.stringify(workspaceSyncInvocations[0])).not.toContain("exact-repository-token");
+  expect(calls.filter((request) => request.path.endsWith("/access_tokens")
+    && (request.body as { readonly kind?: unknown } | undefined)?.kind === "exact-repository-token")).toHaveLength(2);
+  await expect(exec("/usr/bin/git", ["-C", worktree, "rev-parse", "refs/remotes/origin/main"]))
+    .resolves.toMatchObject({ stdout: `${secondCommit}\n` });
+  await expect(exec("/usr/bin/git", ["-C", worktree, "rev-parse", "HEAD"]))
+    .resolves.toMatchObject({ stdout: `${localCommit}\n` });
+  await expect(exec("/usr/bin/git", ["-C", worktree, "symbolic-ref", "--quiet", "--short", "HEAD"]))
+    .resolves.toMatchObject({ stdout: `${branchBefore}\n` });
+  await expect(exec("/usr/bin/git", ["-C", worktree, "status", "--porcelain=v1", "--untracked-files=all"]))
+    .resolves.toMatchObject({ stdout: dirtyStatusBefore });
+  await expect(readFile(path.join(worktree, "staged.txt"), "utf8"))
+    .resolves.toBe("staged and unstaged value\n");
+  await expect(readFile(path.join(worktree, "untracked.txt"), "utf8"))
+    .resolves.toBe("untracked workspace content\n");
+  await expect(readFile(path.join(worktree, "local-commit.txt"), "utf8"))
+    .resolves.toBe("unpublished workspace commit\n");
+  expect(calls.filter((request) => request.method === "DELETE" && request.path === "/installation/token")).toHaveLength(2);
 });
 
 test("does not cross the completed boundary when a real Fetch runner fails after local updates", async () => {
