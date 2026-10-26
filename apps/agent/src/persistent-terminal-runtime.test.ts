@@ -294,7 +294,7 @@ describe("persistent tmux identity", () => {
       if (result.error !== undefined) throw result.error;
       return result;
     };
-    const baseBinding = persistentTmuxBinding(ownership.containerId, 1000, 1000);
+    const baseBinding = persistentTmuxBinding(ownership.containerId, process.getuid?.() ?? 1000, process.getgid?.() ?? 1000);
     const binding = { ...baseBinding, binaryPath: tmuxPath, configPath, socketDirectory: directory, socketPath,
       environment: { ...baseBinding.environment, TMUX_TMPDIR: directory } };
     const execCommands = new Map<string, readonly string[]>();
