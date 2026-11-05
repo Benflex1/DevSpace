@@ -203,7 +203,14 @@ test("keeps Edit and Changes Monaco surfaces usable through a mode toggle", asyn
     const url = new URL(request.url());
     if (url.pathname === `/api/projects/${projectId}/files` && url.searchParams.get("action") === "read") reads += 1;
   });
+  const tools = page.getByRole("navigation", { name: "Workbench tools" });
+  await tools.getByRole("button", { name: /Tasks/u }).click();
+  await expect(page.locator("#sidebar-tasks")).toBeFocused();
+  await tools.getByRole("button", { name: /Terminals/u }).click();
+  await expect(page.locator("#sidebar-terminals")).toBeFocused();
+  await expect(tools.getByRole("button", { name: /Terminals/u })).toHaveAttribute("aria-pressed", "false");
   const surface = await openReadme(page);
+  await expect(tools.locator("[aria-pressed=true]")).toHaveCount(0);
 
   const editGeometry = await captureEditorGeometry(page, ".monaco-editor");
   assertUsableEditorGeometry("initial Edit", editGeometry);

@@ -43,6 +43,12 @@ container. Neither test path proves the full real Agent/Web process restart and 
 sequence with PID continuity. Keep the Slice 1 PR in draft until that process-level acceptance
 is run and recorded.
 
+Running the whole browser suite unsharded on one dev server previously exhausted V8's default
+heap (Next.js webpack compiling Monaco reaches roughly 2.6 GB RSS); the E2E server now sets an
+explicit Web heap ceiling. Local runs as root fail permission-based Agent tests by design, and
+sandboxes that inject `GIT_SSL_CAINFO` or cannot resolve `*.localhost` will fail the askpass and
+preview-path checks respectively; these are environment limitations, not product regressions.
+
 ## Native harness slice
 
 The generic native AI harness is implemented on `feat/generic-native-ai-harness`. The Workbench

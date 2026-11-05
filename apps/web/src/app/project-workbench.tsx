@@ -647,19 +647,27 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
   hasUnsavedEditorChanges: boolean;
   onOpenTerminal: (terminal: TerminalView) => void; onCreateTerminal: () => void; onRunTask: (taskKey: string) => void;
 }) {
+  const activeKind = tabs.tabs.find((tab) => tab.id === tabs.activeTabId)?.kind ?? null;
+  const navClass = (active: boolean) => `workbench-nav-item${active ? " active" : ""}`;
+  const openPreviews = () => {
+    const only = previews.length === 1 ? previews[0] : undefined;
+    if (only !== undefined) onOpenPreview(only); else revealSidebarSection("previews");
+  };
   return <aside className="workbench-sidebar" aria-label="Project navigation">
-    <div className="sidebar-heading"><span>Project</span><span className="sidebar-kicker">M1</span></div>
+    <div className="sidebar-heading"><span>Project</span></div>
     <nav className="workbench-nav" aria-label="Workbench tools">
-      <button type="button" className="workbench-nav-item active"><span aria-hidden="true">▸</span> Terminals <span className="nav-count">{terminals.length}</span></button>
-      <button type="button" className="workbench-nav-item"><span aria-hidden="true">≡</span> Tasks <span className="nav-count">{tasks.length}</span></button>
-      <button type="button" className="workbench-nav-item" onClick={onOpenAi}>
+      <button type="button" className={navClass(activeKind === "terminal")} aria-pressed={activeKind === "terminal"} onClick={() => revealSidebarSection("terminals")}>
+        <span aria-hidden="true">▸</span> Terminals <span className="nav-count">{terminals.length}</span></button>
+      <button type="button" className={navClass(activeKind === "task-output")} aria-pressed={activeKind === "task-output"} onClick={() => revealSidebarSection("tasks")}>
+        <span aria-hidden="true">≡</span> Tasks <span className="nav-count">{tasks.length}</span></button>
+      <button type="button" className={navClass(activeKind === "ai")} aria-pressed={activeKind === "ai"} onClick={onOpenAi}>
         <span aria-hidden="true">✦</span> AI<span className="nav-future">Beta</span>
       </button>
-      <button type="button" className="workbench-nav-item" onClick={() => { const first = previews[0]; if (first !== undefined) onOpenPreview(first); }}>
+      <button type="button" className={navClass(activeKind === "preview")} aria-pressed={activeKind === "preview"} onClick={openPreviews}>
         <span aria-hidden="true">▾</span> Previews <span className="nav-count">{previews.length}</span>
       </button>
-      <button type="button" className={`workbench-nav-item ${tabs.activeTabId === "project-options" ? "active" : ""}`}
-        aria-pressed={tabs.activeTabId === "project-options"} onClick={onOpenProjectOptions}>
+      <button type="button" className={navClass(activeKind === "project-options")}
+        aria-pressed={activeKind === "project-options"} onClick={onOpenProjectOptions}>
         <span aria-hidden="true">⚙</span> Project Options
       </button>
     </nav>
@@ -669,7 +677,7 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
     </div>
     <WorkspaceChanges status={gitStatus} loading={gitLoading} error={gitError} agentReachable={agentReachable} hasUnsavedEditorChanges={hasUnsavedEditorChanges} busyAction={gitBusyAction}
       onRefresh={onRefreshGit} onOpenFile={onOpenChangedFile} onStage={onStage} onUnstage={onUnstage} onCommit={onCommit} />
-    <div className="sidebar-section">
+    <div className="sidebar-section" id="sidebar-terminals" tabIndex={-1}>
       <div className="sidebar-section-heading"><h2>Terminals</h2><button type="button" className="icon-button" disabled={!actionsAvailable}
         onClick={onCreateTerminal} aria-label="Create terminal" title={actionsAvailable ? "Create terminal" : "The Agent and runtime must be available to create a terminal"}>+</button></div>
       {terminals.length === 0 ? <p className="sidebar-empty">No terminal sessions yet.</p> : <ul className="terminal-list">
@@ -686,7 +694,7 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
         })}
       </ul>}
     </div>
-    <div className="sidebar-section previews-sidebar-section">
+    <div className="sidebar-section previews-sidebar-section" id="sidebar-previews" tabIndex={-1}>
       <div className="sidebar-section-heading"><h2>Previews</h2></div>
       {previews.length === 0 ? <p className="sidebar-empty">No configured previews.</p> : <ul className="preview-list">
         {previews.map((preview) => {
@@ -702,7 +710,7 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
         })}
       </ul>}
     </div>
-    <div className="sidebar-section tasks-sidebar-section">
+    <div className="sidebar-section tasks-sidebar-section" id="sidebar-tasks" tabIndex={-1}>
       <div className="sidebar-section-heading"><h2>Tasks</h2></div>
       {tasks.length === 0 ? <p className="sidebar-empty">No configured tasks.</p> : <ul className="sidebar-task-list">
         {tasks.map((task) => <li key={task.key}><span><strong>{task.displayName}</strong><code>{task.key}</code></span>
@@ -712,6 +720,13 @@ function WorkbenchSidebar({ projectId, workspaceId, agentReachable, gitStatus, g
         <div key={run.id}><code>{run.taskKey}</code><span className={`run-state ${run.state}`}>{run.state}</span>{run.exitCode !== null && <span>Exit code: {run.exitCode}</span>}</div>)}</div>}
     </div>
   </aside>;
+}
+
+function revealSidebarSection(section: "terminals" | "tasks" | "previews"): void {
+  const element = document.getElementById(`sidebar-${section}`);
+  if (element === null) return;
+  element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  element.focus({ preventScroll: true });
 }
 
 function WorkbenchTabStrip({ tabs, onActivate, onClose, onCreateTerminal, canCreateTerminal, dirtyEditorIds, dirtyProjectOptions }: {

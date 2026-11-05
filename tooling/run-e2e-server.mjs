@@ -105,7 +105,7 @@ function startAgent() {
 }
 function startWeb() {
   webChild = spawn("pnpm", ["--filter", "@devspace/web", "run", "dev"], {
-    env: { ...environment, DEVSPACE_WEB_HOST: "127.0.0.1", PORT: "3100" }, stdio: "inherit", detached: true
+    env: { ...environment, DEVSPACE_WEB_HOST: "127.0.0.1", PORT: "3100", NODE_OPTIONS: webNodeOptions(environment.NODE_OPTIONS) }, stdio: "inherit", detached: true
   });
   watchChild(webChild);
 }
@@ -215,3 +215,11 @@ async function stop(code = 0) {
 }
 process.once("SIGINT", () => { void stop(0); });
 process.once("SIGTERM", () => { void stop(0); });
+
+// The Next.js development compiler (webpack plus Monaco) needs more than V8's default heap when a
+// single server runs the whole browser suite; CI only avoids this by sharding. Respect an explicit
+// caller-provided limit.
+function webNodeOptions(existing) {
+  const current = existing ?? "";
+  return /--max-old-space-size/u.test(current) ? current : `${current} --max-old-space-size=6144`.trim();
+}
