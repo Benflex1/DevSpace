@@ -168,22 +168,41 @@ practical browser acceptance. The t3code comparison is recorded in the feasibili
 static 3.7c artifact preserved shell/TUI PIDs, redraw, cursor, resize, input and history through
 client loss. PR #75 passed its rootless Docker feasibility gate for both target Debian images.
 Persistent-terminal Slice 1 merged in PR #76. Slice 2 reuses the same runtime for Native harness
-generations, binds the tmux marker to Native session/generation/lease identity, and keeps Codex
-output inline with `--no-alt-screen` so the bounded tmux history can retain conversation lines.
+generations and binds the tmux marker to Native session/generation/lease identity. Codex is launched
+with `--no-alt-screen`, but this only makes its TUI use the primary screen; it does not make the
+resulting tmux line history a faithful conversation transcript.
 Its focused Agent and Web tests cover exact reattachment, single-pane ownership, redraw, history
 controls, continued input, private-home lease retention, and pane-exit settlement.
 
 The 2026-10-26 local behavior gate used the actual Codex CLI 0.163.0 against an isolated synthetic
 Responses endpoint, without provider credentials. The default Codex TUI entered the alternate
 screen. With `--no-alt-screen`, earlier long-turn markers remained in tmux pane history, the same
-Codex PID survived tmux client detach/reattach and resize, and the current screen redrew. This
-establishes technical feasibility only. Authenticated real-provider and DevSpace browser
-F5/navigation acceptance remain pending; until those pass, this ADR does not claim that earlier
-Codex messages are reliably reachable after refresh. Main risks are image/UID/terminfo coverage
-and TUI key/display compatibility. Tmux server/container death loses live state; persistence
-covers Web/Agent/browser loss while the container keeps running. Rare ambiguous admission and
-hostile same-container mutation keep conservative recovery; perfect crash recovery, multi-owner
-fencing and full browser history serialization are deferred.
+Codex PID survived tmux client detach/reattach and resize, and the current screen redrew. The later
+authenticated Bankroll dogfood found that this history is still not usable: the retained lines
+include limited conversation text mixed with Codex status/usage redraws, numbers and terminal-control
+fragments. This is consistent with tmux retaining primary-screen lines emitted during a live TUI;
+it does not establish that xterm created those entries. Browser reload resets xterm scrollback and
+reattaches to tmux; xterm then renders tmux's new-client stream. A byte-for-byte pane-history versus
+browser-render capture remains required to close that distinction conclusively.
+
+Native terminal navigation is therefore not an accepted earlier-message interface. Keep terminal
+continuity and screen navigation for live interaction. The concrete history direction is a separate
+read-only Codex adapter over the exact Codex rollout already bound to the Native session. It should
+use typed provider-owned records, return only bounded user and completed assistant text, and exclude
+tool output, instructions, credentials, and unrelated private-home records. Enforce the exact
+authenticated actor/project/workspace/DevSpace-session/native-thread binding at Web and Agent,
+validate the canonical rollout identity in the dedicated private home, cap message count and bytes,
+redact secrets, and expose no host paths. This does not change provider-neutral Native process
+execution or parse terminal escape sequences. See
+[`native-codex-history-2026-11-12.md`](../feasibility/native-codex-history-2026-11-12.md).
+
+F5 tab restoration is separate from conversation history. The Workbench may retain a bounded,
+versioned active-tab identity in browser session storage scoped by exact project and workspace; it
+must resolve resource IDs against current server projections and never persist editor buffers or
+credentials. Automated restoration coverage exists, while real-browser acceptance remains pending.
+Tmux server/container death loses live state; persistence covers Web/Agent/browser loss while the
+container keeps running. Rare ambiguous admission and hostile same-container mutation keep
+conservative recovery; perfect crash recovery and multi-owner fencing are deferred.
 
 1. **Persistent shell slice:** binary delivery, exact identity/admission and Agent recovery;
    browser attach/reset/resize, History control and single input owner. Prove a running shell

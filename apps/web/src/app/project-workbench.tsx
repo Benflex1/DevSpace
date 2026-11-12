@@ -24,6 +24,7 @@ import {
 import { editorDocumentKey, WorkbenchEditorDocuments } from "./workbench-editor-documents.js";
 import { confirmWorkbenchLeave, registerBeforeUnloadGuard } from "./workbench-unsaved-changes.js";
 import type { BrowserAiTurn } from "./ai-session-projection.js";
+import { restoreActiveWorkbenchTab, serializeActiveWorkbenchTab, workbenchTabStorageKey } from "./workbench-tab-restoration.js";
 
 type Task = { key: string; displayName: string };
 type TaskRun = { id: string; taskKey: string; processId: string | null; state: string; processState: string | null; exitCode: number | null };
@@ -62,6 +63,8 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
 }) {
   const router = useRouter();
   const [tabs, setTabs] = useState<WorkbenchTabState>(emptyWorkbenchTabs);
+  const [restoredTabScope, setRestoredTabScope] = useState<string | null>(null);
+  const tabStorageKey = workbenchTabStorageKey(projectId, workspaceId);
   const [editorDocuments] = useState(() => new WorkbenchEditorDocuments());
   const confirmedWorkbenchLeave = useRef(false);
   const [editorPresentationGeneration, setEditorPresentationGeneration] = useState(0);
@@ -97,6 +100,35 @@ export function ProjectWorkbench({ projectId, workspaceId, projectName, branchNa
   const lostDialogSession = useRef<LostTerminalDialogSession | null>(null);
   currentTerminals.current = terminals;
   currentPreviews.current = previews;
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      let restored: WorkbenchTabState | null;
+      try {
+        restored = restoreActiveWorkbenchTab(window.sessionStorage.getItem(tabStorageKey), projectId, workspaceId,
+          currentTerminals.current, currentPreviews.current);
+        const editor = restored?.tabs[0];
+        if (editor?.kind === "editor") {
+          const query = new URLSearchParams({ action: "read", path: editor.fileId });
+          const response = await fetch(`/api/projects/${projectId}/files?${query.toString()}`, { cache: "no-store" });
+          if (!response.ok) restored = null;
+        }
+      } catch { restored = null; }
+      if (cancelled) return;
+      setTabs(restored ?? emptyWorkbenchTabs);
+      setRestoredTabScope(tabStorageKey);
+    };
+    void restore().catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectId, tabStorageKey, workspaceId]);
+  useEffect(() => {
+    if (restoredTabScope !== tabStorageKey) return;
+    try {
+      const serialized = serializeActiveWorkbenchTab(projectId, workspaceId, tabs);
+      if (serialized === null) window.sessionStorage.removeItem(tabStorageKey);
+      else window.sessionStorage.setItem(tabStorageKey, serialized);
+    } catch { /* Storage can be disabled; tab navigation remains available for this mount. */ }
+  }, [projectId, restoredTabScope, tabStorageKey, tabs, workspaceId]);
   useEffect(() => registerBeforeUnloadGuard(window,
     () => editorDocuments.hasUnsavedChanges() || projectOptionsDirtyRef.current || projectOptionsBusyRef.current,
     () => confirmedWorkbenchLeave.current), [editorDocuments]);

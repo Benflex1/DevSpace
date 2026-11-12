@@ -2,11 +2,38 @@ import { describe, expect, test } from "vitest";
 import {
   activateWorkbenchTab, closeWorkbenchTab, closeWorkbenchTabsForTerminalIds, editorTab, emptyWorkbenchTabs, openWorkbenchTab, previewTabId, projectOptionsTab, terminalTabId, type WorkbenchTab
 } from "./workbench-tabs.js";
+import { restoreActiveWorkbenchTab, serializeActiveWorkbenchTab, workbenchTabStorageKey } from "./workbench-tab-restoration.js";
 
 const terminal = (id: string): WorkbenchTab => ({ id: terminalTabId(id), kind: "terminal", terminalId: id, title: `Terminal ${id}` });
 const editor = (path: string): WorkbenchTab => editorTab(path);
 
 describe("Workbench tab state", () => {
+  test("restores the selected Native AI tab only in its exact project and workspace", () => {
+    const state = openWorkbenchTab(emptyWorkbenchTabs, { id: "ai:workspace-one", kind: "ai", sessionId: "workspace-one" });
+    const saved = serializeActiveWorkbenchTab("project-one", "workspace-one", state)!;
+    expect(workbenchTabStorageKey("project-one", "workspace-one")).not.toBe(workbenchTabStorageKey("project-two", "workspace-one"));
+    expect(restoreActiveWorkbenchTab(saved, "project-one", "workspace-one", [], [])).toEqual(state);
+    expect(restoreActiveWorkbenchTab(saved, "project-two", "workspace-one", [], [])).toBeNull();
+    expect(restoreActiveWorkbenchTab(saved, "project-one", "workspace-two", [], [])).toBeNull();
+  });
+
+  test("drops missing or non-openable resources and malformed saved state", () => {
+    const state = openWorkbenchTab(emptyWorkbenchTabs, terminal("gone"));
+    expect(restoreActiveWorkbenchTab(serializeActiveWorkbenchTab("p", "w", state), "p", "w", [], [])).toBeNull();
+    expect(restoreActiveWorkbenchTab(serializeActiveWorkbenchTab("p", "w", state), "p", "w",
+      [{ id: "gone", state: "creating", title: "Terminal 1" }], [])).toBeNull();
+    expect(restoreActiveWorkbenchTab("{", "p", "w", [], [])).toBeNull();
+    expect(restoreActiveWorkbenchTab("x".repeat(4097), "p", "w", [], [])).toBeNull();
+  });
+
+  test("stores a saved editor path but no editor buffer content", () => {
+    const state = openWorkbenchTab(emptyWorkbenchTabs, editor("src/main.ts"));
+    const saved = serializeActiveWorkbenchTab("p", "w", state)!;
+    expect(saved).toContain("src/main.ts");
+    expect(saved).not.toContain("unsaved");
+    expect(restoreActiveWorkbenchTab(saved, "p", "w", [], [])?.activeTabId).toBe("editor:src%2Fmain.ts");
+  });
+
   test("uses stable terminal identity and preserves ordered tabs", () => {
     const first = terminal("one");
     const second = terminal("two");
