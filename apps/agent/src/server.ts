@@ -17,6 +17,8 @@ import {
   nativeHarnessInspectDataSchema,
   nativeHarnessResumeDataSchema,
   nativeHarnessStartDataSchema,
+  nativeCodexHistoryRequestSchema,
+  nativeCodexHistoryPageSchema,
   type AgentExecutionFailure,
   type SourceInspectionData
 } from "@devspace/contracts";
@@ -847,6 +849,30 @@ export function createAgentServer(options: AgentServerOptions = {}): AgentServer
       await execution.flushHarnessSettlements().catch(() => undefined);
       const data = { agentBootId, throughCursor: events.throughCursor, resources: executor.snapshotResources(), operationObservations: journal.observations() };
       return sendJson(response, 200, snapshotEndpoint.successBodySchema.parse({ meta: meta(requestId, now), data }));
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/harness-sessions/history") {
+      let data: z.infer<typeof nativeCodexHistoryRequestSchema>;
+      try {
+        const envelope = z.strictObject({ data: z.unknown() }).parse(await readJsonBody(request));
+        data = nativeCodexHistoryRequestSchema.parse(envelope.data);
+      } catch {
+        return requestError(response, requestId, now, { location: "body", field: null, reason: "malformed" });
+      }
+      try {
+        const page = await harnessRuntime.readCodexHistory(data);
+        return sendJson(response, 200, { meta: meta(requestId, now), data: nativeCodexHistoryPageSchema.parse(page) });
+      } catch (error) {
+        const code = error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "HISTORY_UNAVAILABLE";
+        const status = code === "RESOURCE_NOT_FOUND" ? 404
+          : code === "HISTORY_CURSOR_INVALID" ? 422
+            : code === "HISTORY_UNAVAILABLE" ? 503 : 409;
+        const message = code === "HISTORY_CURSOR_INVALID" ? "The history page expired. Refresh history to continue."
+          : code === "HISTORY_CHANGED" ? "Codex history changed while paging. Refresh history to continue."
+            : code === "RESOURCE_NOT_FOUND" ? "The Native session was not found."
+              : status === 503 ? "Codex history is temporarily unavailable." : "Codex history ownership could not be proven.";
+        return sendJson(response, status, { meta: meta(requestId, now), error: { code, message, retryable: status === 503 } });
+      }
     }
 
     if (request.method === "POST" && (url.pathname === "/v1/harness-sessions/start" || url.pathname === "/v1/harness-sessions/resume" || url.pathname === "/v1/harness-sessions/inspect")) {

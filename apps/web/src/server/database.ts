@@ -1897,6 +1897,18 @@ export function openProjectDatabase(path: string, options: {
         eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.runtimeKind, "native-pty")
       )).orderBy(desc(aiSessions.updatedAt)).all();
     },
+    getNativeHarnessHistoryIdentity(projectId: string, workspaceId: string, sessionId: string) {
+      assertAiWorkspace(projectId, workspaceId);
+      const session = db.select({
+        id: aiSessions.id, workspaceId: aiSessions.workspaceId, processId: aiSessions.processId,
+        processGeneration: aiSessions.processGeneration, state: aiSessions.state,
+        runtimeKind: aiSessions.runtimeKind, harnessId: aiSessions.harnessId
+      }).from(aiSessions).where(and(
+        eq(aiSessions.id, sessionId), eq(aiSessions.workspaceId, workspaceId), eq(aiSessions.runtimeKind, "native-pty")
+      )).get();
+      if (session === undefined || session.harnessId !== "codex" || session.processId === null) return undefined;
+      return session;
+    },
     reconcileNativeHarnessObservation(input: {
       sessionId: string;
       expectedGeneration: number;

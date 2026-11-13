@@ -318,3 +318,19 @@ export async function listProjectedHarnessSessions(
   }
   return sessions;
 }
+
+export async function readNativeCodexHistory(
+  input: { readonly projectId: string; readonly actor: string; readonly workspaceId: string; readonly sessionId: string; readonly cursor: string | null },
+  dependencies: { readonly database: ProjectDatabase; readonly agent: FullAgentClient }
+) {
+  if (input.actor.length === 0) throw new ProjectSetupConflictError("Authentication is required.");
+  const session = dependencies.database.getNativeHarnessHistoryIdentity(input.projectId, input.workspaceId, input.sessionId);
+  if (session === undefined || session.processId === null || !["active", "stopped", "lost"].includes(session.state)) {
+    throw new ProjectSetupConflictError("The Codex history session is unavailable.");
+  }
+  return await dependencies.agent.readNativeCodexHistory({
+    actorIdentity: input.actor, projectId: input.projectId, sessionId: session.id,
+    workspaceId: session.workspaceId, processId: session.processId,
+    processGeneration: session.processGeneration, cursor: input.cursor
+  });
+}

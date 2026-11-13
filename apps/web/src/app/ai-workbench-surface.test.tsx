@@ -426,7 +426,10 @@ test("Resume is shown only for a resumable stopped or lost session", async () =>
   roots.length = 0;
   installFetch([session("lost", true)]);
   const lost = await mount(createElement(HarnessSessionTab, { projectId, workspaceId, active: true }));
-  expect(buttons(lost)).toEqual(["Resume"]);
+  expect(buttons(lost)).toContain("Resume");
+  expect(buttons(lost)).toContain("History");
+  expect(buttons(lost)).toContain("Refresh history");
+  expect(buttons(lost)).not.toContain("Start");
   expect(visibleText(lost)).toContain("Connection lost");
   expect(findSelect(lost)).toBe(false);
 });

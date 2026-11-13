@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import path from "node:path";
@@ -23,6 +23,7 @@ import {
   discoverCodexNativeSessionId,
   repairLegacyCodexFilenameId
 } from "./harness-codex-discovery.js";
+import { readNativeCodexHistory } from "./harness-codex-history.js";
 import type { ExecutableSource } from "./harness-executable.js";
 import { CODEX_HARNESS_ID, CODEX_PRESET, HARNESS_SLOT_ENV } from "./harness-presets.js";
 import { HarnessHomeError, type HarnessHomeStore } from "./harness-home.js";
@@ -156,6 +157,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
     definitionDigest: string;
     activeRequests: number;
   }>();
+  const codexHistoryCursorSecret = randomBytes(32);
 
   const sessionPath = (sessionId: string) => path.join(sessionsRoot, `${sessionId}.json`);
 
@@ -915,6 +917,44 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       });
     },
     privateNativeId: async (sessionId: string) => (await loadSession(sessionId)).nativeSessionId,
+    readCodexHistory: async (input: {
+      readonly actorIdentity: string; readonly projectId: string;
+      readonly sessionId: string; readonly workspaceId: string; readonly processId: string;
+      readonly processGeneration: number; readonly cursor: string | null;
+    }) => {
+      let record: SessionRecord;
+      try { record = sessionRecordSchema.parse(await readStrictJson(sessionPath(input.sessionId), sessionRecordSchema)) as SessionRecord; }
+      catch { throw new HarnessRuntimeError("RESOURCE_NOT_FOUND", "The Native session was not found."); }
+      if (record.harnessId !== CODEX_HARNESS_ID || record.workspaceId !== input.workspaceId
+        || record.processId !== input.processId || record.processGeneration !== input.processGeneration) {
+        throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The Native session history identity does not match.");
+      }
+      const source = record.leaseId !== null ? "live" : "settled";
+      if (record.admission !== "started" || record.recoveryPending === true
+        || source === "live" && record.state !== "live" && record.state !== "lost"
+        || source === "live" && record.nativeSessionId === null && record.discoveryBaseline === undefined
+        || source === "settled" && record.state === "live") {
+        throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The Codex history source is not in a proven lifecycle state.");
+      }
+      if (source === "settled" && !uuidV7Schema.safeParse(record.nativeSessionId).success) {
+        throw new HarnessRuntimeError("HARNESS_NATIVE_SESSION_ID_UNVERIFIED", "The Codex thread identity is not available.");
+      }
+      let rolloutRoot: string;
+      try {
+        rolloutRoot = await dependencies.home.codexHistoryDirectory({
+          workspaceId: record.workspaceId, sessionId: input.sessionId, processGeneration: record.processGeneration,
+          leaseId: record.leaseId, source
+        });
+      } catch {
+        throw new HarnessRuntimeError("RESOURCE_STATE_CONFLICT", "The Codex history source ownership could not be proven.");
+      }
+      return await readNativeCodexHistory({
+        actorIdentity: input.actorIdentity, projectId: input.projectId, sessionId: input.sessionId,
+        workspaceId: record.workspaceId, processGeneration: record.processGeneration,
+        source, rolloutRoot, nativeSessionId: record.nativeSessionId,
+        discoveryBaseline: record.discoveryBaseline ?? [], cursor: input.cursor, cursorSecret: codexHistoryCursorSecret
+      });
+    },
     publicSnapshot: async (sessionId: string) => {
       const record = await loadSession(sessionId);
       return { state: record.state, harnessId: record.harnessId, executableSource: record.executableSource };

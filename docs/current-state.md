@@ -200,14 +200,23 @@ implemented in Slice 1. Native continuity Slice 2 is implemented in the current 
 new Native harness generations use the existing tmux runtime and retain the exact session/process/
 lease identity across Agent recovery. Authenticated Bankroll dogfood showed that `--no-alt-screen`
 does not make tmux's TUI line history readable conversation history; full earlier-message recovery
-is not fixed. A separate read-only projection over the exact Agent-owned Codex rollout is the
-proposed solution, documented in
+is not fixed. A separate read-only projection over the exact Agent-owned Codex rollout is
+implemented as described in
 [`native-codex-history-2026-11-12.md`](feasibility/native-codex-history-2026-11-12.md). The paired
 pane/browser capture and authenticated projection acceptance remain pending. Workbench now stores
 only the active tab identity in project/workspace-scoped session storage; restoration validates
 current terminal/preview resources, re-reads an editor file, and never persists editor buffers or
 credentials. Focused restoration tests pass; real-browser F5 acceptance remains pending. Full
-workspace Stop/Start and close settlement remain Slice 3 work.
+workspace Stop/Start and close settlement remain Slice 3 work. The isolated fixture browser test
+also confirms F5 restores the selected AI tab; authenticated dogfood F5 acceptance remains pending.
+The separate Native Codex History
+viewer is now implemented on the review branch: it reads an exact active leased-slot rollout or a
+settled persistent-home rollout, projects only bounded user messages and completed assistant
+answers, and pages from a signed in-memory cursor. Focused Agent, Web, contract, lifecycle,
+pagination, and terminal-continuity tests pass. The implementation does not store transcript text
+in browser storage or Web SQLite. Real-provider history verification remains outstanding: at least
+three earlier real Codex exchanges must be read after F5 while confirming the same process and
+session remain active. Do not claim conversation-history recovery is fixed before that run.
 
 ## Private GitHub Repository Access status
 

@@ -324,7 +324,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
   return <section className={`terminal-tab-surface ${active ? "is-active" : "is-inactive"}`} aria-hidden={!active}
     aria-label="Terminal session" role={active ? "region" : undefined}>
     {persistentReady && <div className="terminal-toolbar" role="toolbar" aria-label="Persistent terminal controls">
-      <button type="button" onClick={() => { persistentControl.current?.("history"); xterm.current?.focus(); }}>History</button>
+      <button type="button" aria-label="Pane scrollback" title="Terminal pane scrollback; this is not Codex conversation history."
+        onClick={() => { persistentControl.current?.("history"); xterm.current?.focus(); }}>Pane scrollback</button>
       <button type="button" onClick={() => { persistentControl.current?.("live"); xterm.current?.focus(); }}>Return to live</button>
       <button type="button" onClick={() => {
         const selection = xterm.current?.getSelection() ?? "";

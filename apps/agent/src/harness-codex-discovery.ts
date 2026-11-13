@@ -6,12 +6,14 @@ import { uuidV7Schema } from "@devspace/contracts";
 const MAX_ROLLOUT_FILES = 4_096;
 const MAX_HOME_ENTRIES = 16_384;
 const MAX_SESSION_META_BYTES = 64 * 1024;
+const MAX_DISCOVERY_BYTES = 16 * 1024 * 1024;
 
 type CodexSessionMetadata = {
   id: string;
   cwd: string | null;
   parentThreadId: string | null;
   fileStem: string;
+  filePath: string;
 };
 
 type DiscoveryOptions = {
@@ -42,7 +44,7 @@ async function collectJsonl(root: string, into: string[], budget: { entries: num
   }
 }
 
-async function readSessionMetadata(file: string): Promise<CodexSessionMetadata | null> {
+async function readSessionMetadata(file: string, budget: { bytes: number }): Promise<CodexSessionMetadata | null> {
   let handle;
   try { handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW); }
   catch (error) {
@@ -53,8 +55,12 @@ async function readSessionMetadata(file: string): Promise<CodexSessionMetadata |
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) return null;
-    const buffer = Buffer.alloc(MAX_SESSION_META_BYTES + 1);
+    const remaining = MAX_DISCOVERY_BYTES - budget.bytes;
+    if (remaining <= 0) throw new Error("codex-session-discovery-byte-limit");
+    const buffer = Buffer.alloc(Math.min(MAX_SESSION_META_BYTES + 1, remaining + 1));
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    budget.bytes += bytesRead;
+    if (budget.bytes > MAX_DISCOVERY_BYTES) throw new Error("codex-session-discovery-byte-limit");
     bytes = buffer.subarray(0, bytesRead);
   } finally {
     await handle.close();
@@ -79,7 +85,8 @@ async function readSessionMetadata(file: string): Promise<CodexSessionMetadata |
     parentThreadId: payload.parent_thread_id === undefined || payload.parent_thread_id === null
       ? null
       : typeof payload.parent_thread_id === "string" ? payload.parent_thread_id : "<invalid>",
-    fileStem: path.basename(file, ".jsonl")
+    fileStem: path.basename(file, ".jsonl"),
+    filePath: file
   };
 }
 
@@ -87,8 +94,9 @@ async function collectSessionMetadata(homePath: string): Promise<CodexSessionMet
   const files: string[] = [];
   await collectJsonl(path.join(homePath, "sessions"), files, { entries: 0 });
   const records: CodexSessionMetadata[] = [];
+  const budget = { bytes: 0 };
   for (const file of files) {
-    const record = await readSessionMetadata(file);
+    const record = await readSessionMetadata(file, budget);
     if (record !== null) records.push(record);
   }
   return records;
@@ -114,6 +122,30 @@ export async function discoverCodexNativeSessionId(homePath: string, options: Di
   if (options.expectedId !== undefined) candidates = candidates.filter((item) => item.id === options.expectedId);
   else if (baseline !== null) candidates = candidates.filter((item) => !baseline.has(item.id));
   return candidates.length === 1 ? candidates[0]!.id : null;
+}
+
+export type CodexRolloutDiscovery =
+  | { readonly kind: "found"; readonly nativeSessionId: string; readonly filePath: string }
+  | { readonly kind: "missing" }
+  | { readonly kind: "ambiguous" };
+
+/** Resolve one exact canonical root-thread rollout without exposing its path outside the Agent. */
+export async function resolveCodexNativeRollout(homePath: string, options: DiscoveryOptions): Promise<CodexRolloutDiscovery> {
+  if (options.baselineIds !== undefined && options.expectedId !== undefined) return { kind: "missing" };
+  if (options.expectedId !== undefined && !uuidV7Schema.safeParse(options.expectedId).success) return { kind: "missing" };
+  if (options.baselineIds?.some((id) => !uuidV7Schema.safeParse(id).success)) return { kind: "missing" };
+  const baseline = options.baselineIds === undefined ? null : new Set(options.baselineIds);
+  const records = await collectSessionMetadata(homePath);
+  const candidates = records.filter(isForegroundWorkspaceSession)
+    .filter((item) => options.expectedId !== undefined ? item.id === options.expectedId
+      : baseline !== null && !baseline.has(item.id));
+  if (candidates.length === 0) return { kind: "missing" };
+  if (candidates.length !== 1) return { kind: "ambiguous" };
+  const selected = candidates[0]!;
+  if (records.filter((item) => item.id === selected.id).length !== 1) {
+    return { kind: "ambiguous" };
+  }
+  return { kind: "found", nativeSessionId: selected.id, filePath: selected.filePath };
 }
 
 /** Repairs only the old filename-stem representation when one exact rollout proves its canonical id. */

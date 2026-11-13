@@ -8,6 +8,7 @@ import {
   githubAgentApiV1EndpointByOperation,
   aiEventStreamFrameSchema,
   nativeHarnessInspectResponseSchema,
+  nativeCodexHistoryPageSchema,
   AI_EVENT_STREAM_FRAME_MAX_BYTES,
   type AiEventStreamFrame,
   type AiProviderProfileProjection,
@@ -26,6 +27,7 @@ import {
   type HealthData,
   type MutationReceipt,
   type NativeHarnessInspectResponse,
+  type NativeCodexHistoryPage,
   type PreviewInspectionData,
   type ProjectPushData,
   type RuntimeStatusData,
@@ -545,18 +547,27 @@ export function createAgentClient(socketPath: string, options: {
         processGeneration: body.processGeneration,
         ...(body.admission === undefined ? {} : { admission: body.admission })
       });
+    },
+    readNativeCodexHistory: async (data: {
+      actorIdentity: string; projectId: string; workspaceId: string; sessionId: string;
+      processId: string; processGeneration: number; cursor: string | null;
+    }): Promise<NativeCodexHistoryPage> => {
+      const body = await callHarness("/v1/harness-sessions/history", data);
+      if (body.history === undefined) throw new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure");
+      return nativeCodexHistoryPageSchema.parse(body.history);
     }
   };
 
   async function callHarness(path: string, data: unknown): Promise<{
-    settled: boolean; state?: string; resume?: boolean; processGeneration?: number; admission?: string;
+    settled: boolean; state?: string; resume?: boolean; processGeneration?: number; admission?: string; history?: NativeCodexHistoryPage;
   }> {
     const requestId = uuidv7();
     const body = JSON.stringify({ data });
     const requestStartedAt = performance.now();
     const resource = data !== null && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
     const operationName = path.endsWith("/start") ? "native-harness.start"
-      : path.endsWith("/resume") ? "native-harness.resume" : "native-harness.inspect";
+      : path.endsWith("/resume") ? "native-harness.resume"
+        : path.endsWith("/history") ? "native-harness.history" : "native-harness.inspect";
     const resourceFields = {
       ...(typeof resource.sessionId === "string" ? { sessionId: resource.sessionId } : {}),
       ...(typeof resource.workspaceId === "string" ? { workspaceId: resource.workspaceId } : {}),
@@ -592,9 +603,21 @@ export function createAgentClient(socketPath: string, options: {
         }
       }, (response) => {
         const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        let responseBytes = 0;
+        let oversized = false;
+        response.on("data", (chunk: Buffer) => {
+          responseBytes += chunk.length;
+          if (responseBytes > 2_200_000) {
+            oversized = true;
+            response.destroy();
+          } else chunks.push(Buffer.from(chunk));
+        });
         response.on("end", () => {
           const status = response.statusCode ?? 0;
+          if (oversized) {
+            logOutcome("uncertain", status, "AGENT_RESPONSE_TOO_LARGE");
+            return reject(new AgentUnavailableError("AGENT_RESPONSE_TOO_LARGE", "protocol-failure", requestId));
+          }
           let parsed: unknown;
           try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
           catch {
@@ -602,16 +625,24 @@ export function createAgentClient(socketPath: string, options: {
             return reject(new AgentUnavailableError("MALFORMED_RESPONSE", "protocol-failure", requestId));
           }
           if (status === 200) {
-            const data = (parsed as { data?: {
+            const responseData = (parsed as { data?: {
               settled?: boolean; state?: string; resume?: boolean; processGeneration?: number; admission?: string;
             } }).data;
+            const history = path.endsWith("/history")
+              ? nativeCodexHistoryPageSchema.safeParse((parsed as { data?: unknown }).data)
+              : null;
+            if (path.endsWith("/history") && history?.success !== true) {
+              logOutcome("uncertain", status, "INVALID_RESPONSE_CONTRACT");
+              return reject(new AgentUnavailableError("INVALID_RESPONSE_CONTRACT", "protocol-failure", requestId));
+            }
             logOutcome("success", status);
             return resolve({
-              settled: data?.settled === true,
-              ...(typeof data?.state === "string" ? { state: data.state } : {}),
-              ...(typeof data?.resume === "boolean" ? { resume: data.resume } : {}),
-              ...(typeof data?.processGeneration === "number" ? { processGeneration: data.processGeneration } : {}),
-              ...(typeof data?.admission === "string" ? { admission: data.admission } : {})
+              settled: responseData?.settled === true,
+              ...(typeof responseData?.state === "string" ? { state: responseData.state } : {}),
+              ...(typeof responseData?.resume === "boolean" ? { resume: responseData.resume } : {}),
+              ...(typeof responseData?.processGeneration === "number" ? { processGeneration: responseData.processGeneration } : {}),
+              ...(typeof responseData?.admission === "string" ? { admission: responseData.admission } : {}),
+              ...(history?.success === true ? { history: history.data } : {})
             });
           }
           const envelope = parsed as { error?: { code?: string; message?: string; retryable?: boolean } };

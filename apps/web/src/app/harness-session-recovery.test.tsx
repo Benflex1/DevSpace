@@ -7,9 +7,10 @@ import { afterEach, expect, test, vi } from "vitest";
 import { buttonText, click, FakeNode, findButtons, installTerminalTestDom, settleReact, visibleText } from "./terminal-test-dom.js";
 
 vi.mock("./terminal-tab.js", () => ({
-  TerminalTab: ({ terminal, onRefresh, nativeHarnessSessionId }: {
-    terminal: { id: string }; onRefresh: () => void; nativeHarnessSessionId?: string;
-  }) => createElement("div", { "data-terminal-id": terminal.id, "data-native-session-id": nativeHarnessSessionId },
+  TerminalTab: ({ terminal, onRefresh, nativeHarnessSessionId, active }: {
+    terminal: { id: string }; onRefresh: () => void; nativeHarnessSessionId?: string; active: boolean;
+  }) => createElement("div", { "data-terminal-id": terminal.id, "data-native-session-id": nativeHarnessSessionId,
+    "data-terminal-active": String(active) },
     createElement("button", { onClick: onRefresh }, "Refresh projection"), "attached")
 }));
 
@@ -37,6 +38,15 @@ function nativeSessionIds(node: FakeNode): string[] {
   const sessionId = node.attributes["data-native-session-id"];
   const ids = sessionId === undefined ? [] : [sessionId];
   return ids.concat(node.children.flatMap(nativeSessionIds));
+}
+
+function terminalNode(node: FakeNode, id: string): FakeNode | undefined {
+  if (node.attributes["data-terminal-id"] === id) return node;
+  for (const child of node.children) {
+    const match = terminalNode(child, id);
+    if (match !== undefined) return match;
+  }
+  return undefined;
 }
 
 function findSessionSelector(node: FakeNode): FakeNode | undefined {
@@ -139,6 +149,62 @@ test("Native reload and navigation reselect the same live terminal without anoth
   expect(nativeSessionIds(reloadElement)).toEqual([currentSessionId]);
   expect(requests.every((request) => request.method === "GET")).toBe(true);
   expect(requests.filter((request) => request.url.includes("/harness")).length).toBeGreaterThanOrEqual(3);
+});
+
+test("Native history stays separate from the live terminal, pages older messages, and reloads from the server", async () => {
+  const firstElement = installTerminalTestDom(class {});
+  const historyRequests: string[] = [];
+  const olderCursor = "opaque-history-cursor";
+  const firstPage = { messages: [
+    { id: "u-new", role: "user", text: "latest prompt", timestamp: null },
+    { id: "a-new", role: "assistant", text: "latest answer", timestamp: null }
+  ], olderCursor, olderHistoryTruncated: false, snapshot: "live", available: true };
+  const olderPage = { messages: [
+    { id: "u-old", role: "user", text: "earlier prompt", timestamp: null },
+    { id: "a-old", role: "assistant", text: "earlier answer", timestamp: null }
+  ], olderCursor: null, olderHistoryTruncated: false, snapshot: "live", available: true };
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = requestUrl(input);
+    if (url.includes("/history?")) {
+      historyRequests.push(url);
+      return Promise.resolve(jsonResponse(url.includes("cursor=") ? olderPage : firstPage));
+    }
+    return Promise.resolve(jsonResponse({ definitions: [], sessions: [session(currentSessionId, "active", "admitted")] }));
+  }));
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  let root = createRoot(firstElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+  expect(terminalIds(firstElement)).toEqual([currentSessionId]);
+
+  act(() => { click(findButtons(firstElement).find((button) => buttonText(button) === "History")!); });
+  await settleReact();
+  expect(visibleText(firstElement)).toContain("latest prompt");
+  expect(visibleText(firstElement)).toContain("latest answer");
+  expect(terminalIds(firstElement)).toEqual([currentSessionId]);
+  expect(terminalNode(firstElement, currentSessionId)?.attributes["data-terminal-active"]).toBe("false");
+  expect(historyRequests[0]).toBe(`/api/projects/${projectId}/harness/${currentSessionId}/history?workspaceId=${workspaceId}`);
+
+  act(() => { click(findButtons(firstElement).find((button) => buttonText(button) === "Load older messages")!); });
+  await settleReact();
+  const orderedText = visibleText(firstElement);
+  expect(orderedText.indexOf("earlier prompt")).toBeLessThan(orderedText.indexOf("latest prompt"));
+  expect(orderedText.indexOf("earlier answer")).toBeLessThan(orderedText.indexOf("latest answer"));
+  expect(historyRequests[1]).toContain(`cursor=${olderCursor}`);
+
+  act(() => { root.unmount(); });
+  roots.splice(roots.indexOf(root), 1);
+  const reloadedElement = firstElement.ownerDocument!.createElement("div");
+  root = createRoot(reloadedElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+  act(() => { click(findButtons(reloadedElement).find((button) => buttonText(button) === "History")!); });
+  await settleReact();
+  expect(visibleText(reloadedElement)).toContain("latest prompt");
+  expect(historyRequests).toHaveLength(3);
+  expect(terminalIds(reloadedElement)).toEqual([currentSessionId]);
 });
 
 test("an uncertain admission retries only the exact existing session before attaching", async () => {

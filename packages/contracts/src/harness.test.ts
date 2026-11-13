@@ -8,7 +8,10 @@ import {
   resumeCapability,
   customHarnessDefinitionSchema,
   nativeHarnessInspectDataSchema,
-  nativeHarnessInspectResponseSchema
+  nativeHarnessInspectResponseSchema,
+  nativeCodexHistoryMessageSchema,
+  nativeCodexHistoryPageSchema,
+  nativeCodexHistoryRequestSchema
 } from "./harness.js";
 
 test("native harness inspect requests carry the exact DevSpace session generation", () => {
@@ -37,6 +40,27 @@ test("native harness inspect response is generation-fenced and excludes private 
   expect(nativeHarnessInspectResponseSchema.safeParse({
     state: "lost", processGeneration: 2, resume: true, nativeSessionId: "private-provider-id"
   }).success).toBe(false);
+});
+
+test("Native Codex history contract accepts only server-derived identity and bounded text pages", () => {
+  const request = {
+    projectId: "018f1f34-7000-7000-8000-000000000101",
+    actorIdentity: "owner@example.test",
+    workspaceId: "018f1f34-7000-7000-8000-000000000102",
+    sessionId: "018f1f34-7000-7000-8000-000000000103",
+    processId: "018f1f34-7000-7000-8000-000000000104",
+    processGeneration: 2,
+    cursor: null
+  };
+  expect(nativeCodexHistoryRequestSchema.parse(request)).toEqual(request);
+  expect(nativeCodexHistoryRequestSchema.safeParse({ ...request, hostPath: "/root/.codex" }).success).toBe(false);
+  expect(nativeCodexHistoryRequestSchema.safeParse({ ...request, nativeSessionId: "provider-thread" }).success).toBe(false);
+
+  const message = { id: "u-1", role: "user", text: "user message", timestamp: null } as const;
+  expect(nativeCodexHistoryMessageSchema.parse(message)).toEqual(message);
+  expect(nativeCodexHistoryMessageSchema.safeParse({ ...message, filePath: "/root/.codex/rollout.jsonl" }).success).toBe(false);
+  expect(nativeCodexHistoryPageSchema.safeParse({ messages: Array(21).fill(message), olderCursor: null,
+    olderHistoryTruncated: false, snapshot: "live", available: true }).success).toBe(false);
 });
 
 test("rejects host paths and shell-like executables", () => {

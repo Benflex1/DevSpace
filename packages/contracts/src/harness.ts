@@ -141,3 +141,29 @@ export const nativeHarnessInspectResponseSchema = z.strictObject({
   admission: nativeHarnessAdmissionStateSchema.optional()
 });
 export type NativeHarnessInspectResponse = z.infer<typeof nativeHarnessInspectResponseSchema>;
+
+export const nativeCodexHistoryRequestSchema = z.strictObject({
+  projectId: uuidV7Schema,
+  actorIdentity: z.string().min(1).max(512),
+  workspaceId: uuidV7Schema,
+  sessionId: uuidV7Schema,
+  processId: uuidV7Schema,
+  processGeneration: z.number().int().positive(),
+  cursor: z.string().max(2048).nullable()
+});
+export type NativeCodexHistoryRequest = z.infer<typeof nativeCodexHistoryRequestSchema>;
+export const nativeCodexHistoryMessageSchema = z.strictObject({
+  id: z.string().min(1).max(64),
+  role: z.enum(["user", "assistant"]),
+  text: z.string().min(1).max(32_768),
+  timestamp: z.string().max(64).nullable()
+});
+export type NativeCodexHistoryMessage = z.infer<typeof nativeCodexHistoryMessageSchema>;
+export const nativeCodexHistoryPageSchema = z.strictObject({
+  messages: z.array(nativeCodexHistoryMessageSchema).max(20),
+  olderCursor: z.string().max(2048).nullable(),
+  olderHistoryTruncated: z.boolean(),
+  snapshot: z.enum(["live", "settled"]),
+  available: z.boolean()
+});
+export type NativeCodexHistoryPage = z.infer<typeof nativeCodexHistoryPageSchema>;

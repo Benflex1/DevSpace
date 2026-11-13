@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { nativeAiPresentation } from "./native-ai-presentation.js";
+import { NativeCodexHistoryView } from "./native-codex-history-view.js";
 import { nativeHarnessTerminalState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 
@@ -46,6 +47,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const [harnessId, setHarnessId] = useState("codex");
   const [sessions, setSessions] = useState<NativeSession[]>([]);
   const [selectedNativeSessionId, setSelectedNativeSessionId] = useState<string | null>(null);
+  const [nativeView, setNativeView] = useState<"terminal" | "history">("terminal");
   const [terminal, setTerminal] = useState<TerminalView | null>(null);
   const [attachmentState, setAttachmentState] = useState<"connecting" | "attached" | "reconnecting" | "failed" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -65,6 +67,14 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const admissionRetryKeys = useRef(new Set<string>());
   const admissionPollAttempts = useRef(new Map<string, number>());
   const activePostKeys = useRef(new Set<string>());
+  const previousSelection = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (previousSelection.current !== selectedNativeSessionId) {
+      previousSelection.current = selectedNativeSessionId;
+      setNativeView("terminal");
+    }
+  }, [selectedNativeSessionId]);
 
   const selectNativeSession = useCallback((id: string | null) => {
     selectionSequence.current += 1;
@@ -103,6 +113,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       setPollExhaustedSessionId(null);
       setSessions([]);
       setSelectedNativeSessionId(null);
+      setNativeView("terminal");
       setTerminal(null);
       setAttachmentState(null);
     }
@@ -454,6 +465,8 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     };
   const selected = definitions.find((definition) => definition.id === (session?.harnessId ?? harnessId)) ?? definitions[0];
   const displayName = selected?.displayName ?? "Codex";
+  const canReadCodexHistory = session?.harnessId === "codex"
+    && (session.state === "active" || session.state === "stopped" || session.state === "lost");
 
   return <section className="native-ai-surface" aria-label="Native harness" hidden={!active}>
     <header className="native-ai-header">
@@ -482,6 +495,10 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         </label>
         : <strong className="native-ai-name">{displayName}</strong>}
       {presentation.status !== null && <span className={`native-ai-state${presentation.status === "Running" || presentation.status === "Attached" ? " is-running" : ""}`}>{presentation.status}</span>}
+      {canReadCodexHistory && <nav className="native-ai-view-switcher" aria-label="Native Codex view">
+        <button type="button" aria-pressed={nativeView === "terminal"} onClick={() => setNativeView("terminal")}>Terminal</button>
+        <button type="button" aria-pressed={nativeView === "history"} onClick={() => setNativeView("history")}>History</button>
+      </nav>}
       <span className="native-ai-spacer" />
       {presentation.action === "start" && <button type="button" disabled={pending} onClick={startHarness}>Start</button>}
       {presentation.action === "resume" && session !== null && <button type="button" disabled={pending || session.resume !== true} onClick={resumeSelectedHarness}>Resume</button>}
@@ -495,6 +512,7 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       {(refreshFailed || pollExhaustedSessionId === selectedNativeSessionId) && <button type="button" disabled={pending} onClick={retryRefresh}>Retry refresh</button>}
     </header>
     <div className="native-ai-terminal">
+      <div className="native-ai-terminal-view" hidden={nativeView !== "terminal"}>
       {pending
         ? <p className="native-ai-empty" role="status">{pendingAction === "resume" ? "Resuming native session…"
           : pendingAction === "retry-native" ? "Reconciling the existing admission…" : "Starting native session…"}</p>
@@ -510,11 +528,16 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
                 : session.admissionStatus === "admitted" ? "Waiting for the admitted session to appear…"
                   : "Checking the current admission state…"}</p>
           : terminal !== null
-            ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active}
+            ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active && nativeView === "terminal"}
                 {...(selectedNativeSessionId === null ? {} : { nativeHarnessSessionId: selectedNativeSessionId })}
                 onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange}
                 onAttachmentStateChange={onTerminalAttachmentChange} />
-            : <p className="native-ai-empty">Start a harness to open its terminal.</p>}
+            : <p className="native-ai-empty">The terminal is not available for this Native session.</p>}
+      </div>
+      {canReadCodexHistory && session !== null && <NativeCodexHistoryView
+        key={`${projectId}:${workspaceId}:${session.id}`}
+        projectId={projectId} workspaceId={workspaceId} sessionId={session.id}
+        visible={active && nativeView === "history"} />}
     </div>
   </section>;
 }

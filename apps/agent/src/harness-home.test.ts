@@ -77,6 +77,46 @@ test("same workspace re-acquires its lease after simulated agent restart", async
   expect(again.leaseId).toBe(first.leaseId);
 });
 
+test("read-only Codex history resolves the exact live slot and the settled persistent home", async () => {
+  const { home } = await store();
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 3 });
+  const slot = await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: lease.leaseId });
+  const leasePath = path.join(home.persistentHomePath("codex"), ".lease", "metadata.json");
+  const leaseBefore = await readFile(leasePath, "utf8");
+
+  await expect(home.codexHistoryDirectory({ workspaceId: wsA, sessionId: sessionA, processGeneration: 3,
+    leaseId: lease.leaseId, source: "live" })).resolves.toBe(slot.slotHostPath);
+  expect(await readFile(leasePath, "utf8")).toBe(leaseBefore);
+  expect((await lstat(slot.slotHostPath)).isDirectory()).toBe(true);
+
+  await home.writeBackAndClear({ workspaceId: wsA, leaseId: lease.leaseId });
+  await home.releaseLease({ harnessId: "codex", leaseId: lease.leaseId });
+  await expect(home.codexHistoryDirectory({ workspaceId: wsA, sessionId: sessionA, processGeneration: 3,
+    leaseId: null, source: "settled" })).resolves.toBe(home.persistentHomePath("codex"));
+});
+
+test("Codex history source rejects a mismatched lease, generation, workspace, or symlinked live slot", async () => {
+  const { home, root } = await store();
+  const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 4 });
+  const slot = await home.materialize({ workspaceId: wsA, harnessId: "codex", leaseId: lease.leaseId });
+
+  await expect(home.codexHistoryDirectory({ workspaceId: wsA, sessionId: sessionB, processGeneration: 4,
+    leaseId: lease.leaseId, source: "live" })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+  await expect(home.codexHistoryDirectory({ workspaceId: wsA, sessionId: sessionA, processGeneration: 5,
+    leaseId: lease.leaseId, source: "live" })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+  await expect(home.codexHistoryDirectory({ workspaceId: wsB, sessionId: sessionB, processGeneration: 4,
+    leaseId: lease.leaseId, source: "live" })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+  await expect(home.codexHistoryDirectory({ workspaceId: wsB, sessionId: sessionB, processGeneration: 4,
+    leaseId: null, source: "settled" })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+
+  const external = path.join(root, "outside-slot");
+  await mkdir(external);
+  await rm(slot.slotHostPath, { recursive: true });
+  await symlink(external, slot.slotHostPath);
+  await expect(home.codexHistoryDirectory({ workspaceId: wsA, sessionId: sessionA, processGeneration: 4,
+    leaseId: lease.leaseId, source: "live" })).rejects.toMatchObject({ code: "HARNESS_HOME_IN_USE" });
+});
+
 test("a dirty slot blocks a new lease when its lease metadata is missing", async () => {
   const { home, root } = await store();
   const lease = await home.acquireLease({ harnessId: "codex", workspaceId: wsA, aiSessionId: sessionA, processGeneration: 1 });
