@@ -82,6 +82,10 @@ export interface HarnessHomeStore {
   reapStaleLeases(): Promise<void>;
   hasActiveWorkspaceLease?(workspaceId: string): Promise<boolean>;
   persistentHomePath(harnessId: string): string;
+  codexHistoryDirectory(input: {
+    readonly workspaceId: string; readonly sessionId: string; readonly processGeneration: number;
+    readonly leaseId: string | null; readonly source: "live" | "settled";
+  }): Promise<string>;
 }
 
 export interface HarnessHomeStoreOptions {
@@ -350,6 +354,55 @@ export function createHarnessHomeStore(stateRoot: string, options: HarnessHomeSt
 
   return {
     persistentHomePath,
+    async codexHistoryDirectory(input) {
+      const workspaceId = requireUuid(input.workspaceId, "workspaceId");
+      const sessionId = requireUuid(input.sessionId, "sessionId");
+      if (!Number.isInteger(input.processGeneration) || input.processGeneration < 1) {
+        throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The Codex history generation is invalid.");
+      }
+      const homePath = persistentHomePath("codex");
+      const homeStats = await lstat(homePath).catch(() => null);
+      if (homeStats === null || !homeStats.isDirectory() || homeStats.isSymbolicLink()) {
+        throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The private Codex home is unavailable.");
+      }
+      const lease = await readLease(homePath);
+      if (input.source === "live") {
+        if (input.leaseId === null || lease === null || lease.leaseId !== input.leaseId
+          || lease.harnessId !== "codex" || lease.workspaceId !== workspaceId || lease.aiSessionId !== sessionId
+          || lease.processGeneration !== input.processGeneration) {
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The live Codex history lease does not match.");
+        }
+        const meta = await readMeta(workspaceId);
+        if (meta === null || meta.harnessId !== "codex" || meta.workspaceId !== workspaceId
+          || meta.leaseId !== input.leaseId || meta.dirty !== true) {
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The live Codex history slot is not owned by this lease.");
+        }
+        const slot = slotHostPath(workspaceId);
+        const slotStats = await lstat(slot).catch(() => null);
+        if (slotStats === null || !slotStats.isDirectory() || slotStats.isSymbolicLink()) {
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The live Codex history slot is unavailable.");
+        }
+        return slot;
+      }
+
+      if (input.leaseId !== null || lease !== null) {
+        throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The persistent Codex home is still leased.");
+      }
+      const ownMeta = await readMeta(workspaceId);
+      if (ownMeta === null || ownMeta.harnessId !== "codex" || ownMeta.workspaceId !== workspaceId || ownMeta.dirty) {
+        throw new HarnessHomeError("HARNESS_HOME_IN_USE", "The settled Codex history slot is not proven clean.");
+      }
+      for (const entry of await readdir(metaRoot, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) {
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "Codex history ownership metadata is not exact.");
+        }
+        const meta = await readStrictJson(path.join(metaRoot, entry.name), slotMetaSchema);
+        if (meta.harnessId === "codex" && meta.dirty) {
+          throw new HarnessHomeError("HARNESS_HOME_IN_USE", "Another live slot still owns the Codex home.");
+        }
+      }
+      return homePath;
+    },
     async acquireLease(input) {
       const harnessId = requireHarnessId(input.harnessId);
       return withLeaseLock(harnessId, async () => {

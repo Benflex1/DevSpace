@@ -7,9 +7,10 @@ import { afterEach, expect, test, vi } from "vitest";
 import { buttonText, click, FakeNode, findButtons, installTerminalTestDom, settleReact, visibleText } from "./terminal-test-dom.js";
 
 vi.mock("./terminal-tab.js", () => ({
-  TerminalTab: ({ terminal, onRefresh, nativeHarnessSessionId }: {
-    terminal: { id: string }; onRefresh: () => void; nativeHarnessSessionId?: string;
-  }) => createElement("div", { "data-terminal-id": terminal.id, "data-native-session-id": nativeHarnessSessionId },
+  TerminalTab: ({ terminal, onRefresh, nativeHarnessSessionId, active }: {
+    terminal: { id: string }; onRefresh: () => void; nativeHarnessSessionId?: string; active: boolean;
+  }) => createElement("div", { "data-terminal-id": terminal.id, "data-native-session-id": nativeHarnessSessionId,
+    "data-terminal-active": String(active) },
     createElement("button", { onClick: onRefresh }, "Refresh projection"), "attached")
 }));
 
@@ -37,6 +38,35 @@ function nativeSessionIds(node: FakeNode): string[] {
   const sessionId = node.attributes["data-native-session-id"];
   const ids = sessionId === undefined ? [] : [sessionId];
   return ids.concat(node.children.flatMap(nativeSessionIds));
+}
+
+function terminalNode(node: FakeNode, id: string): FakeNode | undefined {
+  if (node.attributes["data-terminal-id"] === id) return node;
+  for (const child of node.children) {
+    const match = terminalNode(child, id);
+    if (match !== undefined) return match;
+  }
+  return undefined;
+}
+
+function findClassNode(node: FakeNode, className: string): FakeNode | undefined {
+  if (node.getAttribute("class")?.split(/\s+/u).includes(className) === true) return node;
+  for (const child of node.children) {
+    const match = findClassNode(child, className);
+    if (match !== undefined) return match;
+  }
+  return undefined;
+}
+
+function scrollTo(node: FakeNode, scrollTop: number) {
+  node.scrollTop = scrollTop;
+  const event = {
+    type: "scroll", target: node, currentTarget: null, bubbles: false, cancelable: false,
+    defaultPrevented: false, button: 0,
+    preventDefault() { /* scroll is not cancelable */ },
+    stopPropagation() { /* tests do not cancel the bubble */ }
+  };
+  node.dispatchEvent(event);
 }
 
 function findSessionSelector(node: FakeNode): FakeNode | undefined {
@@ -139,6 +169,71 @@ test("Native reload and navigation reselect the same live terminal without anoth
   expect(nativeSessionIds(reloadElement)).toEqual([currentSessionId]);
   expect(requests.every((request) => request.method === "GET")).toBe(true);
   expect(requests.filter((request) => request.url.includes("/harness")).length).toBeGreaterThanOrEqual(3);
+});
+
+test("scrolling reveals saved conversation above the mounted live terminal and returns to it", async () => {
+  const firstElement = installTerminalTestDom(class {});
+  const historyRequests: string[] = [];
+  const olderCursor = "opaque-history-cursor";
+  const firstPage = { messages: [
+    { id: "u-new", role: "user", text: "latest prompt", timestamp: null },
+    { id: "a-new", role: "assistant", text: "latest answer", timestamp: null }
+  ], olderCursor, olderHistoryTruncated: false, snapshot: "live", available: true };
+  const olderPage = { messages: [
+    { id: "u-old", role: "user", text: "earlier prompt", timestamp: null },
+    { id: "a-old", role: "assistant", text: "earlier answer", timestamp: null }
+  ], olderCursor: null, olderHistoryTruncated: false, snapshot: "live", available: true };
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = requestUrl(input);
+    if (url.includes("/history?")) {
+      historyRequests.push(url);
+      return Promise.resolve(jsonResponse(url.includes("cursor=") ? olderPage : firstPage));
+    }
+    return Promise.resolve(jsonResponse({ definitions: [], sessions: [session(currentSessionId, "active", "admitted")] }));
+  }));
+  const { HarnessSessionTab } = await import("./harness-session-tab.js");
+  let root = createRoot(firstElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+  expect(terminalIds(firstElement)).toEqual([currentSessionId]);
+  expect(terminalNode(firstElement, currentSessionId)?.attributes["data-terminal-active"]).toBe("true");
+  expect(visibleText(firstElement)).toContain("latest prompt");
+  expect(visibleText(firstElement)).toContain("latest answer");
+  expect(historyRequests[0]).toBe(`/api/projects/${projectId}/harness/${currentSessionId}/history?workspaceId=${workspaceId}`);
+  const scroller = findClassNode(firstElement, "native-ai-conversation")!;
+  expect(scroller.attributes["data-native-conversation-view"]).toBe("live");
+
+  // The shared scroller reveals the saved conversation above the live pane.
+  scroller.scrollHeight = 1_200;
+  act(() => { scrollTo(scroller, 480); });
+  await settleReact();
+  expect(scroller.attributes["data-native-conversation-view"]).toBe("history");
+  expect(terminalNode(firstElement, currentSessionId)?.attributes["data-terminal-active"]).toBe("true");
+
+  act(() => { click(findButtons(firstElement).find((button) => buttonText(button) === "Load older messages")!); });
+  await settleReact();
+  const orderedText = visibleText(firstElement);
+  expect(orderedText.indexOf("earlier prompt")).toBeLessThan(orderedText.indexOf("latest prompt"));
+  expect(orderedText.indexOf("earlier answer")).toBeLessThan(orderedText.indexOf("latest answer"));
+  expect(historyRequests[1]).toContain(`cursor=${olderCursor}`);
+
+  act(() => { scrollTo(scroller, 600); });
+  await settleReact();
+  expect(scroller.attributes["data-native-conversation-view"]).toBe("live");
+  expect(terminalNode(firstElement, currentSessionId)?.attributes["data-terminal-active"]).toBe("true");
+
+  act(() => { root.unmount(); });
+  roots.splice(roots.indexOf(root), 1);
+  const reloadedElement = firstElement.ownerDocument!.createElement("div");
+  root = createRoot(reloadedElement as never);
+  roots.push(root);
+  act(() => { root.render(createElement(HarnessSessionTab, { projectId, workspaceId, active: true })); });
+  await settleReact();
+  expect(visibleText(reloadedElement)).toContain("latest prompt");
+  expect(historyRequests).toHaveLength(3);
+  expect(terminalIds(reloadedElement)).toEqual([currentSessionId]);
+  expect(terminalNode(reloadedElement, currentSessionId)?.attributes["data-terminal-active"]).toBe("true");
 });
 
 test("an uncertain admission retries only the exact existing session before attaching", async () => {
@@ -344,7 +439,11 @@ test("a pending exact-session refresh cannot replace a newer manual session sele
   let inspections = 0;
   let releaseExactRefresh!: (response: Response) => void;
   const sessions = [session(oldSessionId, "creating", "admitting"), session(currentSessionId, "active")];
-  vi.stubGlobal("fetch", vi.fn(() => {
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    if (requestUrl(input).includes("/history?")) {
+      return Promise.resolve(jsonResponse({ messages: [], olderCursor: null, olderHistoryTruncated: false,
+        snapshot: "live", available: false }));
+    }
     inspections += 1;
     if (inspections === 1) return Promise.resolve(jsonResponse({ definitions: [], sessions }));
     return new Promise<Response>((resolve) => { releaseExactRefresh = resolve; });

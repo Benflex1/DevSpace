@@ -92,7 +92,7 @@ test("inspection reports admission in progress before the private session record
 
   const identity = { workspaceId, harnessId: "codex", processId, processGeneration: 1 };
   expect(await h.runtime.capability(sessionId, undefined, identity)).toEqual({
-    state: "admitting", processGeneration: 1, resume: false
+    state: "admitting", processGeneration: 1, resume: false, processId
   });
   await expect(h.runtime.capability(sessionId, undefined, { ...identity, processGeneration: 2 }))
     .rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
@@ -108,7 +108,7 @@ test("inspection reports admission in progress before the private session record
     processId: queuedIdentity.processId, terminalId: "018f1f34-7000-7000-8000-000000000008", processGeneration: 1
   }).then(() => null, (error: unknown) => error);
   expect(await h.runtime.capability("018f1f34-7000-7000-8000-000000000006", undefined, queuedIdentity)).toEqual({
-    state: "admitting", processGeneration: 1, resume: false
+    state: "admitting", processGeneration: 1, resume: false, processId: queuedIdentity.processId
   });
 
   releaseMaterialization();
@@ -230,6 +230,56 @@ test("Codex settlement releases its dedicated home only for a foreground-only pr
   await expect(home.acquireLease({
     harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
   })).resolves.toMatchObject({ leaseId: expect.any(String) });
+});
+
+test("Codex history reads the active leased slot, then settled and resumed homes without changing the process", async () => {
+  const { runtime, root, createdExecs } = await fixture();
+  const nativeId = "018f1f34-7000-7000-8000-000000000221";
+  const slot = path.join(root, "harness-slots", workspaceId);
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  const activeRollout = await writeCanonicalRollout(slot, { id: nativeId, timestamp: "2026-10-01T14:38:06.144Z" });
+  await writeFile(activeRollout, `${JSON.stringify({ timestamp: "2026-10-01T14:38:06.144Z", type: "session_meta",
+    payload: { id: nativeId, cwd: "/workspace", parent_thread_id: null } })}\n` + [
+    { timestamp: "2026-10-01T14:38:07.000Z", type: "event_msg", payload: { type: "user_message", message: "first prompt" } },
+    { timestamp: "2026-10-01T14:38:07.100Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+    { timestamp: "2026-10-01T14:38:08.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1", last_agent_message: "first answer" } }
+  ].map((line) => JSON.stringify(line)).join("\n") + "\n");
+
+  const request = (identity: { processId: string; processGeneration: number }) => runtime.readCodexHistory({
+    actorIdentity: "owner@example.test", projectId, sessionId, workspaceId, ...identity, cursor: null
+  });
+  const live = await request({ processId, processGeneration: 1 });
+  expect(live).toMatchObject({ snapshot: "live", available: true, messages: [
+    { role: "user", text: "first prompt" }, { role: "assistant", text: "first answer" }
+  ] });
+  expect(await runtime.privateNativeId(sessionId)).toBeNull();
+  expect(await runtime.capability(sessionId)).toMatchObject({ state: "live", processGeneration: 1 });
+  expect(createdExecs).toHaveLength(1);
+  await expect(request({ processId: "018f1f34-7000-7000-8000-000000000222", processGeneration: 1 }))
+    .rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  await expect(runtime.readCodexHistory({ actorIdentity: "owner@example.test", projectId, sessionId,
+    workspaceId: wsB, processId, processGeneration: 1, cursor: null })).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  const privateRecordPath = path.join(root, "harness-sessions", `${sessionId}.json`);
+  const privateRecord = await readFile(privateRecordPath, "utf8");
+  const unprovenRecord = JSON.parse(privateRecord) as Record<string, unknown>;
+  delete unprovenRecord.discoveryBaseline;
+  await writeFile(privateRecordPath, JSON.stringify(unprovenRecord));
+  await expect(request({ processId, processGeneration: 1 })).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+  await writeFile(privateRecordPath, privateRecord);
+
+  await runtime.settleExit({ sessionId });
+  expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
+  await expect(request({ processId, processGeneration: 1 })).resolves.toMatchObject({ snapshot: "settled", available: true });
+
+  const resumedProcessId = "018f1f34-7000-7000-8000-000000000223";
+  await runtime.resumeExec({ sessionId, projectId, processId: resumedProcessId,
+    terminalId: "018f1f34-7000-7000-8000-000000000224", processGeneration: 2 });
+  await expect(request({ processId: resumedProcessId, processGeneration: 2 })).resolves.toMatchObject({
+    snapshot: "live", available: true, messages: [
+      { role: "user", text: "first prompt" }, { role: "assistant", text: "first answer" }
+    ]
+  });
+  expect(createdExecs).toHaveLength(2);
 });
 
 test("settlement identifies only a canonical Codex session created after this DevSpace generation started", async () => {

@@ -1,7 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { nativeAiPresentation } from "./native-ai-presentation.js";
+import { NativeConversationHistory, useNativeCodexHistory } from "./native-codex-history-view.js";
+import {
+  nativeConversationAtLive, nativeConversationShouldLoadOlder, nativeConversationWheelDelta, nativeConversationWheelTarget
+} from "./native-conversation-scroll.js";
 import { nativeHarnessTerminalState } from "./terminal-lifecycle.js";
 import { TerminalTab, type TerminalView } from "./terminal-tab.js";
 
@@ -27,6 +31,14 @@ function preferredInitialSession(sessions: readonly NativeSession[]): NativeSess
       : session.resume === true ? 2 : 3;
   return [...sessions].sort((left, right) => priority(left) - priority(right)
     || (left.id === right.id ? 0 : left.id > right.id ? -1 : 1))[0] ?? null;
+}
+
+function conversationGeometry(element: HTMLDivElement | null): {
+  readonly scrollTop: number; readonly scrollHeight: number; readonly clientHeight: number;
+} | null {
+  return element === null ? null : {
+    scrollTop: element.scrollTop, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight
+  };
 }
 
 function sessionOptionLabel(session: NativeSession): string {
@@ -65,6 +77,16 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
   const admissionRetryKeys = useRef(new Set<string>());
   const admissionPollAttempts = useRef(new Map<string, number>());
   const activePostKeys = useRef(new Set<string>());
+  const conversationRef = useRef<HTMLDivElement | null>(null);
+  const pinnedToLive = useRef(true);
+  const previousConversationHeight = useRef(0);
+  const [historyEngaged, setHistoryEngaged] = useState(false);
+
+  useEffect(() => {
+    pinnedToLive.current = true;
+    previousConversationHeight.current = 0;
+    setHistoryEngaged(false);
+  }, [selectedNativeSessionId]);
 
   const selectNativeSession = useCallback((id: string | null) => {
     selectionSequence.current += 1;
@@ -103,6 +125,9 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       setPollExhaustedSessionId(null);
       setSessions([]);
       setSelectedNativeSessionId(null);
+      pinnedToLive.current = true;
+      previousConversationHeight.current = 0;
+      setHistoryEngaged(false);
       setTerminal(null);
       setAttachmentState(null);
     }
@@ -454,6 +479,60 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
     };
   const selected = definitions.find((definition) => definition.id === (session?.harnessId ?? harnessId)) ?? definitions[0];
   const displayName = selected?.displayName ?? "Codex";
+  const canReadCodexHistory = session?.harnessId === "codex"
+    && (session.state === "active" || session.state === "stopped" || session.state === "lost");
+  const history = useNativeCodexHistory({
+    projectId, workspaceId, sessionId: session?.id ?? null, displayName, enabled: active && canReadCodexHistory
+  });
+
+  const returnToLive = useCallback(() => {
+    const element = conversationRef.current;
+    if (element === null) return;
+    element.scrollTop = element.scrollHeight;
+    pinnedToLive.current = true;
+    setHistoryEngaged(false);
+  }, []);
+  const revealHistory = useCallback(() => {
+    const element = conversationRef.current;
+    if (element === null) return;
+    element.scrollTop = 0;
+    pinnedToLive.current = false;
+    setHistoryEngaged(true);
+  }, []);
+  const onConversationScroll = useCallback(() => {
+    const geometry = conversationGeometry(conversationRef.current);
+    if (geometry === null) return;
+    const atLive = nativeConversationAtLive(geometry);
+    pinnedToLive.current = atLive;
+    setHistoryEngaged(!atLive);
+    if (nativeConversationShouldLoadOlder(geometry, history.olderCursor !== null)) history.loadOlder();
+  }, [history.loadOlder, history.olderCursor]);
+  const onTerminalWheel = useCallback((event: { readonly deltaY: number; readonly deltaMode?: number }) => {
+    const geometry = conversationGeometry(conversationRef.current);
+    if (geometry === null) return true;
+    const target = nativeConversationWheelTarget(
+      geometry, nativeConversationWheelDelta(event), canReadCodexHistory && history.available !== false
+    );
+    if (target === null) return true;
+    const element = conversationRef.current;
+    if (element === null) return true;
+    element.scrollTop = target;
+    const atLive = nativeConversationAtLive({
+      scrollTop: element.scrollTop, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight
+    });
+    pinnedToLive.current = atLive;
+    setHistoryEngaged(!atLive);
+    return false;
+  }, [canReadCodexHistory, history.available]);
+  useLayoutEffect(() => {
+    const element = conversationRef.current;
+    if (element === null) return;
+    if (pinnedToLive.current) element.scrollTop = element.scrollHeight;
+    else if (element.scrollHeight !== previousConversationHeight.current) {
+      element.scrollTop += element.scrollHeight - previousConversationHeight.current;
+    }
+    previousConversationHeight.current = element.scrollHeight;
+  }, [history.messages, terminal?.id, session?.id, active]);
 
   return <section className="native-ai-surface" aria-label="Native harness" hidden={!active}>
     <header className="native-ai-header">
@@ -482,6 +561,10 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
         </label>
         : <strong className="native-ai-name">{displayName}</strong>}
       {presentation.status !== null && <span className={`native-ai-state${presentation.status === "Running" || presentation.status === "Attached" ? " is-running" : ""}`}>{presentation.status}</span>}
+      {canReadCodexHistory && session !== null && <button type="button" className="native-ai-conversation-jump"
+        onClick={historyEngaged ? returnToLive : revealHistory}>
+        {historyEngaged ? "Return to live terminal" : "Earlier conversation"}
+      </button>}
       <span className="native-ai-spacer" />
       {presentation.action === "start" && <button type="button" disabled={pending} onClick={startHarness}>Start</button>}
       {presentation.action === "resume" && session !== null && <button type="button" disabled={pending || session.resume !== true} onClick={resumeSelectedHarness}>Resume</button>}
@@ -494,7 +577,12 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
       {message !== null && <span className="native-ai-message" role="status">{message}</span>}
       {(refreshFailed || pollExhaustedSessionId === selectedNativeSessionId) && <button type="button" disabled={pending} onClick={retryRefresh}>Retry refresh</button>}
     </header>
-    <div className="native-ai-terminal">
+    <div className="native-ai-conversation" ref={conversationRef} onScroll={onConversationScroll}
+      data-native-conversation-view={historyEngaged ? "history" : "live"}>
+      {canReadCodexHistory && session !== null && <NativeConversationHistory
+        key={`${projectId}:${workspaceId}:${session.id}`}
+        history={history} displayName={displayName} />}
+      <div className="native-ai-live">
       {pending
         ? <p className="native-ai-empty" role="status">{pendingAction === "resume" ? "Resuming native session…"
           : pendingAction === "retry-native" ? "Reconciling the existing admission…" : "Starting native session…"}</p>
@@ -513,8 +601,9 @@ export function HarnessSessionTab({ projectId, workspaceId, active }: {
             ? <TerminalTab projectId={projectId} workspaceId={workspaceId} terminal={terminal} active={active}
                 {...(selectedNativeSessionId === null ? {} : { nativeHarnessSessionId: selectedNativeSessionId })}
                 onRefresh={onRefresh} onTerminalStateChange={onTerminalStateChange}
-                onAttachmentStateChange={onTerminalAttachmentChange} />
-            : <p className="native-ai-empty">Start a harness to open its terminal.</p>}
+                onAttachmentStateChange={onTerminalAttachmentChange} onWheelIntent={onTerminalWheel} />
+            : <p className="native-ai-empty">The terminal is not available for this Native session.</p>}
+      </div>
     </div>
   </section>;
 }

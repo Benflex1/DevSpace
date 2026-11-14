@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { discoverCodexNativeSessionId } from "./harness-codex-discovery.js";
+import { discoverCodexNativeSessionId, resolveCodexNativeRollout } from "./harness-codex-discovery.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -137,4 +137,43 @@ test("does not follow symlinked sessions roots or rollout files", async () => {
 
   expect(await discoverCodexNativeSessionId(linkedRoot)).toBeNull();
   expect(await discoverCodexNativeSessionId(linkedFile)).toBeNull();
+});
+
+test("resolves a canonical rollout exactly and rejects stale, duplicate, or ambiguous live identities", async () => {
+  const home = await newHome();
+  const firstId = "018f1f34-7000-7000-8000-000000000121";
+  await writeModernCodexSession(home, {
+    id: firstId, cwd: "/workspace", timestamp: "2026-10-01T14:38:06.144Z"
+  });
+  await expect(resolveCodexNativeRollout(home, { expectedId: firstId })).resolves.toMatchObject({
+    kind: "found", nativeSessionId: firstId
+  });
+  await expect(resolveCodexNativeRollout(home, { expectedId: "018f1f34-7000-7000-8000-000000000122" }))
+    .resolves.toEqual({ kind: "missing" });
+  await expect(resolveCodexNativeRollout(home, { baselineIds: [] })).resolves.toMatchObject({ kind: "found" });
+
+  await writeModernCodexSession(home, {
+    id: "018f1f34-7000-7000-8000-000000000123", cwd: "/workspace", timestamp: "2026-10-01T14:39:06.144Z"
+  });
+  await expect(resolveCodexNativeRollout(home, { baselineIds: [] })).resolves.toEqual({ kind: "ambiguous" });
+
+  const duplicate = path.join(home, "sessions", "2026", "10", "01", "rollout-duplicate.jsonl");
+  await writeFile(duplicate, `${JSON.stringify({ type: "session_meta", payload: {
+    id: firstId, cwd: "/workspace", parent_thread_id: null
+  } })}\n`);
+  await expect(resolveCodexNativeRollout(home, { expectedId: firstId })).resolves.toEqual({ kind: "ambiguous" });
+});
+
+test("history discovery rejects a symlinked canonical rollout even when another file matches", async () => {
+  const external = await newHome("devspace-codex-history-symlink-source-");
+  const id = "018f1f34-7000-7000-8000-000000000124";
+  const externalFile = await writeModernCodexSession(external, {
+    id, cwd: "/workspace", timestamp: "2026-10-01T14:38:06.144Z"
+  });
+  const home = await newHome("devspace-codex-history-symlink-target-");
+  const directory = path.join(home, "sessions", "2026", "10", "01");
+  await mkdir(directory, { recursive: true });
+  await symlink(externalFile, path.join(directory, path.basename(externalFile)));
+
+  await expect(resolveCodexNativeRollout(home, { expectedId: id })).resolves.toEqual({ kind: "missing" });
 });

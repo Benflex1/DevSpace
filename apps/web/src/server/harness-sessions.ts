@@ -150,6 +150,7 @@ async function inspectAndReconcileNativeHarnessSession(
   agentState: "admitting" | "live" | "stopped" | "lost" | null;
   authoritative: boolean;
   resume: boolean;
+  processId?: string;
   admissionStatus?: "preparing" | "admitting" | "admitted" | "uncertain" | "unknown";
 }> {
   const findSession = () => dependencies.database.listNativeHarnessSessions(workspaceId).find((row) => row.id === sessionId) ?? null;
@@ -234,6 +235,7 @@ async function inspectAndReconcileNativeHarnessSession(
     agentState: observation.state,
     authoritative,
     resume: authoritative && observation.state !== "live" && observation.resume,
+    ...(authoritative && observation.processId !== undefined ? { processId: observation.processId } : {}),
     ...(admissionStatus === undefined ? {} : { admissionStatus })
   };
 }
@@ -317,4 +319,39 @@ export async function listProjectedHarnessSessions(
     });
   }
   return sessions;
+}
+
+export async function readNativeCodexHistory(
+  input: { readonly projectId: string; readonly actor: string; readonly workspaceId: string; readonly sessionId: string; readonly cursor: string | null },
+  dependencies: { readonly database: ProjectDatabase; readonly agent: FullAgentClient }
+) {
+  if (input.actor.length === 0) throw new ProjectSetupConflictError("Authentication is required.");
+  const identity = dependencies.database.getNativeHarnessHistoryIdentity(input.projectId, input.workspaceId, input.sessionId);
+  let session: { id: string; workspaceId: string; processGeneration: number; state: string } | null = identity ?? null;
+  let processId = identity?.processId ?? null;
+  if (session === null) {
+    // A legacy row created before session persistence has no process identity.
+    // The exact Agent private record supplies it for this read without writing
+    // an invented database identity.
+    const definitions = listCustomHarnessDefinitions(dependencies.database);
+    const inspection = await inspectAndReconcileNativeHarnessSession(input.workspaceId, input.sessionId, dependencies, definitions);
+    if (inspection.session !== null && inspection.session.harnessId === "codex"
+      && inspection.processId !== undefined && inspection.authoritative) {
+      session = {
+        id: inspection.session.id,
+        workspaceId: inspection.session.workspaceId,
+        processGeneration: inspection.session.processGeneration,
+        state: inspection.session.state
+      };
+      processId = inspection.processId;
+    }
+  }
+  if (session === null || processId === null || !["active", "stopped", "lost"].includes(session.state)) {
+    throw new ProjectSetupConflictError("The Codex history session is unavailable.");
+  }
+  return await dependencies.agent.readNativeCodexHistory({
+    actorIdentity: input.actor, projectId: input.projectId, sessionId: session.id,
+    workspaceId: session.workspaceId, processId,
+    processGeneration: session.processGeneration, cursor: input.cursor
+  });
 }
