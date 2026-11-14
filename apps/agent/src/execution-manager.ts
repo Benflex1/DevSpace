@@ -538,6 +538,27 @@ export class ExecutionManager {
     }
   }
 
+  /**
+   * An exec can only exist inside the container lifetime that created it. When the
+   * engine no longer knows the exec but reports that the exact container started
+   * after the exec's recorded start, the exec belonged to a previous container
+   * lifetime (for example a workspace Stop/Start) and cannot still be running.
+   * A daemon restart alone keeps the same container lifetime and stays unproven.
+   */
+  private async containerRestartedAfterExec(live: LiveExecution): Promise<boolean> {
+    if (live.record.startedAt === null) return false;
+    const execStartedAt = Date.parse(live.record.startedAt);
+    if (!Number.isFinite(execStartedAt)) return false;
+    try {
+      const inspection = await this.engine.inspectContainer(live.record.containerId);
+      if (inspection.Id !== live.record.containerId) return false;
+      const containerStartedAt = Date.parse(inspection.State?.StartedAt ?? "");
+      return Number.isFinite(containerStartedAt) && containerStartedAt > execStartedAt;
+    } catch {
+      return false;
+    }
+  }
+
   private async harnessObservation(live: LiveExecution): Promise<HarnessProcessObservation> {
     if (live.record.execId === null) return "unproven";
     try {
@@ -548,7 +569,8 @@ export class ExecutionManager {
       return inspection.Running ? "running" : "unproven";
     } catch (error) {
       if (error instanceof DockerEngineError && error.statusCode === 404) {
-        return await this.containerCannotRun(live.record.containerId) ? "definitely-gone" : "unproven";
+        if (await this.containerCannotRun(live.record.containerId)) return "definitely-gone";
+        return await this.containerRestartedAfterExec(live) ? "definitely-gone" : "unproven";
       }
       return "unproven";
     }

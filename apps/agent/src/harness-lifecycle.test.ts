@@ -759,6 +759,114 @@ test("restart recovers a durable exec exit whose clean-settlement hook was inter
   expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8")).toContain(nativeId);
 });
 
+test("an exec missing after an exact container restart is definitely gone and releases the private home", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-container-restart-"));
+  roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const home = createHarnessHomeStore(root);
+  const stream = new PassThrough();
+  const startedEngine = {
+    createExec: async () => "exec-live",
+    startExecAttached: async () => stream,
+    inspectExec: async () => ({ ID: "exec-live", Running: true, ExitCode: null, ContainerID: "container-owned" }),
+    inspectContainer: async () => ({ Id: "container-owned", State: { Running: true, Status: "running",
+      StartedAt: "2026-09-24T00:00:00.000Z" } })
+  };
+  const manager = legacyDirectExecManager(root, startedEngine, { now: () => new Date("2026-09-24T00:00:00.000Z") });
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => { await manager.createHarness(input); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await manager.initialize();
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  const nativeId = "018f1f34-7000-7000-8000-000000000236";
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId), nativeId);
+
+  const restartedEngine = {
+    createExec: async () => { throw new Error("restart-must-not-exec"); },
+    startExecAttached: async () => { throw new Error("restart-must-not-exec"); },
+    inspectExec: async () => { throw new DockerEngineError(404, "No such exec instance"); },
+    inspectContainer: async () => ({ Id: "container-owned", State: { Running: true, Status: "running",
+      StartedAt: "2026-09-25T00:00:00.000Z" } })
+  };
+  const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
+  const restarted = legacyDirectExecManager(root, restartedEngine, { now: () => new Date("2026-09-25T01:00:00.000Z"), hooks });
+  const recovered = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    observeHarnessRecovery: () => restarted.harnessRecoveryReports()
+  });
+  hooks.onHarnessRecovered = async (event) => { await recovered.finalizeRecoveredLoss(event); };
+  await restarted.initialize();
+  await recovered.recoverAfterAgentRestart();
+
+  expect(restarted.harnessRecoveryReports()).toMatchObject([{ observation: "definitely-gone", processId, sessionId }]);
+  expect(await recovered.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
+  expect(await recovered.capability(sessionId)).toMatchObject({ resume: true });
+  expect(await home.hasActiveWorkspaceLease!(workspaceId)).toBe(false);
+  expect(await readdir(path.join(root, "harness-slots", workspaceId))).toEqual([]);
+  expect(await recovered.privateNativeId(sessionId)).toBe(nativeId);
+  expect(await readFile(path.join(home.persistentHomePath("codex"), "sessions", "2026", "10", "01", path.basename(rollout)), "utf8"))
+    .toContain(nativeId);
+  await expect(home.acquireLease({
+    harnessId: "codex", workspaceId: wsB, aiSessionId: "018f1f34-7000-7000-8000-000000000099", processGeneration: 1
+  })).resolves.toMatchObject({ leaseId: expect.any(String) });
+});
+
+test("an exec missing within the same container lifetime stays unproven after restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-same-lifetime-"));
+  roots.push(root);
+  await mkdir(path.join(root, "ownership", "executions"), { recursive: true });
+  const home = createHarnessHomeStore(root);
+  const stream = new PassThrough();
+  const startedEngine = {
+    createExec: async () => "exec-live",
+    startExecAttached: async () => stream,
+    inspectExec: async () => ({ ID: "exec-live", Running: true, ExitCode: null, ContainerID: "container-owned" }),
+    inspectContainer: async () => ({ Id: "container-owned", State: { Running: true, Status: "running",
+      StartedAt: "2026-09-24T00:00:00.000Z" } })
+  };
+  const manager = legacyDirectExecManager(root, startedEngine, { now: () => new Date("2026-09-24T00:00:00.000Z") });
+  const runtime = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async (input) => { await manager.createHarness(input); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    imageCodex: { present: true, version: null }
+  });
+  await manager.initialize();
+  await runtime.start({ projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1 });
+  const rollout = await writeCanonicalRollout(path.join(root, "harness-slots", workspaceId),
+    "018f1f34-7000-7000-8000-000000000237");
+
+  const restartedEngine = {
+    createExec: async () => { throw new Error("restart-must-not-exec"); },
+    startExecAttached: async () => { throw new Error("restart-must-not-exec"); },
+    inspectExec: async () => { throw new DockerEngineError(404, "No such exec instance"); },
+    inspectContainer: async () => ({ Id: "container-owned", State: { Running: true, Status: "running",
+      StartedAt: "2026-09-23T00:00:00.000Z" } })
+  };
+  const hooks: { onHarnessRecovered?: (event: HarnessRecoveryIdentity) => Promise<void> } = {};
+  const restarted = legacyDirectExecManager(root, restartedEngine, { now: () => new Date("2026-09-25T01:00:00.000Z"), hooks });
+  const recovered = createHarnessRuntime({
+    home, stateRoot: root,
+    createHarnessExec: async () => { throw new Error("restart-must-not-exec"); },
+    inspectSlot: async () => ({ state: "present-and-exact" }),
+    observeHarnessRecovery: () => restarted.harnessRecoveryReports()
+  });
+  hooks.onHarnessRecovered = async (event) => { await recovered.finalizeRecoveredLoss(event); };
+  await restarted.initialize();
+  await recovered.recoverAfterAgentRestart();
+
+  expect(restarted.harnessRecoveryReports()).toMatchObject([{ observation: "unproven", processId, sessionId }]);
+  expect(await recovered.publicSnapshot(sessionId)).toMatchObject({ state: "lost" });
+  expect(await recovered.capability(sessionId)).toMatchObject({ resume: false });
+  expect(await home.hasActiveWorkspaceLease!(workspaceId)).toBe(true);
+  expect(await readdir(path.dirname(rollout))).toEqual([path.basename(rollout)]);
+});
+
 test("a still-running harness exec survives Agent restart until it exits", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-harness-restart-"));
   roots.push(root);

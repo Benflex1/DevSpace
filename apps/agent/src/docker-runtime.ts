@@ -77,7 +77,7 @@ export interface DockerContainerInspection {
   Name: string;
   Image?: string;
   Config: { Labels: Record<string, string>; Image?: string; WorkingDir: string; User?: string; Entrypoint?: readonly string[] | null; Cmd?: readonly string[] | null };
-  State: { Running: boolean; Status: string; ExitCode?: number };
+  State: { Running: boolean; Status: string; ExitCode?: number; StartedAt?: string };
   HostConfig: { Privileged: boolean; PublishAllPorts: boolean; PidMode: string;
     IpcMode: string; UTSMode: string; UsernsMode: string; CgroupnsMode: string;
     NetworkMode: string; PortBindings: Record<string, Array<{ HostIp?: string | undefined; HostPort: string }> | null> | null;
@@ -286,7 +286,7 @@ const dockerContainerInspectionSchema = z.object({
   Id: z.string().min(1), Name: z.string().min(1), Image: z.string().min(1).optional(),
   Config: z.object({ Labels: z.record(z.string(), z.string()), Image: z.string().min(1).optional(), WorkingDir: z.string(), User: z.string().optional(),
     Entrypoint: z.array(z.string()).nullable().optional(), Cmd: z.array(z.string()).nullable().optional() }),
-  State: z.object({ Running: z.boolean(), Status: z.string(), ExitCode: z.number().int().optional() }),
+  State: z.object({ Running: z.boolean(), Status: z.string(), ExitCode: z.number().int().optional(), StartedAt: z.string().optional() }),
   HostConfig: z.object({
     Privileged: z.boolean(), PublishAllPorts: z.boolean(), PidMode: z.string(), IpcMode: z.string(), UTSMode: z.string(),
     UsernsMode: z.string(), CgroupnsMode: z.string(), NetworkMode: z.string(),
