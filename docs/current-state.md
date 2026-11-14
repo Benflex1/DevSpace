@@ -196,8 +196,18 @@ terminalized as non-retryable `GIT_MUTATION_OUTCOME_UNCERTAIN` failures and are 
 mutation that is known to have completed but cannot settle observation or its journal remains
 recoverable, preserving mutation truthfulness until restart reconciliation. Project creation from
 scratch and later Workbench polish remain deferred product work. Persistent ordinary shells are
-implemented in Slice 1 and in review. Native continuity is deferred to Slice 2; full persistent-
-terminal exit and close settlement is deferred to Slice 3.
+implemented in Slice 1. Native continuity Slice 2 is implemented in the current review branch:
+new Native harness generations use the existing tmux runtime and retain the exact session/process/
+lease identity across Agent recovery. Authenticated Bankroll dogfood showed that `--no-alt-screen`
+does not make tmux's TUI line history readable conversation history; full earlier-message recovery
+is not fixed. A separate read-only projection over the exact Agent-owned Codex rollout is the
+proposed solution, documented in
+[`native-codex-history-2026-11-12.md`](feasibility/native-codex-history-2026-11-12.md). The paired
+pane/browser capture and authenticated projection acceptance remain pending. Workbench now stores
+only the active tab identity in project/workspace-scoped session storage; restoration validates
+current terminal/preview resources, re-reads an editor file, and never persists editor buffers or
+credentials. Focused restoration tests pass; real-browser F5 acceptance remains pending. Full
+workspace Stop/Start and close settlement remain Slice 3 work.
 
 ## Private GitHub Repository Access status
 

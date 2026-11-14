@@ -881,6 +881,16 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
             && record.recoveryPending !== true) continue;
           const matching = reports.filter((item) => item.processId === record.processId && item.workspaceId === record.workspaceId
             && item.sessionId === sessionId && item.processGeneration === record.processGeneration && item.leaseId === record.leaseId);
+          const reattached = matching.length === 1 && matching[0]!.reattachable === true
+            && matching[0]!.observation === "running";
+          if (reattached) {
+            record.state = "live";
+            record.admission = "started";
+            record.recoveryPending = false;
+            liveByWorkspace.set(record.workspaceId, sessionId);
+            await saveSession(sessionId, record);
+            continue;
+          }
           record.state = "lost";
           if (record.leaseId !== null || record.recoveryPending === true
             || matching.some((item) => item.observation === "running" || item.observation === "unproven")) {

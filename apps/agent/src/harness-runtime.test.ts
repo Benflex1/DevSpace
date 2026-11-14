@@ -69,7 +69,7 @@ test("codex launch env contains CODEX_HOME and not CLAUDE_CONFIG_DIR", async () 
   expect(env.CODEX_HOME).toBe("/opt/devspace/harness-home");
   expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
   expect(env.HOME).not.toBe("/opt/devspace/harness-home");
-  expect(createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon"]);
+  expect(createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon", "--no-alt-screen"]);
 });
 
 test("inspection reports admission in progress before the private session record or exec exists", async () => {
@@ -223,7 +223,7 @@ test("Codex settlement releases its dedicated home only for a foreground-only pr
   expect(await readFile(leasePath, "utf8").catch(() => null)).toBeNull();
   await Promise.all(detachedWriters.map((writer) => writer()));
   expect(await readdir(slot)).toEqual([]);
-  expect(command).toEqual(["codex", "--yolo", "--no-daemon"]);
+  expect(command).toEqual(["codex", "--yolo", "--no-daemon", "--no-alt-screen"]);
   expect(await runtime.publicSnapshot(sessionId)).toMatchObject({ state: "stopped" });
   expect(await runtime.privateNativeId(sessionId)).toBe(nativeId);
   expect((await runtime.inspect({ harnessId: "codex", workspaceId, sessionId })).capabilities.resume).toBe(true);
@@ -572,9 +572,9 @@ test("codex resume after discovery execs resume argv with native id", async () =
     sessionId, projectId, processId: "018f1f34-7000-7000-8000-000000000016",
     terminalId: "018f1f34-7000-7000-8000-000000000017", processGeneration: 2
   });
-  expect(result.command).toEqual(["codex", "--yolo", "--no-daemon", "resume", nativeId]);
-  expect(createdExecs.at(-1)?.command).toEqual(["codex", "--yolo", "--no-daemon", "resume", nativeId]);
-  expect(createdExecs.at(-1)?.command[4]).toBe(nativeId);
+  expect(result.command).toEqual(["codex", "--yolo", "--no-daemon", "--no-alt-screen", "resume", nativeId]);
+  expect(createdExecs.at(-1)?.command).toEqual(["codex", "--yolo", "--no-daemon", "--no-alt-screen", "resume", nativeId]);
+  expect(createdExecs.at(-1)?.command[5]).toBe(nativeId);
   expect(JSON.stringify(await runtime.publicSnapshot(sessionId))).not.toContain(nativeId);
   expect(createdExecs.at(-1)?.environment.CODEX_HOME).toBe("/opt/devspace/harness-home");
 });
@@ -713,7 +713,7 @@ test("image codex wins without staging and an in-container artifact is the only 
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   expect(imageStages).toBe(0);
-  expect(image.createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon"]);
+  expect(image.createdExecs[0]?.command).toEqual(["codex", "--yolo", "--no-daemon", "--no-alt-screen"]);
   expect(await imageRuntime.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "image-path", reportedVersion: "0.160.0" } });
 
   const fallbackRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-artifact-"));
@@ -732,7 +732,7 @@ test("image codex wins without staging and an in-container artifact is the only 
     projectId, workspaceId, sessionId, harnessId: "codex", processId, terminalId, processGeneration: 1
   });
   expect(staged).toBe(1);
-  expect(fallbackExecs[0]?.command).toEqual([entrypoint, "--yolo", "--no-daemon"]);
+  expect(fallbackExecs[0]?.command).toEqual([entrypoint, "--yolo", "--no-daemon", "--no-alt-screen"]);
   expect(await fallback.publicSnapshot(sessionId)).toMatchObject({ executableSource: { kind: "agent-artifact", reportedVersion: "0.156.1" } });
 
   const noneRoot = await mkdtemp(path.join(tmpdir(), "devspace-harness-no-executable-"));

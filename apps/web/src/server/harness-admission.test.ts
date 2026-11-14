@@ -94,6 +94,15 @@ test("a lost agent response retries the same creating harness and a definite rej
   await expect(createNativeHarnessSession(other.project.id, "actor", other.workspaceId, "codex", { database: other.database, agent: rejected }))
     .rejects.toBeInstanceOf(AgentResponseError);
   expect(other.database.listNativeHarnessSessions(other.workspaceId)[0]).toMatchObject({ state: "failed" });
+  const failedSession = other.database.listNativeHarnessSessions(other.workspaceId)[0]!;
+  const raw = new BetterSqlite3(other.databasePath);
+  const failedTerminal = raw.prepare("select state, closed_at from terminal_sessions where id = ?").get(failedSession.terminalSessionId) as
+    { state: string; closed_at: string | null };
+  const failedProcess = raw.prepare("select desired_state, observed_state, finished_at from processes where id = ?").get(failedSession.terminalSessionId) as
+    { desired_state: string; observed_state: string; finished_at: string | null };
+  raw.close();
+  expect(failedTerminal).toMatchObject({ state: "failed", closed_at: expect.any(String) });
+  expect(failedProcess).toMatchObject({ desired_state: "stopped", observed_state: "failed", finished_at: expect.any(String) });
   const again = await createNativeHarnessSession(other.project.id, "actor", other.workspaceId, "codex", {
     database: other.database,
     agent: { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient
