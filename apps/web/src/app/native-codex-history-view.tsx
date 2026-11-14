@@ -1,15 +1,33 @@
 "use client";
 
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { nativeCodexHistoryPageSchema, type NativeCodexHistoryMessage } from "@devspace/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
 
-export function NativeCodexHistoryView({ projectId, workspaceId, sessionId, visible }: {
+export type NativeCodexHistoryState = {
+  readonly messages: readonly NativeCodexHistoryMessage[];
+  readonly olderCursor: string | null;
+  readonly olderHistoryTruncated: boolean;
+  readonly available: boolean | null;
+  readonly snapshot: "live" | "settled" | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly loadOlder: () => void;
+  readonly refresh: () => void;
+};
+
+/**
+ * Bounded, read-only provider history. The Agent owns Codex rollout extraction;
+ * this hook only pages the authenticated Web route and never inspects terminal
+ * bytes, so TUI redraws and escape sequences can never become conversation text.
+ */
+export function useNativeCodexHistory(input: {
   readonly projectId: string;
   readonly workspaceId: string;
-  readonly sessionId: string;
-  readonly visible: boolean;
-}) {
-  const [messages, setMessages] = useState<NativeCodexHistoryMessage[]>([]);
+  readonly sessionId: string | null;
+  readonly displayName: string;
+  readonly enabled: boolean;
+}): NativeCodexHistoryState {
+  const [messages, setMessages] = useState<readonly NativeCodexHistoryMessage[]>([]);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [olderHistoryTruncated, setOlderHistoryTruncated] = useState(false);
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -20,18 +38,21 @@ export function NativeCodexHistoryView({ projectId, workspaceId, sessionId, visi
   const pendingRequest = useRef<{ readonly key: string; readonly sequence: number } | null>(null);
 
   const load = useCallback(async (cursor: string | null, prepend: boolean) => {
+    const sessionId = input.sessionId;
+    if (sessionId === null) return;
     const key = `${prepend ? "older" : "newest"}:${cursor ?? ""}`;
     if (pendingRequest.current?.key === key) return;
     const sequence = ++requestSequence.current;
     pendingRequest.current = { key, sequence };
     setLoading(true);
     setError(null);
-    const query = new URLSearchParams({ workspaceId });
+    const query = new URLSearchParams({ workspaceId: input.workspaceId });
     if (cursor !== null) query.set("cursor", cursor);
     try {
-      const response = await fetch(`/api/projects/${projectId}/harness/${sessionId}/history?${query.toString()}`, {
-        cache: "no-store", headers: { accept: "application/json" }
-      });
+      const response = await fetch(
+        `/api/projects/${input.projectId}/harness/${sessionId}/history?${query.toString()}`,
+        { cache: "no-store", headers: { accept: "application/json" } }
+      );
       if (!response.ok) throw new Error("history-read-failed");
       const page = nativeCodexHistoryPageSchema.parse(await response.json());
       if (sequence !== requestSequence.current) return;
@@ -45,55 +66,88 @@ export function NativeCodexHistoryView({ projectId, workspaceId, sessionId, visi
       setAvailable(page.available);
       setSnapshot(page.snapshot);
     } catch {
-      if (sequence === requestSequence.current) setError("Codex conversation history could not be read safely. Refresh to try again.");
+      if (sequence === requestSequence.current) {
+        setError(`${input.displayName} conversation history could not be read safely. Refresh to try again.`);
+      }
     } finally {
       if (pendingRequest.current?.sequence === sequence) pendingRequest.current = null;
       if (sequence === requestSequence.current) setLoading(false);
     }
-  }, [projectId, sessionId, workspaceId]);
+  }, [input.displayName, input.projectId, input.sessionId, input.workspaceId]);
 
   useEffect(() => {
-    if (visible) void load(null, false).catch(() => undefined);
+    requestSequence.current += 1;
+    pendingRequest.current = null;
+    setMessages([]);
+    setOlderCursor(null);
+    setOlderHistoryTruncated(false);
+    setAvailable(null);
+    setSnapshot(null);
+    setError(null);
+    setLoading(false);
+    if (input.enabled && input.sessionId !== null) void load(null, false).catch(() => undefined);
     return () => {
       requestSequence.current += 1;
       pendingRequest.current = null;
     };
-  }, [load, visible]);
+  }, [input.enabled, input.sessionId, load]);
 
-  const formatTime = (value: string | null): string => {
-    if (value === null) return "";
-    const date = new Date(value);
-    return Number.isNaN(date.valueOf()) ? "" : date.toLocaleString();
-  };
+  const loadOlder = useCallback(() => {
+    if (olderCursor === null || loading) return;
+    void load(olderCursor, true).catch(() => undefined);
+  }, [load, loading, olderCursor]);
+  const refresh = useCallback(() => {
+    void load(null, false).catch(() => undefined);
+  }, [load]);
 
-  return <section className="native-history-panel" aria-label="Codex conversation history" hidden={!visible}>
-    <header className="native-history-header">
+  return useMemo(() => ({
+    messages, olderCursor, olderHistoryTruncated, available, snapshot, loading, error, loadOlder, refresh
+  }), [messages, olderCursor, olderHistoryTruncated, available, snapshot, loading, error, loadOlder, refresh]);
+}
+
+function formatTime(value: string | null): string {
+  if (value === null) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "" : date.toLocaleString();
+}
+
+export function NativeConversationHistory({ history, displayName }: {
+  readonly history: NativeCodexHistoryState;
+  readonly displayName: string;
+}) {
+  return <section className="native-conversation-history" aria-label={`${displayName} conversation history`}>
+    <header className="native-conversation-history-header">
       <div>
-        <h2>Conversation history</h2>
-        <p>Read-only Codex messages. Tool results, analysis, and status events are omitted.</p>
+        <h2>Earlier conversation</h2>
+        <p>Readable saved messages. Terminal redraws, tool output, and status events are omitted.</p>
       </div>
-      <div className="native-history-actions">
-        <span>{snapshot === "live" ? "Live snapshot" : snapshot === "settled" ? "Saved conversation" : ""}</span>
-        <button type="button" onClick={() => void load(null, false)} disabled={loading}>Refresh history</button>
+      <div className="native-conversation-history-actions">
+        <span>{history.snapshot === "live" ? "Live snapshot" : history.snapshot === "settled" ? "Saved conversation" : ""}</span>
+        <button type="button" onClick={history.refresh} disabled={history.loading}>Refresh</button>
       </div>
     </header>
-    {error !== null && <p className="native-history-status" role="alert">{error}</p>}
-    {loading && messages.length === 0 && <p className="native-history-status" role="status">Loading Codex conversation history…</p>}
-    {!loading && error === null && messages.length === 0 && available === false
-      && <p className="native-history-status" role="status">Codex has not written this conversation to its private home yet. Refresh history after a message completes.</p>}
-    {!loading && error === null && messages.length === 0 && available === true
-      && <p className="native-history-status" role="status">No complete exchanges are available in this snapshot.</p>}
-    {olderHistoryTruncated && <p className="native-history-truncated" role="status">Earlier messages are outside the bounded history snapshot.</p>}
-    {messages.length > 0 && <ol className="native-history-messages">
-      {messages.map((message) => <li key={message.id} className={`native-history-message is-${message.role}`}>
+    {history.error !== null && <p className="native-conversation-status" role="alert">{history.error}</p>}
+    {history.loading && history.messages.length === 0
+      && <p className="native-conversation-status" role="status">Loading {displayName} conversation history…</p>}
+    {!history.loading && history.error === null && history.messages.length === 0 && history.available === false
+      && <p className="native-conversation-status" role="status">
+        {displayName} has not written this conversation to its private home yet. Refresh after a message completes.
+      </p>}
+    {!history.loading && history.error === null && history.messages.length === 0 && history.available === true
+      && <p className="native-conversation-status" role="status">No complete exchanges are available in this snapshot.</p>}
+    {history.olderHistoryTruncated && <p className="native-conversation-truncated" role="status">
+      Earlier messages are outside the bounded history snapshot.
+    </p>}
+    {history.olderCursor !== null && <button className="native-conversation-older" type="button" disabled={history.loading}
+      onClick={history.loadOlder}>{history.loading ? "Loading…" : "Load older messages"}</button>}
+    {history.messages.length > 0 && <ol className="native-conversation-messages">
+      {history.messages.map((message) => <li key={message.id} className={`native-conversation-message is-${message.role}`}>
         <header>
-          <strong>{message.role === "user" ? "You" : "Codex"}</strong>
+          <strong>{message.role === "user" ? "You" : displayName}</strong>
           {message.timestamp !== null && <time dateTime={message.timestamp}>{formatTime(message.timestamp)}</time>}
         </header>
         <pre>{message.text}</pre>
       </li>)}
     </ol>}
-    {olderCursor !== null && <button className="native-history-older" type="button" disabled={loading}
-      onClick={() => void load(olderCursor, true)}>{loading ? "Loading…" : "Load older messages"}</button>}
   </section>;
 }

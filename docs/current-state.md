@@ -198,7 +198,10 @@ recoverable, preserving mutation truthfulness until restart reconciliation. Proj
 scratch and later Workbench polish remain deferred product work. Persistent ordinary shells are
 implemented in Slice 1. Native continuity Slice 2 is implemented in the current review branch:
 new Native harness generations use the existing tmux runtime and retain the exact session/process/
-lease identity across Agent recovery. Authenticated Bankroll dogfood showed that `--no-alt-screen`
+lease identity across Agent recovery. A recovered execution whose Docker exec is missing is now
+settled as definitely gone when the exact container started after that exec's recorded start; a
+daemon restart inside the same container lifetime remains unproven. Definite Native admission
+failures also close their prepared terminal/process rows instead of leaving them creating. Authenticated Bankroll dogfood showed that `--no-alt-screen`
 does not make tmux's TUI line history readable conversation history; full earlier-message recovery
 is not fixed. A separate read-only projection over the exact Agent-owned Codex rollout is
 implemented as described in
@@ -209,14 +212,28 @@ current terminal/preview resources, re-reads an editor file, and never persists 
 credentials. Focused restoration tests pass; real-browser F5 acceptance remains pending. Full
 workspace Stop/Start and close settlement remain Slice 3 work. The isolated fixture browser test
 also confirms F5 restores the selected AI tab; authenticated dogfood F5 acceptance remains pending.
-The separate Native Codex History
-viewer is now implemented on the review branch: it reads an exact active leased-slot rollout or a
-settled persistent-home rollout, projects only bounded user messages and completed assistant
-answers, and pages from a signed in-memory cursor. Focused Agent, Web, contract, lifecycle,
-pagination, and terminal-continuity tests pass. The implementation does not store transcript text
-in browser storage or Web SQLite. Real-provider history verification remains outstanding: at least
-three earlier real Codex exchanges must be read after F5 while confirming the same process and
-session remain active. Do not claim conversation-history recovery is fixed before that run.
+Native Codex conversation history is now
+integrated into the single AI surface on the review branch: semantic saved messages scroll above
+the live terminal, the terminal stays mounted and attached, and scrolling back down returns to it.
+A header action jumps between the live terminal and history for keyboard users. The surface reads
+an exact active leased-slot rollout or a settled persistent-home rollout, projects only bounded
+user messages and completed assistant answers, and pages from a signed in-memory cursor. Legacy
+Native rows created before process persistence have no database process identity; the history read
+uses the exact Agent private session record for that identity without writing an invented row.
+Focused Agent, Web, contract, lifecycle, scroll, pagination, and terminal-continuity tests pass. The
+implementation does not store transcript text in browser storage or Web SQLite.
+
+The Bankroll dogfood failure is diagnosed from durable state, not reset: the old Native session's
+Docker exec no longer exists because its workspace container started after the exec was created,
+while the private-home lease and dirty slot remained. Agent recovery classified that evidence as
+unproven, kept `recoveryPending`, and every new Native Start was rejected as an already-live
+harness. The same legacy row also had no database process identity, so the history route failed
+closed. The recovery evidence and legacy-identity fixes are on this stack. Real-provider
+acceptance remains outstanding: after an Agent restart with the fixed build, the stale session
+must settle without deleting leases or stopping containers, a new Native Start must succeed, and
+at least three earlier real Codex exchanges must be read after F5 while confirming the same
+process and session remain active. Do not claim conversation-history recovery is fixed before
+that run.
 
 ## Private GitHub Repository Access status
 

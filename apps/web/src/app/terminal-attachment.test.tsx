@@ -7,8 +7,11 @@ import { afterEach, expect, test, vi } from "vitest";
 import { buttonText, FakeNode, findButtons, installTerminalTestDom, settleReact } from "./terminal-test-dom.js";
 import { decodeTerminalClientFrame, encodeTerminalAgentFrame } from "@devspace/contracts";
 
-const xtermState = vi.hoisted(() => ({ writes: [] as Uint8Array[], writeCallbacks: [] as Array<() => void>, resets: 0,
-  selection: "selected history text" }));
+const xtermState = vi.hoisted(() => ({
+  writes: [] as Uint8Array[], writeCallbacks: [] as Array<() => void>, resets: 0,
+  selection: "selected history text",
+  wheelHandler: null as ((event: { readonly deltaY: number; readonly deltaMode?: number }) => boolean) | null
+}));
 
 class FakeSocket {
   static readonly OPEN = 1;
@@ -65,6 +68,9 @@ vi.mock("@xterm/xterm", () => ({
       xtermState.writes.push(data);
       if (callback !== undefined) xtermState.writeCallbacks.push(callback);
     }
+    attachCustomWheelEventHandler(handler: (event: { readonly deltaY: number; readonly deltaMode?: number }) => boolean) {
+      xtermState.wheelHandler = handler;
+    }
     onData() { return { dispose() { /* unused */ } }; }
     onBinary() { return { dispose() { /* unused */ } }; }
     dispose() { /* attachment teardown */ }
@@ -90,6 +96,7 @@ afterEach(() => {
   xtermState.writes = [];
   xtermState.writeCallbacks = [];
   xtermState.resets = 0;
+  xtermState.wheelHandler = null;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -352,4 +359,27 @@ test("a closed fast-exit terminal receives its one-shot retained output and exit
   expect(xtermState.writes).toEqual([output]);
   expect(states.at(-1)).toBe("closed");
   expect(FakeSocket.instances).toHaveLength(1);
+});
+
+test("the terminal wheel bridge delegates wheel intent to the conversation surface", async () => {
+  const rootElement = installTerminalTestDom(FakeSocket);
+  const { TerminalTab } = await import("./terminal-tab.js");
+  const onWheelIntent = vi.fn(() => false);
+  const root = createRoot(rootElement as never);
+  roots.push(root);
+  act(() => {
+    root.render(createElement(TerminalTab, {
+      projectId,
+      workspaceId,
+      terminal: { id: terminalId, processId: terminalId, title: "Codex", state: "active" },
+      active: true,
+      onRefresh: () => undefined,
+      onTerminalStateChange: () => undefined,
+      onWheelIntent
+    }));
+  });
+  await settleReact();
+  expect(xtermState.wheelHandler).toBeTypeOf("function");
+  expect(xtermState.wheelHandler!({ deltaY: -120 })).toBe(false);
+  expect(onWheelIntent).toHaveBeenCalledWith({ deltaY: -120 });
 });

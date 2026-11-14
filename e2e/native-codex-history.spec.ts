@@ -75,18 +75,24 @@ test("Native Codex History reloads from a bounded history fixture after F5 and r
   await expect(nativeTab).toHaveAttribute("aria-selected", "true");
 
   const native = page.getByRole("region", { name: "Native harness" });
-  await native.getByRole("button", { name: "History", exact: true }).click();
+  const conversation = native.locator(".native-ai-conversation");
+  await expect(conversation).toHaveAttribute("data-native-conversation-view", "live");
+  await native.getByRole("button", { name: "Earlier conversation", exact: true }).click();
+  await expect(conversation).toHaveAttribute("data-native-conversation-view", "history");
   const history = native.getByRole("region", { name: "Codex conversation history" });
   await expect(history.getByText("third fixture prompt", { exact: true })).toBeVisible();
   await expect(history.getByText("third fixture answer", { exact: true })).toBeVisible();
-  await history.getByRole("button", { name: "Load older messages" }).click();
-  await expect(history.getByText("first fixture prompt", { exact: true })).toBeVisible();
+  // Reaching the top of the revealed history pages older messages automatically;
+  // the explicit control remains for keyboard and non-wheel navigation.
+  await expect(history.getByText("first fixture prompt", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(history.getByText("second fixture answer", { exact: true })).toBeVisible();
-  const rendered = await history.locator(".native-history-message").allTextContents();
+  const rendered = await history.locator(".native-conversation-message").allTextContents();
   expect(rendered.join(" ")).toContain("first fixture prompt");
   expect(rendered.join(" ").indexOf("first fixture prompt")).toBeLessThan(rendered.join(" ").indexOf("third fixture prompt"));
   expect(rendered.join(" ")).not.toContain("usage");
   expect(rendered.join(" ")).not.toContain("function_call_output");
+  await native.getByRole("button", { name: "Return to live terminal", exact: true }).click();
+  await expect(conversation).toHaveAttribute("data-native-conversation-view", "live");
   expect(await page.evaluate(() => {
     const browserGlobal = globalThis as unknown as { readonly localStorage: Storage; readonly sessionStorage: Storage };
     const values = (storage: Storage) => Array.from({ length: storage.length }, (_, index) => {
@@ -102,11 +108,10 @@ test("Native Codex History reloads from a bounded history fixture after F5 and r
   const restoredNativeTab = reloadedWorkbench.getByRole("tablist", { name: "Project tabs" }).getByRole("tab", { name: "AI session" });
   await expect(restoredNativeTab).toHaveAttribute("aria-selected", "true");
   const reloadedNative = page.getByRole("region", { name: "Native harness" });
-  await reloadedNative.getByRole("button", { name: "History", exact: true }).click();
+  await reloadedNative.getByRole("button", { name: "Earlier conversation", exact: true }).click();
   const reloadedHistory = reloadedNative.getByRole("region", { name: "Codex conversation history" });
   await expect(reloadedHistory.getByText("third fixture prompt", { exact: true })).toBeVisible();
-  await reloadedHistory.getByRole("button", { name: "Load older messages" }).click();
-  await expect(reloadedHistory.getByText("first fixture prompt", { exact: true })).toBeVisible();
+  await expect(reloadedHistory.getByText("first fixture prompt", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(reloadedHistory.getByText("second fixture prompt", { exact: true })).toBeVisible();
 
   expect(nativeSessionGets.length).toBeGreaterThanOrEqual(2);

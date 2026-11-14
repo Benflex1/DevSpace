@@ -9,7 +9,7 @@ export type TerminalView = { id: string; processId: string; title: string; state
 export type TerminalAttachmentState = "connecting" | "attached" | "reconnecting" | "failed";
 
 export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHarnessSessionId, onRefresh, onTerminalStateChange,
-  onAttachmentStateChange }: {
+  onAttachmentStateChange, onWheelIntent }: {
   projectId: string;
   workspaceId: string;
   terminal: TerminalView;
@@ -18,6 +18,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
   onRefresh: () => void;
   onTerminalStateChange: (terminalId: string, state: string) => void;
   onAttachmentStateChange?: (terminalId: string, state: TerminalAttachmentState) => void;
+  onWheelIntent?: (event: { readonly deltaY: number; readonly deltaMode?: number }) => boolean;
 }) {
   const [state, setState] = useState<TerminalUiState>(() => terminalUiState(terminal.state));
   const [message, setMessage] = useState("");
@@ -41,6 +42,8 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
   const onRefreshRef = useRef(onRefresh);
   const onTerminalStateChangeRef = useRef(onTerminalStateChange);
   const onAttachmentStateChangeRef = useRef(onAttachmentStateChange);
+  const wheelIntentRef = useRef(onWheelIntent);
+  wheelIntentRef.current = onWheelIntent;
   onRefreshRef.current = onRefresh;
   onTerminalStateChangeRef.current = onTerminalStateChange;
   onAttachmentStateChangeRef.current = onAttachmentStateChange;
@@ -111,6 +114,7 @@ export function TerminalTab({ projectId, workspaceId, terminal, active, nativeHa
       terminalInstance.loadAddon(fit);
       fitAddon.current = fit;
       terminalInstance.open(element);
+      terminalInstance.attachCustomWheelEventHandler((event) => wheelIntentRef.current?.(event) ?? true);
       terminalInstance.focus();
       xterm.current = terminalInstance;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";

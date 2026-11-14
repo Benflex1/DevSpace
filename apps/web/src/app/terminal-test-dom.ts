@@ -35,6 +35,8 @@ export class FakeNode {
   value = "";
   clientWidth = 800;
   clientHeight = 600;
+  scrollTop = 0;
+  scrollHeight = 0;
   selected = false;
   get options(): FakeNode[] | undefined {
     if (this.nodeName !== "SELECT") return undefined;

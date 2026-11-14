@@ -30,10 +30,13 @@ History button, ordinary scrollback, or `--no-alt-screen` as conversation-histor
 
 ## Implemented bounded history view
 
-The review branch adds a **Codex-specific, read-only History view** beside the Native terminal.
+The review branch integrates **Codex conversation history into the single Native AI surface**.
+Semantic saved messages sit above the live terminal in one shared scroller: scrolling up reveals
+them, scrolling down returns to the live terminal, and the terminal stays mounted and attached.
 The persistent Native execution and lease lifecycle remains provider-neutral; only the adapter
-understands Codex rollout records. The terminal component stays mounted while History is open, and
-its tmux control is labeled **Pane scrollback** to distinguish TUI output from conversation text.
+understands Codex rollout records. A header action jumps between the live terminal and history for
+keyboard users; it is not a separate history tab. The tmux control remains labeled **Pane
+scrollback** to distinguish TUI output from conversation text.
 
 ### Ownership and source selection
 
@@ -41,7 +44,9 @@ its tmux control is labeled **Pane scrollback** to distinguish TUI output from c
   project ID, workspace ID, Native DevSpace session ID, and signed paging cursor. It rejects
   browser-supplied filesystem paths and native thread IDs. The database requires the exact
   primary project/workspace and a `native-pty` Codex session, then derives process ID and generation
-  from that row before calling the Agent.
+  from that row before calling the Agent. A legacy row created before process persistence has no
+  database process identity; the read proves a matching identity from the exact Agent private
+  session record and never persists an invented process row.
 - The Agent reads the private Native session record without invoking lifecycle repair or saving
   changes. It checks the exact harness, workspace, DevSpace session, process ID, generation,
   admission, recovery state, and lease source. When the live native thread ID is still null, the
@@ -96,6 +101,27 @@ structured history while retaining DevSpace's Agent/Web authority boundaries
 ([T3 Code thread migration](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-migration.md),
 [portable handoffs](https://github.com/pingdotgg/t3code/blob/main/docs/user/portable-handoffs.md)).
 
+## Dogfood failure diagnosis
+
+Two dogfood failures came from durable state, not a reset-worthy condition:
+
+1. **New Native Start rejected.** The previous Native session still had its private-home lease,
+   dirty slot metadata, and `recoveryPending: true`. Its Docker exec returned 404 because the
+   workspace container had started after that exec was created; the old recovery classifier saw a
+   running container and reported `unproven`, so the loss never settled. Admission then found a
+   leased/`recoveryPending` record for the workspace and rejected every new Start as already live.
+   The Agent now treats an exec that is missing from the current lifetime of the exact container as
+   definitely gone, but keeps a same-lifetime daemon restart unproven. Definite admission failures
+   also close their prepared terminal/process rows.
+2. **Legacy history unreadable.** The old Native database row had no terminal/process identity
+   because it predates session persistence. The history route failed closed with
+   "The Codex history session is unavailable." The read now obtains the exact process identity from
+   the Agent's private session record without mutating SQLite.
+
+These fixes do not reset sessions, delete leases, or stop containers. After deploying the fixed
+Agent and restarting it, the stale record must settle from the container-start evidence and release
+its lease before real acceptance proceeds.
+
 ## Acceptance still required
 
 1. In an isolated authenticated Codex home, produce at least three distinct real user/assistant
@@ -103,9 +129,11 @@ structured history while retaining DevSpace's Agent/Web authority boundaries
 2. Record exact pane history with fixed `capture-pane` and the matching browser output after
    Pane scrollback navigation and after F5. This identifies whether the terminal artifacts are
    already in tmux's retained lines and verifies xterm is not adding them.
-3. Verify the History view shows all earlier real user prompts and completed assistant answers
-   after F5, in order and through older-page navigation, with no status rows, tool output,
-   credentials, unrelated thread data, or unsaved editor content.
+3. Verify scrolling up in the single AI surface shows all earlier real user prompts and completed
+   assistant answers after F5, in order and through older-page navigation, with no status rows,
+   tool output, credentials, unrelated thread data, or unsaved editor content; scrolling down
+   returns to the still-attached live terminal without losing keyboard input, selection, or scroll
+   position.
 4. While that authenticated session is active, confirm the same Codex PID and DevSpace session
    remain live after reading. Close and resume Codex, then verify the same history remains readable
    from the resumed live slot and after settlement.
