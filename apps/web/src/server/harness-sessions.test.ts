@@ -42,7 +42,11 @@ test("Native Codex history authorization derives process identity from the exact
 });
 
 test("Native Codex history refuses unknown or non-live/non-settled session rows before the Agent call", async () => {
-  const database = { getNativeHarnessHistoryIdentity: vi.fn(() => undefined) };
+  const database = {
+    getNativeHarnessHistoryIdentity: vi.fn(() => undefined),
+    listHarnessDefinitions: vi.fn(() => []),
+    listNativeHarnessSessions: vi.fn(() => [])
+  };
   const agent = { readNativeCodexHistory: vi.fn() };
   await expect(readNativeCodexHistory({
     projectId: "018f1f34-7000-7000-8000-000000000301", actor: "owner@example.test", workspaceId, sessionId, cursor: null

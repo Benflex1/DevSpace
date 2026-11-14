@@ -545,6 +545,7 @@ export function createAgentClient(socketPath: string, options: {
         state: body.state,
         resume: body.resume,
         processGeneration: body.processGeneration,
+        ...(body.processId === undefined ? {} : { processId: body.processId }),
         ...(body.admission === undefined ? {} : { admission: body.admission })
       });
     },
@@ -559,7 +560,8 @@ export function createAgentClient(socketPath: string, options: {
   };
 
   async function callHarness(path: string, data: unknown): Promise<{
-    settled: boolean; state?: string; resume?: boolean; processGeneration?: number; admission?: string; history?: NativeCodexHistoryPage;
+    settled: boolean; state?: string; resume?: boolean; processGeneration?: number; processId?: string;
+    admission?: string; history?: NativeCodexHistoryPage;
   }> {
     const requestId = uuidv7();
     const body = JSON.stringify({ data });

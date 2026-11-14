@@ -138,6 +138,7 @@ export const nativeHarnessInspectResponseSchema = z.strictObject({
   state: nativeHarnessInspectStateSchema,
   resume: z.boolean(),
   processGeneration: z.number().int().positive(),
+  processId: uuidV7Schema.optional(),
   admission: nativeHarnessAdmissionStateSchema.optional()
 });
 export type NativeHarnessInspectResponse = z.infer<typeof nativeHarnessInspectResponseSchema>;

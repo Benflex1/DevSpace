@@ -7,7 +7,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import { AgentResponseError, AgentUnavailableError, type FullAgentClient } from "./agent-client.js";
 import { openProjectDatabase, ProjectSetupConflictError } from "./database.js";
 import {
-  createNativeHarnessSession, listProjectedHarnessSessions, resumeNativeHarnessSession, retryNativeHarnessSession
+  createNativeHarnessSession, listProjectedHarnessSessions, readNativeCodexHistory, resumeNativeHarnessSession,
+  retryNativeHarnessSession
 } from "./harness-sessions.js";
 import { saveCustomHarnessDefinition } from "./harness-definitions.js";
 import { mutatePrimaryWorkspaceRuntime } from "./workspace-runtime.js";
@@ -96,13 +97,20 @@ test("a lost agent response retries the same creating harness and a definite rej
   expect(other.database.listNativeHarnessSessions(other.workspaceId)[0]).toMatchObject({ state: "failed" });
   const failedSession = other.database.listNativeHarnessSessions(other.workspaceId)[0]!;
   const raw = new BetterSqlite3(other.databasePath);
-  const failedTerminal = raw.prepare("select state, closed_at from terminal_sessions where id = ?").get(failedSession.terminalSessionId) as
-    { state: string; closed_at: string | null };
-  const failedProcess = raw.prepare("select desired_state, observed_state, finished_at from processes where id = ?").get(failedSession.terminalSessionId) as
-    { desired_state: string; observed_state: string; finished_at: string | null };
+  const terminalRow: unknown = raw.prepare("select state, closed_at from terminal_sessions where id = ?")
+    .get(failedSession.terminalSessionId);
+  const processRow: unknown = raw.prepare("select desired_state, observed_state, finished_at from processes where id = ?")
+    .get(failedSession.terminalSessionId);
+  expect(terminalRow).toBeDefined();
+  expect(processRow).toBeDefined();
+  const failedTerminal = terminalRow as { state: string; closed_at: string | null };
+  const failedProcess = processRow as { desired_state: string; observed_state: string; finished_at: string | null };
   raw.close();
-  expect(failedTerminal).toMatchObject({ state: "failed", closed_at: expect.any(String) });
-  expect(failedProcess).toMatchObject({ desired_state: "stopped", observed_state: "failed", finished_at: expect.any(String) });
+  expect(failedTerminal.state).toBe("failed");
+  expect(typeof failedTerminal.closed_at).toBe("string");
+  expect(failedProcess.desired_state).toBe("stopped");
+  expect(failedProcess.observed_state).toBe("failed");
+  expect(typeof failedProcess.finished_at).toBe("string");
   const again = await createNativeHarnessSession(other.project.id, "actor", other.workspaceId, "codex", {
     database: other.database,
     agent: { startNativeHarness: async () => ({ settled: false }) } as unknown as FullAgentClient
@@ -852,4 +860,39 @@ test("native resume generation claims are fenced to the inspected generation", a
 
   expect(() => fixture.database.claimHarnessResumeGeneration(started.sessionId, 1)).toThrow(ProjectSetupConflictError);
   expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]).toMatchObject({ state: "lost", processGeneration: 2 });
+});
+
+test("a legacy native row without process identity is repaired from the exact Agent session before history", async () => {
+  const fixture = await createReadyProject();
+  const processId = "018f0f00-0000-7000-8000-000000000902";
+  const historyPage = {
+    messages: [{ id: "u-1", role: "user", text: "hello", timestamp: null }],
+    olderCursor: null, olderHistoryTruncated: false, snapshot: "settled", available: true
+  };
+  const readAgentHistory = vi.fn(async () => historyPage);
+  const agent = {
+    startNativeHarness: async () => ({ settled: false }),
+    inspectNativeHarness: async () => ({ state: "lost", processGeneration: 1, resume: false, processId }),
+    readNativeCodexHistory: readAgentHistory
+  } as unknown as FullAgentClient;
+  const created = await createNativeHarnessSession(fixture.project.id, "actor", fixture.workspaceId, "codex", {
+    database: fixture.database, agent
+  });
+  const raw = new BetterSqlite3(fixture.databasePath);
+  raw.prepare("update ai_sessions set process_id = null, terminal_session_id = null, state = 'lost' where id = ?")
+    .run(created.sessionId);
+  raw.close();
+  expect(fixture.database.getNativeHarnessHistoryIdentity(fixture.project.id, fixture.workspaceId, created.sessionId))
+    .toBeUndefined();
+
+  await expect(readNativeCodexHistory({
+    projectId: fixture.project.id, actor: "actor", workspaceId: fixture.workspaceId, sessionId: created.sessionId, cursor: null
+  }, { database: fixture.database, agent })).resolves.toEqual(historyPage);
+
+  expect(readAgentHistory).toHaveBeenCalledWith({
+    actorIdentity: "actor", projectId: fixture.project.id, sessionId: created.sessionId,
+    workspaceId: fixture.workspaceId, processId, processGeneration: 1, cursor: null
+  });
+  // The read proves the Agent identity without inventing a database process row.
+  expect(fixture.database.listNativeHarnessSessions(fixture.workspaceId)[0]?.processId).toBeNull();
 });

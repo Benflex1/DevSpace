@@ -812,11 +812,17 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
         if (identity !== undefined) assertHarnessInspectionIdentity(identity, trackedAdmission);
         if (definition !== undefined) {
           if (definition.id !== trackedAdmission.harnessId || authorityDigest(definition) !== trackedAdmission.definitionDigest) {
-            return { state: "admitting", processGeneration: trackedAdmission.processGeneration, resume: false };
+            return {
+              state: "admitting", processGeneration: trackedAdmission.processGeneration, resume: false,
+              processId: trackedAdmission.processId
+            };
           }
           customs.set(definition.id, definition);
         }
-        return { state: "admitting", processGeneration: trackedAdmission.processGeneration, resume: false };
+        return {
+          state: "admitting", processGeneration: trackedAdmission.processGeneration, resume: false,
+          processId: trackedAdmission.processId
+        };
       }
       const record = await loadSession(sessionId);
       if (identity !== undefined) assertHarnessInspectionIdentity(identity, record);
@@ -840,6 +846,7 @@ export function createHarnessRuntime(dependencies: HarnessRuntimeDependencies) {
       return {
         state: record.state,
         processGeneration: record.processGeneration,
+        processId: record.processId,
         resume,
         ...(record.state === "live" ? { admission: record.admission } : {})
       };
