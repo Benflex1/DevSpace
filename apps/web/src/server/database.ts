@@ -1969,9 +1969,26 @@ export function openProjectDatabase(path: string, options: {
       db.update(aiSessions).set({ state: "creating", updatedAt: now().toISOString() }).where(eq(aiSessions.id, sessionId)).run();
     },
     failNativeHarnessSession(sessionId: string) {
-      const timestamp = now().toISOString();
-      db.update(aiSessions).set({ state: "failed", updatedAt: timestamp, stoppedAt: timestamp })
-        .where(and(eq(aiSessions.id, sessionId), eq(aiSessions.runtimeKind, "native-pty"), eq(aiSessions.state, "creating"))).run();
+      return client.transaction(() => {
+        const timestamp = now().toISOString();
+        const session = db.select({ terminalSessionId: aiSessions.terminalSessionId }).from(aiSessions)
+          .where(eq(aiSessions.id, sessionId)).get();
+        db.update(aiSessions).set({ state: "failed", updatedAt: timestamp, stoppedAt: timestamp })
+          .where(and(eq(aiSessions.id, sessionId), eq(aiSessions.runtimeKind, "native-pty"), eq(aiSessions.state, "creating"))).run();
+        if (session?.terminalSessionId === null || session?.terminalSessionId === undefined) return;
+        // A definite admission failure never started the harness exec, so the
+        // prepared terminal cannot become usable later. Leave ambiguous outcomes
+        // open; callers only fail the session after the Agent rejects it.
+        db.update(terminalSessions).set({ state: "failed", lastActivityAt: timestamp, closedAt: timestamp })
+          .where(and(eq(terminalSessions.id, session.terminalSessionId), or(
+            eq(terminalSessions.state, "creating"), eq(terminalSessions.state, "active")
+          ))).run();
+        db.update(processes).set({
+          desiredState: "stopped", observedState: "failed", finishedAt: timestamp, lastObservedAt: timestamp
+        }).where(and(eq(processes.id, session.terminalSessionId), or(
+          eq(processes.observedState, "queued"), eq(processes.observedState, "starting"), eq(processes.observedState, "running")
+        ))).run();
+      }).immediate();
     },
     claimHarnessResumeGeneration(sessionId: string, expectedGeneration: number): number {
       return client.transaction(() => {
